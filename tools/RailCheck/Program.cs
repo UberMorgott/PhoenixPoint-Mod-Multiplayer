@@ -88,6 +88,7 @@ namespace RailCheck
             laws.AddRange(EventTokenDerefLaw());
             laws.AddRange(VehicleIntentLaw());
             laws.AddRange(VehicleGestureLaw(game));
+            laws.AddRange(DerivedPoseLaw(game));
             laws.AddRange(HuskContentLaw(game));
             laws.AddRange(RootOwnershipLaw(types));
             laws.AddRange(RootCoverageLaw());
@@ -1431,17 +1432,38 @@ namespace RailCheck
                 yield return "L14 twin-coercion: GeoSite.OwnerFactionDef lost the def→GeoFaction coercion";
             // An aircraft's position rides through a PROPERTY hop (GeoActor.Surface is an auto-property,
             // decompile GeoVehicle.cs:89), so a field-only ResolveAliasChain silently classifies both
-            // carriers "dto-twin unresolved" — the client's aircraft then never moves and NOTHING says so
-            // (the host never ships the field, so GenericApplier's dto-twin-gap line never fires either).
-            // Assert COVERED, and assert the hop is the Surface property landing on Transform's own member.
-            foreach (var (dtoName, leafName) in new[] { ("SurfacePos", "position"), ("SurfaceRot", "rotation") })
+            // carriers "dto-twin unresolved". Both are now DELIBERATELY excluded — the client derives its
+            // own pose from the mirrored order (L43) — which means this law's job INVERTED but did not go
+            // away: it now guards the DIFFERENCE between the two ways a member stops riding. A declared
+            // opt-out is a decision; an unresolvable twin is a bug that would hide behind the opt-out's
+            // reason string forever. So assert BOTH — excluded by exactly the declared reason, and the
+            // mapping underneath still resolving through Surface onto Transform's own member.
+            foreach (var (dtoName, leafName, valType) in new[]
+                     {
+                         ("SurfacePos", "position", typeof(UnityEngine.Vector3)),
+                         ("SurfaceRot", "rotation", typeof(UnityEngine.Quaternion)),
+                     })
             {
                 var fSurf = twinV?.FieldByName(dtoName);
-                if (fSurf == null || fSurf.Class != FieldClass.Leaf)
-                    yield return "L14 twin-coercion: GeoVehicle." + dtoName + " is not a covered Leaf (" +
-                                 (fSurf?.Exclude ?? "absent") + ") — a client aircraft cannot mirror the host's position";
-                else if (!(fSurf.HopFi is PropertyInfo) || fSurf.HopFi.Name != "Surface" || fSurf.Pi?.Name != leafName)
-                    yield return "L14 twin-coercion: GeoVehicle." + dtoName + " no longer routes through the Surface property onto Transform." + leafName;
+                var declared = RailMeta.OptOutReason(typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle), dtoName);
+                if (declared == null)
+                    yield return "L14 twin-coercion: GeoVehicle." + dtoName + " has no declared pose opt-out — if it is " +
+                                 "riding again the client's own navigation fights the host's pose deltas, and if it is " +
+                                 "excluded the reason is now an accident rather than a decision";
+                else if (fSurf == null || fSurf.Class != FieldClass.Excluded || fSurf.Exclude != declared)
+                    yield return "L14 twin-coercion: GeoVehicle." + dtoName + " is not excluded by the declared pose " +
+                                 "opt-out (" + (fSurf == null ? "absent" : fSurf.Class + " / " + fSurf.Exclude) +
+                                 ") — a mirrored pose makes the client step at the rail's walk cadence (L43)";
+                else
+                {
+                    MemberInfo surfLive = null, hop = null;
+                    try { surfLive = RailMeta.ResolveLive(typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle), dtoName, valType, out _, out hop); }
+                    catch { }
+                    if (!(hop is PropertyInfo) || hop.Name != "Surface" || surfLive == null || surfLive.Name != leafName)
+                        yield return "L14 twin-coercion: GeoVehicle." + dtoName + " no longer resolves through the Surface " +
+                                     "property onto Transform." + leafName + " — the opt-out is now masking a real twin " +
+                                     "gap, so removing it would restore nothing";
+                }
             }
             // Hop mechanics, PROPERTY arm: the hop is only ever READ, so a get-only property must work.
             var propHop = new HopHolder();
@@ -1996,7 +2018,7 @@ namespace RailCheck
 
             // The twin gaps closed alongside it (same type, same log): a member that goes back to being
             // unresolved is a silent regression, since the warning it produces is deduped after one line.
-            foreach (var name in new[] { "Rot", "StartExplorationTime" })
+            foreach (var name in new[] { "StartExplorationTime" })
             {
                 var f = twin?.FieldByName(name);
                 if (f == null || f.Class == FieldClass.Excluded)
@@ -2004,6 +2026,37 @@ namespace RailCheck
                                  (f == null ? "no such member" : f.Exclude) + ") — it is not mirrored, and GenericApplier " +
                                  "says so exactly once per session";
             }
+            // `Rot` was the other gap this batch closed, and it is now DELIBERATELY excluded again: it aliases
+            // ActorComponent.Rot -> transform.rotation, i.e. the very PIVOT the client's own nav routine writes
+            // (GeoNavComponent.cs:111), so mirroring it fights the derivation (L43). Same split as L14's Surface
+            // arm — the decision must be the declared opt-out, and the mapping under it must still resolve, so a
+            // genuinely re-opened gap cannot masquerade as the decision.
+            var fRot = twin?.FieldByName("Rot");
+            var rotOptOut = RailMeta.OptOutReason(typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle), "Rot");
+            if (rotOptOut == null || fRot == null || fRot.Class != FieldClass.Excluded || fRot.Exclude != rotOptOut)
+                yield return "L41 twin-gap-reopened: GeoVehicleInstanceData.Rot is not excluded by the declared pose " +
+                             "opt-out (" + (rotOptOut == null ? "none declared" : fRot == null ? "no such member"
+                                 : fRot.Class + " / " + fRot.Exclude) + ") — either the pivot is being mirrored against " +
+                             "the client's own navigation, or the twin gap re-opened and the opt-out is hiding it";
+            else
+            {
+                MemberInfo rotLive = null;
+                try { rotLive = RailMeta.ResolveLive(typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle), "Rot", typeof(UnityEngine.Quaternion), out _, out _); }
+                catch { }
+                if (rotLive == null || rotLive.Name != "rotation")
+                    yield return "L41 twin-gap-reopened: GeoVehicleInstanceData.Rot no longer resolves onto " +
+                                 "transform.rotation — the opt-out is masking a real gap, so removing it would " +
+                                 "restore nothing";
+            }
+            // GeoSite must KEEP riding it: the pose opt-out is scoped to actors whose nav the client runs, and a
+            // site has no routine recomputing its transform. A reason that leaked one level up to ActorComponent
+            // would silently stop mirroring every site's placement.
+            var siteRot = RailType.GetBridged(typeof(PhoenixPoint.Geoscape.Entities.GeoSite),
+                                              typeof(PhoenixPoint.Geoscape.Entities.GeoSiteInstaceData))?.FieldByName("Rot");
+            if (siteRot != null && siteRot.Class == FieldClass.Excluded && siteRot.Exclude == rotOptOut && rotOptOut != null)
+                yield return "L41 pose-optout-overreached: GeoSite.Rot is excluded by the NAVIGATING-actor pose opt-out — " +
+                             "a site has no nav routine to re-derive its transform, so its placement would simply stop " +
+                             "mirroring; key the opt-out on the vehicle, never on ActorComponent";
         }
 
         /// <summary>L40 — NO VALUE MAY LEAVE A BATCH UNSHIPPED AND UNANNOUNCED. The wire caps one entry at
@@ -3454,6 +3507,16 @@ namespace RailCheck
                     catch { }
                     if (m != null) set.Add(m.MetadataToken);
                 }
+                // SINGULAR TargetMethod() counts too. Harmony accepts either shape, and a gate written with
+                // the singular one was invisible here — a blind spot that reads as "no prefix binds it", i.e.
+                // this collector would call a real gate missing.
+                var one = t.GetMethod("TargetMethod", AllMembers);
+                if (one != null && typeof(MethodBase).IsAssignableFrom(one.ReturnType))
+                {
+                    MethodBase single = null;
+                    try { single = (MethodBase)one.Invoke(null, null); } catch { }
+                    if (single != null) set.Add(single.MetadataToken);
+                }
                 var tm = t.GetMethod("TargetMethods", AllMembers);
                 if (tm == null || !typeof(IEnumerable<MethodBase>).IsAssignableFrom(tm.ReturnType)) continue;
                 IEnumerable<MethodBase> yielded = null;
@@ -3462,6 +3525,175 @@ namespace RailCheck
                 foreach (var m in yielded) if (m != null) set.Add(m.MetadataToken);
             }
             return set;
+        }
+
+        /// <summary>L43 — NO POSE LEAF OF A RAIL-MIRRORED NAVIGATING ACTOR MAY RIDE COVERED. Geoscape motion
+        /// is CLOSED-FORM and reproducible: <c>GeoNavComponent.NavigateRoutine</c> recomputes
+        /// <c>Ratio01(startTime, Timing.Now)</c> → <c>Slerp</c> → <c>PivotTransform.localRotation</c> from
+        /// scratch every frame (GeoNavComponent.cs:104-116, rescheduled :126) off a def-fixed speed with no
+        /// RNG, on a clock the client already tracks. So a mirrored actor's POSE is not state — it is the
+        /// OUTPUT of a routine the client can run itself, and shipping it as periodic deltas can only make
+        /// the icon STEP at the rail's walk cadence. The rail mirrors the ORDER; the client derives the pose.
+        ///
+        /// Three arms, because the fix is only correct as a whole — the pose can be dropped ONLY if the
+        /// client actually runs the derivation, and the derivation is safe ONLY if the arrival OUTCOME stays
+        /// host-side and the re-seed cannot fire per tick:
+        ///   1. POSE EXCLUDED. The actor set is DISCOVERED (a rail-classified GeoActor that owns a
+        ///      GeoNavComponent), never declared, so a newly-mirrored navigating actor arrives here as a
+        ///      violation instead of as a stutter nobody traces.
+        ///   2. OUTCOME GATED, DERIVATION NOT. <c>GeoVehicle.OnArrived</c> must carry a prefix of ours (its
+        ///      body is all authoritative — <c>CurrentSite=</c>, <c>_destinationSites.RemoveAt(0)</c>,
+        ///      <c>VehicleArrived</c>, <c>OnArrivedAtDestination</c>, plus the :335
+        ///      "Sites desynchronized?!?" throw) and that prefix must read <c>IsHost</c>, because a gate the
+        ///      HOST also obeys would strand every aircraft in the session. Conversely
+        ///      <c>GeoNavComponent.Navigate</c> must carry NO prefix of ours: gating it is what froze the
+        ///      client's navigation in the first place, so re-adding it turns this arm red.
+        ///   3. RE-SEED ON ORDER CHANGE ONLY. <c>NavigateRoutine</c> opens with
+        ///      <c>yield return NextUpdate.Seconds(5f)</c> (:89), so a re-seed keyed on anything that moves
+        ///      per tick freezes the aircraft for five seconds each time. The order-leaf test must therefore
+        ///      accept the order and REJECT the continuously-changing covered leaves, and a route whose
+        ///      waypoint was merely consumed must be recognised as the SAME route (a normal
+        ///      <c>TravelTo</c> fills DestinationSites with many sites and the host trims one per leg).
+        /// Falsify by re-admitting any pose row, by removing the arrival gate or its IsHost arm, by
+        /// re-adding a Navigate prefix, or by letting RangeRemaining count as an order leaf.</summary>
+        private static IEnumerable<string> DerivedPoseLaw(Assembly game)
+        {
+            var poseNames = new[] { "SurfacePos", "SurfaceRot", "Rot" };
+            var nav = typeof(PhoenixPoint.Geoscape.Entities.GeoNavComponent);
+            var actors = DeclaredTypes(game)
+                .Where(t => t != null && !t.IsAbstract &&
+                            typeof(PhoenixPoint.Geoscape.Entities.GeoActor).IsAssignableFrom(t) &&
+                            t.GetMembers(AllMembers).Any(mi =>
+                                (mi is FieldInfo fi && fi.FieldType == nav) ||
+                                (mi is PropertyInfo pi && pi.PropertyType == nav)))
+                .OrderBy(t => t.FullName, StringComparer.Ordinal).ToList();
+
+            // The POSE members live on the actor's save-DTO twin, so the table to read is the BRIDGED one
+            // (RailMeta.FindBridge resolves the DTO generically — no hardcoded pair). Reading RailType.Get
+            // instead finds no pose members at all and the arm passes vacuously, which is exactly how this
+            // law would rot: green because it looked in the wrong place.
+            var navigators = new List<KeyValuePair<Type, RailType>>();
+            foreach (var t in actors)
+            {
+                RailType rt = null;
+                try
+                {
+                    var dto = RailMeta.FindBridge(t);
+                    rt = dto != null ? RailType.GetBridged(t, dto) : RailType.Get(t);
+                }
+                catch { }
+                if (rt != null && rt.Fields.Count > 0) navigators.Add(new KeyValuePair<Type, RailType>(t, rt));
+            }
+            if (navigators.Count == 0)
+                yield return "L43 navigators-undiscovered: no rail-classified GeoActor owns a GeoNavComponent — " +
+                             "the discovery rule no longer matches the game, so arm 1 is asleep and a mirrored " +
+                             "aircraft's pose could ride covered without anything noticing";
+
+            int poseSeen = 0;
+            foreach (var kv in navigators)
+                foreach (var name in poseNames)
+                {
+                    var f = kv.Value.FieldByName(name);
+                    if (f == null) continue; // the game does not carry it on this actor
+                    poseSeen++;
+                    if (f.Class != FieldClass.Excluded)
+                        yield return "L43 pose-covered: " + kv.Key.FullName + "." + name + " rides as " + f.Class +
+                                     " — it is the OUTPUT of GeoNavComponent.NavigateRoutine, which the client " +
+                                     "recomputes closed-form every frame, so mirroring it makes the client's icon " +
+                                     "step at the rail's walk cadence instead of gliding";
+                }
+            if (navigators.Count > 0 && poseSeen == 0)
+                yield return "L43 pose-members-absent: not one of the " + navigators.Count + " navigating actors " +
+                             "exposes SurfacePos/SurfaceRot/Rot on its twin table — the members moved or the bridge " +
+                             "stopped resolving, so arm 1 is checking nothing and green here means nothing";
+
+            // ── arm 2: the OUTCOME is gated, the DERIVATION is not ──
+            var vehicle = typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle);
+            var covered = OurPrefixTargets();
+            var onArrived = HarmonyLib.AccessTools.Method(vehicle, "OnArrived",
+                new[] { typeof(UnityEngine.Vector3), typeof(bool) });
+            if (onArrived == null)
+                yield return "L43 arrival-unresolved: GeoVehicle.OnArrived(Vector3,bool) does not resolve — the gate's " +
+                             "TargetMethod yields NULL, PatchAll throws, and MultiplayerMain swallows the warning, " +
+                             "killing every later patch in the same pass (L23's failure mode)";
+            else if (!covered.Contains(onArrived.MetadataToken))
+                yield return "L43 arrival-ungated: GeoVehicle.OnArrived carries no prefix of ours — a client that flies " +
+                             "its own aircraft then runs the ARRIVAL outcome locally (CurrentSite=, " +
+                             "_destinationSites.RemoveAt(0), CurrentSite.VehicleArrived, OnArrivedAtDestination) and " +
+                             "can hit the :335 \"Sites desynchronized?!?\" throw inside a coroutine";
+            else
+            {
+                var gate = DeclaredTypes(typeof(IntentRail).Assembly)
+                    .FirstOrDefault(t => t.GetMethod("Prefix", AllMembers) != null &&
+                                         t.GetMethod("TargetMethod", AllMembers) != null &&
+                                         t.Name == "VehicleArrivalGate");
+                var prefix = gate?.GetMethod("Prefix", AllMembers);
+                var isHost = HarmonyLib.AccessTools.PropertyGetter(typeof(Multiplayer.Network.NetworkEngine), "IsHost");
+                if (prefix == null)
+                    yield return "L43 gate-type-missing: no VehicleArrivalGate with a Prefix binds GeoVehicle.OnArrived — " +
+                                 "the arrival outcome's gate cannot be checked for its host arm";
+                else if (isHost == null)
+                    yield return "L43 ishost-unresolved: NetworkEngine.IsHost does not resolve, so the harness cannot " +
+                                 "prove the arrival gate lets the HOST through";
+                else if (!Callees(prefix, typeof(IntentRail).Assembly).Any(c => c.MetadataToken == isHost.MetadataToken))
+                    yield return "L43 host-gated: VehicleArrivalGate.Prefix never reads NetworkEngine.IsHost — the HOST " +
+                                 "would obey its own client gate, so no aircraft in the session ever completes a leg " +
+                                 "(no CurrentSite, no DestinationSites trim, and nothing for the rail to mirror)";
+            }
+
+            var navigate = HarmonyLib.AccessTools.Method(nav, "Navigate", new[] { typeof(List<UnityEngine.Vector3>) });
+            if (navigate != null && covered.Contains(navigate.MetadataToken))
+                yield return "L43 derivation-gated: GeoNavComponent.Navigate(List<Vector3>) carries a prefix of ours — " +
+                             "gating the DERIVATION is what made the client project the host's pose deltas and step at " +
+                             "the walk cadence; with the pose leaves excluded it would strand the aircraft entirely";
+
+            // ── arm 3: the re-seed fires on an order CHANGE, never per tick ──
+            var isOrderLeaf = HarmonyLib.AccessTools.Method(typeof(GenericApplier), "IsOrderLeaf");
+            var isSuffixOf = HarmonyLib.AccessTools.Method(typeof(GenericApplier), "IsSuffixOf");
+            if (isOrderLeaf == null || isSuffixOf == null)
+            {
+                yield return "L43 reseed-unreachable: GenericApplier.IsOrderLeaf/IsSuffixOf do not resolve — the " +
+                             "order-change rule is unverifiable, and a re-seed that fires per tick freezes the " +
+                             "aircraft 5s each time (NavigateRoutine's opening NextUpdate.Seconds(5f))";
+                yield break;
+            }
+            foreach (var name in new[] { "DestinationSites", "Travelling", "CurrentSite" })
+                if (!(bool)isOrderLeaf.Invoke(null, new object[] { name }))
+                    yield return "L43 order-leaf-dropped: '" + name + "' is not counted as an order leaf — the client " +
+                                 "never re-derives its route when that value changes, so the aircraft keeps flying the " +
+                                 "old order (or never starts)";
+            // The per-tick traps: covered leaves of the SAME actor that move continuously in flight.
+            foreach (var name in new[] { "RangeRemaining", "SurfacePos", "SurfaceRot", "Rot", "HitPoints" })
+                if ((bool)isOrderLeaf.Invoke(null, new object[] { name }))
+                    yield return "L43 reseed-per-tick: '" + name + "' counts as an order leaf, but it changes " +
+                                 "continuously during a flight — every delta would re-issue Navigate and " +
+                                 "NavigateRoutine's opening `yield return NextUpdate.Seconds(5f)` (GeoNavComponent.cs:89) " +
+                                 "would freeze the aircraft for 5s on each one";
+            object a = new object(), b = new object(), c = new object();
+            var cases = new[]
+            {
+                // last route, current route, is-the-same-route (skip the re-seed)
+                new { Last = new[] { a, b, c }, Cur = new[] { b, c }, Same = true,  What = "a consumed waypoint" },
+                new { Last = new[] { a, b, c }, Cur = new[] { c },    Same = true,  What = "two consumed waypoints" },
+                new { Last = new[] { a, b, c }, Cur = new[] { a, b, c }, Same = true, What = "an unchanged route" },
+                new { Last = new[] { a, b, c }, Cur = new[] { b },    Same = false, What = "a redirect to an earlier leg" },
+                new { Last = new[] { a, b },    Cur = new[] { c },    Same = false, What = "a redirect to a new site" },
+                new { Last = new[] { a },       Cur = new[] { b, c }, Same = false, What = "a longer new route" },
+            };
+            foreach (var k in cases)
+            {
+                bool got = false; string threw = null;
+                try { got = (bool)isSuffixOf.Invoke(null, new object[] { k.Last, k.Cur }); }
+                catch (Exception ex) { threw = ex.Message; }
+                if (threw != null) { yield return "L43 suffix-threw: " + k.What + " → " + threw; continue; }
+                if (got != k.Same)
+                    yield return "L43 reseed-" + (k.Same ? "per-leg" : "route-missed") + ": " + k.What + " is " +
+                                 (k.Same
+                                     ? "treated as a NEW route, so a normal multi-site TravelTo re-issues Navigate at " +
+                                       "every waypoint the host trims and the aircraft stalls 5s per leg"
+                                     : "treated as the SAME route, so the client keeps flying the old order and the " +
+                                       "host's redirect is never obeyed");
+            }
         }
 
         /// <summary>L42 — A CLIENT GESTURE THAT MUTATES HOST-AUTHORITATIVE STATE MUST HAVE AN INTENT, OR BE

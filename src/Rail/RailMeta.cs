@@ -551,6 +551,21 @@ namespace Multiplayer.Network.Sync
             "writer is Timing.Start (GeoVehicle.cs:451), i.e. the client's own exploration timer (law 4b); " +
             "the exploration START time mirrors as the StartExplorationTime leaf";
 
+        private const string DerivedPoseOptOut =
+            "derived pose, recomputed continuously by the client's own native routine from mirrored inputs — " +
+            "GeoNavComponent.NavigateRoutine re-derives the actor's placement CLOSED-FORM every frame " +
+            "(num = totalTime.Ratio01(startTime, Timing.Now) -> Slerp(start,end,num) -> " +
+            "PivotTransform.localRotation, GeoNavComponent.cs:104-116, rescheduled :126 NextUpdate.NextFrame) " +
+            "out of the mirrored ORDER (DestinationSites/Travelling/CurrentSite) and a def-fixed speed " +
+            "(GeoVehicle.cs:266, Stats from VehicleDef.BaseStats) with no RNG, on a clock the client already " +
+            "tracks (TimeSync/TimeAnchor). Mirroring the RESULT of that routine as periodic deltas makes the " +
+            "client STEP at the rail's walk cadence instead of gliding, and it cannot be fixed by shipping it " +
+            "more often — the derivation is the fix. Same shape as the scheduler-handle opt-out above: what " +
+            "the client can recompute is not state to mirror. The ORDER still rides (CanRedirect, CurrentSite, " +
+            "DestinationSites, RangeRemaining, Travelling), the SEED still lands structurally " +
+            "(GenericApplier's order-leaf re-seed replays TeleportToSite:510 for a non-flying actor), and the " +
+            "arrival OUTCOME stays host-only (VehicleArrivalGate)";
+
         private static readonly Dictionary<string, string> _optOutMembers = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             // Timing.Now = StartTime + OwnNow (decompile Base.Core/Timing.cs:55) where OwnNow accrues from
@@ -593,6 +608,21 @@ namespace Multiplayer.Network.Sync
             // one reviewed fact rather than a stop on one side and an anonymous gap on the other.
             { "PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData.NextSiteExplorationUpdate", ExplorationHandleOptOut },
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.NextSiteExplorationUpdate", ExplorationHandleOptOut },
+
+            // The three POSE carriers of a navigating actor. Keyed on the two owners whose tables carry them
+            // (the twin table's owner is the LIVE type — GeoVehicle, which the base walk extends to
+            // DummyGeoVehicle — plus the DTO for any [direct] table), deliberately NOT on
+            // Base.Entities.ActorComponent/ActorInstanceData: a GeoSite's Rot has no routine recomputing it,
+            // so the reason above would be false there and the site's own transform must keep riding.
+            // `Rot` is a DELIBERATE REVERSAL of 525b0b5, which added it as a twin-gap fix (get-only
+            // ActorComponent.Rot -> transform.rotation) precisely so the PIVOT would mirror too. That closed
+            // the gap the right way for a mirrored pose; it is the mirrored pose itself that is now wrong.
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicle.SurfacePos", DerivedPoseOptOut },
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicle.SurfaceRot", DerivedPoseOptOut },
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicle.Rot", DerivedPoseOptOut },
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData.SurfacePos", DerivedPoseOptOut },
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData.SurfaceRot", DerivedPoseOptOut },
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData.Rot", DerivedPoseOptOut },
 
             // NakedRecruits pair blob (whole-dict replaced value) — GeoUnitDescriptor's two non-carried
             // refs are SAFE nulls, argued from the decompile, so the husk gate must not veto the dict:
@@ -829,13 +859,15 @@ namespace Multiplayer.Network.Sync
         {
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.Name", "_vehicleName" },         // GeoVehicle.RecordInstanceData:1051 (the Name PROPERTY substitutes a localized default — not the store)
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.HitPoints", "Stats.HitPoints" }, // GeoVehicle.ProcessInstanceData:1119 (v3 arm; MaxHitPoints clamp is host-side truth)
-            // The two carriers of an aircraft's POSITION on the globe. Not presentation: GeoActor.cs:25
-            // declares `WorldPosition => Surface.position`, so this member IS the actor's world position
-            // for gameplay and UI alike, and the mesh hangs off the same transform (VisualsRoot =
-            // Surface.gameObject, GeoVehicle.cs:316). World-space setters, so the client's stale
-            // PivotTransform (which is what nav rotates to fly, GeoNavComponent.cs:111) cannot skew them.
-            // Both hops go through the auto-property GeoActor.Surface — a PROPERTY hop, which is why
-            // these rows only work alongside the MemberInfo hop above.
+            // The two carriers of an aircraft's POSITION on the globe. GeoActor.cs:25 declares
+            // `WorldPosition => Surface.position`, so this member IS the actor's world position for gameplay
+            // and UI alike, and the mesh hangs off the same transform (VisualsRoot = Surface.gameObject,
+            // GeoVehicle.cs:316). Both hops go through the auto-property GeoActor.Surface — a PROPERTY hop,
+            // which is why these rows only work alongside the MemberInfo hop above.
+            // THESE ROWS NO LONGER SHIP: `DerivedPoseOptOut` excludes both (and `Rot`) ahead of resolution,
+            // because the client re-derives the pose itself. They stay as the RESOLUTION record — the
+            // DTO->live mapping is real and hard-won, and without it removing the opt-out would silently
+            // downgrade the exclusion reason to "dto-twin unresolved" instead of restoring the mirror.
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.SurfacePos", "Surface.position" }, // GeoVehicle.RecordInstanceData:1052 / ProcessInstanceData:1077
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.SurfaceRot", "Surface.rotation" }, // GeoVehicle.RecordInstanceData:1053 / ProcessInstanceData:1078 — world rotation carries the rendered heading (UpdateHeading writes Surface.localEulerAngles, GeoNavComponent.cs:213)
             // The ACTOR's own transform rotation. `ActorComponent.Rot` is `=> transform.rotation`
@@ -843,7 +875,9 @@ namespace Multiplayer.Network.Sync
             // "read-only" on every actor twin. The game's OWN load path writes the identical thing
             // (ProcessInstanceData:392 `SetTransform(Pos, Rot)`), so the alias points at the writable member
             // behind the read-only view — the same move `SurfaceRot -> Surface.rotation` makes one level
-            // down. Keyed on ActorComponent, so it covers every actor twin at once rather than one type.
+            // down. Keyed on ActorComponent, so it covers every actor twin at once rather than one type —
+            // GeoSite still rides it; GeoVehicle opts out of it above (DerivedPoseOptOut), because `Rot` IS
+            // the pivot the nav routine writes (GeoActor.PivotTransform => base.transform, GeoActor.cs:22).
             { "Base.Entities.ActorComponent.Rot", "transform.rotation" },
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.StartExplorationTime", "StartedExplorationAt" }, // GeoVehicle.RecordInstanceData:1069 / ProcessInstanceData:1123 — private store, DTO name differs and no convention reaches it
             { "PhoenixPoint.Geoscape.Entities.GeoSite.OwnerFactionDef", "Owner" },        // GeoSite.ProcessInstanceData:1552 — def⇄faction via FactionRef coercion

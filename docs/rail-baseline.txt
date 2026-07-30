@@ -712,7 +712,7 @@ PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=19/32
   + LeafList TacUnits (List`1) -> live _tacUnits unordered=no apply=IList
   - EXCLUDED TimingData (TimingInstanceData): dto-twin unresolved
   + Leaf Weather (GeoSiteWeather)
-PhoenixPoint.Geoscape.Entities.GeoVehicle  <=  GeoVehicleInstanceData  resolved=17/25
+PhoenixPoint.Geoscape.Entities.GeoVehicle  <=  GeoVehicleInstanceData  resolved=14/25
   + Leaf CanRedirect (Boolean)
   + Leaf CurrentSite (GeoSite)
   + LeafList DestinationSites (List`1) unordered=no apply=IList
@@ -726,19 +726,19 @@ PhoenixPoint.Geoscape.Entities.GeoVehicle  <=  GeoVehicleInstanceData  resolved=
   + Leaf Owner (PPFactionDef)
   - EXCLUDED Pos (Vector3): read-only
   + Leaf RangeRemaining (Single)
-  + Leaf Rot (Quaternion) -> live transform.rotation
+  - EXCLUDED Rot (Quaternion): derived pose, recomputed continuously by the client's own native routine from mirrored inputs — GeoNavComponent.NavigateRoutine re-derives the actor's placement CLOSED-FORM every frame (num = totalTime.Ratio01(startTime, Timing.Now) -> Slerp(start,end,num) -> PivotTransform.localRotation, GeoNavComponent.cs:104-116, rescheduled :126 NextUpdate.NextFrame) out of the mirrored ORDER (DestinationSites/Travelling/CurrentSite) and a def-fixed speed (GeoVehicle.cs:266, Stats from VehicleDef.BaseStats) with no RNG, on a clock the client already tracks (TimeSync/TimeAnchor). Mirroring the RESULT of that routine as periodic deltas makes the client STEP at the rail's walk cadence instead of gliding, and it cannot be fixed by shipping it more often — the derivation is the fix. Same shape as the scheduler-handle opt-out above: what the client can recompute is not state to mirror. The ORDER still rides (CanRedirect, CurrentSite, DestinationSites, RangeRemaining, Travelling), the SEED still lands structurally (GenericApplier's order-leaf re-seed replays TeleportToSite:510 for a non-flying actor), and the arrival OUTCOME stays host-only (VehicleArrivalGate)
   - EXCLUDED Source (Object): untyped/interface member
   - EXCLUDED SourceTemplate (Object): untyped/interface member
   + Leaf StartExplorationTime (TimeUnit) -> live StartedExplorationAt
-  + Leaf SurfacePos (Vector3) -> live Surface.position
-  + Leaf SurfaceRot (Quaternion) -> live Surface.rotation
+  - EXCLUDED SurfacePos (Vector3): derived pose, recomputed continuously by the client's own native routine from mirrored inputs — GeoNavComponent.NavigateRoutine re-derives the actor's placement CLOSED-FORM every frame (num = totalTime.Ratio01(startTime, Timing.Now) -> Slerp(start,end,num) -> PivotTransform.localRotation, GeoNavComponent.cs:104-116, rescheduled :126 NextUpdate.NextFrame) out of the mirrored ORDER (DestinationSites/Travelling/CurrentSite) and a def-fixed speed (GeoVehicle.cs:266, Stats from VehicleDef.BaseStats) with no RNG, on a clock the client already tracks (TimeSync/TimeAnchor). Mirroring the RESULT of that routine as periodic deltas makes the client STEP at the rail's walk cadence instead of gliding, and it cannot be fixed by shipping it more often — the derivation is the fix. Same shape as the scheduler-handle opt-out above: what the client can recompute is not state to mirror. The ORDER still rides (CanRedirect, CurrentSite, DestinationSites, RangeRemaining, Travelling), the SEED still lands structurally (GenericApplier's order-leaf re-seed replays TeleportToSite:510 for a non-flying actor), and the arrival OUTCOME stays host-only (VehicleArrivalGate)
+  - EXCLUDED SurfaceRot (Quaternion): derived pose, recomputed continuously by the client's own native routine from mirrored inputs — GeoNavComponent.NavigateRoutine re-derives the actor's placement CLOSED-FORM every frame (num = totalTime.Ratio01(startTime, Timing.Now) -> Slerp(start,end,num) -> PivotTransform.localRotation, GeoNavComponent.cs:104-116, rescheduled :126 NextUpdate.NextFrame) out of the mirrored ORDER (DestinationSites/Travelling/CurrentSite) and a def-fixed speed (GeoVehicle.cs:266, Stats from VehicleDef.BaseStats) with no RNG, on a clock the client already tracks (TimeSync/TimeAnchor). Mirroring the RESULT of that routine as periodic deltas makes the client STEP at the rail's walk cadence instead of gliding, and it cannot be fixed by shipping it more often — the derivation is the fix. Same shape as the scheduler-handle opt-out above: what the client can recompute is not state to mirror. The ORDER still rides (CanRedirect, CurrentSite, DestinationSites, RangeRemaining, Travelling), the SEED still lands structurally (GenericApplier's order-leaf re-seed replays TeleportToSite:510 for a non-flying actor), and the arrival OUTCOME stays host-only (VehicleArrivalGate)
   + LeafList TacUnits (List`1) -> live _tacUnits unordered=no apply=IList
   - EXCLUDED TimingData (TimingInstanceData): dto-twin unresolved
   + Leaf Travelling (Boolean)
   > dispatch VehicleControllerInstanceData -> GetComponent(VehicleFactionController)
   + Leaf VehicleID (Int32)
   + EntityList Weapons (List`1) -> live _weapons unordered=no apply=IList
-PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  <=  GeoVehicleInstanceData  resolved=17/25
+PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  <=  GeoVehicleInstanceData  resolved=14/25
   + Leaf CanRedirect (Boolean)
   + Leaf CurrentSite (GeoSite)
   + LeafList DestinationSites (List`1) unordered=no apply=IList
@@ -752,12 +752,12 @@ PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  <=  GeoVehicleInstanceData  
   + Leaf Owner (PPFactionDef)
   - EXCLUDED Pos (Vector3): read-only
   + Leaf RangeRemaining (Single)
-  + Leaf Rot (Quaternion) -> live transform.rotation
+  - EXCLUDED Rot (Quaternion): derived pose, recomputed continuously by the client's own native routine from mirrored inputs — GeoNavComponent.NavigateRoutine re-derives the actor's placement CLOSED-FORM every frame (num = totalTime.Ratio01(startTime, Timing.Now) -> Slerp(start,end,num) -> PivotTransform.localRotation, GeoNavComponent.cs:104-116, rescheduled :126 NextUpdate.NextFrame) out of the mirrored ORDER (DestinationSites/Travelling/CurrentSite) and a def-fixed speed (GeoVehicle.cs:266, Stats from VehicleDef.BaseStats) with no RNG, on a clock the client already tracks (TimeSync/TimeAnchor). Mirroring the RESULT of that routine as periodic deltas makes the client STEP at the rail's walk cadence instead of gliding, and it cannot be fixed by shipping it more often — the derivation is the fix. Same shape as the scheduler-handle opt-out above: what the client can recompute is not state to mirror. The ORDER still rides (CanRedirect, CurrentSite, DestinationSites, RangeRemaining, Travelling), the SEED still lands structurally (GenericApplier's order-leaf re-seed replays TeleportToSite:510 for a non-flying actor), and the arrival OUTCOME stays host-only (VehicleArrivalGate)
   - EXCLUDED Source (Object): untyped/interface member
   - EXCLUDED SourceTemplate (Object): untyped/interface member
   + Leaf StartExplorationTime (TimeUnit) -> live StartedExplorationAt
-  + Leaf SurfacePos (Vector3) -> live Surface.position
-  + Leaf SurfaceRot (Quaternion) -> live Surface.rotation
+  - EXCLUDED SurfacePos (Vector3): derived pose, recomputed continuously by the client's own native routine from mirrored inputs — GeoNavComponent.NavigateRoutine re-derives the actor's placement CLOSED-FORM every frame (num = totalTime.Ratio01(startTime, Timing.Now) -> Slerp(start,end,num) -> PivotTransform.localRotation, GeoNavComponent.cs:104-116, rescheduled :126 NextUpdate.NextFrame) out of the mirrored ORDER (DestinationSites/Travelling/CurrentSite) and a def-fixed speed (GeoVehicle.cs:266, Stats from VehicleDef.BaseStats) with no RNG, on a clock the client already tracks (TimeSync/TimeAnchor). Mirroring the RESULT of that routine as periodic deltas makes the client STEP at the rail's walk cadence instead of gliding, and it cannot be fixed by shipping it more often — the derivation is the fix. Same shape as the scheduler-handle opt-out above: what the client can recompute is not state to mirror. The ORDER still rides (CanRedirect, CurrentSite, DestinationSites, RangeRemaining, Travelling), the SEED still lands structurally (GenericApplier's order-leaf re-seed replays TeleportToSite:510 for a non-flying actor), and the arrival OUTCOME stays host-only (VehicleArrivalGate)
+  - EXCLUDED SurfaceRot (Quaternion): derived pose, recomputed continuously by the client's own native routine from mirrored inputs — GeoNavComponent.NavigateRoutine re-derives the actor's placement CLOSED-FORM every frame (num = totalTime.Ratio01(startTime, Timing.Now) -> Slerp(start,end,num) -> PivotTransform.localRotation, GeoNavComponent.cs:104-116, rescheduled :126 NextUpdate.NextFrame) out of the mirrored ORDER (DestinationSites/Travelling/CurrentSite) and a def-fixed speed (GeoVehicle.cs:266, Stats from VehicleDef.BaseStats) with no RNG, on a clock the client already tracks (TimeSync/TimeAnchor). Mirroring the RESULT of that routine as periodic deltas makes the client STEP at the rail's walk cadence instead of gliding, and it cannot be fixed by shipping it more often — the derivation is the fix. Same shape as the scheduler-handle opt-out above: what the client can recompute is not state to mirror. The ORDER still rides (CanRedirect, CurrentSite, DestinationSites, RangeRemaining, Travelling), the SEED still lands structurally (GenericApplier's order-leaf re-seed replays TeleportToSite:510 for a non-flying actor), and the arrival OUTCOME stays host-only (VehicleArrivalGate)
   + LeafList TacUnits (List`1) -> live _tacUnits unordered=no apply=IList
   - EXCLUDED TimingData (TimingInstanceData): dto-twin unresolved
   + Leaf Travelling (Boolean)
@@ -810,7 +810,7 @@ PhoenixPoint.Geoscape.Entities.VehicleFactionController  <=  InstanceData  resol
   - EXCLUDED LastVisitedSite (GeoSite): dto-twin unresolved
   - EXCLUDED WaitForSiteMission (GeoSite): dto-twin unresolved
   - EXCLUDED WaitingUpdateTime (NextUpdate): dto-twin unresolved
-twin summary: resolved=71 gaps=44 dispatch=7
+twin summary: resolved=65 gaps=50 dispatch=7
 
 null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), GeoHavenDefenseMissionInstanceData.AttackingSites (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
 

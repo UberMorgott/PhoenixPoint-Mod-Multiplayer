@@ -179,56 +179,67 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
-    /// FIFTH seam, same law, at the GEOSCAPE MOVEMENT funnel: <c>GeoNavComponent.Navigate</c>
-    /// (GeoNavComponent.cs:152). It is the ONE entry point for geoscape navigation — every geoscape
-    /// caller in the game passes a <c>List&lt;Vector3&gt;</c> and lands here (GeoVehicle.cs:388 the
-    /// mid-flight-join resume, :529/:541 StartTravel, GeoBehemothActor.cs:325/:351/:365/:706,
-    /// GeoscapeRaid.cs:125, plus the internal resume GeoNavComponent.cs:185); the inherited
-    /// <c>Navigate(Vector3)</c> overload (NavigationComponent.cs:162) is tactical-only. One prefix
-    /// therefore covers the class, with no reach into tactical nav.
+    /// FIFTH seam, same law, at the GEOSCAPE ARRIVAL funnel: <c>GeoVehicle.OnArrived</c>
+    /// (GeoVehicle.cs:327-350), the single delegate the nav routine invokes when a leg finishes
+    /// (<c>Arrived?.Invoke</c>, GeoNavComponent.cs:139; wired once at GeoVehicle.cs:321).
     ///
-    /// <c>NavigateRoutine</c> (GeoNavComponent.cs:86-143) is an AUTHORITATIVE writer, not presentation:
-    /// it sets <c>Travelling</c> (:88/:94/:138) and <c>RangeRemaining</c> (:116/:135) — both rail-covered
-    /// leaves — and fires <c>Arrived</c> (:139) → <c>GeoVehicle.OnArrived</c>:327-350 →
-    /// <c>CurrentSite.VehicleArrived</c> + <c>OnArrivedAtDestination</c>, i.e. gameplay outcomes on a
-    /// projector client (law 3). It is reachable on a client today: a client that joins mid-flight loads
-    /// a save with <c>Travelling</c> set, and <c>GeoVehicle.OnLevelStart</c>:385-388 re-issues Navigate —
-    /// after which the client flies its own timeline and the diff rail can never correct it (the diff is
-    /// host-now vs host-before, so a client-local mutation is permanent). Blocked, the client's aircraft
-    /// is a pure projection of the host's <c>Surface.position</c>/<c>.rotation</c> deltas instead.
+    /// This gate USED to sit one level up, on <c>GeoNavComponent.Navigate(List&lt;Vector3&gt;)</c>, which
+    /// froze the client's navigation outright and left its aircraft a pure projection of the host's
+    /// <c>SurfacePos</c>/<c>SurfaceRot</c>/<c>Rot</c> deltas — i.e. an icon that STEPS at the rail's walk
+    /// cadence (the ceiling this doc used to name out loud). That was gating the DERIVATION to stop the
+    /// OUTCOME. Native geoscape motion is closed-form and reproducible — <c>NavigateRoutine</c> recomputes
+    /// <c>num = totalTime.Ratio01(startTime, Timing.Now)</c> → <c>Slerp(start,end,num)</c> →
+    /// <c>PivotTransform.localRotation</c> from scratch EVERY frame (:104-116, rescheduled :126) and
+    /// <c>RangeRemaining</c> likewise closed-form (:116), off a def-fixed speed with no RNG and a clock the
+    /// client already tracks. So the client can fly the aircraft itself, exactly as the game itself does
+    /// when it restores a flight from a save with no departure time recorded
+    /// (<c>GeoVehicle.OnLevelStart</c>:385-388 re-issues <c>Navigate</c> from the destination sites, and
+    /// <c>CalculatePath</c>:68-84 re-seeds from the actor's CURRENT WorldPosition). The gate therefore drops
+    /// to the outcome, and only the outcome.
     ///
-    /// Phrased on the RAIL's own knowledge, not on a type list: only an actor the rail actually mirrors
-    /// is gated (<c>IdentityResolver.RootRef</c> != null). Every faction's GeoVehicle is a root
-    /// (IdentityResolver.cs:218-221 walks <c>map.Vehicles</c> wholesale), so no aircraft is ever frozen
-    /// WITHOUT also being mirrored; <c>GeoBehemothActor</c> is not a root (RootRef's default arm,
-    /// IdentityResolver.cs:129) so behemoths keep dead-reckoning exactly as before — and the day one
-    /// becomes a root, this gate extends itself. Known ceiling, presentation only: the flying animator
-    /// pose is set by nav (<c>InitiateTravelling</c> → GeoVehicle.cs:583, cleared at :344), so a mirrored
-    /// client shows the landed pose while the icon steps at the walk cadence. The gameplay half of
-    /// <c>Travelling</c> (VehicleLeft + CurrentSite=null, GeoVehicle.cs:209-217) still lands, via the leaf.
+    /// What must not run on a projector client (law 3) is ALL of this method's body, so the prefix skips it
+    /// whole rather than picking lines: <c>CurrentSite =</c> (:337), <c>_destinationSites.RemoveAt(0)</c>
+    /// (:340), <c>CurrentSite.VehicleArrived(this)</c> (:347) and <c>OnArrivedAtDestination</c> (:348 →
+    /// <c>CanRedirect = true</c>, <c>ArrivedAtDestinationEvent</c>). Every one of those is a rail-covered
+    /// leaf or a host-computed event; all of them arrive as deltas. Skipping whole also disarms
+    /// <c>:335 throw new Exception("Sites desynchronized?!?")</c> — the client's own nav can legitimately
+    /// finish a leg AFTER the host's <c>DestinationSites</c> delta already trimmed the list, which is
+    /// exactly the mismatch that throw fires on, and it would surface inside a coroutine.
+    ///
+    /// The client's flying ANIMATOR pose is set locally by its own nav (<c>InitiateTravelling</c> →
+    /// GeoVehicle.cs:581) and this gate blocks the native reset at :344, so the landing half is re-derived
+    /// where every other mirrored-input derivation lives: <c>GenericApplier</c>'s order-leaf re-seed, next
+    /// to the pivot seed. Presentation stays complete without letting an outcome through here.
+    ///
+    /// Phrased on the RAIL's own knowledge, not a type list: only an actor the rail actually mirrors is
+    /// gated (<c>IdentityResolver.RootRef</c> != null). Every faction's GeoVehicle is a root
+    /// (IdentityResolver.cs:218-221 walks <c>map.Vehicles</c> wholesale), so no aircraft's arrival is ever
+    /// refused WITHOUT its order being mirrored. There is deliberately NO <c>SyncApplyScope</c> exemption:
+    /// arrival is never a rail apply's job, the re-seed only starts a coroutine that fires this later on the
+    /// game loop, and an open apply arm would let the outcome through on exactly the path that re-seeds.
     /// </summary>
     [HarmonyPatch]
-    internal static class GeoNavigateGate
+    internal static class VehicleArrivalGate
     {
         private static readonly HashSet<string> _logged = new HashSet<string>(StringComparer.Ordinal);
 
-        // Exact parameter match — AccessTools.Method does no widening, and the base type declares a
-        // same-named Vector3 overload that must NOT be caught here.
+        // Exact parameter match — AccessTools.Method does no widening, and a null here makes PatchAll throw
+        // a warning MultiplayerMain swallows, killing every later patch in the same pass (RailCheck L23).
         private static MethodBase TargetMethod() =>
-            AccessTools.Method(typeof(GeoNavComponent), nameof(GeoNavComponent.Navigate), new[] { typeof(List<Vector3>) });
+            AccessTools.Method(typeof(GeoVehicle), "OnArrived", new[] { typeof(Vector3), typeof(bool) });
 
-        private static bool Prefix(GeoNavComponent __instance)
+        private static bool Prefix(GeoVehicle __instance)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
-            if (SyncApplyScope.Active) return true;                                      // an apply may rewire nav
-            var root = IdentityResolver.RootRef(__instance?.NavActor?.Actor);
-            if (root == null) return true; // not rail-mirrored — leave its local dead-reckoning alone
+            var root = IdentityResolver.RootRef(__instance);
+            if (root == null) return true; // not rail-mirrored — its arrival is nobody else's truth
 
-            // Never silent (the dominant bug class): say which actor's navigation was refused and why.
-            // Log-once per root — Navigate is per route leg, not per frame, but the join resume retries.
+            // Never silent (the dominant bug class): say whose arrival outcome was refused and why.
+            // Log-once per root — arrival is per route leg, not per frame.
             if (_logged.Add(root))
-                Debug.Log("[MP][diag] GeoNavigateGate BLOCK " + root + " — client nav is host-mirrored (Surface.position/.rotation deltas)");
+                Debug.Log("[MP][diag] VehicleArrivalGate BLOCK " + root + " — arrival outcome is host-only; " +
+                          "the client flew the leg itself and takes CurrentSite/DestinationSites/CanRedirect from the rail");
             return false;
         }
     }

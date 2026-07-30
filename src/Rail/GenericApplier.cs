@@ -11,6 +11,8 @@ using PhoenixPoint.Geoscape.Entities.PhoenixBases;
 using PhoenixPoint.Geoscape.Entities.Sites;
 using PhoenixPoint.Geoscape.Levels;
 using UnityEngine;
+using GeoSite = PhoenixPoint.Geoscape.Entities.GeoSite;
+using GeoVehicle = PhoenixPoint.Geoscape.Entities.GeoVehicle;
 
 namespace Multiplayer.Network.Sync
 {
@@ -145,6 +147,11 @@ namespace Multiplayer.Network.Sync
                     // The anchor is a DTO, so the leaf applies above only filled it in — this is where it becomes
                     // the clock. Post-batch, and outside SyncApplyScope because ProcessInstanceData fires nothing.
                     TimeAnchor.ApplyIfTouched(geo, touched);
+                    // Same post-batch rung, same reason: an ORDER may arrive as several leaves of one batch
+                    // (Travelling + DestinationSites + CurrentSite), and re-deriving from a half-applied order
+                    // would seed the wrong route. Outside SyncApplyScope on purpose — this only STARTS a
+                    // coroutine, whose arrival callback must meet VehicleArrivalGate with no apply exemption.
+                    FlushOrderReseed();
                 }
                 catch (Exception ex)
                 {
@@ -419,8 +426,10 @@ namespace Multiplayer.Network.Sync
         // A MonoBehaviour-bound ACTOR, so the payload is a type name + the ComponentSetDef the game spawns
         // it from (RailMeta.EncodeActorCreate) and NEVER a native graph blob: decoding a blob would
         // re-create this actor and every actor its members reach (law 3). Everything else about the vehicle
-        // rides the value rail one packet behind the create — CurrentSite, SurfacePos/SurfaceRot (the A1
-        // mirrored twins), Stats.HitPoints, RangeRemaining, Travelling, Weapons, Modules, TacUnits, Name.
+        // rides the value rail one packet behind the create — CurrentSite, Stats.HitPoints, RangeRemaining,
+        // Travelling, Weapons, Modules, TacUnits, Name. POSE is not among them any more (RailMeta
+        // .DerivedPoseOptOut); the create's placement seed is the CurrentSite leaf, which lands on the very
+        // next packet and drives ReseedNavigation's parked arm.
 
         /// <summary>Split a "V#&lt;id&gt;@&lt;ownerFactionDefGuid&gt;" root key. The qualifier is not
         /// decoration: VehicleID comes from the OWNER's counter (GeoFaction.cs:2008), so the key already
@@ -449,8 +458,12 @@ namespace Multiplayer.Network.Sync
         ///   • `:2012 UseLoadout(...)` — the LOAD path does not do it either: it clears equipment and adds
         ///     what the DTO carried (GeoVehicle.ProcessInstanceData:1089-1102), and here the rail's covered
         ///     Weapons/Modules EntityLists are that DTO. A mirror follows the load model, not the runtime one.
-        ///   • `:2015 TeleportToSite(site)` — position IS mirrored as of gap A1 (SurfacePos/SurfaceRot twins),
-        ///     so the vehicle must land in the mirrored state, never dead-reckoned into a site.
+        ///   • `:2015 TeleportToSite(site)` — not HERE, because the create frame does not name a site: the
+        ///     spawn site is not on the root key and the payload is a type + ComponentSetDef. Its placement
+        ///     half is replayed one packet later, from the mirrored `CurrentSite` leaf, by
+        ///     <see cref="ReseedNavigation"/> — and only that half, since the method's tail
+        ///     (`VehicleArrived`, `OnArrivedAtDestination`) is a host outcome (law 3). Until that leaf lands
+        ///     the new aircraft sits at the spawn pivot for one packet; it is never dead-reckoned into a site.
         ///   • `:2016 VehicleAdded?.Invoke` and `:2017 OnVehicleArrived(...)` — host outcome events (law 3).
         /// `Stats` is NOT optional: the rail's HitPoints twin writes through `Stats.HitPoints`, so a null
         /// Stats would NRE on the first value packet. Both native paths build it the same way
@@ -488,8 +501,9 @@ namespace Multiplayer.Network.Sync
                                                             //   GeoMap.RegisterVehicle:517-521 = Vehicles.Add,
                                                             //   i.e. what makes this root key resolvable
             v.OnLevelStart();                               // :2014 — inert on a virgin actor (GeoVehicle.cs:385
-                                                            //   needs Travelling && destinations), and the A1
-                                                            //   gate blocks client nav for rail-rooted actors
+                                                            //   needs Travelling && destinations, and a just-spawned
+                                                            //   one has neither; once they mirror, the order-leaf
+                                                            //   re-seed issues the same Navigate :385-388 does)
             // Law 11 via the ONE universal repaint, exactly like the facility pair: UiEventMap has no
             // GeoVehicle arm, so adding the actor to `touched` would be a no-op dressed up as wiring.
             OpenUiRepaint.MarkDirty(); // the open geoscape/roster shows the new aircraft NOW
@@ -801,11 +815,114 @@ namespace Multiplayer.Network.Sync
                         return; // Descend never carries values
                 }
                 touched.Add(entity);
+                MarkOrderChange(entity, field.Name);
             }
             catch (Exception ex)
             {
                 LogMissOnce("apply failed " + path + "." + field.Name + ": " + ex.Message);
             }
+        }
+
+        // ─── Order-change navigation re-seed ────────────────────────────────────────────────────────
+        // The other half of excluding the POSE leaves (RailMeta.DerivedPoseOptOut): the client no longer
+        // receives where its aircraft IS, so it must re-derive it — and the game already has the routine
+        // that does exactly that, closed-form, every frame. This is the seam that hands that routine the
+        // mirrored ORDER, and it is deliberately the ONLY place a mirrored actor's placement is written.
+        //
+        // NOT PER TICK — three independent reasons, because a per-tick re-seed would be catastrophic rather
+        // than merely wasteful: NavigateRoutine opens with `yield return NextUpdate.Seconds(5f)`
+        // (GeoNavComponent.cs:89), so every redundant re-seed freezes the aircraft for five seconds.
+        //   1. The diff ships only CHANGED leaves, and `Unchanged` (above) drops a redelivered identical
+        //      value before it ever reaches here — so a marker means the value really moved.
+        //   2. The marker set is the ORDER leaves only. `RangeRemaining` is the one that matters: it is
+        //      rail-covered AND changes continuously mid-flight, so keying on "the vehicle was touched"
+        //      instead of on these three names would re-seed on every delta of a flight in progress.
+        //   3. Consuming a waypoint is NOT an order change. `TravelTo` routes through the pathfinder
+        //      (GeoVehicle.cs:553-556/:568-571), so a normal player order fills DestinationSites with MANY
+        //      sites and the host trims one at every intermediate arrival. That is the same route, so a
+        //      list which is a SUFFIX of what we last seeded is skipped; only a genuinely different route
+        //      re-issues Navigate.
+        private static readonly HashSet<GeoVehicle> _reseed = new HashSet<GeoVehicle>();
+        private static readonly Dictionary<string, GeoSite[]> _seededRoute = new Dictionary<string, GeoSite[]>(StringComparer.Ordinal);
+
+        /// <summary>The ORDER leaves — a mirrored INPUT to native navigation, as opposed to its derived
+        /// output. Named, not type-dispatched: the rule is about which values constitute an order.</summary>
+        private static bool IsOrderLeaf(string name) =>
+            name == "DestinationSites" || name == "Travelling" || name == "CurrentSite";
+
+        private static void MarkOrderChange(object entity, string fieldName)
+        {
+            if (IsOrderLeaf(fieldName) && entity is GeoVehicle v) _reseed.Add(v);
+        }
+
+        private static void FlushOrderReseed()
+        {
+            if (_reseed.Count == 0) return;
+            foreach (var v in _reseed)
+            {
+                try { ReseedNavigation(v); }
+                catch (Exception ex)
+                { LogMissOnce("nav re-seed failed for " + (IdentityResolver.RootRef(v) ?? "?") + ": " + ex.Message); }
+            }
+            _reseed.Clear();
+        }
+
+        /// <summary>Replay the game's OWN two re-derivations, chosen by the mirrored order:
+        /// <c>GeoVehicle.OnLevelStart</c>:385-388 when the order says "flying" (the path is rebuilt from the
+        /// destination SITES and <c>CalculatePath</c>:68-84 re-seeds leg 1 from the actor's current
+        /// WorldPosition, so a client that drifted converges instead of snapping), and the placement half of
+        /// <c>TeleportToSite</c>:510/:513 when it says "parked". The parked arm is the SEED the structural
+        /// create needs (a rail-created aircraft has no pose leaf to land on any more) and the drift
+        /// corrector at journey's end, and it is exactly the two lines of that method which are NOT gameplay:
+        /// :506/:507 (EndCollecting/EndExplore), :509 (_destinationSites.Clear), :511 (CurrentSite), :512
+        /// (SetVisible), :514 (VehicleArrived) and :515 (OnArrivedAtDestination) are all either host outcomes
+        /// (law 3) or rail-covered leaves that arrive on their own.</summary>
+        private static void ReseedNavigation(GeoVehicle v)
+        {
+            if (v == null || v.Navigation == null) return;
+            var root = IdentityResolver.RootRef(v);
+            var dest = v.DestinationSites;
+
+            if (v.Travelling && dest != null && dest.Count > 0)
+            {
+                var route = new GeoSite[dest.Count];
+                for (int i = 0; i < dest.Count; i++)
+                {
+                    if (dest[i] == null) return; // an unresolved destination: wait for the resend, never fly a null leg
+                    route[i] = dest[i];
+                }
+                if (root != null && _seededRoute.TryGetValue(root, out var last) && IsSuffixOf(last, route))
+                    return;                      // same route, a waypoint consumed — the client is already flying it
+                var path = new List<Vector3>(route.Length);
+                foreach (var d in route) path.Add(d.WorldPosition);
+                v.Navigation.Navigate(path);     // GeoVehicle.OnLevelStart:388
+                if (root != null) _seededRoute[root] = route;
+                Debug.Log("[Multiplayer][rail] nav re-seed " + (root ?? "?") + " → " + route.Length + " leg(s)");
+                return;
+            }
+
+            if (root != null) _seededRoute.Remove(root);
+            if (!v.Travelling && v.CurrentSite != null)
+            {
+                v.PivotTransform.localRotation = v.CurrentSite.PivotTransform.localRotation; // TeleportToSite:510
+                if (v.Animator != null) v.Animator.SetInteger("State", 0);                   // :513 — the landing
+                                                                                             // half of the pose the
+                                                                                             // client's own nav set
+                                                                                             // via InitiateTravelling
+            }
+        }
+
+        /// <summary>Is <paramref name="cur"/> the tail of <paramref name="last"/>? Reference equality on the
+        /// live sites — the rail resolves both to the client's own instances. Typed <c>object[]</c> so the
+        /// rule is checkable headlessly (RailCheck L43 arm 3): array covariance keeps the GeoSite[] call
+        /// sites unchanged, and reference identity is all this ever compares.</summary>
+        private static bool IsSuffixOf(object[] last, object[] cur)
+        {
+            if (last == null || cur == null || cur.Length == 0 || cur.Length > last.Length) return false;
+            int off = last.Length - cur.Length;
+            for (int i = 0; i < cur.Length; i++)
+                if (!ReferenceEquals(last[off + i], cur[i])) return false;
+            return true;
         }
 
         /// <summary>Resolve a live instance for an order-vector key that is missing from an ALIAS
