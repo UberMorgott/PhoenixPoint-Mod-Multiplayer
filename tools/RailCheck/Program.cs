@@ -80,6 +80,7 @@ namespace RailCheck
             laws.AddRange(ExitWriteBackLaw(types));
             laws.AddRange(HandleSweepLaw());
             laws.AddRange(CrcBackstopLaw());
+            laws.AddRange(FragmentLaw());
             laws.AddRange(EventRaiseLaw());
             laws.AddRange(AnswerValidatorLaw());
             laws.AddRange(FunnelCoverageLaw(game));
@@ -1903,6 +1904,98 @@ namespace RailCheck
             if (msgBytes.Distinct().Count() != msgBytes.Length)
                 yield return "L25 msg-byte-collision: the CRC report shares its leading byte with another 0xAC message " +
                              "kind — it would be parsed as that one, silently";
+        }
+
+        /// <summary>L40 — NO VALUE MAY LEAVE A BATCH UNSHIPPED AND UNANNOUNCED. The wire caps one entry at
+        /// <see cref="DiffEngine.MaxValueBytes"/> (a u16 length inside a u16 envelope), and an entry that
+        /// outgrew it used to be <c>continue</c>d: one deduped warning on the first tick, then silence on
+        /// every tick after, with no <c>TouchRoot</c>, so the law-7 CRC backstop read the root as QUIESCENT
+        /// and hashed a host truth the wire had never carried. Measured shape: a campaign-long
+        /// <c>GeoscapeEventSystem.EncounterRecords</c> blob at 8636 B — the whole event ledger stopped
+        /// mirroring, permanently, and the clients' event windows could never resolve.
+        ///
+        /// The cap is not raised and the ledger is not special-cased. It is a TRANSPORT bound, and every
+        /// keyless <see cref="FieldClass.EntityList"/> ships one canonical blob BY CONSTRUCTION (that is what
+        /// distinguishes it from EntityCollection), so any of them can reach it as a campaign grows — the fix
+        /// therefore has to live at the envelope, where it covers all of them at once, keyable or not.
+        ///
+        /// Both halves are driven as the REAL functions: the host's split
+        /// (<see cref="DiffEngine.FragmentForWire"/>) against the client's reassembly
+        /// (<c>GenericApplier.Reassemble</c>) — a harness that re-implemented either could agree with itself
+        /// while disagreeing with the wire. Falsify by restoring the <c>continue</c>, or by dropping the
+        /// <c>TouchRoot</c> from <see cref="DiffEngine.NoteUndeliverable"/>.</summary>
+        private static IEnumerable<string> FragmentLaw()
+        {
+            // ── the marker's own namespace ────────────────────────────────
+            var taken = Enum.GetValues(typeof(LeafKind)).Cast<LeafKind>().Select(k => (byte)k)
+                .Concat(new[] { RailMeta.EntityListMarker, RailMeta.OrderVectorMarker,
+                                RailMeta.DictCensusMarker, RailMeta.DictTombstone, (byte)14 /* ListMarker */ })
+                .ToList();
+            if (taken.Contains(RailMeta.FragmentMarker))
+                yield return "L40 marker-collision: FragmentMarker " + RailMeta.FragmentMarker + " is already a LeafKind " +
+                             "or another value marker — a fragment would decode as a value (or a delete) and the client " +
+                             "would write the header bytes into the game's model";
+
+            // ── the split, and its reassembly ─────────────────────────────
+            var big = new byte[DiffEngine.MaxValueBytes * 3 + 137];
+            new System.Random(7).NextBytes(big);
+            var oversized = new DiffEngine.Entry { KindId = 0, Path = "ES", FieldIdx = 2, SubKey = "", Value = big, Key = "ES2" };
+            var neighbour = Ent("S#7", 0, "", 1);
+            var wire = DiffEngine.FragmentForWire(new List<DiffEngine.Entry> { neighbour, oversized });
+
+            var frags = wire.Where(e => e.Path == "ES").ToList();
+            if (frags.Count < 2)
+                yield return "L40 oversized-dropped: an entry of " + big.Length + " B left FragmentForWire as " + frags.Count +
+                             " wire entr(y/ies) — it was dropped or passed through whole, so the client either never " +
+                             "receives the field again or the packet writer refuses it, silently, on every tick forever";
+            if (wire.Count == 0 || wire[0].Path != neighbour.Path)
+                yield return "L40 batch-reordered: fragmenting moved the batch's other entries — the delta stream is " +
+                             "canonical by law 6 and its order is what makes creates land before the values that need them";
+            foreach (var e in wire)
+                if (e.Value.Length > DiffEngine.MaxValueBytes)
+                {
+                    yield return "L40 fragment-oversized: a wire entry still carries " + e.Value.Length + " B (cap " +
+                                 DiffEngine.MaxValueBytes + ") — Emit's residual drop path is reachable again and the " +
+                                 "value never ships";
+                    break;
+                }
+
+            byte[] whole = null;
+            int premature = 0;
+            for (int i = 0; i < frags.Count; i++)
+            {
+                var got = GenericApplier.Reassemble(oversized.Path, oversized.FieldIdx, oversized.SubKey, frags[i].Value);
+                if (i < frags.Count - 1 && got != null) premature++;
+                if (i == frags.Count - 1) whole = got;
+            }
+            if (premature > 0)
+                yield return "L40 partial-applied: reassembly returned a value " + premature + " time(s) BEFORE the last " +
+                             "fragment — a half-filled buffer would be handed to the decoder as if it were the field";
+            if (whole == null || whole.Length != big.Length || !RailMeta.BytesEqual(whole, big))
+                yield return "L40 reassembly-lossy: the fragments did not reassemble to the host's exact bytes (" +
+                             (whole == null ? "never completed" : whole.Length + " B vs " + big.Length + " B") +
+                             ") — the client decodes a corrupt value instead of the state, which is worse than the drop";
+
+            // A value AT the cap must not be split: fragmenting what already fits would double the traffic of
+            // every large-but-legal field and is how a "fix" quietly becomes a regression.
+            var atCap = new DiffEngine.Entry { Path = "ES", FieldIdx = 3, SubKey = "", Value = new byte[DiffEngine.MaxValueBytes], Key = "k" };
+            var plain = new List<DiffEngine.Entry> { atCap };
+            if (!ReferenceEquals(DiffEngine.FragmentForWire(plain), plain))
+                yield return "L40 fragments-what-fits: a batch whose largest value is exactly at the cap was rebuilt — " +
+                             "every ordinary tick then pays a copy of its whole changed list";
+
+            // ── the residual drop path: loud AND non-quiescent ────────────
+            const uint dropSeq = 4242u;
+            DiffEngine.NoteUndeliverable(new DiffEngine.Entry
+            {
+                KindId = 0, Path = "S#77.SerializationData.Storage", FieldIdx = 9, SubKey = "",
+                Value = new byte[DiffEngine.MaxValueBytes + 1], Key = "drop",
+            }, dropSeq);
+            if (DiffEngine.RootTouchedAt("S#77") != dropSeq)
+                yield return "L40 drop-untouched: the undeliverable path did not record root 'S#77' as touched at the " +
+                             "seq it failed on — the CRC backstop then treats the subtree as QUIESCENT, compares a host " +
+                             "hash that includes the value the wire never carried, spends its ONE heal on a re-emit that " +
+                             "drops the same value again, and gives up; the divergence becomes permanent and invisible";
         }
 
         // Root pairs where a LATER root's declared-type closure reaches an EARLIER root's type. Legal —

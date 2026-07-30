@@ -1850,6 +1850,49 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        // ─── Oversized-value FRAGMENTATION (the envelope layer's own limit, generic) ───
+        // The wire caps ONE entry's value at DiffEngine.MaxValueBytes because the packet writes it behind a
+        // u16 length inside a u16 envelope (SyncProtocol.EncodeEnvelope). That is a TRANSPORT bound, not a
+        // statement about the state, and a value that outgrows it used to be dropped — silently, forever,
+        // for whatever grew (a campaign-long event ledger is the measured one; every keyless EntityList has
+        // the same ceiling by construction, which is exactly why the fix lives HERE and not in a keying
+        // table). Split at the envelope, reassemble before the apply: no field class, no subsystem and no
+        // classification knows this happened.
+
+        /// <summary>Fragment marker — distinct from LeafKinds 0-14/18, ListMarker 14, EntityListMarker 15,
+        /// OrderVectorMarker 16, DictCensusMarker 17 and DictTombstone 0xFF, so a fragment can never decode
+        /// as a value, a census or a delete (RailCheck L40 asserts the disjointness).</summary>
+        internal const byte FragmentMarker = 19;
+
+        /// <summary>[marker][total:i32][offset:i32][chunk] — one slice of an oversized entry value. Header
+        /// is fixed-width so a slice costs exactly 9 bytes of overhead and the split arithmetic is exact.</summary>
+        internal const int FragmentHeaderBytes = 9;
+
+        internal static byte[] EncodeFragment(byte[] value, int offset, int count)
+        {
+            var frame = new byte[FragmentHeaderBytes + count];
+            frame[0] = FragmentMarker;
+            Buffer.BlockCopy(BitConverter.GetBytes(value.Length), 0, frame, 1, 4);
+            Buffer.BlockCopy(BitConverter.GetBytes(offset), 0, frame, 5, 4);
+            Buffer.BlockCopy(value, offset, frame, FragmentHeaderBytes, count);
+            return frame;
+        }
+
+        /// <summary>False = an ordinary value (every other first byte), so the client's check is one
+        /// comparison on the hot path and no entry shape has to be re-declared anywhere.</summary>
+        internal static bool TryDecodeFragment(byte[] framed, out int total, out int offset, out byte[] chunk)
+        {
+            total = 0; offset = 0; chunk = null;
+            if (framed == null || framed.Length < FragmentHeaderBytes || framed[0] != FragmentMarker) return false;
+            total = BitConverter.ToInt32(framed, 1);
+            offset = BitConverter.ToInt32(framed, 5);
+            int n = framed.Length - FragmentHeaderBytes;
+            if (total <= 0 || offset < 0 || offset + n > total) return false; // malformed: treat as a value, fail loudly downstream
+            chunk = new byte[n];
+            Buffer.BlockCopy(framed, FragmentHeaderBytes, chunk, 0, n);
+            return true;
+        }
+
         /// <summary>Rearrange a LIVE keyed list to the host's key sequence — index writes on the existing
         /// container, never a rebuild (elements are live entities; destroying them is the husk bug).
         /// Unknown keys are skipped (element not spawned here yet), local elements missing from the vector

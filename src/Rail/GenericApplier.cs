@@ -52,6 +52,7 @@ namespace Multiplayer.Network.Sync
         {
             _pathCache = new Dictionary<string, object>(StringComparer.Ordinal);
             _loggedMisses.Clear();
+            _fragBuf.Clear(); _fragGot.Clear(); // the transferred save replaced the state these halves belonged to
             // (No EventPopup reset here anymore: event windows are live 0xB6 raises, so there is no
             // record-derived latch to re-seed. Its raise-seq stream is a host monotonic counter and MUST
             // survive a reload boundary — rca-3 contract — so it resets only at full teardown.)
@@ -136,7 +137,8 @@ namespace Multiplayer.Network.Sync
                             string path = r.ReadString();
                             ushort fieldIdx = r.ReadUInt16();
                             string subKey = r.ReadString();
-                            var value = r.ReadBytes(r.ReadUInt16());
+                            var value = Reassemble(path, fieldIdx, subKey, r.ReadBytes(r.ReadUInt16()));
+                            if (value == null) continue; // fragment stashed — the entry applies once it is whole
                             ApplyEntry(engine, geo, kindId, path, fieldIdx, subKey, value, touched);
                         }
                     }
@@ -171,6 +173,32 @@ namespace Multiplayer.Network.Sync
                 using (SyncApplyScope.Enter())
                     UiEventMap.Fire(touched, geo);
             }
+        }
+
+        // ─── Oversized-value reassembly (the envelope layer's own split — DiffEngine.FragmentForWire) ───
+        // Fragments of one entry ride CONSECUTIVE entries on the ONE ordered seq stream (possibly across
+        // packets, since each packet caps at MaxPacketBytes), so ordering is the delivery contract's job and
+        // nothing here needs to sort. A seq gap already drives the throttled resync, which re-ships the whole
+        // value; a partial buffer left behind by one is simply overwritten by the resend's first fragment.
+        private static readonly Dictionary<string, byte[]> _fragBuf = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, int> _fragGot = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        /// <summary>An ordinary value passes through untouched (one byte compared); a FRAGMENT is copied into
+        /// its entry's buffer and returns null until the last byte lands. Internal because RailCheck L40
+        /// drives this exact function against <see cref="DiffEngine.FragmentForWire"/> — a reassembler the
+        /// harness re-implements could agree with itself while disagreeing with the wire.</summary>
+        internal static byte[] Reassemble(string path, ushort fieldIdx, string subKey, byte[] value)
+        {
+            if (!RailMeta.TryDecodeFragment(value, out int total, out int offset, out var chunk)) return value;
+            string key = path + "" + fieldIdx + "" + subKey;
+            if (!_fragBuf.TryGetValue(key, out var buf) || buf.Length != total || offset == 0)
+            { buf = new byte[total]; _fragBuf[key] = buf; _fragGot[key] = 0; }
+            Buffer.BlockCopy(chunk, 0, buf, offset, chunk.Length);
+            int got = _fragGot[key] + chunk.Length;
+            _fragGot[key] = got;
+            if (got < total) return null;
+            _fragBuf.Remove(key); _fragGot.Remove(key);
+            return buf;
         }
 
         /// <summary>Structural create/destroy (law 3, host→client): the entity arrives as a native-

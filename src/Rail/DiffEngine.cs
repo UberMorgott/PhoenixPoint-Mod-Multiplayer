@@ -43,7 +43,7 @@ namespace Multiplayer.Network.Sync
         private const float TickInterval = 0.5f;   // ≤2 Hz
         private const float ExceptionRetryBackoff = 1f; // min pause between forced retries after a tick exception
         private const int MaxPacketBytes = 45000;  // chunk flush threshold
-        private const int MaxValueBytes = 8192;    // per-entry cap: 45000 + 8192 stays under the u16 envelope
+        internal const int MaxValueBytes = 8192;   // per-entry cap: 45000 + 8192 stays under the u16 envelope
         private const int MaxEntities = 50000;     // graph-chase brake
         private const int MaxDepth = 12;
         private const double SliceBudgetMs = 3.0;  // per-frame walk budget of the sliced periodic cycle
@@ -435,6 +435,12 @@ namespace Multiplayer.Network.Sync
             int dot = path.IndexOf('.');
             _rootTouchedSeq[dot < 0 ? path : path.Substring(0, dot)] = seq;
         }
+
+        /// <summary>The quiescence ledger, read-only — RailCheck L40 asserts that the residual drop path
+        /// records its root here, since a drop that leaves the root looking quiescent makes the CRC
+        /// backstop hash a host truth the wire never carried.</summary>
+        internal static uint RootTouchedAt(string rootKey) =>
+            _rootTouchedSeq.TryGetValue(rootKey, out var s) ? s : 0u;
 
         // ─── Host tick: walk → diff → emit ─────────────────────────────────
 
@@ -1167,8 +1173,55 @@ namespace Multiplayer.Network.Sync
 
         // ─── Wire emit (chunked; each packet its own seq on one ordered stream) ───
 
+        /// <summary>Split every entry whose value outgrew the envelope cap into cap-sized FRAGMENTS, in
+        /// place of the batch's original entry and in its exact position — the client reassembles them
+        /// before the apply (<c>GenericApplier.Reassemble</c>), so nothing downstream of the wire knows a
+        /// value was ever split. PURE and internal, because it is the whole of RailCheck L40: the alternative
+        /// it replaces was <c>continue</c>, i.e. the batch quietly shipping fewer entries than it was handed.
+        ///
+        /// Not a raised cap and not a special case: the cap is a TRANSPORT bound (u16 length inside a u16
+        /// envelope) and every keyless <see cref="FieldClass.EntityList"/> rides one canonical blob by
+        /// construction, so any of them can reach it as the campaign grows. Fragmenting at the envelope
+        /// covers all of them at once, keyable or not.</summary>
+        internal static List<Entry> FragmentForWire(List<Entry> changed)
+        {
+            int oversized = 0;
+            foreach (var e in changed) if (e.Value != null && e.Value.Length > MaxValueBytes) oversized++;
+            if (oversized == 0) return changed; // the normal batch: same list, no allocation
+            var wire = new List<Entry>(changed.Count + oversized);
+            int chunk = MaxValueBytes - RailMeta.FragmentHeaderBytes;
+            foreach (var e in changed)
+            {
+                if (e.Value == null || e.Value.Length <= MaxValueBytes) { wire.Add(e); continue; }
+                for (int off = 0; off < e.Value.Length; off += chunk)
+                {
+                    var slice = e;
+                    slice.Value = RailMeta.EncodeFragment(e.Value, off, Math.Min(chunk, e.Value.Length - off));
+                    wire.Add(slice);
+                }
+            }
+            return wire;
+        }
+
+        /// <summary>The residual drop path, and the ONE place it may happen. LOUD EVERY TIME (not
+        /// once-per-incident: a value the client never receives is wrong on every tick, so it must read as
+        /// wrong on every tick) and it TOUCHES the root, so the law-7 CRC backstop treats the subtree as
+        /// non-quiescent instead of hashing a truth the wire never carried. Reachable only if a single
+        /// FRAGMENT ever exceeds the cap — which <see cref="FragmentForWire"/> makes arithmetically
+        /// impossible — so this is the belt, kept because a silent drop is the bug class this rail
+        /// exists to kill. RailCheck L40 drives it.</summary>
+        internal static void NoteUndeliverable(Entry e, uint seq)
+        {
+            string kind = e.KindId < _kinds.Count ? _kinds[e.KindId].Name : "kind " + e.KindId;
+            Debug.LogError("[Multiplayer][rail] DiffEngine: UNDELIVERABLE " + kind + ".(fieldIdx " + e.FieldIdx +
+                           ") at " + e.Path + " — value " + (e.Value?.Length ?? 0) + "B exceeds the " + MaxValueBytes +
+                           "B envelope cap even after fragmentation; the client's copy of this field is STALE");
+            TouchRoot(e.Path, seq); // never quiescent while we are failing to ship it (CRC backstop input)
+        }
+
         private static void Emit(NetworkEngine engine, List<Entry> changed, ref int packets, ref int bytes)
         {
+            changed = FragmentForWire(changed);
             int i = 0;
             while (i < changed.Count)
             {
@@ -1199,11 +1252,7 @@ namespace Multiplayer.Network.Sync
                     while (i < changed.Count && ms.Length < MaxPacketBytes && n < ushort.MaxValue)
                     {
                         var e = changed[i++];
-                        if (e.Value.Length > MaxValueBytes)
-                        {
-                            Incident(_kinds[e.KindId], "(fieldIdx " + e.FieldIdx + ")", "value " + e.Value.Length + "B exceeds cap — not emitted", e.Path);
-                            continue;
-                        }
+                        if (e.Value.Length > MaxValueBytes) { NoteUndeliverable(e, seq); continue; }
                         w.Write(e.KindId);
                         w.Write(e.Path);
                         w.Write(e.FieldIdx);
