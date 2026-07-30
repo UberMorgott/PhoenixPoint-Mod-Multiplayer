@@ -451,6 +451,58 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>CLICK PARITY on the augment screens — the v1 fix (quarry commit cbb9b2c,
+        /// <c>AugmentSlotSwitchUnlockPatch</c>) ported as its PRINCIPLE, not its code.
+        ///
+        /// The behaviour, grounded in the decompile: <c>UIModuleMutationSection.SelectMutation</c>
+        /// (:173-259) is a TOGGLE on the single field <c>_selectedMutationSlot</c> (:78), and while a slot
+        /// IS selected its own loop disables every sibling — :219 <c>slot2.SetEnable(enabled: false)</c> —
+        /// while <c>PhoenixGeneralButton</c> drops clicks on a disabled button. So a click on part B while
+        /// part A is selected is silently swallowed; the player must click A a SECOND time to release it
+        /// first. A section left in that state is precisely the "the armour is blocked and can no longer be
+        /// selected or cleared" report, and it is where a repaint that nulls the selection without re-running
+        /// this loop strands the screen.
+        ///
+        /// Postfix, PRESENTATION ONLY (law 4c): whenever a selection is armed, restore every slot's enabled
+        /// state to the game's OWN rule, <c>CanApplyAugumentation</c> (:160-171) — the identical expression
+        /// native writes in <c>RefreshContainerSlots</c> (:384) and in this method's own deselect branch
+        /// (:210). Clicking B then runs <c>SelectMutation(B)</c> natively and A releases by itself, which is
+        /// the requested behaviour. No model write, no wire traffic, nothing staged, no new UI.
+        /// IN-SESSION ONLY, so single-player stays vanilla.</summary>
+        [HarmonyPatch(typeof(UIModuleMutationSection), "SelectMutation")]
+        internal static class AugmentSlotSwitchUnlockPatch
+        {
+            private static readonly FieldInfo SelectedSlot =
+                AccessTools.Field(typeof(UIModuleMutationSection), "_selectedMutationSlot");
+            private static readonly MethodInfo CanApply =
+                AccessTools.Method(typeof(UIModuleMutationSection), "CanApplyAugumentation");
+
+            /// <summary>Loud, never silent: if the game renamed either member the patch would be a no-op that
+            /// looks installed, and the double-click bug would quietly come back.</summary>
+            private static bool Prepare()
+            {
+                if (SelectedSlot != null && CanApply != null) return true;
+                Debug.LogError("[Multiplayer][equip] AugmentSlotSwitchUnlockPatch NOT bound (" +
+                               (SelectedSlot == null ? "_selectedMutationSlot " : "") +
+                               (CanApply == null ? "CanApplyAugumentation " : "") +
+                               "missing) — augment body-part switching stays vanilla double-click");
+                return false;
+            }
+
+            private static void Postfix(UIModuleMutationSection __instance)
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession) return; // solo: vanilla
+                // Unity's overloaded != also answers "destroyed", which a plain null check would miss.
+                if (!(SelectedSlot.GetValue(__instance) is UnityEngine.Object sel) || sel == null) return;
+                var container = __instance.CurrentContainer;
+                if (container == null || container.Slots == null) return;
+                foreach (var slot in container.Slots)
+                    if (slot != null)
+                        slot.SetEnable((bool)CanApply.Invoke(__instance, new object[] { slot.Mutation }));
+            }
+        }
+
         // ─── Wire codec: per-slot (defGuid, count, charges) triples ─────────
         //
         // WHY NOT the RailMeta EntityList blob this seam originally shipped: AmmoManager is UNCOVERED in the

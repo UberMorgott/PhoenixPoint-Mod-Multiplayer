@@ -106,6 +106,8 @@ namespace RailCheck
             laws.AddRange(StructuralActorLaw());
             laws.AddRange(RepaintRelevanceLaw(types, game));
             laws.AddRange(SlicedWalkLaw());
+            laws.AddRange(AugmentRepaintGuardLaw());
+            laws.AddRange(AugmentClickParityLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -5009,6 +5011,139 @@ namespace RailCheck
                 yield return "L50 budget-bypassed: DiffEngine.RunSlice does not read SliceBudgetMs — the slice loop " +
                              "no longer stops on the per-frame budget, so a cycle runs to completion in one frame " +
                              "and slicing is decoration";
+        }
+
+        /// <summary>L51 — A REPAINT MAY NOT TAKE AN ARMED AUGMENT SELECTION, AND MAY NOT REVERT THE MIRROR.
+        ///
+        /// The defect: UiNativeRepaint's augment entry called the native OnNewCharacter, which (decompile
+        /// UIModuleBionics.cs:136-154) opens with RevertUnconfirmedChanges() = SetItems(CharacterOriginalItems)
+        /// — stamping the STALE visit baseline over armour the rail just mirrored in, with no later delta to
+        /// re-ship it — then re-snapshots ArmourItems into that baseline (baking a live preview in as a real
+        /// augment → InitCharacterInfo counts MAX_AUGMENTATIONS → the slot locks with nothing committed) and
+        /// finally nulls every section's _selectedMutationSlot, which inverts SelectMutation's toggle and
+        /// blinks the confirm button off.
+        ///
+        /// Three arms:
+        ///   A. the selection probe BINDS against the real game assembly (a renamed member is red, not a
+        ///      guard that silently answers "nothing is armed" forever);
+        ///   B. every caller of OnNewCharacter in our assembly also calls the guard;
+        ///   C. ORDER: inside that caller the baseline adoption (AddRange onto the snapshot list) precedes
+        ///      the OnNewCharacter call, and the guard precedes both.
+        /// NON-VACUITY: each arm must FIND its subject — an unresolved member, an empty caller set or a
+        /// missing call site is itself the violation, so nothing here can pass by matching nothing. Negating
+        /// the fix trips it: drop the guard call → B and C; swap the two statements → C; rename the bound
+        /// field → A.</summary>
+        private static IEnumerable<string> AugmentRepaintGuardLaw()
+        {
+            // Arm A — binds resolve. Checked against the game assembly directly, so this law does not merely
+            // re-read whatever the mod happened to bind.
+            var bionics = typeof(PhoenixPoint.Geoscape.View.ViewModules.UIModuleBionics);
+            var mutate = typeof(PhoenixPoint.Geoscape.View.ViewModules.UIModuleMutate);
+            var section = typeof(PhoenixPoint.Geoscape.View.ViewModules.UIModuleMutationSection);
+            foreach (var (owner, name) in new[] { (bionics, "_augmentSections"), (mutate, "_augmentSections"),
+                                                  (section, "_selectedMutationSlot") })
+                if (owner.GetField(name, AllMembers) == null)
+                    yield return "L51 bind-broken: " + owner.Name + "." + name + " no longer exists — the repaint's " +
+                                 "mid-interaction guard cannot see an armed body-part selection and will silently go " +
+                                 "back to clobbering it (double-click parity, blinking augment button, locked slot)";
+            if (UiNativeRepaint.SectionSelectedSlot == null)
+                yield return "L51 guard-blind: UiNativeRepaint.SectionSelectedSlot did not bind — SelectionArmed can " +
+                             "only ever answer false, so the guard is a no-op";
+
+            var guard = typeof(UiNativeRepaint).GetMethod("SelectionArmed", AllMembers);
+            var repaint = typeof(UiNativeRepaint).GetMethod("RepaintAugmentScreen", AllMembers);
+            if (guard == null || repaint == null)
+            {
+                yield return "L51 unresolved: UiNativeRepaint.SelectionArmed / RepaintAugmentScreen did not resolve — " +
+                             "the guard law cannot be evaluated and asserts nothing";
+                yield break;
+            }
+
+            // Arm B — nobody rebinds an augment module without asking the guard first.
+            var universe = OurMethods();
+            var onNewCharacter = bionics.GetMethod("OnNewCharacter", AllMembers);
+            var rebinders = CallersOf(onNewCharacter, universe);
+            if (onNewCharacter == null || rebinders.Count == 0)
+                yield return "L51 vacuous: no caller of UIModuleBionics.OnNewCharacter was found in the mod — the " +
+                             "destructive rebind this law polices is not where it thinks it is";
+            foreach (var r in rebinders)
+                if (r != "UiNativeRepaint.RepaintAugmentScreen")
+                    yield return "L51 unguarded-rebind: " + r + " calls OnNewCharacter, but the mid-interaction guard " +
+                                 "lives only in RepaintAugmentScreen — that path reverts mirrored armour and drops the " +
+                                 "user's body-part selection";
+
+            // Arm C — order inside the one legal caller: guard, then adopt the baseline, then rebind.
+            var seq = CalleeSequence(repaint);
+            int iGuard = IndexOfCall(seq, "SelectionArmed");
+            int iAdopt = IndexOfCall(seq, "AddRange");
+            int iRebind = IndexOfCall(seq, "OnNewCharacter");
+            if (iGuard < 0)
+                yield return "L51 guard-missing: RepaintAugmentScreen never calls SelectionArmed — a repaint arriving " +
+                             "mid-interaction takes the armed selection, inverting SelectMutation's toggle (the " +
+                             "'click it twice to deselect' report) and hiding the confirm button";
+            if (iRebind < 0)
+                yield return "L51 vacuous: RepaintAugmentScreen does not call OnNewCharacter — arm C found nothing to " +
+                             "order and is asleep";
+            if (iAdopt < 0)
+                yield return "L51 baseline-not-adopted: RepaintAugmentScreen never AddRanges the live armour into the " +
+                             "module snapshot — OnNewCharacter's opening RevertUnconfirmedChanges then stamps the stale " +
+                             "visit baseline back over state the rail just mirrored in, and no later delta re-ships it";
+            if (iGuard >= 0 && iRebind >= 0 && iGuard > iRebind)
+                yield return "L51 guard-too-late: RepaintAugmentScreen calls SelectionArmed AFTER OnNewCharacter — the " +
+                             "selection is already destroyed by the time the guard is asked";
+            if (iAdopt >= 0 && iRebind >= 0 && iAdopt > iRebind)
+                yield return "L51 adopt-too-late: RepaintAugmentScreen adopts the live armour AFTER OnNewCharacter — the " +
+                             "revert has already run, so the mirrored value is gone and the re-snapshot bakes the preview " +
+                             "in as a real augment (AugumentationLimitReached locks the slot with nothing committed)";
+        }
+
+        /// <summary>L52 — CLICK PARITY: an armed augment selection must leave its siblings clickable.
+        /// Native SelectMutation (UIModuleMutationSection.cs:219) disables every sibling slot while one is
+        /// selected, and PhoenixGeneralButton drops clicks on a disabled button — so switching from part A to
+        /// part B is swallowed and the player has to click A a second time. The ported v1 fix (quarry cbb9b2c)
+        /// is a postfix that restores each slot's enabled state to the game's own CanApplyAugumentation rule.
+        /// Falsified structurally: the patch must exist, must target SelectMutation, must be a Postfix, and
+        /// must reach both SetEnable and CanApplyAugumentation. NON-VACUITY: every one of those is a
+        /// find-or-violate, and the target method is resolved from the GAME assembly.</summary>
+        private static IEnumerable<string> AugmentClickParityLaw()
+        {
+            var patch = typeof(EquipSync).GetNestedType("AugmentSlotSwitchUnlockPatch", AllMembers);
+            if (patch == null)
+            {
+                yield return "L52 patch-missing: EquipSync.AugmentSlotSwitchUnlockPatch is gone — augment body-part " +
+                             "switching reverts to vanilla, where a selected slot disables its siblings and the next " +
+                             "part cannot be clicked until the first is clicked again";
+                yield break;
+            }
+            var section = typeof(PhoenixPoint.Geoscape.View.ViewModules.UIModuleMutationSection);
+            var target = section.GetMethod("SelectMutation", AllMembers);
+            var canApply = section.GetMethod("CanApplyAugumentation", AllMembers);
+            var setEnable = typeof(PhoenixPoint.Geoscape.View.ViewModules.UIModuleMutationsSlot)
+                            .GetMethod("SetEnable", AllMembers);
+            if (target == null || canApply == null || setEnable == null)
+                yield return "L52 bind-broken: UIModuleMutationSection.SelectMutation / .CanApplyAugumentation / " +
+                             "UIModuleMutationsSlot.SetEnable no longer all exist — the click-parity patch is bound to " +
+                             "nothing and silently does not run";
+            var attr = patch.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                            .Cast<HarmonyLib.HarmonyPatch>().FirstOrDefault();
+            if (attr?.info?.methodName != "SelectMutation" || attr?.info?.declaringType != section)
+                yield return "L52 patch-retargeted: AugmentSlotSwitchUnlockPatch no longer targets " +
+                             "UIModuleMutationSection.SelectMutation — the sibling re-enable never runs";
+            var post = patch.GetMethod("Postfix", AllMembers);
+            if (post == null)
+            {
+                yield return "L52 postfix-missing: AugmentSlotSwitchUnlockPatch has no Postfix — a prefix or nothing at " +
+                             "all cannot restore the slot enabled-state native just cleared";
+                yield break;
+            }
+            var seq = CalleeSequence(post);
+            if (IndexOfCall(seq, "SetEnable") < 0)
+                yield return "L52 no-reenable: the click-parity postfix never calls UIModuleMutationsSlot.SetEnable — the " +
+                             "sibling slots stay disabled and part-to-part switching is still swallowed";
+            if (IndexOfCall(seq, "Invoke") < 0 && IndexOfCall(seq, "CanApplyAugumentation") < 0)
+                yield return "L52 rule-bypassed: the click-parity postfix does not consult CanApplyAugumentation — it is " +
+                             "re-enabling slots by its own rule instead of the game's, which would offer augments the " +
+                             "faction has not unlocked";
         }
 
         private static int OperandSize(OperandType t, byte[] il, int pos)

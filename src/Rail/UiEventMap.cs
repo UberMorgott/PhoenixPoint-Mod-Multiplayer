@@ -578,14 +578,77 @@ namespace Multiplayer.Network.Sync
                 default: return false;
             }
             if (cur == null || snapshot == null || trial == null) return false; // fallback re-enter re-seeds from scratch
+            // MID-INTERACTION. An armed body-part selection is UNCOMMITTED LOCAL INPUT, and the rebind
+            // below takes it: OnNewCharacter ends by running UnselectAllMutations() + ClearMutationSelection()
+            // on every section (UIModuleBionics.cs:136-154), which nulls _selectedMutationSlot. SelectMutation
+            // (UIModuleMutationSection.cs:173-259) is a TOGGLE keyed on exactly that field and it also owns
+            // the confirm button's visibility (:250 MutateButton.SetActive(... && _selectedMutationSlot != null
+            // && ...)), so nulling it behind the user's back INVERTS the next click and makes the AUGMENT
+            // button blink away and back on every rail batch. Decline instead: the screen stays as the user
+            // left it and converges the moment they commit or clear the selection.
+            // Deliberately NOT OpenUiRepaint.LocalInputInFlight: that is a BOUNDED global defer
+            // (MaxDeferFrames, "do not raise the cap") for input a repaint would physically yank out of the
+            // user's hand. A body-part selection can legitimately sit armed for minutes while the player
+            // reads the cost, and parking it there would stall every OTHER screen's repaint too.
+            if (SelectionArmed(module)) return true;
             var live = cur.ArmourItems;
-            if (!SameItems(live, snapshot) && !SameItems(live, trial))
-            {
-                if (module is UIModuleBionics b2) b2.OnNewCharacter(cur);
-                else ((UIModuleMutate)module).OnNewCharacter(cur);
-                mods.ActorCycleModule?.DisplaySoldier(cur, resetAnimation: false, addWeapon: false);
-            }
+            if (SameItems(live, snapshot) || SameItems(live, trial)) return true; // snapshot/trial still valid
+            // The model moved under the screen (a foreign augment on this soldier, or a reject re-emit).
+            // ADOPT it as the visit baseline BEFORE the native rebind — the order is the whole fix:
+            //   • OnNewCharacter OPENS with RevertUnconfirmedChanges() = SetItems(CharacterOriginalItems),
+            //     which stamps the STALE baseline back over the armour the rail just mirrored in. The host's
+            //     value did not change, so no later delta re-ships it and that peer stays diverged until the
+            //     law-7 CRC backstop heals it.
+            //   • It then re-snapshots ArmourItems into the baseline and runs InitCharacterInfo(), so a
+            //     preview still sitting in that list is BAKED IN as a real augment. InitCharacterInfo counts
+            //     it, hits MAX_AUGMENTATIONS (2) and sets AugumentSlotState.AugumentationLimitReached →
+            //     ResetContainer(...) → the slot is locked with nothing committed. That is the "armour can
+            //     no longer be selected or cleared after clicking helmets and legs" report.
+            // Adopting first makes the revert a no-op against the live set and the recount truthful.
+            snapshot.Clear();
+            snapshot.AddRange(live);
+            if (module is UIModuleBionics b2) b2.OnNewCharacter(cur);
+            else ((UIModuleMutate)module).OnNewCharacter(cur);
+            mods.ActorCycleModule?.DisplaySoldier(cur, resetAnimation: false, addWeapon: false);
             return true;
+        }
+
+        // ─── Augment-screen staging state — bound from the decompile, never guessed ──────────────
+        // UIModuleBionics.cs:51 / UIModuleMutate.cs:54  private Dictionary<AddonSlotDef, UIModuleMutationSection> _augmentSections
+        // UIModuleMutationSection.cs:78                 private UIModuleMutationsSlot _selectedMutationSlot
+        private static readonly FieldInfo BionicsSections = RequireField(typeof(UIModuleBionics), "_augmentSections");
+        private static readonly FieldInfo MutateSections = RequireField(typeof(UIModuleMutate), "_augmentSections");
+        internal static readonly FieldInfo SectionSelectedSlot = RequireField(typeof(UIModuleMutationSection), "_selectedMutationSlot");
+
+        /// <summary>Bind loudly: a renamed member after a game update must be a red line in the log, not a
+        /// repaint that silently goes back to clobbering the user's selection. Same contract as
+        /// <see cref="Bind"/>.</summary>
+        private static FieldInfo RequireField(Type owner, string name)
+        {
+            var f = AccessTools.Field(owner, name);
+            if (f == null)
+                Debug.LogError("[Multiplayer][rail] augment-screen bind FAILED on " + owner.Name + "." + name +
+                               " — a repaint can no longer see an armed body-part selection and will clobber it");
+            return f;
+        }
+
+        /// <summary>True when this augment module has an ARMED body-part selection anywhere, i.e. the local
+        /// user is mid-interaction. Internal so RailCheck can assert the guard is the one the repaint
+        /// consults.</summary>
+        internal static bool SelectionArmed(object module)
+        {
+            var sectionsField = module is UIModuleBionics ? BionicsSections
+                              : module is UIModuleMutate ? MutateSections : null;
+            if (sectionsField == null || SectionSelectedSlot == null) return false;
+            if (!(sectionsField.GetValue(module) is IDictionary sections)) return false;
+            foreach (var section in sections.Values)
+            {
+                if (section == null) continue;
+                // Unity's overloaded != also answers "destroyed", which a plain null check would miss.
+                var slot = SectionSelectedSlot.GetValue(section) as UnityEngine.Object;
+                if (slot != null) return true;
+            }
+            return false;
         }
 
         /// <summary>GeoItem.Equals is VALUE equality (def+count+charges, GeoItem.cs:124) — survives the
