@@ -81,6 +81,7 @@ namespace RailCheck
             laws.AddRange(HandleSweepLaw());
             laws.AddRange(CrcBackstopLaw());
             laws.AddRange(FragmentLaw());
+            laws.AddRange(ReadOnlyFacadeLaw());
             laws.AddRange(EventRaiseLaw());
             laws.AddRange(AnswerValidatorLaw());
             laws.AddRange(FunnelCoverageLaw(game));
@@ -1904,6 +1905,104 @@ namespace RailCheck
             if (msgBytes.Distinct().Count() != msgBytes.Length)
                 yield return "L25 msg-byte-collision: the CRC report shares its leading byte with another 0xAC message " +
                              "kind — it would be parsed as that one, silently";
+        }
+
+        // L41's own stand-in for a game type that exposes a mutable store through a read-only view — the
+        // shape RailMeta.MutableBehind must see THROUGH, driven here without a live GeoVehicle.
+        private sealed class OpaqueReadOnlyList : IList
+        {
+            public object this[int i] { get => null; set => throw new NotSupportedException(); }
+            public bool IsReadOnly => true;
+            public bool IsFixedSize => true;
+            public int Count => 0;
+            public object SyncRoot => this;
+            public bool IsSynchronized => false;
+            public int Add(object v) => throw new NotSupportedException();
+            public void Clear() => throw new NotSupportedException();
+            public bool Contains(object v) => false;
+            public int IndexOf(object v) => -1;
+            public void Insert(int i, object v) => throw new NotSupportedException();
+            public void Remove(object v) => throw new NotSupportedException();
+            public void RemoveAt(int i) => throw new NotSupportedException();
+            public void CopyTo(Array a, int i) { }
+            public IEnumerator GetEnumerator() { yield break; }
+        }
+
+        /// <summary>L41 — AN APPLY ONTO A READ-ONLY COLLECTION FAÇADE MUST SUCCEED OR FAIL LOUDLY, NEVER
+        /// NO-OP. The game hands out mutable stores behind read-only views wherever it wants callers to go
+        /// through its own mutators — <c>GeoVehicle.DestinationSites =&gt; _destinationSites.AsReadOnly()</c>
+        /// (decompile GeoVehicle.cs:172) — while every <see cref="RailMeta.ApplyList"/> strategy mutates in
+        /// place. The result was <c>NotSupportedException("Collection is read-only.")</c> on EVERY delta,
+        /// caught by <c>GenericApplier</c> and deduped to ONE warning by <c>LogMissOnce</c>: after that,
+        /// aircraft routes simply never landed on any client and nothing said so again.
+        ///
+        /// Asserted through the REAL function, and generically — the law never names
+        /// <c>_destinationSites</c>, because the fix must not either: it asks the façade what it WRAPS.
+        /// (a) a real <c>ReadOnlyCollection&lt;T&gt;</c> resolves to its own backing list, by reference;
+        /// (b) an already-mutable container and an ARRAY pass through untouched (fixed-size is not
+        /// read-only, and the array strategy assigns a fresh one); (c) a façade with no reachable backing
+        /// store THROWS rather than silently doing nothing. Plus the live anchor: the twin member that
+        /// actually failed must still classify covered with a strategy behind it.
+        /// Falsify by returning <c>current</c> unchanged from <see cref="RailMeta.MutableBehind"/>.</summary>
+        private static IEnumerable<string> ReadOnlyFacadeLaw()
+        {
+            var backing = new List<string> { "a", "b" };
+            object resolved = null;
+            string threw = null;
+            try { resolved = RailMeta.MutableBehind(backing.AsReadOnly(), null, null); }
+            catch (Exception ex) { threw = ex.GetType().Name; }
+            if (threw != null)
+                yield return "L41 facade-unresolved: a plain ReadOnlyCollection<T> — what List<T>.AsReadOnly() returns, " +
+                             "the shape the game itself uses — threw " + threw + " instead of resolving to its backing " +
+                             "list; every list behind a read-only view stops applying";
+            else if (!ReferenceEquals(resolved, backing))
+                yield return "L41 facade-unresolved: MutableBehind did not return the ReadOnlyCollection's OWN backing " +
+                             "list (got " + (resolved == null ? "null" : resolved.GetType().Name) + ") — applying into a " +
+                             "copy writes into nothing, which is the silent no-op this law exists to forbid";
+            else if ((resolved as IList).IsReadOnly)
+                yield return "L41 facade-unresolved: the resolved container is itself read-only — ApplyList's Clear+Add " +
+                             "still throws on every delta";
+
+            var plain = new List<string> { "x" };
+            if (!ReferenceEquals(RailMeta.MutableBehind(plain, null, null), plain))
+                yield return "L41 mutable-rewrapped: an ordinary mutable list did not pass through untouched — every " +
+                             "list apply in the rail would go through a resolution it does not need";
+            var arr = new string[2];
+            if (!ReferenceEquals(RailMeta.MutableBehind(arr, null, null), arr))
+                yield return "L41 array-unwrapped: an ARRAY was treated as a façade — arrays are fixed-size, not " +
+                             "read-only, and ApplyList assigns a fresh one; unwrapping here would break that strategy";
+
+            threw = null;
+            try { RailMeta.MutableBehind(new OpaqueReadOnlyList(), null, null); }
+            catch (Exception ex) { threw = ex.GetType().Name; }
+            if (threw == null)
+                yield return "L41 unresolvable-facade-silent: a read-only façade with NO reachable backing collection " +
+                             "was accepted — ApplyList then Clear()s it, the NotSupportedException is deduped away by " +
+                             "GenericApplier.LogMissOnce, and the field is stale forever with one stale log line";
+
+            // The live anchor: the member that actually failed in-game. A law that only exercised synthetic
+            // containers would stay green if the twin stopped classifying this field at all.
+            var twin = RailType.GetBridged(typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle),
+                                           typeof(PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData));
+            var dest = twin?.FieldByName("DestinationSites");
+            if (dest == null || dest.Class == FieldClass.Excluded)
+                yield return "L41 anchor-lost: GeoVehicle's DestinationSites twin no longer classifies covered (" +
+                             (dest == null ? "no such member" : dest.Exclude) + ") — the aircraft-route field this law " +
+                             "was written for stopped riding at all, so the law is asleep";
+            else if (RailMeta.ListApplyStrategy(dest) == null)
+                yield return "L41 anchor-unappliable: DestinationSites has no ApplyList strategy — it would reach the " +
+                             "final throw on every delta regardless of the façade";
+
+            // The twin gaps closed alongside it (same type, same log): a member that goes back to being
+            // unresolved is a silent regression, since the warning it produces is deduped after one line.
+            foreach (var name in new[] { "Rot", "StartExplorationTime" })
+            {
+                var f = twin?.FieldByName(name);
+                if (f == null || f.Class == FieldClass.Excluded)
+                    yield return "L41 twin-gap-reopened: GeoVehicleInstanceData." + name + " has no live counterpart again (" +
+                                 (f == null ? "no such member" : f.Exclude) + ") — it is not mirrored, and GenericApplier " +
+                                 "says so exactly once per session";
+            }
         }
 
         /// <summary>L40 — NO VALUE MAY LEAVE A BATCH UNSHIPPED AND UNANNOUNCED. The wire caps one entry at

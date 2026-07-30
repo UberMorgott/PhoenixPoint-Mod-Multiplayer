@@ -546,6 +546,11 @@ namespace Multiplayer.Network.Sync
         // everything by default, then OPT OUT what we don't want). An entry earns its place only with a
         // reason about the VALUE's own nature — never a subsystem's convenience — and it is visible in the
         // coverage report and the RailCheck baseline like any other exclusion.
+        private const string ExplorationHandleOptOut =
+            "scheduler handle, not state — IUpdateable.NextUpdate is get-only over a readonly struct and its " +
+            "writer is Timing.Start (GeoVehicle.cs:451), i.e. the client's own exploration timer (law 4b); " +
+            "the exploration START time mirrors as the StartExplorationTime leaf";
+
         private static readonly Dictionary<string, string> _optOutMembers = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             // Timing.Now = StartTime + OwnNow (decompile Base.Core/Timing.cs:55) where OwnNow accrues from
@@ -573,6 +578,21 @@ namespace Multiplayer.Network.Sync
             // the level clock rides the TimeAnchor "TA" root. Excluding the Descend member kills the
             // churn without touching TimingInstanceData's OWN table — the "TA" anchor kind stays 6/6.
             { "Base.Entities.ActorInstanceData.TimingData", "per-actor clock (OwnNow/OwnFixedNow accrue every walk on every actor — pure churn; client clocks tick locally, the level clock rides the TimeAnchor \"TA\" root)" },
+
+            // The exploration SCHEDULER handle, not a value. The DTO records a derived read of the live
+            // updateable (GeoVehicle.RecordInstanceData:1064 `_explorationUpdateable.NextUpdate`), and
+            // IUpdateable.NextUpdate is get-only (IUpdateable.cs) over a readonly struct — there is no
+            // writable live counterpart for the twin mechanism to resolve, so it rode as an anonymous
+            // "dto-twin unresolved" warning on every vehicle. Its real writer is Timing.Start
+            // (GeoVehicle.cs:451), i.e. STARTING the client's own exploration timer — precisely the
+            // client-local sim the explore intent (VehicleSync.OpExploreSite) exists to stop. Named here
+            // rather than half-mirrored: what the host's exploration produces (site inspected, rewards)
+            // rides the rail as ordinary state; StartExplorationTime mirrors as a leaf via its twin alias.
+            // Both declarations of the same member: the DTO's own table (which is what the host walks and
+            // ships from) and the live twin's (which is what the client's warning reads), so the opt-out is
+            // one reviewed fact rather than a stop on one side and an anonymous gap on the other.
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicleInstanceData.NextSiteExplorationUpdate", ExplorationHandleOptOut },
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicle.NextSiteExplorationUpdate", ExplorationHandleOptOut },
 
             // NakedRecruits pair blob (whole-dict replaced value) — GeoUnitDescriptor's two non-carried
             // refs are SAFE nulls, argued from the decompile, so the husk gate must not veto the dict:
@@ -818,6 +838,14 @@ namespace Multiplayer.Network.Sync
             // these rows only work alongside the MemberInfo hop above.
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.SurfacePos", "Surface.position" }, // GeoVehicle.RecordInstanceData:1052 / ProcessInstanceData:1077
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.SurfaceRot", "Surface.rotation" }, // GeoVehicle.RecordInstanceData:1053 / ProcessInstanceData:1078 — world rotation carries the rendered heading (UpdateHeading writes Surface.localEulerAngles, GeoNavComponent.cs:213)
+            // The ACTOR's own transform rotation. `ActorComponent.Rot` is `=> transform.rotation`
+            // (ActorComponent.cs:43) — get-only, so the same-name rung resolved it and then excluded it as
+            // "read-only" on every actor twin. The game's OWN load path writes the identical thing
+            // (ProcessInstanceData:392 `SetTransform(Pos, Rot)`), so the alias points at the writable member
+            // behind the read-only view — the same move `SurfaceRot -> Surface.rotation` makes one level
+            // down. Keyed on ActorComponent, so it covers every actor twin at once rather than one type.
+            { "Base.Entities.ActorComponent.Rot", "transform.rotation" },
+            { "PhoenixPoint.Geoscape.Entities.GeoVehicle.StartExplorationTime", "StartedExplorationAt" }, // GeoVehicle.RecordInstanceData:1069 / ProcessInstanceData:1123 — private store, DTO name differs and no convention reaches it
             { "PhoenixPoint.Geoscape.Entities.GeoSite.OwnerFactionDef", "Owner" },        // GeoSite.ProcessInstanceData:1552 — def⇄faction via FactionRef coercion
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.EncounterRecords", "_records" },     // GeoscapeEventSystem.RecordInstanceData:666 (_records.Values.ToList())
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.SupressEvents", "SuppressEvents" },  // GeoscapeEventSystem.RecordInstanceData:667 (game typo in the DTO member)
@@ -2724,6 +2752,36 @@ namespace Multiplayer.Network.Sync
             return back;
         }
 
+        /// <summary>The MUTABLE collection behind a read-only FAÇADE, or the container itself when it is
+        /// already mutable. Generic by construction — it asks the façade what it WRAPS, never which field a
+        /// particular game type happens to use: a wrapper's own state is the wrapped collection, so the one
+        /// instance member holding a non-read-only <see cref="IList"/>/<see cref="IDictionary"/> IS the
+        /// backing store. That covers <c>ReadOnlyCollection&lt;T&gt;</c> (<c>List&lt;T&gt;.AsReadOnly()</c>,
+        /// the shape the game uses), <c>ReadOnlyDictionary&lt;K,V&gt;</c> and any hand-rolled wrapper, with
+        /// no per-type table to keep in sync.
+        ///
+        /// Arrays are left alone: fixed-size is not read-only, and the array strategy assigns a fresh one.
+        /// An unresolvable façade is LOUD ON EVERY OCCURRENCE and then throws — not once, because a field
+        /// that cannot be applied is wrong on every delta and a once-only line is exactly how this stayed
+        /// invisible (GenericApplier.LogMissOnce dedups the catch below it).</summary>
+        internal static object MutableBehind(object current, object owner, RailField field)
+        {
+            if (current == null || current is Array) return current;
+            if (!((current is IList l && l.IsReadOnly) || (current is IDictionary d && d.IsReadOnly))) return current;
+            foreach (var fi in current.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                object v;
+                try { v = fi.GetValue(current); } catch { continue; }
+                if (v == null || ReferenceEquals(v, current) || v is Array) continue;
+                if ((v is IList bl && !bl.IsReadOnly && !bl.IsFixedSize) || (v is IDictionary bd && !bd.IsReadOnly)) return v;
+            }
+            var what = (owner == null ? "?" : owner.GetType().Name) + "." + (field == null ? "?" : field.Name);
+            Debug.LogError("[Multiplayer][rail] " + what + " is a READ-ONLY collection façade (" +
+                           current.GetType().Name + ") with no mutable backing collection behind it — nothing " +
+                           "can be applied through it and this field is stale on this peer");
+            throw new InvalidOperationException("read-only collection façade " + current.GetType().Name + " on " + what);
+        }
+
         /// <summary>In-place list rebuild (the game exposes most lists by reference); assignment fallback.
         /// Shared by the client applier (top-level LeafList/EntityList fields) and the blob codec
         /// (nested lists on freshly constructed elements).</summary>
@@ -2765,6 +2823,12 @@ namespace Multiplayer.Network.Sync
             // attach used to be a `created` flag re-tested per strategy, and the dict route below simply
             // forgot it, so a null Dictionary field was filled and then thrown away.
             if (current == null) current = MaterializeContainer(entity, field);
+            // The game exposes a mutable store through a READ-ONLY FAÇADE wherever it wants callers to go
+            // through its own mutators (GeoVehicle.DestinationSites => _destinationSites.AsReadOnly(),
+            // decompile GeoVehicle.cs:172). Every strategy below mutates in place, so without this the apply
+            // threw "Collection is read-only" on every single delta — deduped to ONE warning by
+            // GenericApplier.LogMissOnce and then silent, which is how client aircraft never moved.
+            current = MutableBehind(current, entity, field);
             if (current is IDictionary dict)
             {
                 // Whole-dict blob (ElemType = KVP): items ARE the entries — rebuild directly.

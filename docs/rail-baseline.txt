@@ -679,7 +679,7 @@ nested husk sweep (recursive over the blob closure; waived = justified opt-out):
   (types swept: 45)
 
 twin tables (GetBridged: *InstanceData wire entries -> live owner members):
-PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=18/32
+PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=19/32
   + Descend ActiveMission (GeoMission)
   + LeafList Addons (List`1) -> live _addons unordered=no apply=IList
   > dispatch AlienBaseData -> GetComponent(GeoAlienBase)
@@ -701,7 +701,7 @@ PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=18/32
   - EXCLUDED Pos (Vector3): read-only
   - EXCLUDED ProvideOwnerTags (List`1): dto-twin unresolved
   + Leaf RandomSeed (Int32)
-  - EXCLUDED Rot (Quaternion): read-only
+  + Leaf Rot (Quaternion) -> live transform.rotation
   > dispatch ScavengingSiteData -> GetComponent(GeoScavengingSite)
   + Leaf SiteId (Int32)
   + LeafList SiteTags (List`1) unordered=no apply=IList
@@ -712,7 +712,7 @@ PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=18/32
   + LeafList TacUnits (List`1) -> live _tacUnits unordered=no apply=IList
   - EXCLUDED TimingData (TimingInstanceData): dto-twin unresolved
   + Leaf Weather (GeoSiteWeather)
-PhoenixPoint.Geoscape.Entities.GeoVehicle  <=  GeoVehicleInstanceData  resolved=15/25
+PhoenixPoint.Geoscape.Entities.GeoVehicle  <=  GeoVehicleInstanceData  resolved=17/25
   + Leaf CanRedirect (Boolean)
   + Leaf CurrentSite (GeoSite)
   + LeafList DestinationSites (List`1) unordered=no apply=IList
@@ -721,15 +721,15 @@ PhoenixPoint.Geoscape.Entities.GeoVehicle  <=  GeoVehicleInstanceData  resolved=
   + EntityList Modules (List`1) -> live _modules unordered=no apply=IList
   + Leaf Name (String) -> live _vehicleName
   - EXCLUDED NextScheduledRepairTime (TimeUnit): dto-twin unresolved
-  - EXCLUDED NextSiteExplorationUpdate (NextUpdate): dto-twin unresolved
+  - EXCLUDED NextSiteExplorationUpdate (NextUpdate): scheduler handle, not state — IUpdateable.NextUpdate is get-only over a readonly struct and its writer is Timing.Start (GeoVehicle.cs:451), i.e. the client's own exploration timer (law 4b); the exploration START time mirrors as the StartExplorationTime leaf
   - EXCLUDED OverrideTransform (Boolean): dto-twin unresolved
   + Leaf Owner (PPFactionDef)
   - EXCLUDED Pos (Vector3): read-only
   + Leaf RangeRemaining (Single)
-  - EXCLUDED Rot (Quaternion): read-only
+  + Leaf Rot (Quaternion) -> live transform.rotation
   - EXCLUDED Source (Object): untyped/interface member
   - EXCLUDED SourceTemplate (Object): untyped/interface member
-  - EXCLUDED StartExplorationTime (TimeUnit): dto-twin unresolved
+  + Leaf StartExplorationTime (TimeUnit) -> live StartedExplorationAt
   + Leaf SurfacePos (Vector3) -> live Surface.position
   + Leaf SurfaceRot (Quaternion) -> live Surface.rotation
   + LeafList TacUnits (List`1) -> live _tacUnits unordered=no apply=IList
@@ -738,7 +738,7 @@ PhoenixPoint.Geoscape.Entities.GeoVehicle  <=  GeoVehicleInstanceData  resolved=
   > dispatch VehicleControllerInstanceData -> GetComponent(VehicleFactionController)
   + Leaf VehicleID (Int32)
   + EntityList Weapons (List`1) -> live _weapons unordered=no apply=IList
-PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  <=  GeoVehicleInstanceData  resolved=15/25
+PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  <=  GeoVehicleInstanceData  resolved=17/25
   + Leaf CanRedirect (Boolean)
   + Leaf CurrentSite (GeoSite)
   + LeafList DestinationSites (List`1) unordered=no apply=IList
@@ -747,15 +747,15 @@ PhoenixPoint.Geoscape.Interception.DummyGeoVehicle  <=  GeoVehicleInstanceData  
   + EntityList Modules (List`1) -> live _modules unordered=no apply=IList
   + Leaf Name (String) -> live _vehicleName
   - EXCLUDED NextScheduledRepairTime (TimeUnit): dto-twin unresolved
-  - EXCLUDED NextSiteExplorationUpdate (NextUpdate): dto-twin unresolved
+  - EXCLUDED NextSiteExplorationUpdate (NextUpdate): scheduler handle, not state — IUpdateable.NextUpdate is get-only over a readonly struct and its writer is Timing.Start (GeoVehicle.cs:451), i.e. the client's own exploration timer (law 4b); the exploration START time mirrors as the StartExplorationTime leaf
   - EXCLUDED OverrideTransform (Boolean): dto-twin unresolved
   + Leaf Owner (PPFactionDef)
   - EXCLUDED Pos (Vector3): read-only
   + Leaf RangeRemaining (Single)
-  - EXCLUDED Rot (Quaternion): read-only
+  + Leaf Rot (Quaternion) -> live transform.rotation
   - EXCLUDED Source (Object): untyped/interface member
   - EXCLUDED SourceTemplate (Object): untyped/interface member
-  - EXCLUDED StartExplorationTime (TimeUnit): dto-twin unresolved
+  + Leaf StartExplorationTime (TimeUnit) -> live StartedExplorationAt
   + Leaf SurfacePos (Vector3) -> live Surface.position
   + Leaf SurfaceRot (Quaternion) -> live Surface.rotation
   + LeafList TacUnits (List`1) -> live _tacUnits unordered=no apply=IList
@@ -810,7 +810,7 @@ PhoenixPoint.Geoscape.Entities.VehicleFactionController  <=  InstanceData  resol
   - EXCLUDED LastVisitedSite (GeoSite): dto-twin unresolved
   - EXCLUDED WaitForSiteMission (GeoSite): dto-twin unresolved
   - EXCLUDED WaitingUpdateTime (NextUpdate): dto-twin unresolved
-twin summary: resolved=66 gaps=49 dispatch=7
+twin summary: resolved=71 gaps=44 dispatch=7
 
 null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), GeoHavenDefenseMissionInstanceData.AttackingSites (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
 
