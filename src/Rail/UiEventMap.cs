@@ -286,6 +286,14 @@ namespace Multiplayer.Network.Sync
                 // fallback re-enter is doubly forbidden here — its ExitState answers a still-Triggered
                 // event with Choices.Last() (UIStateGeoscapeEvent.cs:61-65). RailCheck L21 asserts this key.
                 [typeof(UIStateGeoscapeEvent)] = (s, v) => EventPopup.RepaintDialog(s, v),
+                // Modal dialog: a DELIBERATE no-op, and the entry exists only to keep the Exit+Enter fallback
+                // away from it. A modal renders a frozen snapshot of something that already happened — there is
+                // nothing on it to re-read from the model — while a re-enter would run UIStateGeoModal
+                // .ExitState:116, which (a) invokes the HOST's own DialogCallback with ModalResult.Close on a
+                // window nobody closed (ResearchCompleteModalHandler, a mission Cancel arm…) and (b) fires
+                // GeoscapeView.ModalClosed, the very signal a future host→all hide would read as "the host
+                // dismissed it". Returning true is the whole entry.
+                [typeof(UIStateGeoModal)] = (s, v) => true,
                 [typeof(UIStateResearch)] = (s, v) => { ResearchSync.RepaintResearchUi(); return true; },
                 [typeof(UIStateEditSoldier)] = (s, v) =>
                 {

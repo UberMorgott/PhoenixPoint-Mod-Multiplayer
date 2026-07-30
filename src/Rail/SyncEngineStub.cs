@@ -34,6 +34,7 @@ namespace Multiplayer.Network.Sync
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
                 ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || EventPopup.HandleInbound(_engine, peer, surfaceId, payload)
+                || GeoModalMirror.HandleInbound(_engine, peer, surfaceId, payload)
                 || IntentRail.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
@@ -71,6 +72,7 @@ namespace Multiplayer.Network.Sync
             DiffEngine.Reset();
             GenericApplier.Reset();
             EventPopup.Reset();   // 0xB6 raise seq stream (teardown only — see EventPopup.Reset)
+            GeoModalMirror.Reset();  // 0xB7 modal raise seq stream, same teardown-only contract
             GeoWindowCoverage.Reset();  // per-session "announced once" set, so a gap is loud in EVERY session
             // Rail statics that survive an engine teardown and had no home in this aggregate until the
             // SessionEnd seam went in. Kept HERE, not in SessionEnd: this is the one full-teardown reset

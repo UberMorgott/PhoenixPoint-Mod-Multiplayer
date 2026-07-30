@@ -11,6 +11,7 @@ using Base.Serialization.General;
 using HarmonyLib;
 using Multiplayer.Network.Sync;
 using Multiplayer.Util;
+using PhoenixPoint.Common.Utils;
 using PhoenixPoint.Geoscape.Events;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewStates;
@@ -91,6 +92,7 @@ namespace RailCheck
             laws.AddRange(DisplayOrderLaw());
             laws.AddRange(OwnAnswerLaw());
             laws.AddRange(WindowCoverageLaw(game));
+            laws.AddRange(ModalCoverageLaw());
             laws.AddRange(AnswerValidatorLaw());
             laws.AddRange(FunnelCoverageLaw(game));
             laws.AddRange(EventTokenDerefLaw());
@@ -3502,6 +3504,298 @@ namespace RailCheck
                 yield return "L48 gate-suppresses: GeoWindowCoverageGate grew a Prefix — the gate must OBSERVE the " +
                              "queue, never gate it. Suppressing an un-mirrored window on the host hides the host's own " +
                              "game from it to make two screens agree, which is not what syncing them means";
+        }
+
+        /// <summary>L49 — the MODAL family, the biggest window kind on the rail: 43 <c>ModalType</c>s ride the
+        /// single <c>UIStateGeoModal</c> view state, so L48's per-view-state verdict can only ever say "modals
+        /// are handled". This law asserts the SECOND axis — the per-ModalType table — plus the two properties
+        /// that make a mirrored modal safe to render on a peer that owns none of the state behind it.
+        ///
+        /// (1) TOTALITY over the enum, derived from <c>typeof(ModalType)</c>'s own members rather than a
+        /// hand-typed list: a modal added by a patch, a DLC or a mod fails the build instead of appearing on
+        /// one screen and nowhere else. Non-vacuous in both directions — the derived universe must contain the
+        /// anchors this rail actually reasons about, and the table must declare at least one kind Mirrored, or
+        /// "everything is declared" is satisfied perfectly by declaring everything LocalOnly and shipping
+        /// nothing.
+        ///
+        /// (2) THE CLIENT'S COPY IS NON-AUTHORITATIVE, asserted on IL because it is a property of the
+        /// CONSTRUCTION and nothing at runtime would ever complain. Two halves, both silent if broken:
+        /// a mirrored modal must be built with a NULL <c>DialogCallback</c> (every button funnels through
+        /// <c>UIStateGeoModal.FinishDialog</c>:82 → <c>_dialogHandler?.Invoke</c>, so a handler is the ONLY
+        /// thing standing between a client click and <c>LaunchMission</c>/<c>GeoAbility.Activate</c>), and it
+        /// must never be marked <c>Persistent</c> — a persistent modal is save-restored through
+        /// <c>RestoreContext.RegenerateState</c>:36, which rebuilds it with the game's OWN
+        /// <c>level.View.ModalResultCallback</c> closure and hands a reloaded client exactly the authoritative
+        /// buttons this file took away.
+        ///
+        /// (3) The seams, the route and the wire: POSTFIX-only capture on both native openers (suppressing a
+        /// window on the host to make two screens agree is not what syncing them means — L48's rule, same
+        /// reason), a payload round-trip, the refusal that keeps a half-built prefab off the screen, and the
+        /// repaint-table entry without which the Exit+Enter fallback fires the HOST's own callback with
+        /// <c>ModalResult.Close</c> on a window nobody closed.</summary>
+        private static IEnumerable<string> ModalCoverageLaw()
+        {
+            // ── (1) totality over the enum, and it is the REAL enum ────────
+            var universe = Enum.GetValues(typeof(ModalType)).Cast<ModalType>().Distinct()
+                               .OrderBy(m => (int)m).ToList();
+            if (universe.Count == 0)
+                yield return "L49 enum-empty: ModalType has no members — the universe this law derives totality from " +
+                             "resolved to nothing, so every arm below is asserting something about the empty set";
+            foreach (var anchor in new[] { ModalType.GeoResearchComplete, ModalType.GeoHavenAttackBrief,
+                                           ModalType.None, ModalType._CustomMission })
+                if (!universe.Contains(anchor))
+                    yield return "L49 enum-unmoored: ModalType." + anchor + " is not among the values this law swept, " +
+                                 "yet the rail reasons about it by name — the derived universe is the wrong set and " +
+                                 "'every modal is declared' is a statement about something else";
+            foreach (var m in universe)
+                if (GeoWindowCoverage.RuleForModal(m) == null)
+                    yield return "L49 modal-undeclared: ModalType." + m + " (" + (int)m + ") is not in " +
+                                 "GeoWindowCoverage.DeclaredModals — nobody has decided whether the other peer should " +
+                                 "see that window, and the default is that it appears on ONE screen while the peers " +
+                                 "drift apart looking at different things. Declare it Mirrored / LocalOnly / Gap with " +
+                                 "a reason";
+            foreach (var kv in GeoWindowCoverage.DeclaredModals.OrderBy(k => (int)k.Key))
+            {
+                if (!Enum.IsDefined(typeof(ModalType), kv.Key))
+                    yield return "L49 modal-declaration-stale: GeoWindowCoverage.DeclaredModals holds " + (int)kv.Key +
+                                 ", which is not a ModalType any more — a table carrying reasons for windows the game " +
+                                 "no longer has is a table nobody trusts, and the REAL kind that replaced it is " +
+                                 "sitting undeclared";
+                if (string.IsNullOrWhiteSpace(kv.Value?.Why))
+                    yield return "L49 modal-unreasoned: GeoWindowCoverage.DeclaredModals[" + kv.Key + "] carries no " +
+                                 "reason — the declaration IS the review, and a bare verdict with nothing behind it is " +
+                                 "how a wrong one survives";
+            }
+            // Non-vacuity: a table that declares everything LocalOnly passes every arm above while the mirror
+            // ships not one window, which is indistinguishable from the gap this whole family exists to close.
+            if (!GeoWindowCoverage.DeclaredModals.Values.Any(r => r != null && r.Sync == WindowSync.Mirrored))
+                yield return "L49 nothing-mirrored: not one ModalType is declared Mirrored — the coverage table is " +
+                             "total and the 0xB7 surface carries nothing, so every modal in the game is still a " +
+                             "window one peer sees and the other does not";
+
+            // ── (2) the client's copy cannot run game logic ────────────────
+            var mirror = typeof(GeoModalMirror);
+            // Callees filters by the DEFINING assembly of the callee (`callee.Module.Assembly == asm`), so a
+            // game-side target has to be looked for with the game assembly and a mod-side one with ours.
+            var gameAsm = typeof(GeoscapeView).Assembly;
+            var raise = mirror.GetMethod("RaiseMirrored", AllMembers);
+            var modalCtor = typeof(UIStateGeoModal).GetConstructors(AllMembers).FirstOrDefault();
+            if (raise == null || modalCtor == null)
+                yield return "L49 raise-seam-gone: GeoModalMirror.RaiseMirrored or the UIStateGeoModal constructor did " +
+                             "not resolve — the law cannot see how the client builds a mirrored modal, and every arm " +
+                             "below it stays green whatever it does";
+            else
+            {
+                // POSITIVE CONTROL for the whole IL half: the one call this method provably makes. If the
+                // walk cannot find it, the forbidden-callee arms below are asserting nothing.
+                if (!Callees(raise, gameAsm).Any(c => c.IsConstructor && c.DeclaringType == typeof(UIStateGeoModal)))
+                    yield return "L49 raise-il-blind: the IL sweep of GeoModalMirror.RaiseMirrored does not find the " +
+                                 "UIStateGeoModal constructor it demonstrably calls — the callee walk is broken here, " +
+                                 "so the 'no authoritative callee' arms below prove nothing";
+            }
+            // Nothing in this file may reach an authoritative funnel. ModalResultCallback is THE one that
+            // matters (it is the closure the game itself would install, and it dispatches to LaunchMission /
+            // mission.Cancel / GeoAbility.Activate / reward.Apply); FinishDialog is the other way in — driving
+            // the native dialog's own completion from mod code would invoke whatever handler it holds.
+            var forbidden = new[]
+            {
+                (M: (MethodBase)typeof(GeoscapeView).GetMethod("ModalResultCallback", AllMembers), Name: "GeoscapeView.ModalResultCallback",
+                 Cost: "that is exactly the authoritative closure the game installs, and it dispatches Confirm to " +
+                       "LaunchMission / mission.Cancel / GeoAbility.Activate on a peer that owns none of it"),
+                (M: (MethodBase)typeof(UIStateGeoModal).GetMethod("FinishDialog", AllMembers), Name: "UIStateGeoModal.FinishDialog",
+                 Cost: "driving the native dialog's own completion invokes whatever DialogCallback it holds, which " +
+                       "on the HOST's copy is the authoritative one"),
+                (M: (MethodBase)typeof(GeoscapeView).GetMethod("LaunchMission", AllMembers), Name: "GeoscapeView.LaunchMission",
+                 Cost: "a client launching a tactical mission is law 5 quarantine breached from the presentation seam"),
+            };
+            foreach (var f in forbidden)
+            {
+                if (f.M == null)
+                {
+                    yield return "L49 forbidden-callee-unresolved: " + f.Name + " did not resolve, so this law cannot " +
+                                 "tell whether the mirror calls it — the arm is asleep, not satisfied";
+                    continue;
+                }
+                foreach (var m in mirror.GetMethods(AllMembers).Cast<MethodBase>()
+                                        .Concat(mirror.GetConstructors(AllMembers))
+                                        .Where(m => !m.IsAbstract && m.GetMethodBody() != null))
+                    if (Callees(m, gameAsm).Any(c => Same(c, f.M)))
+                        yield return "L49 client-runs-host-logic: GeoModalMirror." + m.Name + " calls " + f.Name +
+                                     " — " + f.Cost + ". A mirrored modal is a PICTURE of the host's window; the only " +
+                                     "thing that keeps it one is that its DialogCallback is null and nothing here " +
+                                     "reaches around it";
+            }
+            var persistent = typeof(UIStateGeoModal).GetField("Persistent", AllMembers);
+            if (persistent == null)
+                yield return "L49 persistent-field-gone: UIStateGeoModal.Persistent did not resolve — the law that " +
+                             "keeps a reloaded client from getting the game's own authoritative callback back " +
+                             "(RestoreContext.RegenerateState:36) cannot be checked at all";
+            else
+                foreach (var m in mirror.GetMethods(AllMembers).Cast<MethodBase>().Where(m => m.GetMethodBody() != null))
+                    if (FieldRefs(m, OpCodes.Stfld).Any(fld => fld == persistent))
+                        yield return "L49 mirrored-modal-persisted: GeoModalMirror." + m.Name + " writes " +
+                                     "UIStateGeoModal.Persistent — a persistent modal is SAVE-RESTORED through " +
+                                     "RestoreContext.RegenerateState:36, which rebuilds it with the game's own " +
+                                     "level.View.ModalResultCallback closure, so a client that reloads gets back " +
+                                     "exactly the authoritative buttons the null handler took away";
+            // No text, therefore no shared-def mutation: this family renders from the client's OWN defs, and
+            // the moment someone "just stamps the host's string in" it becomes EventPopup.WithWireTexts'
+            // problem (a def is shared state on this peer, and LocalizedTextBind(text, doNotLocalize).Localize()
+            // returns the literal FOREVER). Positive control first, so the arm cannot pass on a blind walk.
+            var stores = mirror.GetMethods(AllMembers).Cast<MethodBase>()
+                               .Where(m => m.GetMethodBody() != null)
+                               .SelectMany(m => FieldRefs(m, OpCodes.Stfld)).ToList();
+            if (stores.Count == 0)
+                yield return "L49 field-il-blind: the Stfld sweep of GeoModalMirror found no field writes at all, yet " +
+                             "it fills a Raise struct field by field — the field walk is broken here, so the " +
+                             "shared-def and Persistent arms prove nothing";
+            foreach (var m in mirror.GetMethods(AllMembers).Cast<MethodBase>().Where(m => m.GetMethodBody() != null))
+            {
+                if (Callees(m, typeof(Base.UI.LocalizedTextBind).Assembly)
+                        .Any(c => c.IsConstructor && c.DeclaringType == typeof(Base.UI.LocalizedTextBind)))
+                    yield return "L49 wire-text-returned: GeoModalMirror." + m.Name + " constructs a LocalizedTextBind " +
+                                 "— this family deliberately ships NO text (every mirrored modal's renderer paints " +
+                                 "from the data object alone), and a host-resolved string is one step from being " +
+                                 "stamped onto a shared def, which is session-permanent with no undo";
+                foreach (var fld in FieldRefs(m, OpCodes.Stfld))
+                    if (fld.DeclaringType != null && typeof(Base.Defs.BaseDef).IsAssignableFrom(fld.DeclaringType))
+                        yield return "L49 shared-def-mutated: GeoModalMirror." + m.Name + " writes " +
+                                     fld.DeclaringType.Name + "." + fld.Name + ", a field on a DEF — defs are shared " +
+                                     "state on this peer (DefOwnership exists to stop the rail descending into one) " +
+                                     "and a write there is session-permanent";
+            }
+
+            // ── (3) the seams: both openers, POSTFIX only, and each announces ──
+            var announce = typeof(GeoWindowCoverage).GetMethod("AnnounceModal", AllMembers);
+            var broadcast = mirror.GetMethod("HostBroadcast", AllMembers);
+            var seams = new[]
+            {
+                (T: typeof(GeoModalOpenMirror), Method: "OpenModal"),
+                (T: typeof(GeoModalOpenPersistentMirror), Method: "OpenModalPersistent"),
+            };
+            foreach (var s in seams)
+            {
+                var attr = s.T.GetCustomAttributes(typeof(HarmonyPatch), inherit: false)
+                              .Cast<HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+                if (attr == null || attr.declaringType != typeof(GeoscapeView) || attr.methodName != s.Method)
+                    yield return "L49 opener-unpatched: " + s.T.Name + " does not patch GeoscapeView." + s.Method +
+                                 " (declaringType=" + (attr?.declaringType?.Name ?? "none") + ", method=" +
+                                 (attr?.methodName ?? "none") + ") — that opener is one of only TWO places the " +
+                                 "shipped game constructs a UIStateGeoModal, so a kind raised through it is captured " +
+                                 "by nothing and announced by nothing";
+                if (s.T.GetMethod("Prefix", AllMembers) != null)
+                    yield return "L49 opener-suppresses: " + s.T.Name + " grew a Prefix — the capture must OBSERVE the " +
+                                 "opener, never gate it. Suppressing a window on the host hides the host's own game " +
+                                 "from it to make two screens agree, which is the opposite of the fix";
+                var post = s.T.GetMethod("Postfix", AllMembers);
+                if (post == null)
+                    yield return "L49 opener-mute: " + s.T.Name + " has no Postfix — the patch is attached to the " +
+                                 "opener and does nothing, which is worse than no patch: it looks covered";
+                else if (announce == null ||
+                         !Callees(post, mirror.Assembly, directCallsOnly: true).Any(c => Same(c, announce)))
+                    yield return "L49 opener-unannounced: " + s.T.Name + ".Postfix does not call " +
+                                 "GeoWindowCoverage.AnnounceModal — a modal kind nobody declared then opens on one " +
+                                 "screen with nothing in any log saying the other peer never got it";
+            }
+            var mirrorSeam = typeof(GeoModalOpenMirror).GetMethod("Postfix", AllMembers);
+            if (broadcast == null || mirrorSeam == null ||
+                !Callees(mirrorSeam, mirror.Assembly, directCallsOnly: true).Any(c => Same(c, broadcast)))
+                yield return "L49 raise-never-sent: GeoModalOpenMirror.Postfix does not call " +
+                             "GeoModalMirror.HostBroadcast — the coverage table says these windows are Mirrored and " +
+                             "the wire carries nothing, which is the declared-but-absent state this law exists to " +
+                             "make impossible";
+            // The surface is actually ROUTED: a raise that reaches no inbound hook is dropped by SurfaceRouter
+            // as forward-compat, silently. Swept over the whole mod assembly because the route is a lambda in
+            // SyncEngine's constructor and Callees sees call/callvirt only.
+            var inbound = mirror.GetMethod("HandleInbound", AllMembers);
+            if (inbound == null)
+                yield return "L49 inbound-gone: GeoModalMirror.HandleInbound did not resolve — nothing can consume " +
+                             "0x" + SurfaceIds.GeoModalRaise.ToString("X2");
+            else if (!DeclaredTypes(mirror.Assembly).Where(t => t != mirror)
+                         .SelectMany(t => { try { return t.GetMethods(AllMembers).Cast<MethodBase>(); } catch { return Enumerable.Empty<MethodBase>(); } })
+                         .Where(m => { try { return m.GetMethodBody() != null; } catch { return false; } })
+                         .Any(m => Callees(m, mirror.Assembly).Any(c => Same(c, inbound))))
+                yield return "L49 surface-unrouted: nothing in the mod calls GeoModalMirror.HandleInbound, so every " +
+                             "0x" + SurfaceIds.GeoModalRaise.ToString("X2") + " raise falls through SurfaceRouter's " +
+                             "forward-compat drop and the client shows no modal at all — with no error anywhere, " +
+                             "because dropping an unknown surface is by design";
+            int declaringModal = typeof(SurfaceIds).GetFields(BindingFlags.Public | BindingFlags.Static)
+                                                   .Count(f => f.FieldType == typeof(byte) &&
+                                                               (byte)f.GetValue(null) == SurfaceIds.GeoModalRaise);
+            if (declaringModal != 1)
+                yield return "L49 surface-id-collision: 0x" + SurfaceIds.GeoModalRaise.ToString("X2") + " is declared " +
+                             "by " + declaringModal + " constants — two senders on one id mis-route silently on the peer";
+            // The repaint table entry is not cosmetic: without it OpenUiRepaint falls back to Exit+Enter, and
+            // UIStateGeoModal.ExitState:116 invokes the HOST's own DialogCallback with ModalResult.Close.
+            if (!UiNativeRepaint.Table.ContainsKey(typeof(UIStateGeoModal)))
+                yield return "L49 modal-repaint-unregistered: UIStateGeoModal is not in UiNativeRepaint.Table, so a " +
+                             "delta arriving while ANY modal is open repaints it by Exit+Enter — which runs " +
+                             "ExitState:116 and invokes the host's own DialogCallback with ModalResult.Close on a " +
+                             "window nobody closed, then re-fires GeoscapeView.ModalClosed";
+
+            // ── the wire ──────────────────────────────────────────────────
+            var p = new GeoModalMirror.Raise
+            {
+                ModalType = (int)ModalType.DiplomacyResearchBrief,
+                Shape = GeoModalMirror.DataShape.DiplomacyReward,
+                Ref = "F#abc-guid",
+                Keys = new[] { "RES_one", "RES_two" },
+                Num = 3,
+                Priority = 99,
+            };
+            var back = GeoModalMirror.Decode(GeoModalMirror.Encode(11u, p), out uint seq);
+            if (seq != 11u || back.ModalType != p.ModalType || back.Shape != p.Shape || back.Ref != p.Ref ||
+                back.Num != p.Num || back.Priority != p.Priority ||
+                back.Keys == null || !back.Keys.SequenceEqual(p.Keys))
+                yield return "L49 modal-round-trip: the payload came back as (seq " + seq + ", type " + back.ModalType +
+                             ", shape " + back.Shape + ", ref " + back.Ref + ", keys " +
+                             (back.Keys == null ? "null" : string.Join("/", back.Keys)) + ", num " + back.Num +
+                             ", priority " + back.Priority + ") — a dropped or shifted field means the client builds " +
+                             "the modal against the wrong faction, with the wrong ids, or queues it in the wrong " +
+                             "place, and every one of those renders as a window that merely looks right";
+            var bare = GeoModalMirror.Decode(GeoModalMirror.Encode(1u, new GeoModalMirror.Raise
+            { ModalType = (int)ModalType.GeoPhoenixBaseOutcome }), out _);
+            if (bare.Ref != "" || bare.Keys == null || bare.Keys.Length != 0)
+                yield return "L49 modal-round-trip: a data-less payload's null fields did not come back as an EMPTY " +
+                             "string and an EMPTY array — DataRefusal and BuildData both key on those, so garbage " +
+                             "there refuses or mis-builds every data-less modal in the game";
+
+            // ── the refusal (pure, and non-vacuous in BOTH directions) ────
+            if (GeoModalMirror.DataRefusal(GeoModalMirror.DataShape.None, false, 0, 0) != null)
+                yield return "L49 dataless-modal-refused: a payload with NO data was REFUSED — GeoPhoenixBaseOutcome " +
+                             "legitimately carries none and the host rendered it that way too, so that window would " +
+                             "never be mirrored at all";
+            if (GeoModalMirror.DataRefusal(GeoModalMirror.DataShape.ResearchComplete, true, 1, 1) != null)
+                yield return "L49 resolved-modal-refused: a payload whose root AND every id resolve was REFUSED — no " +
+                             "client could ever be shown anything";
+            foreach (var bad in new[]
+            {
+                (Root: false, Want: 1, Got: 0, Case: "a root this peer cannot resolve"),
+                (Root: true, Want: 0, Got: 0, Case: "no ids at all for a shape that needs one"),
+                (Root: true, Want: 3, Got: 2, Case: "only part of the shipped ids resolving"),
+            })
+                if (string.IsNullOrWhiteSpace(GeoModalMirror.DataRefusal(GeoModalMirror.DataShape.DiplomacyReward,
+                                                                        bad.Root, bad.Want, bad.Got)))
+                    yield return "L49 halfbuilt-modal-raised: " + bad.Case + " was accepted (or refused with a BLANK " +
+                                 "reason) — the prefab's data-bind casts modal.Data and dereferences it unguarded " +
+                                 "(GeoReseatchCompleteDataBind.cs:97), the throw lands inside " +
+                                 "UIStateGeoModal.EnterState, and what stays on screen is a half-built prefab over " +
+                                 "the designers' baked placeholder text, logged as a success";
+
+            // ── the shape derivation is by RUNTIME TYPE, and it fails LOUD ─
+            if (GeoModalMirror.Describe(null).Shape != GeoModalMirror.DataShape.None)
+                yield return "L49 dataless-shape-wrong: Describe(null) is not DataShape.None — a modal the game opens " +
+                             "with no data (GeoscapeView.cs:1965) would be reported unsupported and never sent";
+            if (GeoModalMirror.Describe("not a modal payload").Shape != GeoModalMirror.DataShape.Unsupported)
+                yield return "L49 unknown-shape-silent: Describe() gave an object it has no description for something " +
+                             "other than DataShape.Unsupported — the host would ship a payload the client cannot " +
+                             "rebuild, and a modal whose data is null renders as an empty prefab instead of an error";
+            var researchShape = GeoModalMirror.Describe(new PhoenixPoint.Geoscape.View.ViewControllers.Modal
+                                                            .GeoResearchCompleteData());
+            if (researchShape.Shape != GeoModalMirror.DataShape.ResearchComplete)
+                yield return "L49 research-shape-wrong: Describe(GeoResearchCompleteData) is not " +
+                             "DataShape.ResearchComplete — the one modal this family exists for stops being " +
+                             "describable and the host silently declines every research-complete window";
         }
 
         /// <summary>Fields an IL body touches (InlineField operands), optionally narrowed to given opcodes —
