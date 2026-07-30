@@ -8,9 +8,12 @@ using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Base.Serialization.General;
+using HarmonyLib;
 using Multiplayer.Network.Sync;
 using Multiplayer.Util;
 using PhoenixPoint.Geoscape.Events;
+using PhoenixPoint.Geoscape.View;
+using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
 
 namespace RailCheck
@@ -86,6 +89,8 @@ namespace RailCheck
             laws.AddRange(PreAnsweredEventLaw());
             laws.AddRange(ReplayVisualsLaw());
             laws.AddRange(DisplayOrderLaw());
+            laws.AddRange(OwnAnswerLaw());
+            laws.AddRange(WindowCoverageLaw(game));
             laws.AddRange(AnswerValidatorLaw());
             laws.AddRange(FunnelCoverageLaw(game));
             laws.AddRange(EventTokenDerefLaw());
@@ -3258,6 +3263,245 @@ namespace RailCheck
                                  "pending (GeoscapeView.cs:2044 gives an event-triggered raise 10 and :2049/:2057 bump " +
                                  "a superseding one to 15) and nothing in any log says so";
             }
+        }
+
+        /// <summary>L47 — the peer whose OWN click produced a resolution must not be asked to click again.
+        /// A client's choice click is BLOCKED and relayed as a 0xB4 intent, and the answer comes back as an
+        /// ordinary record delta that names the CHOICE and never the CHOOSER — so the repaint painted the
+        /// answerer the same replay it paints observers (winner highlighted, still clickable) and the player
+        /// had to confirm its own answer with a SECOND click. The memo
+        /// (<c>EventPopup.NoteOwnAnswer</c>/<c>AnswerIsOurs</c>) is the only thing that tells initiator from
+        /// observer; headless because the distinction only exists for the ~0.25-0.75 s between the click and
+        /// the delta, and its symptom is one extra click nobody logs.</summary>
+        private static IEnumerable<string> OwnAnswerLaw()
+        {
+            const string ev = "EV_pick", other = "EV_other";
+            const int trig = 3, choice = 1;
+
+            // ── the four axes, both directions, so no arm can pass vacuously ──
+            if (!EventPopup.AnswerIsOurs(ev, trig, choice, ev, trig, choice))
+                yield return "L47 own-answer-unrecognised: the peer that answered was not recognised as the author of " +
+                             "the resolution it produced — it gets the OBSERVER replay (winner highlighted and still " +
+                             "clickable) and has to click its own answer a SECOND time to reach the result page, which " +
+                             "is the whole bug this law guards";
+            if (EventPopup.AnswerIsOurs(null, 0, EventPopup.NothingPending, ev, 0, choice))
+                yield return "L47 observer-fast-forwarded: a peer that never answered was treated as the author — every " +
+                             "OBSERVING peer is then yanked past the replay to a result page for a choice it did not " +
+                             "make, which is the dismiss bug the replay visuals (L45) exist to prevent";
+            // The arm above states the OUTCOME for a real observer, and an empty memo fails the event axis
+            // too — so it stays green if the sentinel guard is deleted. This one ISOLATES that guard: every
+            // other axis matches, and only "nothing is pending" may reject it. Without it the guard is a belt
+            // nothing holds to the rule, and it rots the moment the clear stops nulling the event id with it.
+            if (EventPopup.AnswerIsOurs(ev, trig, EventPopup.NothingPending, ev, trig, EventPopup.NothingPending))
+                yield return "L47 sentinel-answerable: 'nothing pending' was accepted as an answer that matched — the " +
+                             "empty memo is only ever rejected because the CLEAR also nulls the event id, so this peer " +
+                             "silently depends on two fields agreeing instead of on the sentinel that names the state";
+            if (EventPopup.AnswerIsOurs(ev, trig, choice, other, trig, choice))
+                yield return "L47 cross-event-fast-forwarded: a memo left by ANOTHER event answered for this one — the " +
+                             "geoscape queues windows one at a time, so the very next window would open already " +
+                             "fast-forwarded to a result page belonging to a different event";
+            if (EventPopup.AnswerIsOurs(ev, trig, choice, ev, trig + 1, choice))
+                yield return "L47 stale-answer-rearmed: a memo from a PREVIOUS raise of the same event answered for the " +
+                             "fresh one — a re-triggered event opens a new window (EventPopup.RaiseTriggerCount) and " +
+                             "fast-forwarding it on the old click answers a question the player was never shown";
+            if (EventPopup.AnswerIsOurs(ev, trig, choice, ev, trig, choice + 1))
+                yield return "L47 race-loser-fast-forwarded: a peer whose answer LOST the race was treated as the author " +
+                             "— its intent was rejected and somebody else's choice won, so jumping it straight to that " +
+                             "choice's result page shows it an outcome for a choice it did not pick";
+
+            // -1 is native's REAL 'no choice' answer (UIModuleSiteEncounters.cs:562-566), not an absence. If
+            // the 'nothing pending' sentinel ever collapses onto it, every no-choice answerer is silently
+            // demoted to an observer and the double-click comes back for exactly that case.
+            if (!EventPopup.AnswerIsOurs(ev, trig, -1, ev, trig, -1))
+                yield return "L47 no-choice-answer-unrecognised: a peer that answered with native's -1 'no choice' was " +
+                             "not recognised as the author — -1 is a real answer, so it must be tellable from 'this " +
+                             "peer never answered'";
+            // Read as METADATA, not as the constant: `EventPopup.NothingPending >= -1` is folded at compile
+            // time, so the arm would be deleted from this method rather than checked (the compiler says so —
+            // CS0162). Reflection also catches the sentinel being removed or retyped, which the fold cannot.
+            var sentinel = typeof(EventPopup).GetField("NothingPending", AllMembers)?.GetRawConstantValue();
+            if (!(sentinel is int nothing) || nothing >= -1)
+                yield return "L47 sentinel-collides: EventPopup.NothingPending is " + (sentinel ?? "gone") +
+                             ", which is a choice index a peer can actually answer with (-1 = native's 'no choice', " +
+                             "0..n = the def's choices) — 'nothing pending' must be outside that range or the arm " +
+                             "above is asserting two things that are the same value";
+
+            // ── the seams actually USE it (existence is compile-checked; use is not) ──
+            var ours = typeof(EventPopup).Assembly;
+            var noteOwn = typeof(EventPopup).GetMethod("NoteOwnAnswer", AllMembers);
+            var replay = typeof(EventPopup).GetMethod("ReplayResolution", AllMembers);
+            var notOurs = typeof(EventPopup).GetMethod("ResolutionIsNotOurs", AllMembers);
+            var capture = typeof(EventChoiceClientLock).GetMethod("Prefix", AllMembers);
+            var repaint = typeof(EventPopup).GetMethod("RepaintDialog", AllMembers);
+
+            if (noteOwn == null || replay == null || notOurs == null || capture == null || repaint == null)
+            {
+                yield return "L47 seam-gone: one of EventPopup.NoteOwnAnswer / .ReplayResolution / " +
+                             ".ResolutionIsNotOurs / .RepaintDialog / EventChoiceClientLock.Prefix no longer resolves, " +
+                             "so the wiring arms below cannot run and the pure arms above stay green against a rule " +
+                             "nothing applies";
+                yield break;
+            }
+
+            var captureCalls = Callees(capture, ours, directCallsOnly: true).ToList();
+            var repaintCalls = Callees(repaint, ours, directCallsOnly: true).ToList();
+            // Non-vacuity for every IL arm below: the walk ABANDONS the method on the first opcode it cannot
+            // decode (Callees yield-breaks), and an abandoned walk returns an empty set that satisfies every
+            // 'must NOT call' arm and fails no 'must call' arm loudly enough to be read as a wiring bug.
+            if (captureCalls.Count == 0 || repaintCalls.Count == 0)
+                yield return "L47 il-walk-abandoned: the IL scan found " + captureCalls.Count + " call(s) in " +
+                             "EventChoiceClientLock.Prefix and " + repaintCalls.Count + " in EventPopup.RepaintDialog " +
+                             "— both bodies really do call into this assembly, so an empty set means the walk gave up " +
+                             "and every wiring arm in this law is asserting nothing";
+
+            if (!captureCalls.Any(c => Same(c, noteOwn)))
+                yield return "L47 initiator-unmarked: EventChoiceClientLock.Prefix does not call " +
+                             "EventPopup.NoteOwnAnswer — the click is relayed as a 0xB4 intent with nothing remembering " +
+                             "that THIS peer made it, so the memo is never armed, AnswerIsOurs is always false and the " +
+                             "answering peer is painted the observer replay: the second click is back";
+            if (!captureCalls.Any(c => Same(c, notOurs)))
+                yield return "L47 double-charge-guard-dropped: EventChoiceClientLock.Prefix no longer calls " +
+                             "EventPopup.ResolutionIsNotOurs — that guard is what keeps a click on an ALREADY-decided " +
+                             "picker off the native path, whose Wallet.Take (UIModuleSiteEncounters.cs:571-573) runs " +
+                             "two calls before any funnel EventCompleteArbiter can guard, so the peer pays a second time";
+            if (!repaintCalls.Any(c => Same(c, replay)))
+                yield return "L47 initiator-not-advanced: EventPopup.RepaintDialog does not call " +
+                             "EventPopup.ReplayResolution — the answering peer's window is only ever repainted, so the " +
+                             "delta that carries its OWN answer leaves it staring at a highlighted winner it must click " +
+                             "again";
+
+            // Non-vacuity, the OTHER direction: prove the scan DISCRIMINATES rather than matching anything.
+            // HostBroadcast is a seam that provably must never arm the memo (the host's click is not blocked
+            // and it has no answer in flight) — a scan that reported the memo there would be reporting noise.
+            var hostSeam = typeof(EventPopup).GetMethod("HostBroadcast", AllMembers);
+            if (hostSeam == null || Callees(hostSeam, ours, directCallsOnly: true).Any(c => Same(c, noteOwn)))
+                yield return "L47 scan-indiscriminate: EventPopup.HostBroadcast is missing or appears to arm the answer " +
+                             "memo — it is the control for the arms above (a host never blocks its own click, so it has " +
+                             "nothing pending), and a scan that finds the memo there is matching noise rather than calls";
+
+            // ── charged exactly once: the fast-forward is a PRESENTATION replay, never a synthetic re-click ──
+            var game = typeof(GeoscapeEvent).Assembly;
+            var completeEvent = typeof(GeoscapeEvent).GetMethod("CompleteEvent", AllMembers);
+            var answerHandler = typeof(EventSync).GetMethod("HandleAnswer", AllMembers);
+            if (completeEvent == null || answerHandler == null)
+                yield return "L47 charge-probe-unmoored: GeoscapeEvent.CompleteEvent or EventSync.HandleAnswer did not " +
+                             "resolve, so the 'the fast-forward resolves nothing' arm below cannot be trusted either way";
+            // The positive control FIRST: a method that really does resolve an event must be SEEN to, or the
+            // negative arm below is green because the probe cannot see resolutions at all.
+            else if (!Callees(answerHandler, game, directCallsOnly: true).Any(c => Same(c, completeEvent)))
+                yield return "L47 charge-probe-blind: EventSync.HandleAnswer — the ONE place that legitimately resolves " +
+                             "a relayed answer — did not show up as calling GeoscapeEvent.CompleteEvent, so the probe " +
+                             "cannot see a resolution and the arm below would pass for a RepaintDialog that made one";
+            else if (Callees(repaint, game, directCallsOnly: true).Any(c => Same(c, completeEvent)))
+                yield return "L47 fast-forward-resolves: EventPopup.RepaintDialog calls GeoscapeEvent.CompleteEvent — " +
+                             "advancing the answering peer must be pure PRESENTATION (SetClosingEncounter over an " +
+                             "instance marked resolved). Re-resolving locally re-runs GenerateFactionReward + " +
+                             "ChoiceReward.Apply on a peer the host already charged, which is a second grant on top of " +
+                             "the wallet delta already in flight";
+        }
+
+        /// <summary>L48 — EVERY window the game pushes at the player must have a reviewed answer to "does the
+        /// other peer see this?". The rail captures ONE window kind (the event picker, at
+        /// GeoscapeView.OnGeoscapeEventRaised) but the game pushes NINE through the same queue
+        /// (GeoscapeViewSwitchQuery.QueryStateSwitch), and the eight others were neither mirrored nor
+        /// declared — they simply appeared on one screen and nowhere else, with nothing in any log saying so.
+        /// This law derives the reachable set from the GAME'S OWN IL rather than from a hand-typed list, so a
+        /// kind added by a patch, a DLC or a mod fails the harness instead of silently desyncing a session.</summary>
+        private static IEnumerable<string> WindowCoverageLaw(Assembly game)
+        {
+            var queue = typeof(GeoscapeViewSwitchQuery).GetMethod("QueryStateSwitch", AllMembers);
+            var stateBase = typeof(GeoscapeViewState);
+            if (queue == null)
+            {
+                yield return "L48 chokepoint-gone: GeoscapeViewSwitchQuery.QueryStateSwitch did not resolve — the one " +
+                             "queue every PUSHED geoscape window goes through has moved, so neither the runtime gate " +
+                             "nor this law can see what the game shows the player any more";
+                yield break;
+            }
+
+            // The reachable set, from the game's IL: every type constructed inside a method that queues a
+            // window. Derived, never listed — a hand-typed universe is a universe that goes stale silently,
+            // which is the exact failure this law exists to make impossible.
+            var reachable = new SortedDictionary<string, Type>(StringComparer.Ordinal);
+            int queueCallers = 0;
+            foreach (var t in game.GetTypes())
+            {
+                MethodBase[] members;
+                try { members = t.GetMethods(AllMembers).Cast<MethodBase>().Concat(t.GetConstructors(AllMembers)).ToArray(); }
+                catch { continue; }
+                foreach (var m in members)
+                {
+                    if (m.IsAbstract || m.ContainsGenericParameters) continue;
+                    List<MethodBase> calls;
+                    try { calls = Callees(m, game).ToList(); } catch { continue; }
+                    if (!calls.Any(c => Same(c, queue))) continue;
+                    queueCallers++;
+                    foreach (var c in calls)
+                        if (c.IsConstructor && c.DeclaringType != null && stateBase.IsAssignableFrom(c.DeclaringType))
+                            reachable[c.DeclaringType.FullName] = c.DeclaringType;
+                }
+            }
+
+            // ── non-vacuity, both halves ────────────────────────────────────
+            // An IL walk that finds nothing satisfies "every reachable kind is declared" perfectly.
+            if (queueCallers == 0 || reachable.Count == 0)
+                yield return "L48 scan-empty: the IL sweep found " + queueCallers + " method(s) calling " +
+                             "QueryStateSwitch and " + reachable.Count + " window type(s) among them — the shipped " +
+                             "game queues windows from nine call sites in GeoscapeView, so an empty result means the " +
+                             "sweep is broken and every coverage arm below is asserting nothing";
+            // And the ONE kind the rail provably does mirror must come out of that sweep, or the sweep is
+            // finding a set that has nothing to do with the windows this rail actually handles.
+            else if (!reachable.ContainsKey(typeof(UIStateGeoscapeEvent).FullName))
+                yield return "L48 scan-unmoored: the sweep did not find UIStateGeoscapeEvent among the queued window " +
+                             "types, yet GeoscapeView.OnGeoscapeEventRaised:2062 queues exactly that — so the derived " +
+                             "universe is wrong and 'everything reachable is declared' is a statement about the wrong set";
+            if (GeoWindowCoverage.Declared.Count == 0)
+                yield return "L48 table-empty: GeoWindowCoverage.Declared is empty, so every window kind resolves to " +
+                             "'undeclared' at runtime and this law degenerates into a list of everything";
+
+            // ── the law: reachable ⊆ declared, and declared ⊆ reachable ─────
+            foreach (var kv in reachable)
+                if (GeoWindowCoverage.RuleFor(kv.Value) == null)
+                    yield return "L48 window-undeclared: " + kv.Key + " is queued at " +
+                                 "GeoscapeViewSwitchQuery.QueryStateSwitch but GeoWindowCoverage.Declared says nothing " +
+                                 "about it — so nobody has decided whether the other peer should see this window, and " +
+                                 "the default is that it appears on ONE screen and the peers drift apart looking at " +
+                                 "different things. Declare it Mirrored / LocalOnly / Gap with a reason";
+            foreach (var declared in GeoWindowCoverage.Declared.Keys.OrderBy(t => t.FullName, StringComparer.Ordinal))
+                if (!reachable.ContainsKey(declared.FullName))
+                    yield return "L48 window-declaration-stale: GeoWindowCoverage.Declared holds " + declared.FullName +
+                                 ", which nothing queues at the chokepoint any more — a table carrying reasons for " +
+                                 "windows the game no longer pushes is a table nobody trusts to be current, and the " +
+                                 "REAL kind that replaced it is sitting undeclared";
+            foreach (var kv in GeoWindowCoverage.Declared.OrderBy(k => k.Key.FullName, StringComparer.Ordinal))
+                if (string.IsNullOrWhiteSpace(kv.Value?.Why))
+                    yield return "L48 window-unreasoned: GeoWindowCoverage.Declared[" + kv.Key.Name + "] carries no " +
+                                 "reason — the declaration is the REVIEW, and a bare verdict with nothing behind it is " +
+                                 "how a wrong one survives";
+
+            // ── and the gate is actually WIRED to the chokepoint ────────────
+            // The table above is a document until something reads it on the live queue; without the patch a
+            // window kind the game gains between builds is invisible until a player reports two screens.
+            var gate = typeof(GeoWindowCoverageGate);
+            var attr = gate.GetCustomAttributes(typeof(HarmonyPatch), inherit: false)
+                           .Cast<HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (attr == null || attr.declaringType != typeof(GeoscapeViewSwitchQuery) || attr.methodName != "QueryStateSwitch")
+                yield return "L48 gate-unpatched: GeoWindowCoverageGate does not patch " +
+                             "GeoscapeViewSwitchQuery.QueryStateSwitch (declaringType=" +
+                             (attr?.declaringType?.Name ?? "none") + ", method=" + (attr?.methodName ?? "none") +
+                             ") — the declared table is then never consulted at runtime and a NEW window kind is " +
+                             "announced by nothing at all";
+            var post = gate.GetMethod("Postfix", AllMembers);
+            var announce = typeof(GeoWindowCoverage).GetMethod("Announce", AllMembers);
+            if (post == null || announce == null ||
+                !Callees(post, typeof(GeoWindowCoverage).Assembly, directCallsOnly: true).Any(c => Same(c, announce)))
+                yield return "L48 gate-mute: the coverage gate's Postfix does not call GeoWindowCoverage.Announce — " +
+                             "the patch is attached to the chokepoint and reports nothing, which is worse than no " +
+                             "patch: it looks covered";
+            if (post != null && gate.GetMethod("Prefix", AllMembers) != null)
+                yield return "L48 gate-suppresses: GeoWindowCoverageGate grew a Prefix — the gate must OBSERVE the " +
+                             "queue, never gate it. Suppressing an un-mirrored window on the host hides the host's own " +
+                             "game from it to make two screens agree, which is not what syncing them means";
         }
 
         /// <summary>Fields an IL body touches (InlineField operands), optionally narrowed to given opcodes —

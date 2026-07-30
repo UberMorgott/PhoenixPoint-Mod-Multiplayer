@@ -71,6 +71,7 @@ namespace Multiplayer.Network.Sync
             DiffEngine.Reset();
             GenericApplier.Reset();
             EventPopup.Reset();   // 0xB6 raise seq stream (teardown only — see EventPopup.Reset)
+            GeoWindowCoverage.Reset();  // per-session "announced once" set, so a gap is loud in EVERY session
             // Rail statics that survive an engine teardown and had no home in this aggregate until the
             // SessionEnd seam went in. Kept HERE, not in SessionEnd: this is the one full-teardown reset
             // list, and TearDown (which SessionEnd drives) is what calls it.

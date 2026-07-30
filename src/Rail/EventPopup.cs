@@ -534,14 +534,28 @@ namespace Multiplayer.Network.Sync
             }
             var ctrl = module.ChoicesButtonController;
             if (ctrl == null || !ShowingRealChoices(ctrl, ev)) return true;
-            if (InSession && IsFrozen(ev, out var winner) &&
-                DismissOnResolution(winner != null, winner?.Outcome != null))
+            if (InSession && IsFrozen(ev, out var winner))
             {
-                Debug.Log("[MP][events] closing the open picker for '" + ev.EventID + "' — the record is resolved " +
-                          "with no choice this peer can click through (winner=" +
-                          (winner == null ? "none" : "no Outcome") + "), so every button on it is dead");
-                view.FinishQueriedState();
-                return true;
+                if (DismissOnResolution(winner != null, winner?.Outcome != null))
+                {
+                    Debug.Log("[MP][events] closing the open picker for '" + ev.EventID + "' — the record is resolved " +
+                              "with no choice this peer can click through (winner=" +
+                              (winner == null ? "none" : "no Outcome") + "), so every button on it is dead");
+                    view.FinishQueriedState();
+                    return true;
+                }
+                // THE ANSWERING PEER: this resolution is the answer to THIS peer's own click, which was
+                // blocked and relayed as a 0xB4 intent. It already made its choice, so the replay paint below
+                // would ask it to confirm its own click — go straight to the result page instead. Charge-free
+                // and resolution-free by construction (ReplayResolution): the winner's cost came out of the
+                // HOST's wallet in EventSync.HandleAnswer and reaches this peer as an ordinary wallet delta.
+                if (ConsumeOwnAnswer(ev) && ReplayResolution(module, ev, winner))
+                {
+                    Debug.Log("[MP][events] '" + ev.EventID + "' resolved by THIS peer's own click (choice " +
+                              (ev.Record == null ? -1 : ev.Record.SelectedChoice) + ") — showing its result page " +
+                              "directly, with no second click and no local charge");
+                    return true;
+                }
             }
             // Otherwise REPAINT, decided or not: SetChoices re-reads affordability and its EventChoiceFreeze
             // postfix repaints the replay (winner selected + still clickable, losers greyed). The player's
@@ -815,8 +829,84 @@ namespace Multiplayer.Network.Sync
             return true;
         }
 
-        /// <summary>Show the native OUTCOME page for a resolution this peer did not make, in place of the
-        /// click that would have made one. Nothing is charged (the native charge at
+        // ─── Which peer's click PRODUCED the resolution? (initiator vs observer) ─
+
+        /// <summary>The one answer THIS peer has sent and not yet seen come back, as (event, raise, choice).
+        /// A client's click is BLOCKED and relayed (<see cref="EventChoiceClientLock"/>), so by the time the
+        /// answer exists as replicated state the gesture is long gone and nothing on the wire says whose it
+        /// was — the record carries WHAT was chosen, never WHO chose it, and it must not: the ledger is
+        /// replicated state, not a claim table (<see cref="EventSync"/>). So the answerer remembers its own
+        /// click locally; every other peer has an empty memo and stays an observer.
+        ///
+        /// ONE slot, not a table: the geoscape shows one modal at a time and a peer can have at most one
+        /// answer in flight. Overwritten by the next send, and consumed (or dropped) the moment the raise it
+        /// belongs to is decided, so nothing survives to satisfy a later resolution by accident.
+        ///
+        /// The HOST needs no memo: its own click is never blocked — it runs the native funnel and reaches
+        /// UIModuleSiteEncounters' result page inside the click itself, with no delta in between.</summary>
+        /// <summary>Distinct from every index a peer can actually answer with — including native's -1
+        /// "no choice" (UIModuleSiteEncounters.cs:562-566), which is a REAL answer whose author must still be
+        /// recognised as the answerer. RailCheck L47 asserts exactly that, because reusing -1 as "nothing
+        /// pending" would silently demote every no-choice answerer to an observer. CONST, and declared before
+        /// the fields: <c>_pendingChoice</c>'s initializer needs it folded at compile time — as a
+        /// <c>static readonly</c> declared after them it would still be 0 when they run.</summary>
+        internal const int NothingPending = int.MinValue;
+
+        private static string _pendingId;
+        private static int _pendingTrigger;
+        private static int _pendingChoice = NothingPending;
+
+        /// <summary>Remember the answer this peer is about to relay. Called from the capture seam at the
+        /// moment the click is converted into a 0xB4 intent — the last point at which "this peer chose it"
+        /// is known anywhere.</summary>
+        internal static void NoteOwnAnswer(GeoscapeEvent ev, int choiceIndex)
+        {
+            _pendingId = ev?.EventID;
+            _pendingTrigger = RaiseTriggerOf(ev);
+            _pendingChoice = choiceIndex;
+        }
+
+        /// <summary>PURE (RailCheck L47): is the resolution now sitting on the record the answer to the click
+        /// THIS peer made on THIS window? All four axes are load-bearing:
+        ///   • <paramref name="pendingChoice"/> == <see cref="NothingPending"/> — this peer never answered, so
+        ///     it is an OBSERVER and must get the replay (winner highlighted + clickable) it can click through;
+        ///   • the EVENT must match — a memo from another window says nothing about this one;
+        ///   • the RAISE must match (<see cref="RaiseTriggerOf"/>) — a re-triggered event opens a FRESH window
+        ///     while the previous raise's memo may still be unconsumed, and fast-forwarding the new picker on
+        ///     the old click answers a question the player was never shown;
+        ///   • the CHOICE must match — a peer that answered and LOST the race (its intent rejected, the other
+        ///     peer's answer accepted) did not produce this resolution: it is an observer of someone else's
+        ///     choice, and jumping it to a result page for a choice it did not pick is a lie.
+        /// True ⇒ walk straight to the native result page: the player already clicked once and must not be
+        /// asked to confirm its own answer.</summary>
+        internal static bool AnswerIsOurs(string pendingId, int pendingTrigger, int pendingChoice,
+                                         string eventId, int raiseTrigger, int selectedChoice) =>
+            pendingChoice != NothingPending &&
+            !string.IsNullOrEmpty(eventId) &&
+            string.Equals(pendingId, eventId, StringComparison.Ordinal) &&
+            pendingTrigger == raiseTrigger &&
+            pendingChoice == selectedChoice;
+
+        /// <summary>Ask <see cref="AnswerIsOurs"/> of the live memo and RETIRE it. The memo dies with the
+        /// raise it names whether it matched or not — a lost race must leave nothing behind that a later
+        /// resolution at the same index could accidentally satisfy.</summary>
+        private static bool ConsumeOwnAnswer(GeoscapeEvent ev)
+        {
+            int trigger = RaiseTriggerOf(ev);
+            var rec = LiveRecord(ev?.EventID, ev?.Record);
+            bool ours = AnswerIsOurs(_pendingId, _pendingTrigger, _pendingChoice,
+                                     ev?.EventID, trigger, rec == null ? -1 : rec.SelectedChoice);
+            if (string.Equals(_pendingId, ev?.EventID, StringComparison.Ordinal) && _pendingTrigger == trigger)
+            { _pendingId = null; _pendingChoice = NothingPending; }
+            return ours;
+        }
+
+        /// <summary>Show the native OUTCOME page for a resolution THIS PEER MUST NOT RE-RUN — either one it
+        /// did not make (an observer clicking through the replay, <see cref="ResolutionIsNotOurs"/>) or its
+        /// OWN, coming back off the rail as a record delta (<see cref="ConsumeOwnAnswer"/>). Both need the
+        /// same thing and neither may take the native click path, so they share this one: the answerer has
+        /// already been charged on the host and the observer must not be charged at all.
+        /// Nothing is charged (the native charge at
         /// UIModuleSiteEncounters.cs:571-573 is skipped entirely with the handler) and nothing is resolved —
         /// <see cref="MarkResolvedInstance"/> gives the instance the empty reward stub that
         /// <c>SetClosingEncounter</c>:357 and <c>SelectChoice</c>:604 dereference unguarded, and
@@ -964,6 +1054,11 @@ namespace Multiplayer.Network.Sync
                 return false;
             }
             string id = ev.EventID;
+            // Remember that THIS peer is the one answering, before the click is thrown away. The resolution
+            // comes back as an ordinary record delta that names the CHOICE and never the chooser, so without
+            // this the repaint cannot tell the answerer from an observer and paints the answerer the replay —
+            // asking it to click its own answer a second time (EventPopup.ConsumeOwnAnswer).
+            EventPopup.NoteOwnAnswer(ev, index);
             IntentRail.Send(SurfaceIds.GeoEventIntent, EventSync.OpAnswer, "answer '" + id + "' choice=" + index,
                             w => { w.Write(id); w.Write(index); });
             return false;
