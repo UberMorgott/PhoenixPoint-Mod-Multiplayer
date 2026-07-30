@@ -81,10 +81,12 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>One raise, as the wire carries it. Refs are rail ROOT REFS (law 2 hybrid addressing —
         /// "S#&lt;siteId&gt;" / "V#&lt;id&gt;@&lt;ownerFactionGuid&gt;"), "" when the host's own context had
-        /// none. Texts are what the HOST resolved; the client prefers its OWN def whenever that def resolves
-        /// to anything (see <see cref="StampWireTexts"/>), so these matter only for a def whose text exists
-        /// solely as a host-side RUNTIME mutation (TFTV VoidOmen_{0..19}: empty loc keys +
-        /// LocalizedTextBind(text, doNotLocalize:true) written at roll time, TFTVODIandVoidOmenRoll.cs:638-639).</summary>
+        /// none. Texts are what the HOST resolved and they WIN on the client — applied to a private copy of
+        /// the event data, never to the shared def (see <see cref="WithWireTexts"/>). They are the only thing
+        /// that renders a def whose text exists solely as a host-side RUNTIME mutation (TFTV VoidOmen_{0..19}:
+        /// empty loc keys + LocalizedTextBind(text, doNotLocalize:true) rewritten PER ROLL,
+        /// TFTVODIandVoidOmenRoll.cs:638-639) or one the host composed over a valid static key
+        /// (TFTVBaseDefenseGeoscape.cs:1227 then :1250).</summary>
         internal struct Raise
         {
             public string EventId;
@@ -309,17 +311,17 @@ namespace Multiplayer.Network.Sync
                 // A re-delivered raise is a SECOND window, not a stale value — the strictly-greater guard is
                 // what makes this surface idempotent (law 7), and it is marked only after the window is up.
                 if (!Seq.ShouldApply(SurfaceIds.GeoEventRaise, seq)) return true;
-                if (RaiseMirrored(p)) Seq.Mark(SurfaceIds.GeoEventRaise, seq);
+                if (RaiseMirrored(p, seq)) Seq.Mark(SurfaceIds.GeoEventRaise, seq);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][rail] EventPopup inbound failed: " + ex); }
             return true;
         }
 
-        /// <summary>Rebuild the host's window here: resolve the shipped refs, build the REAL context, stamp
-        /// the wire texts only where this peer's own def has nothing, and push the NATIVE view state through
-        /// the game's own switch query — the same call the host's <c>OnGeoscapeEventRaised</c> makes.
+        /// <summary>Rebuild the host's window here: resolve the shipped refs, build the REAL context, apply
+        /// the wire texts to a PRIVATE copy of the event data, and push the NATIVE view state through the
+        /// game's own switch query — the same call the host's <c>OnGeoscapeEventRaised</c> makes.
         /// Returns false when nothing was raised (and always says why).</summary>
-        private static bool RaiseMirrored(Raise p)
+        private static bool RaiseMirrored(Raise p, uint seq)
         {
             var geo = GeoLevel();
             var view = geo?.View;
@@ -350,7 +352,7 @@ namespace Multiplayer.Network.Sync
                 return false;
             }
 
-            StampWireTexts(data, p.Title, p.Narrative);
+            var shown = WithWireTexts(data, p.Title, p.Narrative);
             var context = vehicle != null
                 ? new GeoscapeEventContext(site, geo.ViewerFaction, vehicle)
                 : new GeoscapeEventContext(site, geo.ViewerFaction);
@@ -361,42 +363,95 @@ namespace Multiplayer.Network.Sync
             // first ES delta. It is presentation only: it is never inserted into GeoscapeEventSystem._records,
             // so the client mints no authoritative state (law 3).
             var rec = es.GetEventRecord(p.EventId) ?? new GeoscapeEventRecord(p.EventId, geo.Timing.Now);
-            var geoEvent = new GeoscapeEvent(data, context) { Record = rec };
+            var geoEvent = new GeoscapeEvent(shown, context) { Record = rec };
+            int raiseTrigger = RaiseTriggerCount(rec.State, rec.TriggerCount);
+            Bound.Add(geoEvent, new RaiseBinding { Seq = seq, TriggerCount = raiseTrigger });
 
             q.QueryStateSwitch(new GeoscapeViewStateSwitchRequest(new UIStateGeoscapeEvent(geoEvent))
             { PauseGame = false }); // pause mirrors from the host via the TimeAnchor
-            Debug.Log("[MP][events] raised '" + p.EventId + "' site=" + (site == null ? "none" : site.SiteId.ToString()) +
+            Debug.Log("[MP][events] raised '" + p.EventId + "' seq=" + seq + " site=" +
+                      (site == null ? "none" : site.SiteId.ToString()) +
                       " vehicle=" + (vehicle == null ? "none" : vehicle.VehicleID.ToString()) +
-                      " record=" + rec.State + (es.GetEventRecord(p.EventId) == null ? " (placeholder)" : ""));
+                      " record=" + rec.State + "#" + rec.TriggerCount +
+                      (es.GetEventRecord(p.EventId) == null ? " (placeholder)" : "") +
+                      " answeredFrom=#" + raiseTrigger);
             return true;
         }
 
-        /// <summary>Stamp the host-resolved text onto this peer's def as a LITERAL bind — but ONLY where the
-        /// peer's own def resolves to nothing. Mod parity (law 10) makes the defs identical, so the local
-        /// resolution is normally the right one AND it is in the PLAYER'S language; overwriting it with the
-        /// host's would ship one peer the other's locale and permanently mutate a shared def. The case that
-        /// is left is the one the wire exists for: a def whose text only ever existed as a host-side RUNTIME
-        /// mutation (TFTV VoidOmen writes LocalizedTextBind(text, doNotLocalize:true) at roll time), whose
-        /// keys are empty here and would render a BLANK window.</summary>
-        private static void StampWireTexts(GeoscapeEventData data, string title, string narrative)
+        /// <summary>The host-resolved title/narrative applied to a PRIVATE COPY of the event data — never to
+        /// the def. A def is SHARED state on this peer (<see cref="DefOwnership"/> exists to stop the rail
+        /// from descending into exactly this), and a direct write there is session-permanent with no undo.
+        /// It also cannot be made safe by "stamp only when the local def resolves EMPTY":
+        /// <c>LocalizedTextBind(text, doNotLocalize:true).Localize()</c> returns the LITERAL
+        /// (LocalizedTextBind.cs:37-41), so one stamp leaves the def permanently non-empty — a def the host
+        /// REWRITES per roll (TFTV VoidOmen_{0..19}, TFTVODIandVoidOmenRoll.cs:638-639) would keep the first
+        /// roll's text forever, while a def with a valid static key the host rewrote at runtime
+        /// (TFTVBaseDefenseGeoscape.cs:1227 then :1250) would never take the wire text at all. With a private
+        /// copy the rule is simply: whatever the host resolved wins.
+        ///
+        /// The copy is SHALLOW and deliberately so — <c>Choices</c> stays the DEF'S OWN list instance, because
+        /// choice identity is load-bearing: the buttons hold those <c>GeoEventChoice</c> references
+        /// (SiteBaseChoiceButton.cs:43-47, our <see cref="ShowingRealChoices"/>) and <c>CompleteEvent</c>
+        /// validates with <c>EventData.Choices.Contains(choice)</c> (GeoscapeEvent.cs:92). Only
+        /// <c>Description</c> is re-listed, so the replaced LAST variation — the entry the host resolved
+        /// (UIModuleSiteEncounters:335) — is ours and the def's own stays untouched. Nothing native
+        /// identity-compares <c>GeoscapeEventData</c> or <c>EventTextVariation</c>: the marketplace test is on
+        /// <c>EventID</c> (GeoscapeEventSystem.cs:409), the art lookup on the <c>Leader</c>/<c>Flavour</c>
+        /// STRINGS (SiteEncountersArtCollectionDef.cs:74-96), the narration on <c>Voiceover</c>
+        /// (NarrationSound.cs:100-107), and <c>EventData</c> is not serialized at all (GeoscapeEvent.cs:17-30
+        /// marks EventID/Context/_record only — a restored window re-fetches the def by id), so no copy can
+        /// leak into a save. Returns <paramref name="data"/> UNCHANGED when there is nothing to apply.</summary>
+        // ponytail: the copy carries the HOST's locale for these two fields, so a client running a different
+        // game language reads them in the host's language. Accepted v1 behaviour — upgrade path is to ship the
+        // loc KEY and let each peer localize it, keeping the resolved text only as the runtime-mutation
+        // fallback. Not built until someone actually plays cross-locale.
+        internal static GeoscapeEventData WithWireTexts(GeoscapeEventData data, string title, string narrative)
         {
+            if (data == null) return null;
+            var desc = data.Description;
+            bool wantTitle = !string.IsNullOrEmpty(title);
+            bool wantBody = !string.IsNullOrEmpty(narrative) && desc != null && desc.Count > 0;
+            if (!wantTitle && !wantBody) return data;
             try
             {
-                if (!string.IsNullOrEmpty(title) && string.IsNullOrEmpty(data.Title?.Localize()))
-                    data.Title = new LocalizedTextBind(title, doNotLocalize: true);
-                var desc = data.Description;
-                if (string.IsNullOrEmpty(narrative) || desc == null || desc.Count == 0) return;
-                // The LAST variation is the entry the host resolved; earlier pages of a multi-page def stay
-                // local so paging still renders this peer's own text.
-                var last = desc[desc.Count - 1];
-                if (last != null && string.IsNullOrEmpty(last.General?.Localize()))
+                var copy = ShallowCopy(data);
+                if (wantTitle) copy.Title = new LocalizedTextBind(title, doNotLocalize: true);
+                if (wantBody)
+                {
+                    var last = ShallowCopy(desc[desc.Count - 1]);
                     last.General = new LocalizedTextBind(narrative, doNotLocalize: true);
+                    // Alt is dropped on OUR copy: GetText prefers Alt for a female haven leader
+                    // (EventTextVariation.cs:21-27) and the host already resolved THAT pick into the one
+                    // string on the wire, so leaving Alt would silently override it on half the havens.
+                    last.Alt = null;
+                    copy.Description = new List<EventTextVariation>(desc);
+                    copy.Description[desc.Count - 1] = last;
+                }
+                return copy;
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[MP][events] wire-text stamp failed (" + ex.Message + ") — the window renders " +
-                                 "this peer's own def text");
+                Debug.LogWarning("[MP][events] wire-text copy failed (" + ex.Message + ") — the window renders " +
+                                 "this peer's own def text, and the shared def stays untouched");
+                return data;
             }
+        }
+
+        /// <summary>Field-for-field copy, subclass-preserving (a modded subtype survives, and no field
+        /// silently stops being copied when the game or a mod adds one — including the ones this file must
+        /// not name, e.g. EventTextVariation.Voiceover, whose AK.Wwise assembly the mod does not reference).
+        /// Every reference stays SHARED: that is the point — the identity-bearing members must remain the
+        /// def's own.</summary>
+        private static T ShallowCopy<T>(T src) where T : class
+        {
+            const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.DeclaredOnly;
+            var copy = (T)Activator.CreateInstance(src.GetType());
+            for (var t = src.GetType(); t != null && t != typeof(object); t = t.BaseType)
+                foreach (var f in t.GetFields(F))
+                    f.SetValue(copy, f.GetValue(src));
+            return copy;
         }
 
         // ─── Presentation: repaint / freeze / close of an OPEN dialog ──────
@@ -412,7 +467,11 @@ namespace Multiplayer.Network.Sync
         ///     signal, so this family ships no dismiss message of its own: once the record is resolved the
         ///     picker's buttons are all dead (the losers greyed by <see cref="EventChoiceFreeze"/>, the winner
         ///     click-dead by IsSelected), and leaving that on screen strands the player behind a window whose
-        ///     only exit is Esc. Guarded by <see cref="ShowingRealChoices"/> so it never closes an OUTCOME page:
+        ///     only exit is Esc. The resolution must belong to the raise THIS window was opened by
+        ///     (<see cref="IsResolvedForRaise"/>), or a re-triggered event's PREVIOUS answer — which is what
+        ///     <c>GetEventRecord</c> still returns for the ~0.25-0.75 s until the re-trigger delta lands —
+        ///     closes the fresh picker under the player. Guarded by <see cref="ShowingRealChoices"/> so it
+        ///     never closes an OUTCOME page:
         ///     the winner's own result page is built over a SYNTHETIC event (EventID "") whose OK button is the
         ///     way out. The close is safe because the Record ref was refreshed one line above — ExitState's
         ///     force-complete guard reads the RESOLVED state and stays silent;
@@ -508,18 +567,53 @@ namespace Multiplayer.Network.Sync
         /// (GeoscapeEvent.cs:36) and a mirrored instance over a resolved record reports false. An empty
         /// <c>EventID</c> is one of the module's own synthetic pages — nothing to freeze. A resolved record
         /// with <c>SelectedChoice</c> outside the def's range (native's -1 "no choice",
-        /// UIModuleSiteEncounters.cs:562-566) freezes every button and leaves no winner.</summary>
-        private static bool IsFrozen(GeoscapeEvent ev, out GeoEventChoice winner)
+        /// UIModuleSiteEncounters.cs:562-566) freezes every button and leaves no winner. The record must
+        /// belong to the raise that opened THIS window (<see cref="IsResolvedForRaise"/>) — a re-triggered
+        /// event's previous answer is still sitting in the record when the fresh window opens.</summary>
+        internal static bool IsFrozen(GeoscapeEvent ev, out GeoEventChoice winner)
         {
             winner = null;
             if (string.IsNullOrEmpty(ev?.EventID)) return false;
             var rec = LiveRecord(ev.EventID, ev.Record);
-            if (rec == null || rec.State == GeoscapeEventRecordState.Triggered) return false;
+            if (rec == null || !IsResolvedForRaise(rec.State, rec.TriggerCount, RaiseTriggerOf(ev))) return false;
             var choices = ev.EventData?.Choices;
             int i = rec.SelectedChoice;
             if (choices != null && i >= 0 && i < choices.Count) winner = choices[i];
             return true;
         }
+
+        // ─── Which RAISE is the open window showing? (the stale-record race) ─
+
+        /// <summary>The raise a mirrored window was opened by, keyed by the very <c>GeoscapeEvent</c> instance
+        /// that went into the view state. Weak, so a closed window's entry dies with it — there is no close
+        /// seam to clean up on, and the queue can hold several windows at once. Windows this peer opened
+        /// NATIVELY (the host's own, and a window restored from a save) are simply not in here, and every
+        /// query below then answers exactly as it did before the binding existed.</summary>
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<GeoscapeEvent, RaiseBinding>
+            Bound = new System.Runtime.CompilerServices.ConditionalWeakTable<GeoscapeEvent, RaiseBinding>();
+
+        private sealed class RaiseBinding { public uint Seq; public int TriggerCount; }
+
+        private static int RaiseTriggerOf(GeoscapeEvent ev) =>
+            ev != null && Bound.TryGetValue(ev, out var b) ? b.TriggerCount : 0;
+
+        /// <summary>PURE (RailCheck L39): which <c>TriggerCount</c> the window being raised NOW belongs to.
+        /// The 0xB6 raise and the record's own 0xAC delta are separate surfaces that flush on their own
+        /// cycles, so for a RE-triggered event the raise routinely arrives while <c>GetEventRecord</c> still
+        /// returns the PREVIOUS, already-Completed record (measured 0.25-0.75 s). That record's answer is one
+        /// trigger OLD — this window is the next one, so it is answered from <c>TriggerCount + 1</c>. A record
+        /// that IS open (Triggered) is already this raise's, count as-is.</summary>
+        internal static int RaiseTriggerCount(GeoscapeEventRecordState state, int triggerCount) =>
+            state == GeoscapeEventRecordState.Triggered ? triggerCount : triggerCount + 1;
+
+        /// <summary>PURE (RailCheck L39): does this record resolution answer the raise the open window shows?
+        /// <paramref name="raiseTriggerCount"/> is 0 for a window with no binding (native/host/restored), and
+        /// every real count is ≥1, so those keep the stock "resolved means resolved" answer. A resolution
+        /// OLDER than the raise must be ignored, not applied: acting on it greys a picker the player is
+        /// legitimately looking at and, one ES delta later, CLOSES it
+        /// (<see cref="RepaintDialog"/> → <c>FinishQueriedState</c>).</summary>
+        internal static bool IsResolvedForRaise(GeoscapeEventRecordState state, int triggerCount, int raiseTriggerCount) =>
+            state != GeoscapeEventRecordState.Triggered && triggerCount >= raiseTriggerCount;
 
         /// <summary>The live <c>GeoscapeEvent</c> this peer's own view holds for an id — on screen, popped
         /// and mid-switch, or still queued — else null. The HOST answer handler wants it because that
@@ -645,7 +739,9 @@ namespace Multiplayer.Network.Sync
             var ev = GeoEventField?.GetValue(__instance) as GeoscapeEvent;
             if (string.IsNullOrEmpty(ev?.EventID)) return true; // not a mirrored host event
             var rec = EventPopup.LiveRecord(ev.EventID, ev.Record);
-            bool frozen = rec == null || rec.State != GeoscapeEventRecordState.Triggered;
+            // The SAME "is this answered?" question the freeze and the dismiss ask, raise-binding and all —
+            // a click must not be dropped as stale on a picker those two have just decided is live.
+            bool frozen = rec == null || EventPopup.IsFrozen(ev, out _);
 
             if (IntentRail.ShouldRunNative())
             {

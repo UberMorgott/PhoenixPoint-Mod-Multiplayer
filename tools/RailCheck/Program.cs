@@ -2634,6 +2634,24 @@ namespace RailCheck
         /// mirrored record set into windows. A future reader who re-adds one re-arms the flood, and this is
         /// the line that stops them.
         ///
+        /// (c) The host's TEXT written into the shared DEF. The defs are one graph the whole session reads, so
+        /// a raise that stamps the host's title/narrative onto <c>GeoscapeEventData</c> rewrites every FUTURE
+        /// raise of that event — the exact clobber <see cref="DefOwnership"/> exists to refuse, except this
+        /// write bypassed it by not going through the rail at all. It cannot be guarded by "stamp only when
+        /// the local def is EMPTY" either: the stamp is a <c>doNotLocalize</c> bind, which localizes to its own
+        /// literal (LocalizedTextBind.cs:37-41), so the guard is false from the first stamp onward and a def
+        /// the host rewrites PER ROLL (TFTV VoidOmen) freezes on roll one. The window therefore gets a PRIVATE
+        /// COPY of the data, which is asserted below to leave the def bit-identical while still carrying the
+        /// host text — and to keep sharing the def's <c>Choices</c> list, whose element identity the buttons
+        /// and <c>CompleteEvent</c> both key on.
+        ///
+        /// (d) A window dismissed by an OLD answer. The raise (0xB6) and the record (0xAC) are separate
+        /// surfaces flushing on their own cycles, so a RE-triggered event's window opens while
+        /// <c>GetEventRecord</c> still returns the previous trigger's Completed record. Read naively that says
+        /// "already answered": the fresh picker opens fully greyed and the next ES delta closes it under the
+        /// player. The open window is therefore BOUND to the raise that opened it and only a resolution at
+        /// that trigger or later may freeze or dismiss it.
+        ///
         /// Plus the wire itself (a dropped payload field is failure (a) one layer down: the window is built
         /// against the WRONG context), the deploy-prompt exclusion (a host-local arrival decision mirrored as
         /// a second window the other peer can never close), and the surface id's own uniqueness.</summary>
@@ -2705,6 +2723,101 @@ namespace RailCheck
             if (EventPopup.IsPureDeployPrompt(new[] { false, false }, new[] { true, true }))
                 yield return "L39 story-event-suppressed: an event with NO mission choice at all was classified as a " +
                              "deploy prompt — ordinary narrative windows would stop mirroring";
+
+            // ── the wire TEXT: a private copy, never the shared def ───────
+            var titleBind = new Base.UI.LocalizedTextBind("KEY_TITLE");
+            var bodyBind = new Base.UI.LocalizedTextBind("KEY_BODY");
+            var altBind = new Base.UI.LocalizedTextBind("KEY_ALT");
+            var variation = new EventTextVariation { General = bodyBind, Alt = altBind };
+            var def = new PhoenixPoint.Geoscape.Events.Eventus.GeoscapeEventData
+            {
+                EventID = "EV_test",
+                Title = titleBind,
+                Description = { variation },
+                Choices = { new GeoEventChoice() },
+            };
+            var defChoices = def.Choices;
+            var shown = EventPopup.WithWireTexts(def, "HOST TITLE", "HOST BODY");
+            var shownLast = shown.Description[shown.Description.Count - 1];
+
+            if (ReferenceEquals(shown, def))
+                yield return "L39 wire-text-clobbers-def: the host text was applied to the DEF ITSELF (the same instance " +
+                             "came back) — a def is SHARED state on this peer, which is the whole reason DefOwnership " +
+                             "refuses to descend into one, so a client raise would permanently rewrite the title and " +
+                             "narrative of every FUTURE raise of that event, session-wide and with no undo";
+            if (!ReferenceEquals(def.Title, titleBind) || def.Title.LocalizationKey != "KEY_TITLE" ||
+                def.Description.Count != 1 || !ReferenceEquals(def.Description[0], variation) ||
+                !ReferenceEquals(variation.General, bodyBind) || variation.General.LocalizationKey != "KEY_BODY" ||
+                !ReferenceEquals(variation.Alt, altBind))
+                yield return "L39 wire-text-clobbers-def: the host text reached the DEF's own Title/Description binds — " +
+                             "and because a doNotLocalize bind localizes to its LITERAL (LocalizedTextBind.cs:37-41), " +
+                             "nothing downstream can ever tell that text from the def's own again: the clobber is " +
+                             "invisible, permanent and self-poisoning";
+            if (ReferenceEquals(shownLast, variation))
+                yield return "L39 wire-text-clobbers-def: the copy's LAST description variation is the DEF's own " +
+                             "EventTextVariation instance — writing its General is the same shared-def mutation one " +
+                             "level down";
+            if (shown.Title?.LocalizationKey != "HOST TITLE" || shownLast.General?.LocalizationKey != "HOST BODY")
+                yield return "L39 wire-text-lost: the raised window did not carry the host's resolved text (title=\"" +
+                             shown.Title?.LocalizationKey + "\", body=\"" + shownLast.General?.LocalizationKey + "\") — a " +
+                             "def whose text exists ONLY as a host-side runtime mutation (TFTV VoidOmen) renders blank, " +
+                             "and one the host composed over a valid static key (TFTVBaseDefenseGeoscape.cs:1227 then " +
+                             ":1250) renders the generic version while the host reads the composed one";
+            if (shownLast.Alt != null)
+                yield return "L39 wire-text-overridden-by-alt: the copy kept the def's Alt variation — GetText prefers " +
+                             "Alt for a female haven leader (EventTextVariation.cs:21-27), so on those havens the host " +
+                             "text is silently replaced by this peer's own def text again";
+            if (!ReferenceEquals(shown.Choices, defChoices))
+                yield return "L39 wire-text-breaks-choice-identity: the data handed to the window carries a DIFFERENT " +
+                             "Choices list than the def — the buttons hold the def's own GeoEventChoice instances " +
+                             "(SiteBaseChoiceButton.cs:43-47), so ShowingRealChoices stops recognising the picker and " +
+                             "CompleteEvent's EventData.Choices.Contains(choice) (GeoscapeEvent.cs:92) throws";
+            if (!ReferenceEquals(EventPopup.WithWireTexts(def, "", ""), def))
+                yield return "L39 wire-text-copies-for-nothing: a raise carrying no host text still allocated a copy — " +
+                             "with nothing to apply the window must ride the def's own data";
+
+            // The self-poison shape: a def whose keys are EMPTY here because the host wrote its text at
+            // ROLL time. Applied twice, the second raise must show the SECOND text.
+            var runtimeDef = new PhoenixPoint.Geoscape.Events.Eventus.GeoscapeEventData
+            {
+                EventID = "EV_voidomen",
+                Title = new Base.UI.LocalizedTextBind(""),
+                Description = { new EventTextVariation { General = new Base.UI.LocalizedTextBind("") } },
+            };
+            EventPopup.WithWireTexts(runtimeDef, "ROLL 1", "ROLL 1 BODY");
+            var roll2 = EventPopup.WithWireTexts(runtimeDef, "ROLL 2", "ROLL 2 BODY");
+            if (roll2.Title?.LocalizationKey != "ROLL 2" ||
+                roll2.Description[roll2.Description.Count - 1].General?.LocalizationKey != "ROLL 2 BODY")
+                yield return "L39 wire-text-self-poisoned: the SECOND raise of the same def kept the FIRST raise's text " +
+                             "— the 'apply only where the local def resolves EMPTY' rule is back, and one application " +
+                             "makes the def permanently non-empty; TFTV rewrites VoidOmen_{roll} per roll " +
+                             "(TFTVODIandVoidOmenRoll.cs:638-639), so every later roll would show the first roll's story";
+
+            // ── the open window is bound to ITS raise (stale-record race) ─
+            if (EventPopup.RaiseTriggerCount(GeoscapeEventRecordState.Completed, 3) != 4)
+                yield return "L39 raise-binding-inherits-stale-answer: a window raised while GetEventRecord still returns " +
+                             "the PREVIOUS trigger's Completed record was bound to that old trigger — the fresh picker " +
+                             "opens fully greyed and the next ES delta closes it under the player";
+            if (EventPopup.RaiseTriggerCount(GeoscapeEventRecordState.Triggered, 4) != 4)
+                yield return "L39 raise-binding-overshoots: a window raised over an already-OPEN (Triggered) record was " +
+                             "bound to the NEXT trigger — its own answer would then never count, so the picker never " +
+                             "freezes and never closes and both peers can resolve it";
+            if (EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Completed, 3, 4))
+                yield return "L39 stale-resolution-dismisses: a record Completed at trigger #3 was applied to the window " +
+                             "raised for trigger #4 — that is the re-trigger race (the record's 0xAC delta lands " +
+                             "0.25-0.75 s after the 0xB6 raise, separate surfaces), and RepaintDialog answers a " +
+                             "resolution with view.FinishQueriedState(): the window the player is looking at vanishes";
+            if (!EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Completed, 4, 4))
+                yield return "L39 live-resolution-ignored: the answer to the very raise the window shows (#4) was treated " +
+                             "as stale — the picker another peer just answered stays open with every button dead and Esc " +
+                             "as its only exit, which is the state the dismiss exists to prevent";
+            if (EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Triggered, 4, 4))
+                yield return "L39 open-record-frozen: a still-OPEN (Triggered) record was reported resolved — every " +
+                             "picker in the game would open greyed and close on the next delta";
+            if (!EventPopup.IsResolvedForRaise(GeoscapeEventRecordState.Completed, 9, 0))
+                yield return "L39 unbound-window-unfrozen: a window with NO raise binding (the host's own, or one restored " +
+                             "from a save) stopped honouring its resolved record — the freeze and the dismiss are " +
+                             "peer-symmetric by law, so that turns them off on the host";
 
             // ── the surface id ────────────────────────────────────────────
             int declaring = typeof(SurfaceIds).GetFields(BindingFlags.Public | BindingFlags.Static)
