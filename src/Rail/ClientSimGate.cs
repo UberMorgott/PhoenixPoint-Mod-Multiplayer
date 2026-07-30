@@ -275,6 +275,62 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
+    /// EIGHTH seam, same law, over the AIRCRAFT-GESTURE class as a whole. A geoscape ability is a player
+    /// gesture that calls a native mutator on the actor, and on a rail-mirrored <c>GeoVehicle</c> that write
+    /// is authoritative — the diff is host-now vs host-before, so a client-local one is never corrected.
+    /// <see cref="ClientSimGate"/> only ever gated the hourly TICK, which is why every one of these ran
+    /// locally on a client for free.
+    ///
+    /// The set is not open-ended and is not guessed: <c>GeoVehicle</c> methods reachable from a
+    /// <c>GeoAbility.ActivateInternal</c> are exactly four (RailCheck L42 sweeps the game assembly for them
+    /// and fails if a fifth appears). <c>StartTravel</c> and <c>StartExploringCurrentSite</c> carry INTENTS
+    /// (<see cref="VehicleSync"/>) because the player expects the order to happen. The rows here are the ones
+    /// that get a GATE instead, each for a stated reason:
+    ///   • <c>ScheduleRepair</c> (GeoVehicle.cs:743, sole caller EmergencyRepairAbility.cs:40) — writes
+    ///     <c>_maintenancePointsToRepair</c> (a covered leaf) and <c>_scheduledRepair</c>, and its arguments
+    ///     are derived from the ABILITY def, not from the vehicle, so an intent would have to ship a def
+    ///     address the host must then trust. Blocked here; the host's own repair mirrors as ordinary state.
+    ///   • <c>StartCollectingFromCurrentSite</c> / <c>EndCollectingFromCurrentSite</c> (:432/:440) — both
+    ///     write <c>GeoHarvestingSite.AddHarvestingForce</c> (GeoHarvestingSite.cs:83), whose
+    ///     <c>HarvestingForce</c> is a covered leaf. BOTH halves are gated, never just the start: End is also
+    ///     called from <c>TeleportToSite</c>:506 and <c>StartTravel</c>:524/:538, so gating the start alone
+    ///     would leave a client subtracting a force it never added.
+    /// Every one of these is void or its return is discarded by the ability, so nothing dereferences a
+    /// blocked call. Host and solo stay fully native; the apply arm stays open (a rail path that reaches one
+    /// must land).
+    /// </summary>
+    [HarmonyPatch]
+    internal static class VehicleGestureGate
+    {
+        private static readonly HashSet<string> _logged = new HashSet<string>(StringComparer.Ordinal);
+
+        // Named as the game names them; a drifted name yields null, which RailCheck L23 reports as an
+        // unbound handle rather than a silently absent gate.
+        internal static readonly string[] GatedGestures =
+            { "ScheduleRepair", "StartCollectingFromCurrentSite", "EndCollectingFromCurrentSite" };
+
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            foreach (var name in GatedGestures)
+                yield return AccessTools.Method(typeof(GeoVehicle), name);
+        }
+
+        private static bool Prefix(GeoVehicle __instance, MethodBase __originalMethod)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            if (SyncApplyScope.Active) return true;                                      // an apply may reach it
+
+            string who = (__originalMethod == null ? "?" : __originalMethod.Name) + " " +
+                         (IdentityResolver.RootRef(__instance) ?? "V#?");
+            if (_logged.Add(who))
+                Debug.Log("[MP][vehicle] CLIENT gesture " + who + " BLOCKED — it writes rail-covered aircraft/site " +
+                          "state the host owns; the host's own result arrives as a delta");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// SEVENTH seam, same law, at the AUTO-MANUFACTURE funnel: <c>GeoFaction.UpdateManufacturing</c>
     /// (GeoFaction.cs:2106) is the ONE writer — both callers route through it, <c>RegisterVehicle</c>
     /// (:2069-2072) and <c>UnregisterVehicle</c> (:2095-2098). One gate in the funnel instead of a guard

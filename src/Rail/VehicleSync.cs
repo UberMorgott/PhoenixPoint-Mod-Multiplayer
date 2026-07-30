@@ -15,9 +15,9 @@ namespace Multiplayer.Network.Sync
 {
     /// <summary>
     /// AIRCRAFT gesture family (surface 0xB5, law 1) — RCA gap A2, "the client cannot send an aircraft
-    /// anywhere". Two ops, because the game has exactly TWO model funnels a player gesture on an aircraft
-    /// can reach, and both are addressed by the vehicle's ROOT KEY ("V#&lt;id&gt;@&lt;ownerFactionGuid&gt;",
-    /// IdentityResolver.cs:126) — never by a local reference and never by a payload-carried id:
+    /// anywhere". One op per MODEL FUNNEL a player gesture on an aircraft can reach, each addressed by the
+    /// vehicle's ROOT KEY ("V#&lt;id&gt;@&lt;ownerFactionGuid&gt;", IdentityResolver.cs:126) — never by a
+    /// local reference and never by a payload-carried id:
     ///   • <c>travelTo</c> — <c>GeoVehicle.StartTravel(List&lt;GeoSite&gt;)</c> (GeoVehicle.cs:518). THE
     ///     route funnel: the player's own order (MoveVehicleAbility.ActivateInternal:63), both
     ///     <c>TravelTo</c> overloads (:556/:572) and every AI/raid route (VehicleFactionController:169,
@@ -32,6 +32,16 @@ namespace Multiplayer.Network.Sync
     ///     The gesture's other half, the <c>AircraftItemStorage</c> write-back
     ///     (<c>UIStateVehicleRoster.UpdateAircraftStorage</c>:278-290), is blocked on a client by
     ///     <see cref="EquipStorageGate"/> — same law, same seam list.
+    ///   • <c>exploreSite</c> — <c>GeoVehicle.StartExploringCurrentSite</c> (GeoVehicle.cs:414), sole caller
+    ///     <c>ExploreSiteAbility.ActivateInternal</c>:14. The wire carries the vehicle key ALONE: the site
+    ///     explored is that vehicle's own <c>CurrentSite</c>, which the host reads off its own graph. Left
+    ///     un-captured it was a client running a per-vehicle <c>Timing.Start</c> (:451) against its own
+    ///     unfrozen clock, i.e. exploring a site with no aircraft of the host's there.
+    ///
+    /// The sibling gestures the same abilities reach — <c>ScheduleRepair</c>,
+    /// <c>Start/EndCollectingFromCurrentSite</c> — take a GATE instead of an op, argued at
+    /// <see cref="VehicleGestureGate"/>. RailCheck L42 discovers the whole set from the game's own ability
+    /// metadata, so neither list can silently fall behind the game.
     ///
     /// CREW BOARDING IS NOT HERE, deliberately. <c>GeoVehicle.AddCharacter/RemoveCharacter</c> (:759/:766)
     /// already have block-first capture in <see cref="PersonnelSync"/> (PersonnelSync.cs:347-366 →
@@ -55,6 +65,7 @@ namespace Multiplayer.Network.Sync
     {
         internal const byte OpTravelTo = 1;      // [vehicleRef][siteRef]
         internal const byte OpSetEquipment = 2;  // [vehicleRef][wN:u16][defGuid × N][mN:u16][defGuid × M] ("" = empty slot)
+        internal const byte OpExploreSite = 3;   // [vehicleRef] — the site is the vehicle's OWN CurrentSite, host-read
 
         internal static void RegisterIntents()
         {
@@ -62,6 +73,7 @@ namespace Multiplayer.Network.Sync
             {
                 [OpTravelTo] = HandleTravelTo,
                 [OpSetEquipment] = HandleSetEquipment,
+                [OpExploreSite] = HandleExploreSite,
             };
             IntentRail.Register(SurfaceIds.GeoVehicleIntent, "vehicle", ops);
         }
@@ -98,6 +110,10 @@ namespace Multiplayer.Network.Sync
             internal bool TargetIsIdleCurrentSite;  // travelTo: MoveVehicleAbility.GetTargetDisabledStateInternal:35
             internal bool Docked;                   // setEquipment: UIModuleVehicleCycle.InPhoenixBase:135-149
             internal int SlotCountDelta;            // setEquipment: requested slots - the vehicle's real slots
+            internal bool SiteExplorable;           // exploreSite: ExploreSiteAbility.GetTargetDisabledStateInternal:42-49 (CurrentSite exists, ExplorationTime != 0, not already inspected)
+            internal bool CanExploreSites;          // exploreSite: GeoVehicle.StartExploringCurrentSite:421 (CanExploreSites:282)
+            internal bool HasCrew;                  // exploreSite: ExploreSiteAbility.GetDisabledStateInternal:24 (NoSoldiersInVehicle)
+            internal bool AlreadyExploring;         // exploreSite: ExploreSiteAbility.ActivateInternal:12 (!IsExploringSite)
         }
 
         /// <summary>null = accept, otherwise the human reason the gesture was refused. A reason is never
@@ -121,6 +137,13 @@ namespace Multiplayer.Network.Sync
                     if (!f.Docked) return "aircraft is not docked at a functioning Phoenix base — its loadout cannot be changed";
                     if (f.SlotCountDelta != 0)
                         return "slot count off by " + f.SlotCountDelta + " — stale mirror or def/mod mismatch";
+                    return null;
+                case OpExploreSite:
+                    if (!f.SiteExplorable)
+                        return "the aircraft's current site cannot be explored (no site, nothing to find, or already inspected) — stale mirror";
+                    if (!f.CanExploreSites) return "this aircraft carries nothing that can explore a site";
+                    if (!f.HasCrew) return "no soldiers aboard — the exploration gesture needs a crew";
+                    if (f.AlreadyExploring) return "already exploring that site — nothing to order";
                     return null;
                 default:
                     return "op " + op + " is registered on the vehicle surface but has no validator";
@@ -254,6 +277,48 @@ namespace Multiplayer.Network.Sync
             return false;
         }
 
+        /// <summary>Site-exploration capture at the MODEL funnel — <c>GeoVehicle.StartExploringCurrentSite</c>
+        /// (GeoVehicle.cs:414), whose ONE caller is <c>ExploreSiteAbility.ActivateInternal</c>
+        /// (ExploreSiteAbility.cs:14), i.e. it is the gesture. Untreated it was a PLAYER gesture running
+        /// LOCALLY on a projector: it schedules a per-vehicle <c>Timing.Start</c> (:451) that the client's
+        /// unfrozen clock then runs to completion, so a client explored a site with no aircraft of the host's
+        /// there and diverged permanently (the diff is host-now vs host-before, so a client-local mutation is
+        /// never corrected). <see cref="ClientSimGate"/> only ever covered the HOURLY tick.
+        /// The wire carries the vehicle root key and NOTHING else: the site explored is the vehicle's own
+        /// <c>CurrentSite</c>, which the host reads off its own graph (law 3 — no derived state on the wire).
+        /// </summary>
+        [HarmonyPatch(typeof(GeoVehicle), nameof(GeoVehicle.StartExploringCurrentSite))]
+        internal static class ExploreCapturePatch
+        {
+            private static bool Prefix(GeoVehicle __instance) => CaptureExplore(__instance);
+        }
+
+        private static bool CaptureExplore(GeoVehicle vehicle)
+        {
+            if (IntentRail.ShouldRunNative()) return true;
+            string vehicleRef = IdentityResolver.RootRef(vehicle);
+            try
+            {
+                var geo = GeoLevel();
+                if (geo == null || !ReferenceEquals(vehicle.Owner, geo.PhoenixFaction))
+                {
+                    if (_logged.Add("explore:" + vehicleRef))
+                        Debug.Log("[MP][vehicle] CLIENT site exploration by " + vehicleRef +
+                                  " BLOCKED — not a player aircraft, nothing to relay");
+                    return false;
+                }
+                IntentRail.Send(SurfaceIds.GeoVehicleIntent, OpExploreSite, "explore " + vehicleRef,
+                    w => w.Write(vehicleRef));
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MP][vehicle] CLIENT explore capture failed for " + vehicleRef +
+                               " — reconverging local UI: " + ex);
+                OpenUiRepaint.MarkDirty();
+            }
+            return false;
+        }
+
         private struct Sent { internal byte[] Body, Canon; }
 
         private static readonly Dictionary<string, Sent> _sent = new Dictionary<string, Sent>(StringComparer.Ordinal);
@@ -345,6 +410,41 @@ namespace Multiplayer.Network.Sync
                           " legs=" + path.Count + " nonce=" + nonce + " peer=" + senderPeerId);
             }
             catch (Exception ex) { Reject(senderPeerId, vehicleRef, "travel (throw) " + ex.Message); }
+        }
+
+        /// <summary>The host runs the SAME native method the client's click was blocked from
+        /// (GeoVehicle.cs:414) and everything it produces — the site's inspected state, its rewards, the
+        /// aircraft's <c>StartExplorationTime</c> — rides back on the ordinary value rail. Every gate the
+        /// game itself applies is repeated here against the HOST's own graph, because a client mirror can be
+        /// arbitrarily stale.</summary>
+        private static void HandleExploreSite(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
+        {
+            string vehicleRef = null;
+            try
+            {
+                vehicleRef = r.ReadString();
+                var geo = GeoLevel();
+                if (geo == null) { Reject(senderPeerId, vehicleRef, "no geoscape"); return; }
+
+                var vehicle = IdentityResolver.Resolve(geo, vehicleRef, null) as GeoVehicle;
+                var site = vehicle == null ? null : vehicle.CurrentSite;
+                string why = Validate(OpExploreSite, new Facts
+                {
+                    Resolved = vehicle != null,
+                    OwnedByPlayer = vehicle != null && ReferenceEquals(vehicle.Owner, geo.PhoenixFaction),
+                    // GeoSite.ExplorationTime:87 / GetInspected(GeoFaction):398 — the ability's own target gates.
+                    SiteExplorable = site != null && site.ExplorationTime != TimeUnit.Zero && !site.GetInspected(vehicle.Owner),
+                    CanExploreSites = vehicle != null && vehicle.CanExploreSites,
+                    HasCrew = vehicle != null && vehicle.Units.Any(),
+                    AlreadyExploring = vehicle != null && vehicle.IsExploringSite,
+                });
+                if (why != null) { Reject(senderPeerId, vehicleRef, "explore: " + why); return; }
+
+                vehicle.StartExploringCurrentSite();
+                Debug.Log("[MP][vehicle] HOST intent APPLIED op=exploreSite " + vehicleRef + " site=" +
+                          IdentityResolver.RootRef(site) + " nonce=" + nonce + " peer=" + senderPeerId);
+            }
+            catch (Exception ex) { Reject(senderPeerId, vehicleRef, "explore (throw) " + ex.Message); }
         }
 
         private static void HandleSetEquipment(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)

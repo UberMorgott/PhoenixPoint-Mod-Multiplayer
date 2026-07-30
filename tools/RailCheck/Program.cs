@@ -87,6 +87,7 @@ namespace RailCheck
             laws.AddRange(FunnelCoverageLaw(game));
             laws.AddRange(EventTokenDerefLaw());
             laws.AddRange(VehicleIntentLaw());
+            laws.AddRange(VehicleGestureLaw(game));
             laws.AddRange(HuskContentLaw(game));
             laws.AddRange(RootOwnershipLaw(types));
             laws.AddRange(RootCoverageLaw());
@@ -3285,6 +3286,7 @@ namespace RailCheck
             {
                 Resolved = true, OwnedByPlayer = true, CanRedirect = true, TargetResolved = true,
                 TargetIsIdleCurrentSite = false, Docked = true, SlotCountDelta = 0,
+                SiteExplorable = true, CanExploreSites = true, HasCrew = true, AlreadyExploring = false,
             };
 
             var ops = typeof(VehicleSync).GetFields(BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)
@@ -3380,10 +3382,11 @@ namespace RailCheck
                                  "already happened by then, so the intent ships a RESULT (L19's rule, asserted here " +
                                  "because ResultShipLaw exempts view-only patch classes)";
             }
-            if (seams < 2)
-                yield return "L32 capture-missing: VehicleSync declares " + seams + " Harmony capture seam(s) — gap A2 needs " +
-                             "both the route funnel (GeoVehicle.StartTravel) and the loadout funnel (ReplaceEquipments); " +
-                             "a gesture that reaches no seam produces no log line at all";
+            if (seams < 3)
+                yield return "L32 capture-missing: VehicleSync declares " + seams + " Harmony capture seam(s) — the family " +
+                             "needs the route funnel (GeoVehicle.StartTravel), the loadout funnel (ReplaceEquipments) and " +
+                             "the exploration funnel (StartExploringCurrentSite); a gesture that reaches no seam produces " +
+                             "no log line at all";
 
             // The loadout gesture's STORAGE half rides EquipStorageGate.TargetMethods() — the exact shape L23
             // says it cannot read ("a TargetMethods() body is not [readable]"), so drive the real iterator: a
@@ -3432,6 +3435,107 @@ namespace RailCheck
             catch (ReflectionTypeLoadException ex) { return ex.Types.Where(t => t != null).ToArray(); }
         }
 
+        /// <summary>Every method in OUR assembly that a Harmony PREFIX of ours is bound to — from the
+        /// attribute rows AND from the <c>TargetMethods()</c> iterators, which L23 explicitly cannot read
+        /// statically, so they are DRIVEN. One collector, because a law that only knew about one of the two
+        /// shapes would call a real gate missing (or a missing one covered).</summary>
+        private static HashSet<int> OurPrefixTargets()
+        {
+            var set = new HashSet<int>();
+            foreach (var t in DeclaredTypes(typeof(IntentRail).Assembly))
+            {
+                if (t.GetMethod("Prefix", AllMembers) == null) continue;
+                foreach (var a in t.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false).OfType<HarmonyLib.HarmonyPatch>())
+                {
+                    var info = a.info;
+                    if (info?.declaringType == null || string.IsNullOrEmpty(info.methodName)) continue;
+                    MethodBase m = null;
+                    try { m = HarmonyLib.AccessTools.Method(info.declaringType, info.methodName, info.argumentTypes); }
+                    catch { }
+                    if (m != null) set.Add(m.MetadataToken);
+                }
+                var tm = t.GetMethod("TargetMethods", AllMembers);
+                if (tm == null || !typeof(IEnumerable<MethodBase>).IsAssignableFrom(tm.ReturnType)) continue;
+                IEnumerable<MethodBase> yielded = null;
+                try { yielded = (IEnumerable<MethodBase>)tm.Invoke(null, null); } catch { }
+                if (yielded == null) continue;
+                foreach (var m in yielded) if (m != null) set.Add(m.MetadataToken);
+            }
+            return set;
+        }
+
+        /// <summary>L42 — A CLIENT GESTURE THAT MUTATES HOST-AUTHORITATIVE STATE MUST HAVE AN INTENT, OR BE
+        /// GATED. A geoscape ability IS the player gesture: <c>GeoAbility.ActivateInternal</c> calls a native
+        /// mutator on the actor, and on a rail-mirrored <c>GeoVehicle</c> that write is authoritative — the
+        /// diff is host-now vs host-before, so a client-local mutation is NEVER corrected. <c>ClientSimGate</c>
+        /// gated only the HOURLY tick, so every one of these ran locally on a client for free: the measured
+        /// one is <c>ExploreSiteAbility</c> → <c>StartExploringCurrentSite</c> → a per-vehicle
+        /// <c>Timing.Start</c> (GeoVehicle.cs:451) that the client's unfrozen clock runs to completion,
+        /// exploring a site with no aircraft of the host's there.
+        ///
+        /// The set is DISCOVERED, never declared: every <c>ActivateInternal</c> override in the game assembly,
+        /// its direct callees, those declared on <c>GeoVehicle</c ,> minus property accessors. So a NEW ability
+        /// (or a mod-visible one this batch never saw) arrives here as a violation instead of as a divergence
+        /// nobody notices. Coverage is likewise discovered from our own assembly — attribute rows and
+        /// <c>TargetMethods()</c> iterators alike — never from a table asserting that a gate exists.
+        ///
+        /// A gesture may satisfy this EITHER way: an intent (the player's order happens, on the host) or a
+        /// gate (the write is refused and the host's own result mirrors). Which one each takes, and why, is
+        /// argued at <c>VehicleGestureGate</c>. Falsify by removing the explore capture patch or a
+        /// <c>GatedGestures</c> row.</summary>
+        private static IEnumerable<string> VehicleGestureLaw(Assembly game)
+        {
+            var vehicle = typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle);
+            var activations = DeclaredTypes(game)
+                .Where(t => t != null && !t.IsAbstract &&
+                            typeof(PhoenixPoint.Geoscape.Entities.Abilities.GeoAbility).IsAssignableFrom(t))
+                .Select(t => t.GetMethod("ActivateInternal", AllMembers | BindingFlags.DeclaredOnly))
+                .Where(m => m != null)
+                .OrderBy(m => m.DeclaringType.Name, StringComparer.Ordinal).ToList();
+            if (activations.Count == 0)
+            {
+                yield return "L42 abilities-undiscovered: no concrete GeoAbility declares ActivateInternal — the " +
+                             "discovery rule no longer matches the game, so this law is asleep and every aircraft " +
+                             "gesture is unchecked";
+                yield break;
+            }
+
+            var gestures = new SortedDictionary<string, MethodBase>(StringComparer.Ordinal);
+            foreach (var a in activations)
+                foreach (var c in Callees(a, game, directCallsOnly: true))
+                    if (c.DeclaringType == vehicle && !c.IsSpecialName && !c.IsConstructor)
+                        gestures[c.Name] = c;
+            if (gestures.Count == 0)
+            {
+                yield return "L42 vacuous: not one of the " + activations.Count + " ability activations calls a " +
+                             "GeoVehicle method — the callee scan found nothing, so a green result here means nothing";
+                yield break;
+            }
+
+            var covered = OurPrefixTargets();
+            foreach (var kv in gestures)
+                if (!covered.Contains(kv.Value.MetadataToken))
+                    yield return "L42 gesture-ungated: GeoVehicle." + kv.Key + " is reached by a player ability but " +
+                                 "carries no Harmony PREFIX of ours — on a client it runs LOCALLY against rail-covered " +
+                                 "aircraft/site state, and the host-now-vs-host-before diff can never correct it; give it " +
+                                 "an intent (VehicleSync) or a gate (VehicleGestureGate)";
+
+            // The gate's own rows, driven by name: EndCollectingFromCurrentSite is NOT ability-reachable (it is
+            // called from TeleportToSite / StartTravel) but gating only its START half would leave a client
+            // subtracting a harvesting force it never added — so the symmetric row must stay bound.
+            foreach (var name in VehicleGestureGate.GatedGestures)
+            {
+                var m = HarmonyLib.AccessTools.Method(vehicle, name);
+                if (m == null)
+                    yield return "L42 gate-row-unbound: GeoVehicle." + name + " does not resolve — VehicleGestureGate " +
+                                 "yields NULL from TargetMethods, PatchAll throws, and MultiplayerMain swallows the " +
+                                 "warning, which kills every later patch in the same PatchAll (L23's failure mode)";
+                else if (!covered.Contains(m.MetadataToken))
+                    yield return "L42 gate-row-dropped: GeoVehicle." + name + " is declared gated but no prefix of ours " +
+                                 "binds it — the client writes rail-covered state through it again";
+            }
+        }
+
         private static IEnumerable<KeyValuePair<string, VehicleSync.Facts>> StaleVehicleCases(byte op, VehicleSync.Facts legal)
         {
             // Universal: no op may act on an aircraft the host does not have, or on one that is not the
@@ -3458,6 +3562,17 @@ namespace RailCheck
                 yield return new KeyValuePair<string, VehicleSync.Facts>("one slot too many", f);
                 f = legal; f.SlotCountDelta = -2;
                 yield return new KeyValuePair<string, VehicleSync.Facts>("two slots too few", f);
+            }
+            if (op == VehicleSync.OpExploreSite)
+            {
+                f = legal; f.SiteExplorable = false;
+                yield return new KeyValuePair<string, VehicleSync.Facts>("a site with nothing left to explore", f);
+                f = legal; f.CanExploreSites = false;
+                yield return new KeyValuePair<string, VehicleSync.Facts>("an aircraft that cannot explore", f);
+                f = legal; f.HasCrew = false;
+                yield return new KeyValuePair<string, VehicleSync.Facts>("an empty aircraft", f);
+                f = legal; f.AlreadyExploring = true;
+                yield return new KeyValuePair<string, VehicleSync.Facts>("an aircraft already exploring that site", f);
             }
         }
 
