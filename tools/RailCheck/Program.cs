@@ -105,6 +105,7 @@ namespace RailCheck
             laws.AddRange(StructuralDescendLaw(game, types));
             laws.AddRange(StructuralActorLaw());
             laws.AddRange(RepaintRelevanceLaw(types, game));
+            laws.AddRange(SlicedWalkLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -4829,6 +4830,185 @@ namespace RailCheck
                 }
                 i += size;
             }
+        }
+
+        /// <summary>Every callee a method invokes, IN IL ORDER, with NO assembly filter. <see cref="Callees"/>
+        /// keeps to one assembly, which cannot express "our code calls into the game in THIS sequence" — and
+        /// sequence is exactly what an ordering law asserts (L52's adopt-baseline-before-rebind arm).</summary>
+        private static List<MethodBase> CalleeSequence(MethodBase m)
+        {
+            var seq = new List<MethodBase>();
+            byte[] il = null;
+            try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) return seq;
+            var typeArgs = m.DeclaringType != null && m.DeclaringType.IsGenericType ? m.DeclaringType.GetGenericArguments() : null;
+            var methodArgs = m.IsGenericMethodDefinition ? m.GetGenericArguments() : null;
+            int i = 0;
+            while (i < il.Length)
+            {
+                short code = il[i++];
+                if (code == 0xFE)
+                {
+                    if (i >= il.Length) break;
+                    code = (short)(0xFE00 | il[i++]);
+                }
+                if (!OpCodeByValue.TryGetValue(code, out var op)) break;
+                int size = OperandSize(op.OperandType, il, i);
+                if (size < 0 || i + size > il.Length) break;
+                if (op.OperandType == OperandType.InlineMethod && (op == OpCodes.Call || op == OpCodes.Callvirt))
+                {
+                    MethodBase callee = null;
+                    try { callee = m.Module.ResolveMethod(BitConverter.ToInt32(il, i), typeArgs, methodArgs); } catch { }
+                    if (callee != null) seq.Add(callee);
+                }
+                i += size;
+            }
+            return seq;
+        }
+
+        /// <summary>True when the method's IL actually READS the given static field. This is why
+        /// <c>DiffEngine.SliceBudgetMs</c> is a static readonly field and not a const: a const is inlined as
+        /// a literal, so "does this loop consult a budget?" would be unanswerable from IL.</summary>
+        private static bool ReadsField(MethodBase m, FieldInfo target)
+        {
+            if (m == null || target == null) return false;
+            byte[] il = null;
+            try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) return false;
+            var typeArgs = m.DeclaringType != null && m.DeclaringType.IsGenericType ? m.DeclaringType.GetGenericArguments() : null;
+            var methodArgs = m.IsGenericMethodDefinition ? m.GetGenericArguments() : null;
+            int i = 0;
+            while (i < il.Length)
+            {
+                short code = il[i++];
+                if (code == 0xFE)
+                {
+                    if (i >= il.Length) return false;
+                    code = (short)(0xFE00 | il[i++]);
+                }
+                if (!OpCodeByValue.TryGetValue(code, out var op)) return false;
+                int size = OperandSize(op.OperandType, il, i);
+                if (size < 0 || i + size > il.Length) return false;
+                if (op.OperandType == OperandType.InlineField)
+                {
+                    FieldInfo f = null;
+                    try { f = m.Module.ResolveField(BitConverter.ToInt32(il, i), typeArgs, methodArgs); } catch { }
+                    if (f != null && f.MetadataToken == target.MetadataToken && f.Module == target.Module) return true;
+                }
+                i += size;
+            }
+            return false;
+        }
+
+        /// <summary>Every method our own assembly declares — the universe the caller-set laws quantify over,
+        /// derived from metadata rather than hand-listed, so a new method cannot slip past them.</summary>
+        private static List<MethodBase> OurMethods()
+        {
+            var ours = typeof(DiffEngine).Assembly;
+            var all = new List<MethodBase>();
+            foreach (var t in ours.GetTypes())
+            {
+                foreach (var m in t.GetMethods(AllMembers)) if (m.DeclaringType == t) all.Add(m);
+                foreach (var c in t.GetConstructors(AllMembers)) all.Add(c);
+            }
+            return all;
+        }
+
+        /// <summary>Names of the methods in our assembly whose IL calls <paramref name="target"/>.</summary>
+        private static List<string> CallersOf(MethodBase target, List<MethodBase> universe)
+        {
+            var hits = new List<string>();
+            if (target == null) return hits;
+            foreach (var m in universe)
+                foreach (var callee in CalleeSequence(m))
+                    if (callee.MetadataToken == target.MetadataToken && callee.Module == target.Module)
+                    { hits.Add(m.DeclaringType.Name + "." + m.Name); break; }
+            hits.Sort(StringComparer.Ordinal);
+            return hits;
+        }
+
+        private static int IndexOfCall(List<MethodBase> seq, string name, string ownerContains = null)
+        {
+            for (int i = 0; i < seq.Count; i++)
+                if (seq[i].Name == name &&
+                    (ownerContains == null || (seq[i].DeclaringType?.Name ?? "").Contains(ownerContains)))
+                    return i;
+            return -1;
+        }
+
+        /// <summary>L50 — THE WALK CANNOT GO MONOLITHIC AGAIN.
+        ///
+        /// Measured defect (user host log 2026-07-30, 275 ticks): every forced flush ran a single-shot walk
+        /// of the WHOLE graph inside one frame — walk p50=40 ms, p90=60 ms, max=95 ms — and the Unity frame
+        /// counter on those same lines reads 60 fps across periodic sliced cycles but 10-37 fps across the
+        /// windows bounded by forced ticks. The forced path is reached from IntentRail.ShouldRunNative, which
+        /// EVERY capture seam calls on every invocation, so an equip/augment screen bought several whole-graph
+        /// walks per click. The fix deleted the monolithic walker outright.
+        ///
+        /// Structural falsification, in three arms, none of which a comment can satisfy:
+        ///   A. the root LIST may be enumerated in exactly one place (BeginCycle, which only snapshots it);
+        ///   B. a root may be VISITED from exactly one place (RunSlice);
+        ///   C. that one place must actually read the per-frame budget.
+        /// Re-adding a monolithic walk has to break one of the three: a second Roots() enumeration trips A, a
+        /// second VisitRoot caller trips B, and deleting the budget check inside RunSlice trips C.
+        /// NON-VACUITY: the universe is every method our assembly declares (OurMethods, from metadata — not a
+        /// hand-written list), and each arm demands its expected caller be FOUND. An empty caller set is a
+        /// violation, so the law cannot pass by looking at nothing.</summary>
+        private static IEnumerable<string> SlicedWalkLaw()
+        {
+            var universe = OurMethods();
+            if (universe.Count == 0)
+            {
+                yield return "L50 vacuous: no methods found in the mod assembly — the caller-set arms scanned nothing";
+                yield break;
+            }
+            var roots = typeof(IdentityResolver).GetMethod("Roots", AllMembers);
+            var visitRoot = typeof(DiffEngine).GetMethod("VisitRoot", AllMembers);
+            var runSlice = typeof(DiffEngine).GetMethod("RunSlice", AllMembers);
+            var budget = typeof(DiffEngine).GetField("SliceBudgetMs", AllMembers);
+            if (roots == null || visitRoot == null || runSlice == null || budget == null)
+            {
+                yield return "L50 unresolved: IdentityResolver.Roots / DiffEngine.VisitRoot / RunSlice / SliceBudgetMs " +
+                             "did not all resolve — the sliced-walk law cannot be evaluated and asserts nothing";
+                yield break;
+            }
+
+            // Arm A — the MONOLITHIC SHAPE itself is banned: no single method may both enumerate the root
+            // list and walk roots. Shape, not identity, because enumerating Roots is legitimate on its own —
+            // GenericApplier.ClientCrcTick reads the list to pick ONE root per second (it breaks at a
+            // rotation cursor and never calls VisitRoot). What can never be legitimate again is the pair,
+            // which is literally `foreach (root in Roots) VisitRoot(root)` = the deleted monolithic tick.
+            var rootCallers = CallersOf(roots, universe);
+            if (rootCallers.Count == 0 || !rootCallers.Contains("DiffEngine.BeginCycle"))
+                yield return "L50 vacuous: IdentityResolver.Roots is enumerated by [" + string.Join(", ", rootCallers) +
+                             "] — DiffEngine.BeginCycle is not among them, so the cycle-start snapshot this law " +
+                             "assumes does not exist and arm A is asleep";
+            foreach (var m in universe)
+            {
+                var seq = CalleeSequence(m);
+                bool enumerates = seq.Any(c => c.MetadataToken == roots.MetadataToken && c.Module == roots.Module);
+                bool walks = seq.Any(c => c.MetadataToken == visitRoot.MetadataToken && c.Module == visitRoot.Module);
+                if (enumerates && walks)
+                    yield return "L50 walk-all-roots: " + m.DeclaringType.Name + "." + m.Name + " both enumerates " +
+                                 "IdentityResolver.Roots and calls VisitRoot — that one method can read the WHOLE graph " +
+                                 "inside a single frame, which is the monolithic tick returning (measured 34-95 ms " +
+                                 "main-thread stall per forced flush, host at ~1/3 the clients' framerate)";
+            }
+
+            // Arm B — one root-visiting loop, and it is the budget-gated slice.
+            var visitCallers = CallersOf(visitRoot, universe);
+            if (visitCallers.Count == 0)
+                yield return "L50 vacuous: nothing calls DiffEngine.VisitRoot — arm B found no walk at all";
+            else if (visitCallers.Count != 1 || visitCallers[0] != "DiffEngine.RunSlice")
+                yield return "L50 unsliced-walk: DiffEngine.VisitRoot is called from [" + string.Join(", ", visitCallers) +
+                             "] — RunSlice must be the only caller. Any other caller can visit roots outside the " +
+                             "per-frame budget, i.e. a whole-graph walk inside one frame";
+
+            // Arm C — the surviving loop genuinely consults the budget.
+            if (!ReadsField(runSlice, budget))
+                yield return "L50 budget-bypassed: DiffEngine.RunSlice does not read SliceBudgetMs — the slice loop " +
+                             "no longer stops on the per-frame budget, so a cycle runs to completion in one frame " +
+                             "and slicing is decoration";
         }
 
         private static int OperandSize(OperandType t, byte[] il, int pos)

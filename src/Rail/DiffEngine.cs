@@ -46,7 +46,10 @@ namespace Multiplayer.Network.Sync
         internal const int MaxValueBytes = 8192;   // per-entry cap: 45000 + 8192 stays under the u16 envelope
         private const int MaxEntities = 50000;     // graph-chase brake
         private const int MaxDepth = 12;
-        private const double SliceBudgetMs = 3.0;  // per-frame walk budget of the sliced periodic cycle
+        // Per-frame walk budget. A static readonly FIELD, not a const, on purpose: a const is inlined into
+        // the IL as a literal and RailCheck L50 could then no longer see that the walk loop actually reads
+        // a budget — i.e. it could not tell a budget-gated walk from a monolithic one.
+        internal static readonly double SliceBudgetMs = 3.0;
 
         internal struct Entry
         {
@@ -260,7 +263,13 @@ namespace Multiplayer.Network.Sync
         private static int _cycleFrames;
         private static double _cycleWalkMs;
         private static double _maxSliceMs;
-        private static bool _flushPending;
+
+        // The forced-emit scope THIS cycle carries, snapshotted at BeginCycle. The dict CENSUS is
+        // walk-ORDER sensitive (ForcedNow is asked during the walk), so a prefix armed halfway through a
+        // cycle would silently miss every root already passed. Snapshotting is what lets a late force stay
+        // armed for its OWN next cycle instead of abandoning and restarting this one — see HostTick.
+        private static readonly List<string> _cycleForcePrefixes = new List<string>();
+        private static bool _cycleForceFull;
 
         // ─── Lifecycle (driven by SyncEngine) ──────────────────────────────
 
@@ -278,7 +287,6 @@ namespace Multiplayer.Network.Sync
         public static void ResetForReloadBoundary()
         {
             AbandonCycle();
-            _flushPending = false;
             _snapshot = new Dictionary<string, Entry>(StringComparer.Ordinal);
             _sentKinds.Clear();
             _prevRoots.Clear(); _rootsSeeded = false; // re-seed silently on the post-boundary baseline walk
@@ -328,8 +336,6 @@ namespace Multiplayer.Network.Sync
                     return true;
             return false;
         }
-
-        private static bool MatchesForcePrefix(string path) => PrefixMatch(_forcePrefixes, path);
 
         private static GeoLevelController GeoLevel()
         {
@@ -444,16 +450,32 @@ namespace Multiplayer.Network.Sync
 
         // ─── Host tick: walk → diff → emit ─────────────────────────────────
 
-        /// <summary>Ship host state NOW instead of waiting out the 0.5 s poll: the next HostTick call
-        /// (same frame when the seam fires before NetworkEngine.Update, else next frame) runs one
-        /// SINGLE-SHOT monolithic tick — never sliced, so the whole graph is read and shipped in that one
-        /// frame (and a ForceReemit scope gets its census from root 0). An in-progress sliced cycle is
-        /// abandoned first: it has shipped nothing (shipping happens only at cycle completion), so nothing
-        /// is lost and nothing double-ships.
+        /// <summary>Ship host state as soon as the walk can carry it: start the sliced cycle NOW instead of
+        /// waiting out the rest of the 0.5 s poll. That is ALL it does, and the "that is all" is the fix.
+        ///
+        /// It used to run one SINGLE-SHOT MONOLITHIC tick — the whole graph read in ONE frame — after
+        /// abandoning any cycle in progress. Measured on the user's own host log (2026-07-30, 275 ticks):
+        /// walk p50=40 ms / p90=60 ms / max=95 ms, and the Unity frame counter in the same lines reads
+        /// 60 fps across the periodic sliced cycles but 10-37 fps across exactly the windows bounded by
+        /// forced ticks (110 of 275 inter-tick gaps were under 0.45 s, i.e. forced). The callers are not
+        /// rare: <see cref="FlushOnHostGesture"/> sits at the top of <c>IntentRail.ShouldRunNative</c>,
+        /// which every capture seam calls on EVERY invocation — and an equip/augment screen re-flushes
+        /// <c>GeoCharacter.SetItems</c> several times per click (EquipSync's own repeat-guard note: "6-7
+        /// frames in a row after one drag"). So the host paid 6-7 whole-graph walks per drag. That is the
+        /// ~3x host framerate loss, and why it showed on the soldier and augmentation screens first.
+        ///
+        /// Now a flush can only make the cycle START earlier, never make a frame longer: all walk work
+        /// stays capped at <see cref="SliceBudgetMs"/> per frame, and N gestures inside one cycle coalesce
+        /// into ONE walk by construction (a cycle already running simply keeps running). Nothing is
+        /// skipped and no tick rate was lowered — the walk, its order and its emit are byte-identical.
+        /// COST, stated: a forced delta now ships at cycle completion (≤ ~250 ms at 60 fps) rather than in
+        /// the same frame. The periodic path always had that latency. Upgrade path if it ever matters: a
+        /// larger slice budget while a cycle is urgent — deliberately not built until something needs it.
+        ///
         /// No guards needed: <see cref="HostTick"/> still returns on non-host / no session / no geoscape,
         /// so this can be called from any seam that knows the host just changed something the client
         /// must not wait for.</summary>
-        public static void FlushNow() { _nextTickAt = 0f; _flushPending = true; }
+        public static void FlushNow() { _nextTickAt = 0f; }
 
         /// <summary>N3 third arm — HOST-LOCAL gestures. The law-4a capture seams fire on the host too
         /// (they conclude "run native"); this is their one-line exit into the same change-driven flush
@@ -506,11 +528,13 @@ namespace Multiplayer.Network.Sync
         {
             if (engine == null || !engine.IsHost || !engine.IsActiveSession) return;
             float now = Time.realtimeSinceStartup;
-            // A forced walk (FlushNow / ForceReemit / full resend) must see its scope from root 0: a
-            // half-walked cycle can no longer census or force-re-emit roots it already passed. Nothing
-            // has shipped (shipping happens only at cycle completion), so dropping the partial walk
-            // loses nothing and cannot double-ship.
-            if ((_flushPending || _forceFull) && _cycleRoots != null) AbandonCycle();
+            // A force NEVER abandons a cycle in progress any more. It cannot: abandoning is what let a
+            // gesture storm cost one whole-graph walk per gesture, and it also had a silent starvation
+            // mode (forces arriving faster than a cycle completes ⇒ every cycle restarted ⇒ nothing ever
+            // shipped, with no log line). The scope a force needs from root 0 is the dict census, and that
+            // is preserved instead by snapshotting the scope at BeginCycle: a force armed mid-cycle is not
+            // in this cycle's snapshot, so it survives in _forcePrefixes/_forceFull and gets its own cycle
+            // on the very next frame (FlushNow already zeroed _nextTickAt).
             if (_cycleRoots == null && now < _nextTickAt) return;
             var geo = GeoLevel();
             if (geo == null) { AbandonCycle(); _nextTickAt = now + TickInterval; return; }
@@ -520,29 +544,16 @@ namespace Multiplayer.Network.Sync
             {
                 if (_cycleRoots != null) { RunSlice(engine); return; }
                 _nextTickAt = now + TickInterval;
-                if (_flushPending || _forceFull)
-                {
-                    // Forced walks stay SINGLE-SHOT (the pre-slicing path, semantics byte-identical):
-                    // rare and event-driven (pause/speed click, intent seam, resync) — one hitch, never
-                    // rhythmic.
-                    _flushPending = false;
-                    Tick(engine, geo);
-                }
-                else
-                {
-                    BeginCycle(geo);
-                    RunSlice(engine);
-                }
+                BeginCycle(geo);
+                RunSlice(engine);
             }
             catch (Exception ex)
             {
                 Debug.LogError("[Multiplayer][rail] DiffEngine tick failed: " + ex);
                 AbandonCycle();
-                // _forceFull self-retries monolithically (checked at the top of the try); a pending
-                // ForceReemit scope retries the same way — dropping the prefixes here would silently lose
-                // the client's convergence re-emit (nothing shipped this tick).
-                if (_forcePrefixes.Count > 0) _flushPending = true;
-                // Backoff, never latch-off: FlushNow here (_nextTickAt=0) retried monolithically —
+                // The forced scope needs nothing re-armed here: DiffAndEmit never ran, so it never
+                // consumed _forceFull / _forcePrefixes and the next cycle picks the same scope back up.
+                // Backoff, never latch-off: FlushNow here (_nextTickAt=0) retried —
                 // and re-logged the exception — EVERY FRAME while the failure persisted. Hold the
                 // still-armed retry ≥1 s; a fresh external FlushNow (intent seam, pause/speed click)
                 // resets _nextTickAt to 0 and still fires immediately.
@@ -572,6 +583,11 @@ namespace Multiplayer.Network.Sync
         private static void BeginCycle(GeoLevelController geo)
         {
             BeginWalkState();
+            // Freeze the forced-emit scope for the whole cycle (see _cycleForcePrefixes): the census is
+            // asked DURING the walk, so the scope must not change under it.
+            _cycleForcePrefixes.Clear();
+            _cycleForcePrefixes.AddRange(_forcePrefixes);
+            _cycleForceFull = _forceFull;
             _cycleRoots = new List<KeyValuePair<string, object>>();
             foreach (var r in IdentityResolver.Roots(geo)) _cycleRoots.Add(r);
             _cycleNext = 0; _cycleFrames = 0; _cycleWalkMs = 0; _maxSliceMs = 0;
@@ -613,22 +629,10 @@ namespace Multiplayer.Network.Sync
             BeginWalkState();
         }
 
-        /// <summary>Single-shot walk+diff+emit — the pre-slicing shape, kept for the forced paths
-        /// (FlushNow same-frame contract, ForceReemit census scope, full resend). Rare, one hitch
-        /// accepted.</summary>
-        private static void Tick(NetworkEngine engine, GeoLevelController geo)
-        {
-            var sw = Stopwatch.StartNew();
-            BeginWalkState();
-            int roots = 0;
-            foreach (var root in IdentityResolver.Roots(geo))
-            {
-                roots++;
-                VisitRoot(root.Key, root.Value);
-            }
-            long walkMs = sw.ElapsedMilliseconds;
-            DiffAndEmit(engine, walkMs, walkMs, 1, roots);
-        }
+        // The single-shot monolithic Tick() that used to live here is DELETED, not disabled. It was the
+        // ONE way a whole-graph walk could land inside a single frame, and every forced path took it —
+        // which is the measured 34-95 ms host stall (see FlushNow). There is now exactly one walk driver,
+        // RunSlice, and it is budget-gated; RailCheck L50 asserts that structurally.
 
         private static void DiffAndEmit(NetworkEngine engine, long walkMs, double maxSliceMs, int frames, int roots)
         {
@@ -640,10 +644,10 @@ namespace Multiplayer.Network.Sync
             // kept the previous tick's array (RailMeta.EncodeFieldValue with prev), so BytesEqual's
             // ReferenceEquals fast path settles it without a byte compare.
             var changed = new List<Entry>();
-            bool anyForced = _forcePrefixes.Count > 0;
+            bool anyForced = _cycleForcePrefixes.Count > 0;
             foreach (var e in ordered)
-                if (_forceFull || !_snapshot.TryGetValue(e.Key, out var old) || !RailMeta.BytesEqual(old.Value, e.Value) ||
-                    (anyForced && MatchesForcePrefix(e.Path)))
+                if (_cycleForceFull || !_snapshot.TryGetValue(e.Key, out var old) || !RailMeta.BytesEqual(old.Value, e.Value) ||
+                    (anyForced && PrefixMatch(_cycleForcePrefixes, e.Path)))
                     changed.Add(e);
 
             // Built only if a stale subKey actually survives both guards below — normally nothing does, and
@@ -679,8 +683,10 @@ namespace Multiplayer.Network.Sync
             long diffMs = sw.ElapsedMilliseconds;
             _snapshotBack = _snapshot;   // this tick's snapshot becomes next tick's scratch, and vice versa
             _snapshot = newSnap;
-            bool wasForceFull = _forceFull;
-            _forceFull = false;
+            // Consume only what THIS cycle carried: a full resend armed mid-cycle shipped nothing and must
+            // survive into the cycle that will actually honour it.
+            bool wasForceFull = _cycleForceFull;
+            if (_cycleForceFull) _forceFull = false;
 
             if (!_reportWritten) { WriteCoverageReport(ordered.Count); _reportWritten = true; }
 
@@ -702,7 +708,9 @@ namespace Multiplayer.Network.Sync
                 return;
             }
             _baselined = true;
-            _forcePrefixes.Clear(); // consumed: the emit below carries the forced scope (censuses + values)
+            // Consumed: the emit below carries the forced scope (censuses + values). Only the prefixes THIS
+            // cycle walked with are retired — one armed mid-cycle never got its census and stays armed.
+            foreach (var p in _cycleForcePrefixes) _forcePrefixes.Remove(p);
 
             int packets = 0, bytes = 0;
             // Structural create/destroy FIRST: the same batch's value entries for a just-created root
@@ -961,7 +969,7 @@ namespace Multiplayer.Network.Sync
         /// <summary>True when this walk position is inside a forced re-emit scope (full resend, or a
         /// <see cref="ForceReemit"/> prefix) — the only ticks that ship dict censuses.</summary>
         private static bool ForcedNow(string path) =>
-            !_crcWalk && (_forceFull || (_forcePrefixes.Count > 0 && MatchesForcePrefix(path)));
+            !_crcWalk && (_cycleForceFull || (_cycleForcePrefixes.Count > 0 && PrefixMatch(_cycleForcePrefixes, path)));
 
         /// <summary>Resync-only dict CENSUS: the field's full present-key set, appended to this tick's
         /// emit but NEVER to the snapshot (normal ticks stay wire-identical). Closes the delete half of
