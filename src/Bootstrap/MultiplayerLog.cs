@@ -20,7 +20,12 @@ namespace Multiplayer.Util
     /// </summary>
     public static class MultiplayerLog
     {
-        private const string Prefix = "[Multiplayer]";
+        /// <summary>Every prefix the mod's own <c>Debug.Log</c> call sites actually use. The original
+        /// single <c>"[Multiplayer]"</c> literal matched the bootstrap/lobby banner only, so the WHOLE
+        /// rail — every <c>[MP][events]</c>, <c>[MP][rail]</c>, <c>[MP][vehicle]</c> line — was filtered
+        /// OUT of multiplayer*.log and existed solely in Unity's Player.log. Diagnosis then needed two
+        /// files, and the one the mod ships was the one missing the evidence.</summary>
+        private static readonly string[] Prefixes = { "[MP]", "[Multiplayer]" };
         private const string DirName = "Multiplayer";
         private const string LogName = "multiplayer.log";
         private const string PrevName = "multiplayer-prev.log";
@@ -152,11 +157,21 @@ namespace Multiplayer.Util
             }
         }
 
+        // Explicit loop, not Array.Exists: this runs on EVERY Unity log line in the game, and a
+        // closure capturing `condition` would allocate once per line.
+        private static bool IsOurs(string condition)
+        {
+            if (string.IsNullOrEmpty(condition)) return false;
+            for (int i = 0; i < Prefixes.Length; i++)
+                if (condition.IndexOf(Prefixes[i], StringComparison.Ordinal) >= 0) return true;
+            return false;
+        }
+
         // logMessageReceived can fire off the main thread; everything here is under Gate and
         // wrapped so a logging fault can never throw back into the engine.
         private static void Handler(string condition, string stackTrace, LogType type)
         {
-            if (string.IsNullOrEmpty(condition) || condition.IndexOf(Prefix, StringComparison.Ordinal) < 0)
+            if (!IsOurs(condition))
                 return;
 
             lock (Gate)
