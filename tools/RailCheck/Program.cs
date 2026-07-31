@@ -113,6 +113,7 @@ namespace RailCheck
             laws.AddRange(DerivedObjectivesLaw(game));
             laws.AddRange(SiteStatusTwinLaw());
             laws.AddRange(RejectScopeLaw());
+            laws.AddRange(PeerLocalContainmentLaw(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -1968,6 +1969,111 @@ namespace RailCheck
                 yield return "L25 msg-byte-collision: the CRC report shares its leading byte with another 0xAC message " +
                              "kind — it would be parsed as that one, silently";
         }
+
+        /// <summary>L58 — PEER-LOCAL CONTAINMENT. Hashing a walk that CONTAINS a peer-local element must equal
+        /// hashing the same walk with that element ABSENT: a peer-local element may contribute neither its own
+        /// entries nor its KEY to any ancestor's order-vector / census.
+        ///
+        /// The half that was missing, and it cost three permanently diverged base roots (S#98/S#99/S#170,
+        /// both clients agreeing and the HOST alone disagreeing, never healing): the opt-out was declared as a
+        /// subtree PREFIX only (`…_facilities#&lt;id&gt;`), but a keyed collection also ships an ORDER VECTOR at
+        /// the OWNER path — which is SHORTER than that prefix, so <see cref="DiffEngine.CrcOfEntries"/>'s
+        /// whole-segment PrefixMatch can never reach it. Every peer therefore hashed its own locally-minted
+        /// corridor ids, and the same vector on the wire made ReorderByKeys shuffle the client's corridors
+        /// against host ids it does not own.
+        ///
+        /// Three halves, all driven through the REAL functions:
+        /// (a) live anchor — <c>DiffEngine.IsPeerLocal</c> recognizes a real corridor <c>GeoPhoenixFacility</c>
+        ///     and rejects a plain one (a predicate matching nothing makes the law vacuous);
+        /// (b) emit site — <c>DiffEngine.VisitEntity</c> must CONSULT it. Falsifier: move the decision back
+        ///     below the element-collection point and the peer-local key is already in `elems`, riding
+        ///     AddKeyOrder no matter what the prefix set says;
+        /// (c) containment on the real key-order codec + the real Crc32 — the owner's vector built through
+        ///     IsPeerLocal, plus the peer-local element's own entry excluded by its declared prefix, hashes
+        ///     EXACTLY as the walk that never saw the element; and the prefix alone provably CANNOT rescue an
+        ///     unfiltered vector (the mechanism check that says why the fix has to live at the emit site).
+        /// Falsify (c) by making IsPeerLocal return false.</summary>
+        private static IEnumerable<string> PeerLocalContainmentLaw(Assembly game)
+        {
+            var isPeerLocal = typeof(DiffEngine).GetMethod("IsPeerLocal", AllMembers);
+            var visit = typeof(DiffEngine).GetMethod("VisitEntity", AllMembers);
+            if (isPeerLocal == null || visit == null)
+            {
+                yield return "L58 peer-local-predicate-absent: DiffEngine.IsPeerLocal/VisitEntity no longer resolve — " +
+                             "the per-peer opt-out has no single decision point and nothing keeps it out of the owner's vector";
+                yield break;
+            }
+            var facType = game.GetType("PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility");
+            object corridor = null, plain = null;
+            if (facType != null)
+                try
+                {
+                    corridor = Activator.CreateInstance(facType, nonPublic: true);
+                    plain = Activator.CreateInstance(facType, nonPublic: true);
+                    facType.GetField("IsCorridor", AllMembers).SetValue(corridor, true);
+                    facType.GetField("FacilityId", AllMembers).SetValue(corridor, 8u);
+                    facType.GetField("FacilityId", AllMembers).SetValue(plain, 7u);
+                }
+                catch { corridor = plain = null; }
+            if (corridor == null || plain == null)
+            {
+                yield return "L58 anchor-unconstructible: GeoPhoenixFacility no longer constructs with IsCorridor/" +
+                             "FacilityId — the only peer-local declaration the rail makes cannot be exercised and " +
+                             "this law is vacuous";
+                yield break;
+            }
+
+            // (a) the predicate is alive and narrow.
+            if (!DiffEngine.IsPeerLocal(corridor))
+                yield return "L58 predicate-blind: DiffEngine.IsPeerLocal does not recognize a corridor GeoPhoenixFacility " +
+                             "— the rail's only per-peer opt-out matches nothing and every base site mirrors ghost corridors";
+            if (DiffEngine.IsPeerLocal(plain))
+                yield return "L58 predicate-overbroad: DiffEngine.IsPeerLocal claims a NON-corridor facility is per-peer — " +
+                             "real facilities would drop out of the order vector and never reorder on any client";
+
+            // (b) the emit site must consult it BEFORE it builds the order vector. ORDER, not mere presence:
+            // the pre-fix rail DID test for a corridor, one rung too low — in the per-element descend arm,
+            // by which point AddKeyOrder had already shipped the key — and a presence-only check calls that
+            // green. This is the half whose absence WAS the S#98/S#99/S#170 divergence.
+            var seq = CalleeSequence(visit).Select(c => c.Name).ToList();
+            int atPredicate = seq.IndexOf(isPeerLocal.Name);
+            int atVector = seq.IndexOf("AddKeyOrder");
+            if (atPredicate < 0 || atVector < 0)
+                yield return "L58 emit-site-unfiltered: DiffEngine.VisitEntity's IL reaches IsPeerLocal=" +
+                             (atPredicate >= 0) + " AddKeyOrder=" + (atVector >= 0) + " — the walk either stopped " +
+                             "asking which elements are peer-local or stopped shipping a key vector, and either way " +
+                             "nothing keeps a locally-minted key out of the owner's vector";
+            else if (atPredicate > atVector)
+                yield return "L58 opt-out-too-low: DiffEngine.VisitEntity consults IsPeerLocal only AFTER AddKeyOrder — " +
+                             "the element is already in the container's element list, so its locally-minted key rides " +
+                             "the owner's ORDER VECTOR, which sits above every peer-local prefix and can never be excluded";
+
+            // (c) containment, through the real codec and the real hash.
+            const string owner = "S#7.Layout._facilities";
+            var prefixes = new[] { owner + "#8" };
+            var kept = new List<string>();
+            foreach (var e in new[] { plain, corridor })
+                if (!DiffEngine.IsPeerLocal(e)) kept.Add(IdentityResolver.KeyOf(e));
+            var walkWith = new List<DiffEngine.Entry> { Vec(owner, kept), Ent(owner + "#8._health", 4, "", 3) };
+            var walkWithout = new List<DiffEngine.Entry> { Vec(owner, new List<string> { IdentityResolver.KeyOf(plain) }) };
+            if (DiffEngine.CrcOfEntries(walkWith, prefixes) != DiffEngine.CrcOfEntries(walkWithout, null))
+                yield return "L58 containment-broken: a walk containing a peer-local element does not hash equal to the " +
+                             "same walk without it — the peers' own corridor ids report permanent false divergence on " +
+                             "every base site and the CRC backstop re-emits forever without ever healing";
+            var unfiltered = new List<DiffEngine.Entry>
+            {
+                Vec(owner, new List<string> { IdentityResolver.KeyOf(plain), IdentityResolver.KeyOf(corridor) }),
+                Ent(owner + "#8._health", 4, "", 3),
+            };
+            if (DiffEngine.CrcOfEntries(unfiltered, prefixes) == DiffEngine.CrcOfEntries(walkWithout, null))
+                yield return "L58 prefix-overreach: declaring the peer-local PREFIX now also neutralizes the OWNER's " +
+                             "order vector — PrefixMatch has grown past whole-segment containment, which would silently " +
+                             "drop whole containers from the hash instead of just the opted-out element";
+        }
+
+        private static DiffEngine.Entry Vec(string path, List<string> keys) =>
+            new DiffEngine.Entry { Path = path, FieldIdx = 0, SubKey = "", Value = RailMeta.EncodeKeyOrder(keys, null),
+                                   Key = path + "" + (ushort)0 + "" };
 
         // L41's own stand-in for a game type that exposes a mutable store through a read-only view — the
         // shape RailMeta.MutableBehind must see THROUGH, driven here without a live GeoVehicle.

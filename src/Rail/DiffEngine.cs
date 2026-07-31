@@ -177,6 +177,24 @@ namespace Multiplayer.Network.Sync
         /// for them (vector-driven removal would also delete the client's corridors — per-peer ids).</summary>
         internal static bool IsStructuralElemType(Type t) => t != null && StructuralElemTypes.Contains(t);
 
+        /// <summary>PEER-LOCAL: derived decoration whose identity every peer mints for ITSELF, so the rail
+        /// deliberately mirrors none of it. Base corridors are the sole member today — load STRIPS them
+        /// (GeoPhoenixBaseLayout.InitAfterDeserialiaztion:903-918), each peer's native rebuild re-mints ids
+        /// off its own `++_lastFacilityId` (AddFacility:585), reshape replaces the object reusing the id and
+        /// removal zeroes it: the same visual corridor legitimately carries a different id on every peer, and
+        /// mirroring them yields ghost corridors.
+        ///
+        /// Consumed at the container's ELEMENT-COLLECTION point (VisitEntity's EntityCollection arm), which is
+        /// the whole law (RailCheck L58): a peer-local element is invisible to its OWNER, not merely inside its
+        /// own subtree — it contributes neither its own entries nor its KEY to the container's order/membership
+        /// vector. Declaring it only as a subtree PREFIX was a permanent CRC divergence on every base site
+        /// (S#98/S#99/S#170): the vector rides at the OWNER path, which is SHORTER than any peer-local prefix
+        /// and therefore unmatchable by <see cref="CrcOfEntries"/>'s whole-segment PrefixMatch, so each peer
+        /// hashed its own ids forever — and the shipped vector made ReorderByKeys shuffle the client's own
+        /// corridors against host ids it does not have.</summary>
+        internal static bool IsPeerLocal(object e) =>
+            e is PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility f && f.IsCorridor;
+
         // A Descend FIELD going null↔non-null is the THIRD structural shape — neither a root key nor a
         // keyed-collection element, and the one the set-diff had no representation for. Untreated it is a
         // silent swallow in BOTH directions: on null→obj every value entry under the path dies at
@@ -253,9 +271,10 @@ namespace Multiplayer.Network.Sync
         private static readonly Dictionary<string, uint> _rootTouchedSeq = new Dictionary<string, uint>(StringComparer.Ordinal);
         private static readonly Dictionary<string, int> _crcHeals = new Dictionary<string, int>(StringComparer.Ordinal); // "<peer>|<root>" → re-emits spent
         private static bool _crcWalk;   // inside RootCrc: the walk must ship NOTHING and touch no tick state
-        // Subtree paths the rail declares PER-PEER (base corridors — derived, locally-issued ids). Recorded
-        // by the walk at its own opt-out site; excluded from the CRC because both peers legitimately hold
-        // different ones, so hashing them would report permanent false divergence.
+        // Subtree paths the rail declares PER-PEER (see IsPeerLocal). Recorded by the walk where it drops the
+        // element; excluded from the CRC because both peers legitimately hold different ones, so hashing them
+        // would report permanent false divergence. BELT ONLY since law 58: the element is dropped at its
+        // container, so nothing under these paths is emitted in the first place.
         private static readonly HashSet<string> _peerLocalPaths = new HashSet<string>(StringComparer.Ordinal);
 
         private static List<KeyValuePair<string, object>> _cycleRoots;
@@ -884,6 +903,18 @@ namespace Multiplayer.Network.Sync
                             if (e == null) continue;
                             var k = IdentityResolver.KeyOf(e);
                             if (k == null) { keyless = true; break; }
+                            // PEER-LOCAL ELEMENTS ARE DROPPED HERE (law 58) — before the element exists for
+                            // this container at all, so it contributes neither a key to the order vector below
+                            // nor any entry of its own. _peerLocalPaths still records the subtree so the CRC
+                            // belt holds for anything that reaches the object by another path.
+                            if (IsPeerLocal(e))
+                            {
+                                _peerLocalPaths.Add(path + "." + f.Name + "#" + k);
+                                if (_structuralSkipsLogged.Add("peer-local-optout"))
+                                    Debug.Log("[Multiplayer][rail] peer-local elements opted out (corridors: derived, " +
+                                              "locally-minted ids — logged once)");
+                                continue;
+                            }
                             elems.Add((k, e));
                         }
                         List<string> liveKeys = null;
@@ -934,29 +965,11 @@ namespace Multiplayer.Network.Sync
                         }
                         if (liveKeys != null)
                             AddKeyOrder(ordered, snap, rt, f, (ushort)i, kindId, path, liveKeys);
-                        foreach (var (key, e) in elems) // already sorted ordinal above
+                        foreach (var (key, e) in elems) // already sorted ordinal above; peer-locals already gone
                         {
                             var childPath = path + "." + f.Name + "#" + key;
-                            if (StructuralElemTypes.Contains(e.GetType()))
-                            {
-                                // CORRIDORS OPT OUT: derived per-peer decoration with UNSTABLE ids —
-                                // load STRIPS them (GeoPhoenixBaseLayout.InitAfterDeserialiaztion:904-919),
-                                // reshape replaces the object reusing the id (:677), removal zeroes it
-                                // (:231) — so host/client can hold different ids for the same visual
-                                // corridor. Mirroring them = ghost corridors; each peer's native rebuild
-                                // derives its own from real-facility placement.
-                                if (e is PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility pf && pf.IsCorridor)
-                                {
-                                    // The one PER-PEER declaration in the rail: also excluded from the law-7
-                                    // subtree CRC, or every base site would hash unequal forever (each peer
-                                    // holds its own corridor ids, so its own element paths).
-                                    _peerLocalPaths.Add(childPath);
-                                    if (_structuralSkipsLogged.Add("corridor-optout"))
-                                        Debug.Log("[Multiplayer][rail] structural: corridors opted out (derived, per-peer ids — logged once)");
-                                }
-                                else if (!_crcWalk)
-                                    _walkRoots[childPath] = e; // structural element set-diff (create/destroy)
-                            }
+                            if (!_crcWalk && StructuralElemTypes.Contains(e.GetType()))
+                                _walkRoots[childPath] = e; // structural element set-diff (create/destroy)
                             VisitEntity(childPath, e, visited, ordered, snap, depth + 1);
                         }
                         break;

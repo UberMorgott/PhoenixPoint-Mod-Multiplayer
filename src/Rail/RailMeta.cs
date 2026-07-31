@@ -1964,6 +1964,7 @@ namespace Multiplayer.Network.Sync
             foreach (var e in src)
             {
                 if (e == null) continue;
+                if (DiffEngine.IsPeerLocal(e)) continue; // law 58 — same filter the host's vector applies
                 var k = IdentityResolver.KeyOf(e);
                 if (k == null) return null;
                 keys.Add(k);
