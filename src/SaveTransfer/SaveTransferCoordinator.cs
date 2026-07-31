@@ -601,27 +601,29 @@ namespace Multiplayer.Network
         /// HOST (entry-via-save, Batch 1): at deploy-ready, write a byte-identical mid-tactical save and
         /// ship it over the SAME chunked transfer + LOADED/BEGIN barrier the F2 reload uses, so the client
         /// builds its tactical level from the host's exact bytes. Self-gated (flag + host + tactical + no
-        /// transfer in flight, via <see cref="Sync.Tactical.TacticalEntryTransferGate"/>). Unlike F2/lobby
+        /// transfer in flight — checked inline below). Unlike F2/lobby
         /// the host does NOT re-enter from the blob (it is already in this live tactical level). Returns
         /// true iff the write+send coroutine launched.
         /// </summary>
-        // ── DEAD until the tactical arc (rail migration step 7) ──────────────────────────────
-        // The whole tac-entry/return-barrier machinery (this method + HostTacticalEntryTransferCrt +
-        // AbortTacticalEntryTransfer/OnEntryTransferAbort + OpenTacticalEntryBarrier/OpenReturnBarrier +
-        // _hostEntryHold) has ZERO live callers in this repo and is self-gated below (go=false). Kept,
-        // not deleted: it is interwoven with the live barrier/reveal state (Begin's _hostEntryHold gate,
-        // the 0x47 route + codec), so severing it would touch live paths for no in-game gain.
+        // ── LIVE since tactical arc A1 ───────────────────────────────────────────────────────
+        // Caller: Tactical/TacticalEntry.cs TacDeployReadyCapture (host, at deploy-ready). The launch
+        // half (OpenTacticalEntryBarrier) is armed by TacLaunchGate on the same file. A1 deliberately
+        // adds NO wire surface: a geo→tac transition is a join into a level, so it rides law 1's native
+        // save-loader transfer rather than a snapshot on the delta path.
         public bool HostBeginTacticalEntryTransfer()
         {
             PhoenixGame game;
             PhoenixSaveManager saveManager;
             if (!TryGetGame(out game, out saveManager)) return false;
 
-            // Tactical entry-via-save stays in the quarry (rail migration step 7) — gate closed until then.
-            bool go = false;
-            if (!go)
+            // Same preconditions the F2/lobby path enforces, plus the tactical-only ones. Refusing is
+            // never silent: the caller turns a false into AbortTacticalEntryTransfer, because the
+            // reveal-hold armed at launch would otherwise park every peer forever.
+            if (!_engine.IsHost || !SessionStarted || TransferActive || !saveManager.IsTactical)
             {
-                Debug.LogWarning("[Multiplayer] HostBeginTacticalEntryTransfer blocked: tactical entry not migrated to the rail yet.");
+                Debug.LogWarning($"[Multiplayer] HostBeginTacticalEntryTransfer blocked: host={_engine.IsHost} " +
+                                 $"sessionStarted={SessionStarted} transferActive={TransferActive} " +
+                                 $"tactical={saveManager.IsTactical}");
                 return false;
             }
 
@@ -710,8 +712,21 @@ namespace Multiplayer.Network
             if (_engine.IsHost) return;
             string reason = "";
             try { reason = MessageSerializer.DeserializeEntryTransferAbort(msg.Payload); } catch { /* reason is diagnostics-only */ }
-            Debug.LogError("[Multiplayer] tac-entry transfer aborted by host (" + reason + ") — dropping stashed deploy + lifting curtain");
-            // Tactical deploy stash stays in the quarry — nothing to drop in the geoscape skeleton.
+            Debug.LogError("[Multiplayer] tac-entry transfer aborted by host (" + reason + ") — lifting curtain");
+            // No deploy stash to drop (A1 ships no snapshot surface — the save transfer IS the entry). What
+            // MUST be undone is the curtain this client dropped on the first chunk: no native level-load is
+            // coming to lift it, and OnSaveChunk also cleared _revealed, so the curtain GATE would park
+            // every lift forever. PerformDeferredLift is the RCA-hardened release (opens the gate, then
+            // resumes the PARKED native lift instead of racing it with a second direct LiftCurtain — see
+            // its own comment). MultiplayerUI.TacLoadAbort is deliberately NOT used here: its raw
+            // LiftCurtainEarly is exactly the competing-tail bug that latched the input lock.
+            ResetRx();
+            if (_downloadCurtain)
+            {
+                _downloadCurtain = false;
+                Multiplayer.UI.NativeWidgetFactory.EndDownloadBar();
+            }
+            PerformDeferredLift();
         }
 
         // Write a mid-tactical save (QuickSave's tactical branch: IsTactical-tagged, TacticalGameParams.
@@ -1046,9 +1061,8 @@ namespace Multiplayer.Network
         /// so its phase-1 timeout clock covers only the client's real download+load window. _begun
         /// (SessionStarted) is deliberately LEFT set (the host is already in a live co-op level) so the
         /// curtain hold engages and mid-tactical F2 keeps working; Begin() still fires via the _hostEntryHold
-        /// relaxation. Gated by <see cref="Sync.Tactical.TacticalEntryBarrierGate"/> at the call site.
+        /// relaxation. Caller (arc A1): Tactical/TacticalEntry.cs TacLaunchGate, host arm.
         /// </summary>
-        // DEAD until the tactical arc — no caller; see the fence note at HostBeginTacticalEntryTransfer.
         public void OpenTacticalEntryBarrier()
         {
             _hostEntryHold = true;
@@ -1069,8 +1083,8 @@ namespace Multiplayer.Network
         /// overlay + per-slot progress pump also work for free. Failure belts are the existing ones:
         /// roster shrink on peer-left, 180 s host forced-reveal + per-peer self-reveal.
         /// </summary>
-        // DEAD until the tactical arc — no caller (the TacticalLevelEndPatch that drove it stayed in
-        // the quarry); see the fence note at HostBeginTacticalEntryTransfer.
+        // DEAD until the MISSION-END arc — no caller yet (the TacticalLevelEndPatch that drove it stayed
+        // in the quarry). Arc A1 wires ENTRY only; the tac→geo return is a later arc.
         public void OpenReturnBarrier()
         {
             if (_engine == null || !_engine.IsActive || !SessionStarted) return; // live co-op sessions only

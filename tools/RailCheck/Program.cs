@@ -116,6 +116,8 @@ namespace RailCheck
             laws.AddRange(PeerLocalContainmentLaw(game));
             laws.AddRange(MistCoverageLaw(game));
             laws.AddRange(PersistentHudLaw(game));
+            laws.AddRange(TacEntryBlobLaw(game));
+            laws.AddRange(SurfaceBandLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -5538,6 +5540,163 @@ namespace RailCheck
         private static bool IsPresentation(Type t) =>
             t.FullName.IndexOf(".View.", StringComparison.Ordinal) >= 0 ||
             t.FullName.StartsWith("Base.UI", StringComparison.Ordinal);
+
+        /// <summary>L61 — THE TAC-ENTRY BLOB MUST BE REAL AND ITS FAILURE MUST BE LOUD (tactical arc A1).
+        /// A geo→tac transition is a JOIN INTO A LEVEL, so it rides law 1's native save-loader transfer:
+        /// the host writes a mid-tactical save, reads it back to bytes and ships it chunked; the client
+        /// builds its battle from those exact bytes. The known way for that to fail SILENTLY is the one
+        /// pinned in memory `pp-serializer-context-and-pump` (2026-06-18): a round-trip done through a
+        /// hand-built <c>Serializer</c> instead of the game's CONFIGURED one, or without a
+        /// <c>Timing</c> pump driving it, returns an EMPTY graph and throws NOTHING. That is very
+        /// probably what produced v1's "493 KB snapshot deserialized empty on a real client" post-mortem.
+        /// Four arms, all static, all on the real shipped IL:
+        ///   (a) the writer really goes through the game's own save API (SaveGame + ReadSavegameBinary);
+        ///   (b) it really drives them through a Timing pump (Call/CallSafe);
+        ///   (c) it never constructs its own Serializer;
+        ///   (d) an empty/failed blob reaches AbortTacticalEntryTransfer — never a silent return.
+        /// Plus the arm that makes the other four non-vacuous: the entry path must be ARMED. It sat here
+        /// fully written with ZERO callers and a `bool go = false` self-gate for the whole geoscape
+        /// migration; a law over a path nothing can reach asserts nothing.</summary>
+        private static IEnumerable<string> TacEntryBlobLaw(Assembly game)
+        {
+            var coord = typeof(Multiplayer.Network.SaveTransferCoordinator);
+            var mod = coord.Assembly;
+
+            var writer = IteratorBody(coord, "HostWriteTacticalSaveCrt");
+            var shipper = IteratorBody(coord, "HostTacticalEntryTransferCrt");
+            if (writer == null || shipper == null)
+            {
+                yield return "L61 body-unreadable: the tac-entry iterator bodies (HostWriteTacticalSaveCrt=" +
+                             (writer != null) + ", HostTacticalEntryTransferCrt=" + (shipper != null) + ") could not " +
+                             "be resolved, so NOTHING about the entry blob was actually checked";
+                yield break;
+            }
+
+            // The pump arm needs ORDER, not presence: the save round-trip is a coroutine, and `Timing.Current
+            // .CallSafe(saveManager.SaveGame(...), ex)` evaluates the inner call as an ARGUMENT — so in IL the
+            // pump is the callee immediately AFTER it. Dropping the pump off one of the two leaves the other's
+            // Timing call in the method and would pass a mere presence test.
+            var seq = CalleeSequence(writer);
+            var writes = Callees(writer, game).ToList();
+            bool nativeSave = seq.Any(c => c.Name == "SaveGame");
+            bool nativeRead = seq.Any(c => c.Name == "ReadSavegameBinary");
+            var ownSerializer = writes.FirstOrDefault(c => c.IsConstructor && c.DeclaringType == typeof(Serializer));
+
+            if (!nativeSave || !nativeRead)
+                yield return "L61 not-the-game-serializer: the tac-entry writer no longer round-trips through the " +
+                             "game's own save API (SaveGame=" + nativeSave + ", ReadSavegameBinary=" + nativeRead +
+                             ") — only PhoenixSaveManager.Serializer is the CONFIGURED instance, and any other route " +
+                             "produces an empty graph with no exception (pp-serializer-context-and-pump)";
+            for (int i = 0; i < seq.Count; i++)
+            {
+                if (seq[i].Name != "SaveGame" && seq[i].Name != "ReadSavegameBinary") continue;
+                var next = i + 1 < seq.Count ? seq[i + 1] : null;
+                if (next != null && next.DeclaringType == typeof(Base.Core.Timing) &&
+                    (next.Name == "Call" || next.Name == "CallSafe")) continue;
+                yield return "L61 unpumped: the tac-entry writer's " + seq[i].Name + " is not handed straight to a " +
+                             "Timing pump (Call/CallSafe) — an undriven serializer coroutine never advances, so the " +
+                             "blob comes back empty and NOTHING throws";
+            }
+            if (ownSerializer != null)
+                yield return "L61 hand-built-serializer: the tac-entry writer constructs its own " +
+                             ownSerializer.DeclaringType.Name + " — the game's configured instance is the ONLY one " +
+                             "with the custom type data registered; a fresh one silently serializes nothing";
+
+            if (!Callees(shipper, mod).Any(c => c.Name == "AbortTacticalEntryTransfer"))
+                yield return "L61 silent-empty-blob: the tac-entry shipper no longer reaches " +
+                             "AbortTacticalEntryTransfer — a zero-byte blob would then return quietly while the " +
+                             "reveal-hold armed at launch parks EVERY peer behind its curtain forever";
+
+            // ─── the arm that keeps the four above from being vacuous: is the path reachable at all? ───
+            var entry = coord.GetMethod("HostBeginTacticalEntryTransfer", AllMembers);
+            var barrier = coord.GetMethod("OpenTacticalEntryBarrier", AllMembers);
+            if (entry == null || barrier == null)
+            {
+                yield return "L61 entry-api-drift: HostBeginTacticalEntryTransfer / OpenTacticalEntryBarrier no " +
+                             "longer resolve on SaveTransferCoordinator — the arming arm checked nothing";
+                yield break;
+            }
+
+            Type[] declared;
+            try { declared = mod.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { declared = ex.Types.Where(t => t != null).ToArray(); }
+            var wanted = new HashSet<int> { entry.MetadataToken, barrier.MetadataToken };
+            var armed = new HashSet<int>();
+            foreach (var t in declared)
+                foreach (var m in t.GetMethods(AllMembers).Cast<MethodBase>().Concat(t.GetConstructors(AllMembers)))
+                {
+                    if (m.DeclaringType == coord) continue; // a self-call is not an arming caller
+                    foreach (var c in Callees(m, mod))
+                        if (wanted.Contains(c.MetadataToken)) armed.Add(c.MetadataToken);
+                }
+
+            if (!armed.Contains(barrier.MetadataToken))
+                yield return "L61 launch-unarmed: nothing outside SaveTransferCoordinator calls " +
+                             "OpenTacticalEntryBarrier — the host's reveal-hold is never armed before Loaded→Playing, " +
+                             "so the host reveals the battle alone while clients are still downloading it";
+            if (!armed.Contains(entry.MetadataToken))
+                yield return "L61 entry-unarmed: nothing outside SaveTransferCoordinator calls " +
+                             "HostBeginTacticalEntryTransfer — the whole tac-entry transfer is dead code again and " +
+                             "the client never receives a battle";
+        }
+
+        /// <summary>The compiler-generated MoveNext of an iterator method — the only place its real IL lives.</summary>
+        private static MethodBase IteratorBody(Type owner, string methodName)
+        {
+            foreach (var t in owner.GetNestedTypes(AllMembers))
+            {
+                if (t.Name.IndexOf("<" + methodName + ">", StringComparison.Ordinal) < 0) continue;
+                var mv = t.GetMethod("MoveNext", AllMembers);
+                if (mv != null) return mv;
+            }
+            return null;
+        }
+
+        /// <summary>L62 — SURFACE IDS ARE BANDED, AND THE BAND IS LOAD-BEARING. <c>SurfaceRouter.OnInbound</c>
+        /// consults the TACTICAL hook FIRST and returns the moment it claims an id, so a tactical surface
+        /// minted inside the geoscape band does not merely collide — it SILENTLY EATS every geoscape
+        /// envelope on that id, with no log line anywhere (v1 RCA 3ff508d: tactical ids at 0xA0-0xA3 ate
+        /// geoscape traffic for days). Hence the partition is a law, not a comment: <c>Geo*</c> = 0xA0-0xBF,
+        /// <c>Tac*</c> = 0x80-0x9F, every value unique, every name banded. Arc A1 adds no tactical surface
+        /// (entry rides the native save transfer), so this is the guard standing at the door for A2+.</summary>
+        private static IEnumerable<string> SurfaceBandLaw()
+        {
+            var fields = typeof(SurfaceIds)
+                .GetFields(BindingFlags.Public | BindingFlags.Static)
+                .Where(f => f.IsLiteral && f.FieldType == typeof(byte))
+                .OrderBy(f => f.Name, StringComparer.Ordinal)
+                .ToList();
+
+            if (fields.Count == 0)
+            {
+                yield return "L62 no-surfaces: SurfaceIds exposes no public const byte — the band law swept nothing";
+                yield break;
+            }
+
+            var byValue = new Dictionary<byte, string>();
+            foreach (var f in fields)
+            {
+                var v = (byte)f.GetRawConstantValue();
+                if (byValue.TryGetValue(v, out var owner))
+                    yield return "L62 id-collision: " + f.Name + " and " + owner + " both claim 0x" + v.ToString("X2") +
+                                 " — one sender would be routed into the other family's handler";
+                else byValue[v] = f.Name;
+
+                bool tac = f.Name.StartsWith("Tac", StringComparison.Ordinal);
+                bool geo = f.Name.StartsWith("Geo", StringComparison.Ordinal);
+                if (!tac && !geo)
+                    yield return "L62 unbanded-name: " + f.Name + " (0x" + v.ToString("X2") + ") starts with neither " +
+                                 "Geo nor Tac, so which band it must live in is undecidable — the partition that keeps " +
+                                 "the tactical-first router from eating geoscape traffic is only enforceable by name";
+                else if (geo && (v < 0xA0 || v > 0xBF))
+                    yield return "L62 geo-out-of-band: " + f.Name + " = 0x" + v.ToString("X2") + " is outside the " +
+                                 "geoscape band 0xA0-0xBF";
+                else if (tac && (v < 0x80 || v > 0x9F))
+                    yield return "L62 tac-out-of-band: " + f.Name + " = 0x" + v.ToString("X2") + " is outside the " +
+                                 "tactical band 0x80-0x9F — the tactical hook is consulted FIRST, so this id now " +
+                                 "silently swallows whatever geoscape surface shares it";
+            }
+        }
 
         private static readonly Dictionary<short, OpCode> OpCodeByValue = BuildOpCodes();
 
