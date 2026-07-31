@@ -104,7 +104,35 @@ BEHAVIOR (per-subsystem mirroring).
    hazard that appears the moment enemies move on a client). A5 also closed A4's two ceilings: a spawn with
    a runtime-generated `ComponentSetDef` is a NAMED refusal registered against its key
    (`TacticalActorKey.Refuse`) instead of a misleading "a spawn record never arrived", and the 0x84
-   resnapshot carries the host's archived corpse manifest. A6 (inventory UI, destructibles) pending.
+   resnapshot carries the host's archived corpse manifest. **A6** (law L69) = INVENTORY/LOOT + DESTRUCTIBLES,
+   and it takes **no new surface**: ops 5/6 on **0x84** plus op 3 on the 0x83 intent family; 0x85 stays free.
+   Inventory commits as a WHOLE BATCH because the game's does — every drag only stages an `InventoryQuery`
+   (`InventoryQuery.AddItem`:26-33 edits a private list), and the one model commit is
+   `InventoryQuery.SyncItems`:44-67, whose single caller in the assembly is
+   `UIStateInventory.ApplyInventoryActions`:898-903. Captured in a PREFIX (the staged `Items` already hold
+   what the native body will write, so it is a capture and not a result-ship, law 19) gated on the game's own
+   `WillModifyInventory`. AP is charged ONCE at the native point and never eagerly (v1 `6617846` deducted per
+   gesture, so `CanPayForTransfer`→`ActionPointRequirementSatisfied` then denied every further drag and the
+   screen locked): this arc only POSTFIX-OBSERVES `InventoryAbility.ApplyCosts()`, and the sole place it
+   charges is the host applying a client's already-closed session. Containers are addressed
+   `(actorKey, Inventory|Equipments)` — `ItemContainer` IS a `TacticalActorBase`, so crates and corpses are
+   keyed by the battle-start ordinal; items ride as ordered def guids and the host CHECKS the multiset is
+   preserved, which is what stops an edited layout minting equipment. v1's `TacCrateOpen` and `TacItemDestroy`
+   are FOLDED, not ported (`OpenCrateAbility` is an ordinary A3a rider; a consumed item simply leaves every
+   container in the batch), and `InventoryAbility` became a DECLARED LOCAL — its `Activate`:11-15 ends in
+   `ToInventoryViewState()`, so under A5's drop-list inversion it was yanking every peer's screen into an
+   inventory nobody there opened. Destructibles are keyed by `DestructableBase.GuidInScene`, the game's OWN
+   save key, but resolved through an index built the way `TacLevelSavegame`:49 enumerates them
+   (`Map.NavigableRoot` + `GetComponentsInChildrenStable`) — NEVER `SceneObjectIdsComponent.GetForScene`,
+   which is v1's mission-wide-dead lookup (`fc661b7`: it needs an ACTIVE tagged GameObject in exactly the
+   scene asked for, and `MapPlot`:230-243 reparents, merges and DESTROYS those registries) and is now
+   mechanically banned from the arc. A hit is addressed by its receiver's AIM POINT, which sits at the tile
+   centre and round-trips through `GetDamageReceiverForHit`'s own inverse — proved numerically, not assumed —
+   because one explosion damages many tiles that all share a single `ImpactHit.Point`. FALLS ARE DERIVED:
+   `CheckForFallAbilitiesToActivate`:1916-1935 runs per-peer off each peer's `OnMapUpdate`, so
+   `FallNoSupportAbility` stays a declared local by A5's autonomy rule. KNOWN A6 CEILING: dropping onto BARE
+   ground spawns a fresh `ItemContainer` that A4 does not replicate, so such a batch ships marked PARTIAL —
+   the rest crosses and the dropped item stays in that soldier's pack elsewhere, loudly.
    Shared-seed determinism = still a separate future project.
 6. **Canonical diff.** Same state → byte-identical Delta: traversal sorted by stable IDs, fixed
    field order, no nondeterministic dictionary walks. IMPLEMENTATION (recon-bound): diff walks the

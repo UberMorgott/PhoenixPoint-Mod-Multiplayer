@@ -342,6 +342,11 @@ namespace Multiplayer.Tactical
         /// spawn of the actor it names (the same argument that puts turn+end on 0x80).</summary>
         internal const byte OpSpawn = 3;
         internal const byte OpDeath = 4;
+        /// <summary>A6 — the two remaining tactical facts, on the SAME stream and for A4's reason. An
+        /// inventory hand-off must not be overtaken by the shot fired with the handed weapon, and a wall
+        /// must not be removed after the grenade record that removed it. 0x85 stays free.</summary>
+        internal const byte OpInventory = 5;
+        internal const byte OpEnvDamage = 6;
         /// <summary>Op 2 on <see cref="SurfaceIds.TacCommandIntent"/> (op 1 is the command). Registered by
         /// <c>TacticalCommandSync.RegisterIntents</c> — one family, one op table.</summary>
         internal const byte OpIntentResnap = 2;
@@ -366,6 +371,8 @@ namespace Multiplayer.Tactical
             MirrorApplyScope.Reset();
             CooldownDurationMirror.Reset();
             TacticalActorLifecycle.Reset();   // A4: pending deaths, loot memos and the spawn-apply depth
+            TacticalInventorySync.Reset();    // A6: the observed AP charge waiting for its batch
+            TacticalDestruction.Reset();      // A6: the previous battle's destructible index
         }
 
         internal static void SayOnce(string key, string message)
@@ -540,6 +547,8 @@ namespace Multiplayer.Tactical
                     else if (op == OpResnap) ApplyResnap(r);
                     else if (op == OpSpawn) TacticalActorLifecycle.ApplySpawn(r);
                     else if (op == OpDeath) TacticalActorLifecycle.ApplyDeath(r);
+                    else if (op == OpInventory) TacticalInventorySync.ApplyInventory(r);
+                    else if (op == OpEnvDamage) TacticalDestruction.ApplyEnvDamage(r);
                     else
                     {
                         Debug.LogError("[Multiplayer][tac] unknown host→all result op " + op + " (seq=" + seq +
@@ -660,7 +669,7 @@ namespace Multiplayer.Tactical
         /// <summary>Overwrite from the host's snapshot AND report it. A correction that is not zero means
         /// something on this peer re-derived a number the host had already resolved — which is precisely the
         /// double-apply that <see cref="MirrorApplyScope"/> exists to prevent — so it is never silent.</summary>
-        private static void Correct(BaseStat stat, float authoritative, string what)
+        internal static void Correct(BaseStat stat, float authoritative, string what)
         {
             if (stat == null || float.IsNaN(authoritative)) return;
             float mine = stat;

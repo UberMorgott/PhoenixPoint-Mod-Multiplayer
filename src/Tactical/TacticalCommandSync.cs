@@ -643,6 +643,10 @@ namespace Multiplayer.Tactical
             { typeof(FallNoSupportAbility),
               "ambient: TacticalLevelController.CheckForFallAbilitiesToActivate:1917-1930 activates it for EVERY " +
               "actor of EVERY faction from each peer's own OnMapUpdate, so relaying it would fall twice" },
+            { typeof(InventoryAbility),
+              "A6: InventoryAbility.Activate:11-15 ends in ToInventoryViewState() — relaying it YANKS every " +
+              "other peer's screen into an inventory nobody there opened. Opening the screen is presentation; " +
+              "what the session COMMITS rides 0x84 op 5 (TacticalInventorySync)" },
         };
 
         /// <summary>The declared reason this ability never crosses the wire, or null when it rides. Null is the
@@ -769,6 +773,9 @@ namespace Multiplayer.Tactical
                 // It rides THIS family rather than a surface of its own — 0x84 is the one new surface the arc
                 // is allowed, and a recovery request is an intent like any other.
                 [TacticalDamageSync.OpIntentResnap] = TacticalDamageSync.HandleResnapRequest,
+                // A6: a client's committed inventory batch. Same family for the same reason — the batch is a
+                // client asking the host to make something true, which is what this family is.
+                [TacticalInventorySync.OpIntentInventory] = TacticalInventorySync.HandleInventoryIntent,
             };
             IntentRail.Register(SurfaceIds.TacCommandIntent, "tac-cmd", ops);
         }

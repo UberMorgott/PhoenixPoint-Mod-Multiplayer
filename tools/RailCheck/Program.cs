@@ -124,6 +124,7 @@ namespace RailCheck
             laws.AddRange(ResolvedDamageLaw(game));
             laws.AddRange(ActorLifecycleLaw(game));
             laws.AddRange(EnemyActionLaw(game));
+            laws.AddRange(InventoryAndDestructionLaw(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -7568,6 +7569,511 @@ namespace RailCheck
                              "forces the death (declare@" + iDeclare + ", force@" + iForce + ") — DieAbility.DropItems " +
                              "asks its questions inside that same synchronous chain, so a declaration afterwards " +
                              "changes nothing at all";
+        }
+
+        /// <summary>L69 — INVENTORY COMMITS AS A BATCH AND DESTRUCTION RESOLVES ON A PEER (tactical arc A6).
+        /// Three ways this arc can quietly become two different battlefields:
+        ///   (a) INVENTORY AP IS CHARGED EXACTLY ONCE, BY THE GAME, WHERE THE GAME CHARGES IT. v1 deducted it
+        ///       eagerly per gesture (`6617846`), the native per-drag gate then refused every further drag and
+        ///       the screen locked. So: the observer is a POSTFIX on the game's own single charge, nothing in
+        ///       the arc charges on an acting peer at all, and the ONE place that does charge is the host
+        ///       applying an already-closed client session.
+        ///   (b) A DESTRUCTIBLE'S IDENTITY RESOLVES ON A PEER. v1's mirror was dead MISSION-WIDE (`fc661b7`)
+        ///       because it resolved through <c>SceneObjectIdsComponent.GetForScene</c>, which needs an ACTIVE
+        ///       tagged GameObject in exactly the scene asked for — and map generation reparents, merges and
+        ///       destroys those registries (<c>MapPlot</c>:230-243). That lookup is now mechanically BANNED
+        ///       from the arc; the index is the savegame's own enumeration, and the tile address is proved to
+        ///       round-trip through the game's own grid arithmetic rather than hoped to.
+        ///   (c) LOOT IS HOST-ROLLED AND NEVER RE-ROLLED, and FALLS ARE DERIVED, NEVER REPLICATED — the same
+        ///       autonomy rule A5 applied to overwatch, since every peer raises its own falls off the same
+        ///       replicated destruction.</summary>
+        private static IEnumerable<string> InventoryAndDestructionLaw(Assembly game)
+        {
+            var command = typeof(Multiplayer.Tactical.TacticalCommandSync);
+            var mod = command.Assembly;
+            var inv = mod.GetType("Multiplayer.Tactical.TacticalInventorySync");
+            var dest = mod.GetType("Multiplayer.Tactical.TacticalDestruction");
+            var damage = mod.GetType("Multiplayer.Tactical.TacticalDamageSync");
+            if (inv == null || dest == null || damage == null)
+            {
+                yield return "L69 seams-missing: TacticalInventorySync / TacticalDestruction no longer exist, so " +
+                             "NOTHING about the inventory and destructible arc was checked";
+                yield break;
+            }
+
+            // ─── (a) THE AP CHARGE ───
+
+            var costSeam = mod.GetType("Multiplayer.Tactical.InventoryCostSeam");
+            var costTarget = ModMethod(costSeam, "TargetMethod") is MethodInfo ctm
+                ? ctm.Invoke(null, null) as MethodBase : null;
+            if (costTarget == null || costTarget.DeclaringType?.Name != "InventoryAbility" ||
+                costTarget.Name != "ApplyCosts" || costTarget.GetParameters().Length != 0)
+                yield return "L69 cost-observer-unbound: the inventory cost seam does not resolve to the " +
+                             "parameterless InventoryAbility.ApplyCosts (it has: " +
+                             (costTarget == null ? "<nothing>" : costTarget.DeclaringType?.Name + "." + costTarget.Name) +
+                             "). AccessTools does EXACT parameter matching, so a signature change here binds " +
+                             "nothing and the AP a peer spends on its inventory reaches no other screen";
+            if (ModMethod(costSeam, "Prefix") != null)
+                yield return "L69 cost-observer-intercepts: the cost seam has a PREFIX. This arc OBSERVES the game's " +
+                             "charge and never decides one — a prefix here is the shape v1's eager deduction had, " +
+                             "and the native per-drag gate (UIStateInventory.CanPayForTransfer:560-571) then denies " +
+                             "every further drag";
+            if (ModMethod(costSeam, "Postfix") == null)
+                yield return "L69 cost-observer-inert: the cost seam has no Postfix, so the charge is never recorded " +
+                             "and no peer is told what the inventory action cost";
+
+            // NOTHING in the arc may charge except the host's intent handler. This is law (a) as a mechanical
+            // fact rather than a promise in a comment: any other caller is an eager charge by construction.
+            foreach (var t in mod.GetTypes().Where(t => t.Namespace == "Multiplayer.Tactical")
+                                            .OrderBy(t => t.Name, StringComparer.Ordinal))
+                foreach (var m in t.GetMethods(AllMembers).Cast<MethodBase>().Concat(t.GetConstructors(AllMembers)))
+                    foreach (var c in CalleeSequence(m))
+                        if (c.Name == "ApplyCosts" && !(t == inv && m.Name == "HandleInventoryIntent"))
+                        {
+                            yield return "L69 charges-eagerly: " + t.Name + "." + m.Name + " calls ApplyCosts. The " +
+                                         "ONLY place this repo may charge is the host applying a client's already " +
+                                         "committed batch; anywhere else is v1's per-gesture deduction, which zeroed " +
+                                         "AP mid-session and made the native gate refuse every further drag";
+                            goto chargeReported;
+                        }
+            chargeReported:
+
+            // The native premises the observer stands on. If the game moved its charge, the observer is on the
+            // wrong method and would silently report nothing.
+            var uiInv = game.GetType("PhoenixPoint.Tactical.View.ViewStates.UIStateInventory");
+            var exitState = ModMethod(uiInv, "ExitState");
+            var applyActions = ModMethod(uiInv, "ApplyInventoryActions");
+            var shouldApply = ModMethod(uiInv, "ShouldApplyCosts");
+            var canPay = ModMethod(uiInv, "CanPayForTransfer");
+            if (exitState == null || applyActions == null || shouldApply == null || canPay == null)
+                yield return "L69 inventory-premise-gone: UIStateInventory no longer has ExitState / " +
+                             "ApplyInventoryActions / ShouldApplyCosts / CanPayForTransfer — the whole shape this " +
+                             "arc reads the game through has changed and none of it was verified";
+            else
+            {
+                if (!Reaches(exitState, null, "ShouldApplyCosts"))
+                    yield return "L69 charge-point-moved: UIStateInventory.ExitState no longer asks ShouldApplyCosts, " +
+                                 "so the single native charge is not where this arc believes it is";
+                if (!Reaches(exitState, null, "ApplyInventoryActions"))
+                    yield return "L69 commit-point-moved: UIStateInventory.ExitState no longer calls " +
+                                 "ApplyInventoryActions — the whole-batch commit this arc captures has moved";
+                if (!Reaches(canPay, null, "get_ActionPointRequirementSatisfied"))
+                    yield return "L69 gate-premise-stale: UIStateInventory.CanPayForTransfer no longer consults " +
+                                 "ActionPointRequirementSatisfied. That gate is exactly what v1's eager charge " +
+                                 "tripped, and the reason this arc never deducts on an acting peer";
+            }
+
+            // ─── (a2) THE COMMIT IS THE BATCH, AND THERE IS NO PER-SLOT MODEL FUNNEL TO PREFER ───
+
+            var query = game.GetType("PhoenixPoint.Common.Entities.Items.InventoryQuery");
+            var syncItems = ModMethod(query, "SyncItems");
+            var queryAdd = query?.GetMethod("AddItem", AllMembers);
+            var syncAdded = ModMethod(query, "SyncAddedItems");
+            var syncRemoved = ModMethod(query, "SyncRemovedItems");
+            var willModify = ModMethod(query, "WillModifyInventory");
+            if (syncItems == null || queryAdd == null || syncAdded == null || syncRemoved == null || willModify == null)
+                yield return "L69 batch-premise-gone: InventoryQuery.SyncItems / AddItem / SyncAddedItems / " +
+                             "SyncRemovedItems / WillModifyInventory no longer exist — the commit funnel this arc " +
+                             "captures is gone and nothing about the batch was verified";
+            else
+            {
+                if (!Reaches(syncItems, null, "SyncAddedItems") || !Reaches(syncItems, null, "SyncRemovedItems"))
+                    yield return "L69 batch-drains-elsewhere: InventoryQuery.SyncItems no longer drains its queries, " +
+                                 "so it is not the model commit this arc captures";
+                if (!Reaches(syncAdded, "InventoryComponent", "AddItem") ||
+                    !Reaches(syncRemoved, "InventoryComponent", "RemoveItem"))
+                    yield return "L69 batch-not-the-model: InventoryQuery's drain no longer reaches " +
+                                 "InventoryComponent.AddItem/RemoveItem — capturing SyncItems then captures nothing " +
+                                 "that changed the model";
+                // THE ARCHITECT'S QUESTION, answered mechanically: the per-slot calls are STAGING. If AddItem ever
+                // became a real model write, a per-slot funnel would exist and the whole-batch payload would be
+                // the wrong shape.
+                if (Reaches(queryAdd, "InventoryComponent", "AddItem"))
+                    yield return "L69 per-slot-funnel-exists: InventoryQuery.AddItem now writes the model directly, " +
+                                 "so a genuine per-slot funnel exists and this arc's whole-batch payload is no longer " +
+                                 "the right shape — it was forced whole-list only by the ABSENCE of one";
+            }
+
+            var commitSeam = mod.GetType("Multiplayer.Tactical.InventoryCommitSeam");
+            var commitAttr = commitSeam?.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                                        .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (commitAttr == null || commitAttr.declaringType != query || commitAttr.methodName != "SyncItems")
+                yield return "L69 commit-seam-unbound: the inventory commit seam does not patch " +
+                             "InventoryQuery.SyncItems (it has: " +
+                             (commitAttr == null ? "<nothing>" : commitAttr.declaringType?.Name + "." + commitAttr.methodName) +
+                             "), so a committed batch reaches no other peer at all";
+            if (!Reaches(ModMethod(commitSeam, "Prefix"), null, "WillModifyInventory"))
+                yield return "L69 commit-seam-always-ships: the commit seam does not ask the game's own " +
+                             "WillModifyInventory before the batch is drained, so merely LOOKING at a soldier's " +
+                             "backpack puts a batch on the wire";
+
+            // ─── (a3) THE TRUST BOUNDARY: a client cannot conjure an item ───
+
+            var contentsDiff = ModMethod(inv, "ContentsDiff");
+            var validate = ModMethod(inv, "Validate");
+            if (contentsDiff == null || validate == null)
+                yield return "L69 arbiter-gone: TacticalInventorySync.ContentsDiff / Validate no longer exist, so a " +
+                             "client's batch is accepted unchecked and an edited layout mints items on the host";
+            else
+            {
+                var vp = validate.GetParameters();
+                bool pureSignature = vp.All(p => p.ParameterType == typeof(bool) || p.ParameterType == typeof(string));
+                if (!pureSignature)
+                    yield return "L69 arbiter-impure-signature: Validate takes a game type, so the decision it makes " +
+                                 "cannot be falsified headless — which is how v1's arbiter stayed wrong";
+                if (ReadsAnyStatic(validate))
+                    yield return "L69 arbiter-reads-static: Validate consults static state; a pure decision is the " +
+                                 "whole reason it can be trusted (L65's arbiter arm, same reasoning)";
+
+                // The behavioural probes run only against the shape they were written for. An arm that invoked a
+                // drifted signature would throw out of the whole law and take every LATER arm with it silently —
+                // the worst possible failure for a harness.
+                var dp = contentsDiff.GetParameters();
+                if (dp.Length != 2 || dp.Any(p => p.ParameterType != typeof(List<string>)))
+                    yield return "L69 arbiter-diff-signature: ContentsDiff no longer compares two item-def lists, so " +
+                                 "the multiset check that guards the trust boundary was not exercised at all";
+                else
+                {
+                    Func<List<string>, List<string>, string> diff = (b, a) =>
+                        (string)contentsDiff.Invoke(null, new object[] { b, a });
+                    var two = new List<string> { "aaa", "bbb" };
+                    if (diff(two, new List<string> { "bbb", "aaa" }) != null)
+                        yield return "L69 arbiter-refuses-a-reorder: the SAME items in a different order are reported " +
+                                     "as a content change, so every ordinary rearrangement would be refused";
+                    if (diff(two, new List<string> { "aaa", "bbb", "ccc" }) == null)
+                        yield return "L69 arbiter-mints-items: a batch that ends holding an item it never started with " +
+                                     "is accepted — that is a client conjuring equipment out of an edited layout, and " +
+                                     "it is the one thing this check exists for";
+                    if (diff(two, new List<string> { "aaa" }) == null)
+                        yield return "L69 arbiter-eats-items: a batch that LOSES an item is accepted, so a dropped " +
+                                     "rifle vanishes from the battlefield instead of landing on the floor";
+                    // Two of the SAME item down to one: the sets are identical, only the counts differ. A set
+                    // comparison passes this and a multiset one must not — losing the second magazine of a pair is
+                    // exactly the case a set check cannot see.
+                    if (diff(new List<string> { "aaa", "aaa" }, new List<string> { "aaa" }) == null)
+                        yield return "L69 arbiter-counts-by-set: losing one of two IDENTICAL items is accepted, so the " +
+                                     "check compares sets and not the multiset it must";
+                }
+
+                if (!pureSignature || vp.Length != 7)
+                    yield return "L69 arbiter-signature: Validate no longer takes the seven plain facts its arms " +
+                                 "probe, so none of the acceptance decisions was exercised";
+                else
+                    foreach (var bad in ValidateProbes(validate)) yield return bad;
+            }
+
+            // The host's intent path must actually charge, or a client's inventory action is free.
+            if (!Reaches(ModMethod(inv, "HandleInventoryIntent"), null, "ApplyCosts"))
+                yield return "L69 client-inventory-is-free: the host's intent handler never calls ApplyCosts, so a " +
+                             "client rearranges its squad's kit at no action-point cost while the host's own player " +
+                             "pays for it";
+            foreach (var bad in InventoryAndDestructionLawPart2(game, mod, inv, dest, damage, command))
+                yield return bad;
+        }
+
+        /// <summary>The acceptance decisions, probed against the pure seven-fact signature. Split out ONLY so the
+        /// signature guard above can skip them without a <c>yield break</c> — which would have silently taken
+        /// every destructible arm with it, the exact vacuity this law is meant to catch elsewhere.</summary>
+        private static IEnumerable<string> ValidateProbes(MethodBase validate)
+        {
+            {
+                Func<object[], string> v = args => (string)validate.Invoke(null, args);
+                if (v(new object[] { true, null, true, null, true, true, true }) != null)
+                    yield return "L69 arbiter-refuses-the-legal-case: a resolvable, contents-preserving, affordable " +
+                                 "batch is refused, so no inventory change would ever cross";
+                if (v(new object[] { false, "a backpack", true, null, true, true, true }) == null)
+                    yield return "L69 arbiter-accepts-a-ghost: a batch naming a container the host cannot find is " +
+                                 "accepted, and the items in it are applied to nothing";
+                if (v(new object[] { true, null, false, "an extra rifle", true, true, true }) == null)
+                    yield return "L69 arbiter-accepts-invention: a batch whose contents changed is accepted";
+                if (v(new object[] { true, null, true, null, true, false, true }) == null)
+                    yield return "L69 arbiter-spends-what-is-gone: a charged batch is accepted for a soldier who " +
+                                 "cannot afford it on the host — another peer spent those points first, and " +
+                                 "first-to-act-wins is the only arbiter this repo has";
+                if (v(new object[] { true, null, true, null, false, false, false }) != null)
+                    yield return "L69 arbiter-demands-a-payer: an UNCHARGED batch is refused for having no affordable " +
+                                 "payer, so a free rearrangement (the native already-paid case, " +
+                                 "UIStateInventory:580-583) would never cross";
+            }
+        }
+
+        /// <summary>L69, second half — the declared locals, the destructible identity and the loot rule. Split
+        /// from the first only to keep one law readable; the arms are numbered continuously.</summary>
+        private static IEnumerable<string> InventoryAndDestructionLawPart2(
+            Assembly game, Assembly mod, Type inv, Type dest, Type damage, Type command)
+        {
+            // ─── (a4) OPENING THE SCREEN IS LOCAL; ONLY THE COMMIT CROSSES ───
+
+            var isRider = ModMethod(command, "IsRider");
+            if (isRider == null)
+                yield return "L69 rider-test-gone: TacticalCommandSync.IsRider no longer exists";
+            else
+                foreach (var t in new[]
+                {
+                    typeof(PhoenixPoint.Tactical.Entities.Abilities.InventoryAbility),
+                    typeof(PhoenixPoint.Tactical.Entities.Abilities.FallNoSupportAbility),
+                })
+                {
+                    var probe = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(t);
+                    if ((bool)isRider.Invoke(null, new[] { probe }))
+                        yield return "L69 local-ability-rides: " + t.Name + " is not declared local. " +
+                                     (t.Name == "InventoryAbility"
+                                        ? "InventoryAbility.Activate:11-15 ends in ToInventoryViewState(), so relaying " +
+                                          "it YANKS every other peer's screen into an inventory nobody there opened"
+                                        : "CheckForFallAbilitiesToActivate raises it per-peer from each peer's own " +
+                                          "OnMapUpdate, so relaying it drops the actor twice");
+                }
+
+            // FALLS DERIVE — and that is only safe while the game really does raise them on every peer.
+            var checkFalls = ModMethod(typeof(PhoenixPoint.Tactical.Levels.TacticalLevelController),
+                                       "CheckForFallAbilitiesToActivate");
+            var fallBody = IteratorBody(typeof(PhoenixPoint.Tactical.Levels.TacticalLevelController),
+                                        "CheckForFallAbilitiesToActivate");
+            var mapUpdateBody = IteratorBody(typeof(PhoenixPoint.Tactical.Levels.TacticalLevelController), "OnMapUpdate");
+            if (checkFalls == null || fallBody == null)
+                yield return "L69 fall-premise-gone: TacticalLevelController.CheckForFallAbilitiesToActivate no longer " +
+                             "exists, so falls are raised by something this arc has not looked at and deriving them " +
+                             "is no longer justified";
+            else
+            {
+                // The loop's own IL must ACTIVATE, and the list it iterates must still be of fall abilities —
+                // the collecting GetAbility call lives in a LINQ display class, not in the state machine, so
+                // asserting it there would be an arm that can only ever pass by accident.
+                bool activates = Reaches(fallBody, null, "Activate");
+                bool typedFalls = fallBody.DeclaringType.GetFields(AllMembers).Any(f =>
+                    f.FieldType.IsGenericType &&
+                    f.FieldType.GetGenericArguments().Any(a => a.Name == "FallNoSupportAbility"));
+                if (!activates || !typedFalls)
+                    yield return "L69 fall-premise-stale: CheckForFallAbilitiesToActivate no longer " +
+                                 (activates ? "collects FallNoSupportAbility" : "activates what it collects") +
+                                 " — deriving falls per peer only works because every peer runs exactly this loop " +
+                                 "off its own map update";
+                if (mapUpdateBody == null || !Reaches(mapUpdateBody, null, "CheckForFallAbilitiesToActivate"))
+                    yield return "L69 fall-not-on-the-map-edge: TacticalLevelController.OnMapUpdate no longer reaches " +
+                                 "CheckForFallAbilitiesToActivate, so a peer's replicated destruction no longer raises " +
+                                 "its own falls and nothing replaces them";
+            }
+
+            // ─── (b) THE DESTRUCTIBLE'S IDENTITY ───
+
+            // v1's EXACT dead lookup, banned mechanically. GetForScene needs an ACTIVE GameObject tagged
+            // "SceneObjectIds" sitting in exactly the scene asked for, and MapPlot:230-243 reparents, merges and
+            // destroys those registries during generation — which is why every v1 batch missed on both clients.
+            foreach (var t in mod.GetTypes().Where(t => t.Namespace == "Multiplayer.Tactical")
+                                            .OrderBy(t => t.Name, StringComparer.Ordinal))
+                foreach (var m in t.GetMethods(AllMembers).Cast<MethodBase>().Concat(t.GetConstructors(AllMembers)))
+                    foreach (var c in CalleeSequence(m))
+                        if (c.DeclaringType?.Name == "SceneObjectIdsComponent" &&
+                            (c.Name == "GetForScene" || c.Name == "GetObjectById"))
+                        {
+                            yield return "L69 resolves-through-the-scene: " + t.Name + "." + m.Name + " calls " +
+                                         "SceneObjectIdsComponent." + c.Name + ". That is v1's mission-wide-dead " +
+                                         "resolution (fc661b7): it needs an ACTIVE tagged GameObject in exactly the " +
+                                         "scene asked for, and map generation reparents, merges and DESTROYS those " +
+                                         "registries. The index is built from the navigable root instead";
+                            goto sceneReported;
+                        }
+            sceneReported:
+
+            var index = ModMethod(dest, "Index");
+            if (index == null)
+                yield return "L69 destructible-index-gone: TacticalDestruction.Index no longer exists, so nothing " +
+                             "builds the identity map and every host destruction is dropped";
+            else if (!Reaches(index, null, "GetComponentsInChildrenStable"))
+                yield return "L69 destructible-index-drifted: the index no longer walks the navigable root with " +
+                             "GetComponentsInChildrenStable — that is the enumeration the game's OWN savegame uses " +
+                             "(TacLevelSavegame:49), and using the same one is what makes the index symmetric on " +
+                             "both peers";
+
+            // The identity itself is the game's save key. If either half of that is gone, the key is ours alone.
+            var guidProp = typeof(PhoenixPoint.Tactical.Levels.Destruction.DestructableBase)
+                .GetProperty("GuidInScene", AllMembers);
+            var findDest = ModMethod(typeof(PhoenixPoint.Tactical.Levels.Destruction.DestructableBase),
+                                     "FindDestructableObject");
+            if (guidProp == null || findDest == null)
+                yield return "L69 identity-premise-gone: DestructableBase.GuidInScene / FindDestructableObject no " +
+                             "longer exist — this arc keys destructibles by the game's own save key precisely so the " +
+                             "identity is one the engine already round-trips, and that premise is now unverified";
+            var savegame = game.GetType("PhoenixPoint.Tactical.Serialization.TacLevelSavegame");
+            if (savegame != null && !savegame.GetNestedTypes(AllMembers)
+                    .Concat(new[] { savegame })
+                    .SelectMany(t => t.GetMethods(AllMembers).Cast<MethodBase>())
+                    .Any(m => Reaches(m, null, "GetComponentsInChildrenStable")))
+                yield return "L69 savegame-enumeration-drifted: TacLevelSavegame no longer enumerates destructibles " +
+                             "with GetComponentsInChildrenStable, so the index no longer mirrors the game's own walk " +
+                             "and the two peers may index different objects";
+
+            // ─── (b2) THE TILE ADDRESS ROUND-TRIPS. Proved against the game's OWN grid arithmetic, not hoped. ───
+
+            var gridToWorld = HarmonyLib.AccessTools.Method(
+                typeof(PhoenixPoint.Tactical.Levels.Destruction.Destructable), "GridToWorld",
+                new[] { typeof(float), typeof(int[]), typeof(UnityEngine.Vector3), typeof(UnityEngine.Vector3), typeof(UnityEngine.Vector2Int) });
+            var worldToGridVec = HarmonyLib.AccessTools.Method(
+                typeof(PhoenixPoint.Tactical.Levels.Destruction.Destructable), "WorldToGridVec",
+                new[] { typeof(float), typeof(int[]), typeof(UnityEngine.Vector3) });
+            if (gridToWorld == null || worldToGridVec == null)
+                yield return "L69 grid-premise-gone: Destructable.GridToWorld / WorldToGridVec no longer have the " +
+                             "signatures this arc's tile address relies on, so nothing proved that the aim point a " +
+                             "hit is addressed by still names the tile it came from";
+            else
+            {
+                string firstBad = null;
+                foreach (var axes in new[] { new[] { 0, 1, 2 }, new[] { 2, 1, 0 } })
+                    foreach (float h in new[] { 1f, 2.5f })
+                        foreach (var pos in new[] { new UnityEngine.Vector2Int(0, 0), new UnityEngine.Vector2Int(3, 7),
+                                                    new UnityEngine.Vector2Int(11, 2) })
+                        {
+                            var min = new UnityEngine.Vector3(-4.25f, 1.5f, 12f);
+                            var size = new UnityEngine.Vector3(30f, 20f, 30f);
+                            var world = (UnityEngine.Vector3)gridToWorld.Invoke(null, new object[] { h, axes, min, size, pos });
+                            var back = (UnityEngine.Vector2Int)worldToGridVec.Invoke(null, new object[] { h, axes, world - min });
+                            if (back != pos && firstBad == null)
+                                firstBad = "tile " + pos + " (tileHeight " + h + ", axes " + string.Join(",", axes.Select(a => a.ToString()).ToArray()) +
+                                           ") came back as " + back;
+                        }
+                if (firstBad != null)
+                    yield return "L69 tile-address-does-not-round-trip: " + firstBad + ". A hit is addressed by its " +
+                                 "receiver's AIM POINT because that transform sits at GridToWorld's tile centre and " +
+                                 "GetDamageReceiverForHit is the floor of the inverse — if that identity breaks, every " +
+                                 "mirrored hit lands on the wrong tile of the right wall, which is worse than landing " +
+                                 "nowhere";
+            }
+
+            // ─── (b3) WHY THE OP HAD TO EXIST AT ALL: A3b's address cannot name a destructible ───
+
+            var recvProbe = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(
+                typeof(PhoenixPoint.Tactical.Levels.Destruction.DestructableDamageReceiver))
+                as PhoenixPoint.Tactical.Entities.IDamageReceiver;
+            if (recvProbe.GetActor() != null || recvProbe.GetSlotName() != "DestructableObject")
+                yield return "L69 gap-premise-stale: a DestructableDamageReceiver now reports an actor or a distinct " +
+                             "slot name, so A3b's (actorKey, slotName) address CAN name it and this arc's separate op " +
+                             "is sprawl rather than the closure of a real gap";
+
+            var envSeam = mod.GetType("Multiplayer.Tactical.EnvironmentDamageSeam");
+            var envAttr = envSeam?.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                                  .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (envAttr == null ||
+                envAttr.declaringType != typeof(PhoenixPoint.Tactical.Levels.Destruction.DestructableDamageReceiver) ||
+                envAttr.methodName != "ApplyDamage")
+                yield return "L69 env-capture-unbound: the environment capture does not patch " +
+                             "DestructableDamageReceiver.ApplyDamage (it has: " +
+                             (envAttr == null ? "<nothing>" : envAttr.declaringType?.Name + "." + envAttr.methodName) +
+                             "), so the host breaks walls nobody else hears about";
+            if (ModMethod(envSeam, "Prefix") != null)
+                yield return "L69 env-capture-gates: the environment capture has a PREFIX. The client neuter already " +
+                             "sits one level up at DamageAccumulation.ApplyAddedDamage, so a second gate here would " +
+                             "also stand down the MIRROR's own re-application and no wall would ever break on a client";
+
+            var applyEnv = ModMethod(dest, "ApplyEnvDamage");
+            if (applyEnv == null)
+                yield return "L69 env-apply-gone: TacticalDestruction.ApplyEnvDamage no longer exists";
+            else
+            {
+                if (!Reaches(applyEnv, null, "GetDamageReceiverForHit"))
+                    yield return "L69 env-apply-invents-a-tile: the mirror no longer resolves its receiver through the " +
+                                 "game's own GetDamageReceiverForHit — grid arithmetic of our own is exactly what " +
+                                 "drifts between peers";
+                if (!Reaches(applyEnv, "MirrorApplyScope", "Enter"))
+                    yield return "L69 env-apply-unscoped: the mirror re-applies the host's environment damage OUTSIDE " +
+                                 "MirrorApplyScope, so the capture postfix re-ships it and every peer echoes every " +
+                                 "wall back at every other";
+            }
+            if (!Reaches(ModMethod(damage, "HandleInbound"), null, "ApplyEnvDamage") ||
+                !Reaches(ModMethod(damage, "HandleInbound"), null, "ApplyInventory"))
+                yield return "L69 ops-undispatched: 0x84's inbound dispatch does not reach ApplyEnvDamage / " +
+                             "ApplyInventory, so both of this arc's ops arrive and fall through to the unknown-op " +
+                             "branch";
+
+            // ─── (b4) THE LAYOUT CODEC ROUND-TRIPS. A field written and not read is the classic silent
+            // desync: every later field decodes shifted and the batch lands as garbage with no exception. ───
+
+            var write = ModMethod(inv, "WriteLayout");
+            var read = ModMethod(inv, "ReadLayout");
+            var slotType = inv.GetNestedType("Slot", AllMembers);
+            if (write == null || read == null || slotType == null)
+                yield return "L69 layout-codec-gone: TacticalInventorySync.WriteLayout / ReadLayout / Slot no longer " +
+                             "exist, so nothing checked that a shipped inventory batch decodes to what was sent";
+            else
+            {
+                string bad = null;
+                try
+                {
+                    var listType = typeof(List<>).MakeGenericType(slotType);
+                    var slots = (System.Collections.IList)Activator.CreateInstance(listType);
+                    foreach (var spec in new[] { new object[] { -3, (byte)1, "g1", "g2" },
+                                                 new object[] { 77, (byte)0, "g3" } })
+                    {
+                        var s = Activator.CreateInstance(slotType);
+                        slotType.GetField("ActorKey", AllMembers).SetValue(s, spec[0]);
+                        slotType.GetField("Kind", AllMembers).SetValue(s, spec[1]);
+                        var defs = (List<string>)slotType.GetField("ItemDefs", AllMembers).GetValue(s);
+                        for (int i = 2; i < spec.Length; i++) defs.Add((string)spec[i]);
+                        slots.Add(s);
+                    }
+                    byte[] bytes;
+                    using (var ms = new MemoryStream())
+                    {
+                        var w = new BinaryWriter(ms, System.Text.Encoding.UTF8);
+                        write.Invoke(null, new object[] { w, slots, 42, 3.5f, true, true });
+                        w.Flush();
+                        bytes = ms.ToArray();
+                    }
+                    using (var ms = new MemoryStream(bytes))
+                    {
+                        var rd = new BinaryReader(ms, System.Text.Encoding.UTF8);
+                        var args = new object[] { rd, null, null, null, null };
+                        var back = (System.Collections.IList)read.Invoke(null, args);
+                        if ((int)args[1] != 42) bad = "payer key " + args[1] + " != 42";
+                        else if (Math.Abs((float)args[2] - 3.5f) > 1e-6) bad = "payer AP " + args[2] + " != 3.5";
+                        else if (!(bool)args[3]) bad = "the CHARGED flag did not survive — a client's inventory " +
+                                                       "action would then be free on the host";
+                        else if (!(bool)args[4]) bad = "the PARTIAL flag did not survive — the host would then apply " +
+                                                       "the contents check to a batch that legitimately cannot pass " +
+                                                       "it, and refuse every drop onto bare ground";
+                        else if (back.Count != 2) bad = "container count " + back.Count + " != 2";
+                        else
+                            for (int i = 0; i < 2 && bad == null; i++)
+                            {
+                                var got = back[i];
+                                var src = slots[i];
+                                if (!Equals(slotType.GetField("ActorKey", AllMembers).GetValue(got),
+                                            slotType.GetField("ActorKey", AllMembers).GetValue(src)) ||
+                                    !Equals(slotType.GetField("Kind", AllMembers).GetValue(got),
+                                            slotType.GetField("Kind", AllMembers).GetValue(src)))
+                                    bad = "container " + i + " decoded to a different address";
+                                else if (!((List<string>)slotType.GetField("ItemDefs", AllMembers).GetValue(got))
+                                          .SequenceEqual((List<string>)slotType.GetField("ItemDefs", AllMembers).GetValue(src)))
+                                    bad = "container " + i + "'s item defs did not survive the wire";
+                            }
+                    }
+                }
+                catch (Exception ex) { bad = "the codec THREW (" + (ex.InnerException ?? ex).GetType().Name + ")"; }
+                if (bad != null)
+                    yield return "L69 layout-codec-roundtrip: an inventory batch does not decode to what was " +
+                                 "encoded — " + bad;
+            }
+
+            // ─── (c) LOOT IS NOT RE-ROLLED HERE ───
+
+            foreach (var m in inv.GetMethods(AllMembers).Cast<MethodBase>())
+                foreach (var c in CalleeSequence(m))
+                    if (c.Name == "ShouldDestroyItem" || c.Name == "GetDroppableItems" ||
+                        c.DeclaringType?.Name == "Random")
+                    {
+                        yield return "L69 loot-rerolled: TacticalInventorySync." + m.Name + " calls " +
+                                     (c.DeclaringType?.Name ?? "?") + "." + c.Name + ". A corpse's contents were " +
+                                     "decided ONCE on the host at the Die prefix (A4) and TFTV overrides that same " +
+                                     "roll at TFTVEconomyExploitsFixes:130 — this arc MOVES loot and must never ask " +
+                                     "again what should be in it";
+                        goto lootReported;
+                    }
+            lootReported:
+
+            if (!Reaches(ModMethod(damage, "Reset"), "TacticalInventorySync", "Reset") ||
+                !Reaches(ModMethod(damage, "Reset"), "TacticalDestruction", "Reset"))
+                yield return "L69 state-leaks-between-battles: the damage family's reset does not drop this arc's " +
+                             "state, so the next battle starts holding the previous one's destructible index (whose " +
+                             "objects are all destroyed Unity references) and a stale observed AP charge";
         }
 
         /// <summary>True when a method's IL READS any static field. The purity arm of L65 needs "no static
