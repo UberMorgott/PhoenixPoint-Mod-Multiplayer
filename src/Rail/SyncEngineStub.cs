@@ -27,6 +27,9 @@ namespace Multiplayer.Network.Sync
             FacilitySync.RegisterIntents();
             EventSync.RegisterIntents();
             VehicleSync.RegisterIntents();
+            // No intents, no surface: mist coverage is pure host→client mod-state riding the value rail
+            // as root "M#mist" — same symmetric registration on both peers as "M#cart" (law L59).
+            MistSync.Register();
             // Geoscape rail surfaces ride the one inbound hook (each returns false for foreign ids):
             // the 0xAD manufacture order channel, the intent engine, and the generic value rail
             // (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the host-side intent dedup.
@@ -49,6 +52,7 @@ namespace Multiplayer.Network.Sync
         public void Tick()
         {
             ManufactureSync.HostTick(_engine);
+            MistSync.Tick(_engine); // host: recompute the "M#mist" payload; client: hand it to the native loader
             DiffEngine.HostTick(_engine);
             TimeSync.ClientTick(_engine); // client-only inside: TimeAnchor drift enforcement (~1 Hz)
             GenericApplier.ClientCrcTick(_engine); // client-only inside: law-7 drift backstop, one root per second
@@ -67,6 +71,7 @@ namespace Multiplayer.Network.Sync
             ResearchSync.Reset();
             ManufactureSync.Reset();
             EquipSync.Reset();
+            MistSync.Reset();
             VehicleSync.Reset();
             TimeSync.Reset();
             DiffEngine.Reset();
@@ -87,6 +92,8 @@ namespace Multiplayer.Network.Sync
             ManufactureSync.ResetForReloadBoundary();
             EquipSync.ResetForReloadBoundary();
             TimeSync.ResetForReloadBoundary();
+            MistSync.ResetForReloadBoundary(); // BEFORE DiffEngine: the mod root must be empty when the
+                                               // post-reload baseline snapshot is taken (see its remark)
             DiffEngine.ResetForReloadBoundary();
             GenericApplier.ResetForReloadBoundary();
         }

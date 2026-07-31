@@ -114,6 +114,7 @@ namespace RailCheck
             laws.AddRange(SiteStatusTwinLaw());
             laws.AddRange(RejectScopeLaw());
             laws.AddRange(PeerLocalContainmentLaw(game));
+            laws.AddRange(MistCoverageLaw(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -176,6 +177,7 @@ namespace RailCheck
                 // Mod-state roots (IdentityResolver.RegisterModRoot): MOD-owned classes riding the same
                 // walk. Sealed → Concretions never scans the game assembly for them.
                 typeof(Multiplayer.Network.Sync.ScrapCartState), // root "M#cart" (shared scrap cart)
+                typeof(Multiplayer.Network.Sync.MistState),      // root "M#mist" (mist coverage, L59)
                 // Ref-addressable SUB-entities (IdentityResolver.IsRefAddressableType). Their state ships as
                 // elements of the collection that OWNS them, but that collection lives in a TWIN table
                 // (GeoHaven <= InstanceData . Zones) and the expansion below only follows a type's own
@@ -267,7 +269,7 @@ namespace RailCheck
             // registered at runtime (IdentityResolver.RegisterModRoot), so they are named separately.
             sb.Append("roots (IdentityResolver.RootKinds, walk order): " +
                       string.Join(" | ", IdentityResolver.RootKinds.Select(r => "\"" + r.Key + "\" " + r.Type.Name)) +
-                      " + ScrapCartState (\"M#cart\" mod-state root, registered at runtime)\n");
+                      " + mod-state roots registered at runtime: ScrapCartState (\"M#cart\"), MistState (\"M#mist\")\n");
             sb.Append("seeded (not roots — types the live walk reaches only through a runtime subtype): GeoPhoenixFacility" +
                       " | structural-descend concretions of: " +
                       string.Join(", ", DiffEngine.StructuralDescendKinds.Select(k => k.Name)) + "\n");
@@ -2069,6 +2071,223 @@ namespace RailCheck
                 yield return "L58 prefix-overreach: declaring the peer-local PREFIX now also neutralizes the OWNER's " +
                              "order vector — PrefixMatch has grown past whole-segment containment, which would silently " +
                              "drop whole containers from the hash instead of just the opted-out element";
+        }
+
+        /// <summary>L59 — MIST COVERAGE MUST RIDE. <c>_mistData</c> is a per-frame GPU accumulator
+        /// (<c>MistFrameUpdate</c> blits the spread shader 4× EVERY FRAME, at the peer's OWN frame rate),
+        /// so a client can never re-derive it from mirrored inputs — it must be shipped. Gameplay, not
+        /// cosmetics: <c>IsInMist</c> reads that same CPU array.
+        ///
+        /// Every arm guards a SILENT failure — the rail's dominant bug class. Nothing here would throw:
+        ///   • <b>api-drift</b> — the whole feature is reflection-bound + native-method reuse. A renamed
+        ///     field or a reshaped DTO means <c>MistSync.HostTick</c> returns early forever and no line
+        ///     anywhere says the mist stopped shipping.
+        ///   • <b>accumulator-claim-false / frame-driver-lost</b> — the law's own PREMISE, executed. If
+        ///     <c>FrameUpdate</c> stopped reaching <c>MistFrameUpdate</c>, or it stopped blitting, or it
+        ///     stopped being started per-frame, then mist WOULD be derivable and this whole root is dead
+        ///     weight shipping ~900 KB a hop. A law that cannot become false is not a law.
+        ///   • <b>encoder-order-drift / encoder-hand-rolled</b> — the host builds <c>MistData</c> itself
+        ///     (it may not pay <c>RecordInstanceData</c>'s second 8 MB ToArray + deflate on the main
+        ///     thread), so the encoding must stay BYTE-compatible with the consumer. Asserted as an
+        ///     ORDERED IL sequence on both sides: deflate-then-base64, using the GAME's own
+        ///     <c>Compress</c>. Swap the two, or hand-roll a DeflateStream, and
+        ///     <c>ProcessInstanceData</c> would decode garbage into the mist texture in silence.
+        ///   • <b>repeller-guard-gone</b> — shipping <c>RepellerData</c> is refused (Arc-4: it redraws
+        ///     from the already-mirrored <c>MistRepeller.Range.Range</c>), which is only safe because
+        ///     <c>ProcessInstanceData</c> null-TESTS the member before decoding it. That branch is the
+        ///     contract; asserted in the iterator's IL, not assumed from the decompile.
+        ///   • <b>root-*</b> — registration and classification, non-vacuously: the key really resolves to
+        ///     the very instance the walk writes, and its members really carry (a root covering nothing
+        ///     is entered and emits nothing, silently).
+        ///   • <b>wiring-* / boundary-order</b> — both peers must register in the ONE ctor, both must
+        ///     tick, and the mod-root contract (IdentityResolver.cs:205-206) requires the state be
+        ///     EMPTY before <c>DiffEngine</c> takes its post-reload baseline. ORDER, not presence:
+        ///     clearing AFTER the baseline snapshot leaves the host holding a value it will never emit
+        ///     against a client instance that is empty forever.</summary>
+        private static IEnumerable<string> MistCoverageLaw(Assembly game)
+        {
+            var sys = game.GetType("PhoenixPoint.Geoscape.MistRendererSystem");
+            var dto = sys?.GetNestedType("MistRendererInstanceData", AllMembers);
+            var mistData = sys?.GetField("_mistData", AllMembers);
+            var record = sys?.GetMethod("RecordInstanceData", AllMembers, null, Type.EmptyTypes, null);
+            var process = dto == null ? null : sys.GetMethod("ProcessInstanceData", AllMembers, null, new[] { dto }, null);
+            var frameUpdate = sys?.GetMethod("FrameUpdate", AllMembers);
+            var mistFrame = sys?.GetMethod("MistFrameUpdate", AllMembers);
+            var startUpd = sys?.GetMethod("StartUpdatingMist", AllMembers);
+            var compress = sys?.GetMethod("Compress", AllMembers, null, new[] { typeof(byte[]) }, null);
+
+            // ─── (a) the bound surface, by name AND shape ───
+            var drift = new List<string>();
+            if (sys == null) drift.Add("MistRendererSystem");
+            if (mistData == null || mistData.FieldType.Name != "NativeArray`1" ||
+                mistData.FieldType.GetGenericArguments().FirstOrDefault() != typeof(byte) ||
+                mistData.FieldType.GetMethod("ToArray", Type.EmptyTypes)?.ReturnType != typeof(byte[]))
+                drift.Add("_mistData:NativeArray<byte> with ToArray()->byte[]");
+            if (sys?.GetField("_hoursPassed", AllMembers)?.FieldType != typeof(int)) drift.Add("_hoursPassed:int");
+            if (record == null || record.ReturnType != dto) drift.Add("RecordInstanceData()->MistRendererInstanceData");
+            if (process == null || !typeof(IEnumerable).IsAssignableFrom(process.ReturnType) &&
+                                   process.ReturnType.Name != "IEnumerator`1")
+                drift.Add("ProcessInstanceData(dto)->IEnumerator<NextUpdate>");
+            if (compress == null || !compress.IsStatic || compress.ReturnType != typeof(byte[])) drift.Add("static Compress(byte[])->byte[]");
+            if (sys?.GetProperty("ActiveGenerators", AllMembers) == null) drift.Add("ActiveGenerators");
+            if (frameUpdate == null) drift.Add("FrameUpdate");
+            if (mistFrame == null) drift.Add("MistFrameUpdate");
+            if (startUpd == null) drift.Add("StartUpdatingMist");
+            if (game.GetType("PhoenixPoint.Geoscape.Levels.GeoLevelController")?.GetField("MistRenderComponent", AllMembers)?.FieldType != sys)
+                drift.Add("GeoLevelController.MistRenderComponent");
+            // The four DTO members the client-side apply fills — a reshape here is a NullReference or a
+            // silently unset member inside a coroutine, i.e. no stack anyone sees.
+            foreach (var (n, t) in new[] { ("MistData", typeof(string)), ("RepellerData", typeof(string)), ("HoursPassed", typeof(int)) })
+                if (dto?.GetField(n, AllMembers)?.FieldType != t) drift.Add("MistRendererInstanceData." + n + ":" + t.Name);
+            if (dto?.GetField("ActiveMistGenerators", AllMembers)?.FieldType.Name != "List`1")
+                drift.Add("MistRendererInstanceData.ActiveMistGenerators:List<GeoSite>");
+            if (drift.Count > 0)
+            {
+                yield return "L59 mist-api-drift: the mist surface no longer matches what MistSync binds — " +
+                             string.Join(", ", drift) + " — the host would stop shipping coverage (or the client " +
+                             "stop applying it) with no exception and no log line anywhere";
+                yield break; // every arm below reads these members; a drifted surface makes them noise
+            }
+
+            // ─── (b) the PREMISE: mist really is a per-frame, frame-rate-local accumulator ───
+            if (!Callees(startUpd, game).Any(c => c.MetadataToken == frameUpdate.MetadataToken))
+                yield return "L59 frame-driver-lost: MistRendererSystem.StartUpdatingMist no longer starts FrameUpdate — " +
+                             "the mist surface is not driven per-frame any more, so L59's whole premise (a client cannot " +
+                             "re-derive coverage) is unproven and the ~900 KB root may be dead weight";
+            if (!Callees(frameUpdate, game).Any(c => c.MetadataToken == mistFrame.MetadataToken))
+                yield return "L59 accumulator-claim-false: FrameUpdate no longer reaches MistFrameUpdate — mist would " +
+                             "advance only on the mirrored hour tick, which every peer already has, and this root " +
+                             "should be deleted rather than shipped";
+            if (!CalleeSequence(mistFrame).Any(c => c.Name == "Blit"))
+                yield return "L59 accumulator-claim-false: MistFrameUpdate no longer blits the spread surface — the " +
+                             "per-frame divergence L59 exists to correct cannot happen, so the root is unjustified";
+
+            // ─── (c) encoding stays byte-compatible with the game's own consumer ───
+            bool IsCompress(MethodBase m) => m.MetadataToken == compress.MetadataToken && m.Module == compress.Module;
+            bool IsBase64(MethodBase m) => m.Name == "ToBase64String" && m.DeclaringType == typeof(Convert);
+            bool IsToArray(MethodBase m) => m.Name == "ToArray" && m.DeclaringType != null && m.DeclaringType.Name == "NativeArray`1";
+
+            var rec = CalleeSequence(record);
+            int rArr = rec.FindIndex(IsToArray), rCmp = rec.FindIndex(IsCompress), rB64 = rec.FindIndex(IsBase64);
+            if (rArr < 0 || rCmp < 0 || rB64 < 0 || !(rArr < rCmp && rCmp < rB64))
+                yield return "L59 encoder-order-drift: RecordInstanceData's IL no longer reads the native array, then " +
+                             "Compress, then ToBase64String (got ToArray@" + rArr + " Compress@" + rCmp + " Base64@" + rB64 +
+                             ") — the save's own encoding changed, so the string MistSync hands ProcessInstanceData would " +
+                             "decode to garbage and paint a wrong mist map with no error";
+
+            // Our side, swept across MistSync AND its compiler-generated closures (the deflate runs on a
+            // worker lambda, so the pipeline is split across two methods by construction).
+            var ourBodies = new[] { typeof(MistSync) }.Concat(typeof(MistSync).GetNestedTypes(AllMembers))
+                .SelectMany(t => t.GetMethods(AllMembers).Cast<MethodBase>())
+                .Where(m => { try { return m.GetMethodBody() != null; } catch { return false; } })
+                .ToList();
+            bool ourToArray = false, ourPipeline = false;
+            foreach (var m in ourBodies)
+            {
+                var s = CalleeSequence(m);
+                if (s.Any(IsToArray)) ourToArray = true;
+                int c = s.FindIndex(IsCompress), b = s.FindIndex(IsBase64);
+                if (c >= 0 && b > c) ourPipeline = true;
+            }
+            if (!ourToArray || !ourPipeline)
+                yield return "L59 encoder-hand-rolled: MistSync no longer reads the native array through NativeArray.ToArray" +
+                             " (" + ourToArray + ") and/or no longer encodes with the GAME's Compress followed by " +
+                             "Convert.ToBase64String (" + ourPipeline + ") — a locally rolled deflate/base64 can differ from " +
+                             "what ProcessInstanceData decodes, and the mismatch is invisible on the host";
+
+            // ─── (d) the null-RepellerData contract, in the consumer's real IL ───
+            var mover = process.ReturnType.GetMethod("MoveNext", AllMembers)
+                        ?? sys.GetNestedTypes(AllMembers)
+                              .Where(t => t.Name.IndexOf("ProcessInstanceData", StringComparison.Ordinal) >= 0)
+                              .Select(t => t.GetMethod("MoveNext", AllMembers)).FirstOrDefault(x => x != null);
+            var repellerField = dto.GetField("RepellerData", AllMembers);
+            if (mover == null)
+                yield return "L59 repeller-guard-unreadable: ProcessInstanceData's iterator body cannot be found, so the " +
+                             "null-RepellerData contract MistSync relies on cannot be asserted at all";
+            else if (!LoadsThenNullBranches(mover, repellerField))
+                yield return "L59 repeller-guard-gone: ProcessInstanceData no longer null-tests RepellerData before " +
+                             "decoding it — MistSync deliberately ships NULL there (the repeller redraws from the " +
+                             "already-mirrored MistRepeller ranges), so every client apply would now throw inside a " +
+                             "coroutine and the mist would silently stop updating";
+
+            // ─── (e) the root: really registered, really covering something ───
+            MistSync.Register(); // idempotent; the harness never builds a SyncEngine
+            object resolved = null;
+            var resolveRoot = typeof(IdentityResolver).GetMethod("ResolveRoot", AllMembers);
+            try { resolved = resolveRoot?.Invoke(null, new object[] { null, MistSync.RootKey }); } catch { }
+            if (!ReferenceEquals(resolved, MistSync.State))
+                yield return "L59 root-unregistered: \"" + MistSync.RootKey + "\" does not resolve to MistSync.State — " +
+                             "the client has no apply target, so every mist delta dies as \"entity not found\", one " +
+                             "log line per path and never retried";
+            var rt = RailType.Get(typeof(MistState));
+            if (rt == null || rt.CoveredCount == 0)
+                yield return "L59 root-covers-nothing: the value rail covers NONE of MistState's members — the walk " +
+                             "enters \"" + MistSync.RootKey + "\" and emits nothing, so coverage never mirrors and " +
+                             "nothing says so (vacuity guard: every arm above would still pass)";
+            else
+            {
+                var f = rt.Fields.FirstOrDefault(x => x.Name == "MistData");
+                if (f == null || f.Class != FieldClass.Leaf || f.Leaf != LeafKind.String)
+                    yield return "L59 mistdata-not-leaf-string: MistState.MistData classifies " +
+                                 (f == null ? "(absent)" : f.Class + "/" + f.Leaf) + " instead of Leaf/String — the " +
+                                 "payload would ride some other codec (or be Excluded outright) and the client's mist " +
+                                 "would simply never change";
+            }
+
+            // ─── (f) wiring: registered once for BOTH peers, ticked, cleared BEFORE the baseline ───
+            var ctor = typeof(SyncEngine).GetConstructors(AllMembers).FirstOrDefault();
+            if (ctor == null || !Callees(ctor, typeof(MistSync).Assembly).Any(c => c.DeclaringType == typeof(MistSync) && c.Name == "Register"))
+                yield return "L59 wiring-unregistered: SyncEngine's ctor does not call MistSync.Register — the mod root " +
+                             "exists in code and is registered on neither peer; the walk never sees it";
+            if (!Callees(typeof(SyncEngine).GetMethod("Tick", AllMembers), typeof(MistSync).Assembly)
+                    .Any(c => c.DeclaringType == typeof(MistSync) && c.Name == "Tick"))
+                yield return "L59 wiring-unticked: SyncEngine.Tick does not call MistSync.Tick — the host never recomputes " +
+                             "the payload and the client never hands it to the native loader; the root stays null forever";
+            var boundary = CalleeSequence(typeof(SyncEngine).GetMethod("ResetForReloadBoundary", AllMembers));
+            int atMist = boundary.FindIndex(c => c.DeclaringType == typeof(MistSync) && c.Name == "ResetForReloadBoundary");
+            int atDiff = boundary.FindIndex(c => c.DeclaringType == typeof(DiffEngine) && c.Name == "ResetForReloadBoundary");
+            if (atMist < 0 || atDiff < 0 || atMist > atDiff)
+                yield return "L59 boundary-order: SyncEngine.ResetForReloadBoundary clears the mist root at " + atMist +
+                             " and rebaselines DiffEngine at " + atDiff + " — the mod-root contract " +
+                             "(IdentityResolver.cs:205-206) needs the state EMPTY when the baseline is taken, else the " +
+                             "host holds a value it will never emit while the client's instance stays empty forever";
+        }
+
+        /// <summary>True when the method's IL loads <paramref name="target"/> and IMMEDIATELY branches on it —
+        /// i.e. a real null test, not just a read. Used by L59: <c>ProcessInstanceData</c> reads
+        /// <c>RepellerData</c> twice (guard, then decode), and only the guarded read is the contract.</summary>
+        private static bool LoadsThenNullBranches(MethodBase m, FieldInfo target)
+        {
+            if (m == null || target == null) return false;
+            byte[] il = null;
+            try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) return false;
+            var typeArgs = m.DeclaringType != null && m.DeclaringType.IsGenericType ? m.DeclaringType.GetGenericArguments() : null;
+            int i = 0;
+            bool loaded = false;
+            while (i < il.Length)
+            {
+                short code = il[i++];
+                if (code == 0xFE)
+                {
+                    if (i >= il.Length) return false;
+                    code = (short)(0xFE00 | il[i++]);
+                }
+                if (!OpCodeByValue.TryGetValue(code, out var op)) return false;
+                int size = OperandSize(op.OperandType, il, i);
+                if (size < 0 || i + size > il.Length) return false;
+                if (loaded && (op == OpCodes.Brfalse || op == OpCodes.Brfalse_S ||
+                               op == OpCodes.Brtrue || op == OpCodes.Brtrue_S)) return true;
+                loaded = false;
+                if (op == OpCodes.Ldfld || op == OpCodes.Ldflda)
+                {
+                    FieldInfo f = null;
+                    try { f = m.Module.ResolveField(BitConverter.ToInt32(il, i), typeArgs, null); } catch { }
+                    loaded = f != null && f.MetadataToken == target.MetadataToken && f.Module == target.Module;
+                }
+                i += size;
+            }
+            return false;
         }
 
         private static DiffEngine.Entry Vec(string path, List<string> keys) =>
