@@ -131,6 +131,8 @@ namespace RailCheck
             laws.AddRange(ClockRebaseLaw());
             laws.AddRange(WalkBudgetLaw());
             laws.AddRange(CameraOwnershipLaw());
+            laws.AddRange(TacticalPayloadUseLaw(game));
+            laws.AddRange(TacticalFunnelLaw(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -8568,6 +8570,280 @@ namespace RailCheck
                     yield return "L75 not-a-filter: " + gate + ".Prefix does not return bool — a void prefix cannot " +
                                  "skip the original, so the gate runs and decides nothing";
             }
+        }
+
+        /// <summary>L76a — A DROPPED PAYLOAD FIELD MAY NOT BE ONE THE REPLAY ITSELF READS. L65's codec arm
+        /// only asks that every <c>TacticalAbilityTarget</c> field be NAMED in one of the two lists; it never
+        /// asks whether the DROP is survivable. It is not, for any field the mirrored <c>Activate</c> path
+        /// dereferences: on 2026-07-31 <c>Equipment</c> and <c>TacticalItem</c> were dropped while
+        /// <c>ReloadAbility.ChooseEquipmentAndAmmo</c>:111-114 reads both as THE weapon and THE magazine
+        /// (falling back to "whatever this peer is holding" at :133-138) and <c>DropItemAbility</c>:36
+        /// dereferences <c>TacticalItem</c> with no null test at all — an NRE on every mirroring peer.
+        ///
+        /// THE SET IS DISCOVERED, never declared: every concrete <c>TacticalAbility</c> in the game assembly
+        /// that is NOT a declared local (i.e. every RIDER), closed transitively from its own
+        /// <c>Activate(object)</c> over in-assembly call/ldftn edges — and, because an ability's real work
+        /// lives in a coroutine, through the compiler-generated state machine nested inside the ability for
+        /// each such method (<c>&lt;ReloadCrt&gt;d__14.MoveNext</c> is where <c>ChooseEquipmentAndAmmo</c> is
+        /// actually reached from). A NEW ability, or a TFTV one, therefore arrives here as a violation.
+        ///
+        /// Falsify by moving "Equipment" back from <see cref="Multiplayer.Tactical.TacAbilityTargetCodec.Rides"/>
+        /// into <c>Dropped</c>: ReloadAbility's closure touches it and the arm goes red.</summary>
+        private static IEnumerable<string> TacticalPayloadUseLaw(Assembly game)
+        {
+            var payload = typeof(PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget);
+            var dropped = Multiplayer.Tactical.TacAbilityTargetCodec.Dropped;
+            var abilityBase = typeof(PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility);
+            var locals = Multiplayer.Tactical.TacticalCommandSync.LocalAbilities;
+
+            var riders = DeclaredTypes(game)
+                .Where(t => t != null && !t.IsAbstract && abilityBase.IsAssignableFrom(t) &&
+                            !locals.Keys.Any(l => l.IsAssignableFrom(t)))
+                .OrderBy(t => t.FullName, StringComparer.Ordinal).ToList();
+            if (riders.Count == 0)
+            {
+                yield return "L76 riders-undiscovered: no concrete non-local TacticalAbility was found in the game " +
+                             "assembly, so this law is asleep and every dropped payload field is unchecked";
+                yield break;
+            }
+
+            // field -> the first rider whose replay closure touches it.
+            var touched = new SortedDictionary<string, string>(StringComparer.Ordinal);
+            int scanned = 0;
+            foreach (var t in riders)
+            {
+                var activate = t.GetMethod("Activate", AllMembers | BindingFlags.DeclaredOnly,
+                                           null, new[] { typeof(object) }, null);
+                if (activate == null) continue;
+                foreach (var m in ReplayClosure(activate, game))
+                {
+                    scanned++;
+                    foreach (var f in payload.GetFields(BindingFlags.Public | BindingFlags.Instance))
+                        if (!touched.ContainsKey(f.Name) && LoadsInstanceField(m, f)) touched[f.Name] = t.Name;
+                }
+            }
+            if (scanned == 0)
+            {
+                yield return "L76 closure-empty: not one rider's Activate closure yielded a readable method body — " +
+                             "the IL scan is asleep, so a green result here means nothing";
+                yield break;
+            }
+            if (touched.Count == 0)
+            {
+                yield return "L76 vacuous: " + scanned + " method(s) were scanned and NONE touches any " +
+                             "TacticalAbilityTarget field — the closure is not reaching ability code";
+                yield break;
+            }
+            var known = Multiplayer.Tactical.TacAbilityTargetCodec.DroppedButRead;
+            foreach (var kv in touched)
+            {
+                if (!dropped.ContainsKey(kv.Key)) continue;
+                string consequence;
+                if (!known.TryGetValue(kv.Key, out consequence))
+                    yield return "L76 dropped-but-read: TacticalAbilityTarget." + kv.Key + " is DROPPED by the codec, " +
+                                 "yet " + kv.Value + "'s own replay path LOADS it — every mirrored activation of that " +
+                                 "ability runs with the field null and silently substitutes something of its own. " +
+                                 "Either ship it, or name it in TacAbilityTargetCodec.DroppedButRead with what the " +
+                                 "replaying peer does instead (reason on file for the drop: " + dropped[kv.Key] + ")";
+                else if (string.IsNullOrEmpty(consequence))
+                    yield return "L76 consequence-blank: TacticalAbilityTarget." + kv.Key + " is declared read-and-" +
+                                 "dropped with no stated consequence — that is the omission this table exists to stop";
+            }
+            // The declaration may not outlive its reason, in either direction.
+            foreach (var name in known.Keys.OrderBy(n => n, StringComparer.Ordinal))
+            {
+                if (!dropped.ContainsKey(name))
+                    yield return "L76 consequence-stale-ride: DroppedButRead names '" + name + "', which the codec no " +
+                                 "longer drops — a shipped field needs no excuse and the row is now misleading";
+                else if (!touched.ContainsKey(name))
+                    yield return "L76 consequence-stale-read: DroppedButRead names '" + name + "', which no rider's " +
+                                 "replay path reads any more — the table is describing a game that has moved on";
+            }
+        }
+
+        /// <summary>Everything a mirrored <c>Activate</c> can actually execute: the method itself, its
+        /// in-assembly callees (call/callvirt AND ldftn — a coroutine is HANDED to PlayAction, never called),
+        /// and the compiler-generated state machine the C# compiler nests inside the declaring type for each
+        /// of those (named <c>&lt;Name&gt;d__N</c>), whose <c>MoveNext</c> holds the real body. Bounded and
+        /// cycle-safe.</summary>
+        private static IEnumerable<MethodBase> ReplayClosure(MethodBase seed, Assembly game)
+        {
+            var seen = new HashSet<MethodBase>();
+            var queue = new Queue<MethodBase>();
+            queue.Enqueue(seed); seen.Add(seed);
+            while (queue.Count > 0 && seen.Count < 400)
+            {
+                var m = queue.Dequeue();
+                yield return m;
+                foreach (var c in Callees(m, game))
+                    if (c.DeclaringType != null && seen.Add(c)) queue.Enqueue(c);
+                var owner = m.DeclaringType;
+                if (owner == null) continue;
+                foreach (var nested in owner.GetNestedTypes(AllMembers))
+                {
+                    if (!nested.Name.StartsWith("<" + m.Name + ">", StringComparison.Ordinal)) continue;
+                    foreach (var nm in nested.GetMethods(AllMembers | BindingFlags.DeclaredOnly))
+                        if (seen.Add(nm)) queue.Enqueue(nm);
+                }
+            }
+        }
+
+        /// <summary>L76b — A TACTICAL MODEL FUNNEL THE UI CAN CLICK MUST BE SEAMED OR DECLARED LOCAL. L42 is
+        /// this law for the GEOSCAPE and it is keyed on <c>GeoAbility.ActivateInternal</c>; the tactical side
+        /// had no equivalent at all, and the whole tactical arc keys on ONE funnel,
+        /// <c>TacticalAbility.Activate</c>. That is a blind spot with a name: on 2026-07-31 switching a
+        /// soldier's weapon turned out NOT to be an ability —
+        /// <c>EquipmentComponent.SetSelectedEquipment</c>:242 is clicked straight out of three view states —
+        /// so nothing about it ever crossed, and the HOST then refused the clicking peer's next order with
+        /// the game's own <c>EquipmentNotSelected</c> gate.
+        ///
+        /// THE SET IS DISCOVERED: every method the tactical view states call DIRECTLY on a
+        /// <c>PhoenixPoint.Tactical.Entities</c>* model type whose own IL WRITES an instance field — i.e. a
+        /// model mutation a player can reach with one click. Ability classes are excluded because
+        /// <c>TacticalAbility.Activate</c> is the arc's seam and covers them by construction; property
+        /// accessors and constructors are excluded because they are not funnels.
+        ///
+        /// Each survivor must be either covered by a Harmony PREFIX of ours or named in
+        /// <c>TacticalCommandSync.LocalFunnels</c> with a reason — the same "dropping is allowed, dropping
+        /// silently is not" shape as the codec's Dropped list and A5's declared-local table. Falsify by
+        /// removing the <c>EquipmentSelectCapture</c> patch or a <c>LocalFunnels</c> row.</summary>
+        private static IEnumerable<string> TacticalFunnelLaw(Assembly game)
+        {
+            var abilityBase = typeof(PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility);
+            var states = DeclaredTypes(game)
+                .Where(t => t != null && t.Namespace == "PhoenixPoint.Tactical.View.ViewStates")
+                .OrderBy(t => t.FullName, StringComparer.Ordinal).ToList();
+            if (states.Count == 0)
+            {
+                yield return "L76 view-states-undiscovered: no PhoenixPoint.Tactical.View.ViewStates type exists — " +
+                             "the discovery rule no longer matches the game and every tactical click is unchecked";
+                yield break;
+            }
+
+            var funnels = new SortedDictionary<string, MethodBase>(StringComparer.Ordinal);
+            foreach (var s in states)
+                foreach (var m in s.GetMethods(AllMembers | BindingFlags.DeclaredOnly))
+                    foreach (var c in Callees(m, game, directCallsOnly: true))
+                    {
+                        var owner = c.DeclaringType;
+                        if (owner == null || owner.Namespace == null) continue;
+                        if (!owner.Namespace.StartsWith("PhoenixPoint.Tactical.Entities", StringComparison.Ordinal)) continue;
+                        if (abilityBase.IsAssignableFrom(owner)) continue;      // A3a's own seam covers these
+                        if (c.IsSpecialName || c.IsConstructor || c.IsStatic) continue;
+                        // A MUTATOR RETURNS NOTHING. Without this the sweep drowns in queries that happen to
+                        // MEMOIZE (Weapon.GetShootTarget, TacticalPerception.GetBestIdleCoverPoseAt) — a cache
+                        // write is not a model mutation, and a law that cries wolf is a law that gets ignored.
+                        var mi = c as MethodInfo;
+                        if (mi == null || mi.ReturnType != typeof(void)) continue;
+                        if (!MutatesInstanceState(c, game)) continue;           // a reader is not a funnel
+                        funnels[owner.Name + "." + c.Name] = c;
+                    }
+            if (funnels.Count == 0)
+            {
+                yield return "L76 funnels-vacuous: no tactical view state calls a field-writing model method at all — " +
+                             "the callee scan found nothing, so a green result here means nothing";
+                yield break;
+            }
+
+            var covered = OurPrefixTargets();
+            var declared = Multiplayer.Tactical.TacticalCommandSync.LocalFunnels;
+            foreach (var kv in funnels)
+            {
+                bool seamed = covered.Contains(kv.Value.MetadataToken);
+                string why;
+                bool named = declared.TryGetValue(kv.Key, out why);
+                if (seamed && named)
+                    yield return "L76 funnel-double-declared: " + kv.Key + " carries a prefix of ours AND is declared " +
+                                 "local — what this repo does with it is undecidable from the declaration";
+                else if (!seamed && !named)
+                    yield return "L76 funnel-unseamed: " + kv.Key + " writes tactical model state and is reachable " +
+                                 "from a tactical view state with one click, but it carries no Harmony seam of ours " +
+                                 "and is not declared local. A3a's seam is TacticalAbility.Activate and this is not " +
+                                 "an ability, so nothing about this gesture crosses the wire";
+                else if (named && string.IsNullOrEmpty(why))
+                    yield return "L76 funnel-unreasoned: " + kv.Key + " is declared local with an empty reason — a " +
+                                 "declaration without a stated reason is an omission wearing a declaration";
+            }
+            foreach (var name in declared.Keys.Where(n => !funnels.ContainsKey(n)).OrderBy(n => n, StringComparer.Ordinal))
+                yield return "L76 funnel-stale-declaration: LocalFunnels names '" + name + "', which no tactical view " +
+                             "state reaches any more — the declaration describes a game that no longer exists";
+        }
+
+        /// <summary>True when a method's IL LOADS a specific instance field (<c>ldfld</c>/<c>ldflda</c>) —
+        /// deliberately NOT <see cref="ReadsField"/>, which matches any field opcode including the STORES a
+        /// constructor does. <c>new TacticalAbilityTarget{...}</c> initialises every field it declares, so a
+        /// store-blind test reports the whole type as "read" from any ability that builds one.</summary>
+        private static bool LoadsInstanceField(MethodBase m, FieldInfo target)
+        {
+            byte[] il = null;
+            try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) return false;
+            var typeArgs = m.DeclaringType != null && m.DeclaringType.IsGenericType ? m.DeclaringType.GetGenericArguments() : null;
+            var methodArgs = m.IsGenericMethodDefinition ? m.GetGenericArguments() : null;
+            int i = 0;
+            while (i < il.Length)
+            {
+                short code = il[i++];
+                if (code == 0xFE)
+                {
+                    if (i >= il.Length) return false;
+                    code = (short)(0xFE00 | il[i++]);
+                }
+                if (!OpCodeByValue.TryGetValue(code, out var op)) return false;
+                int size = OperandSize(op.OperandType, il, i);
+                if (size < 0 || i + size > il.Length) return false;
+                if (op == OpCodes.Ldfld || op == OpCodes.Ldflda)
+                {
+                    FieldInfo f = null;
+                    try { f = m.Module.ResolveField(BitConverter.ToInt32(il, i), typeArgs, methodArgs); } catch { }
+                    if (f != null && f.MetadataToken == target.MetadataToken && f.Module == target.Module) return true;
+                }
+                i += size;
+            }
+            return false;
+        }
+
+        /// <summary>"Does this method mutate its object?", as the compiler can answer it: a direct
+        /// <c>stfld</c>, OR a call to an instance property SETTER.
+        ///
+        /// The setter half is not a refinement, it is the whole point — and it was found by falsifying the
+        /// law rather than by reading it. <c>EquipmentComponent.SetSelectedEquipment</c>:242-268, the exact
+        /// funnel L76b exists to have caught, writes an AUTO-PROPERTY
+        /// (<c>public Equipment SelectedEquipment { get; protected set; }</c>), so the <c>stfld</c> lives in
+        /// the compiler-generated <c>set_SelectedEquipment</c> and the field test alone answered "this method
+        /// mutates nothing". With only that half the arm was VACUOUS: unbinding our own seam left it green.</summary>
+        private static bool MutatesInstanceState(MethodBase m, Assembly game)
+        {
+            if (WritesInstanceField(m)) return true;
+            foreach (var c in Callees(m, game, directCallsOnly: true))
+                if (c.IsSpecialName && !c.IsStatic && c.Name.StartsWith("set_", StringComparison.Ordinal))
+                    return true;
+            return false;
+        }
+
+        /// <summary>True when a method's IL writes ANY instance field (<c>stfld</c>). "Does this mutate the
+        /// model?" as the compiler can answer it — a getter or a pure query never does.</summary>
+        private static bool WritesInstanceField(MethodBase m)
+        {
+            byte[] il = null;
+            try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) return false;
+            int i = 0;
+            while (i < il.Length)
+            {
+                short code = il[i++];
+                if (code == 0xFE)
+                {
+                    if (i >= il.Length) return false;
+                    code = (short)(0xFE00 | il[i++]);
+                }
+                if (!OpCodeByValue.TryGetValue(code, out var op)) return false;
+                int size = OperandSize(op.OperandType, il, i);
+                if (size < 0 || i + size > il.Length) return false;
+                if (op == OpCodes.Stfld) return true;
+                i += size;
+            }
+            return false;
         }
 
         /// <summary>True when a method's IL READS any static field. The purity arm of L65 needs "no static

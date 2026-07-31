@@ -10,6 +10,7 @@ using Multiplayer.Network;
 using Multiplayer.Network.MessageLayer;
 using Multiplayer.Network.Sync;
 using PhoenixPoint.Common.Entities;
+using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.Entities.Abilities;
 using PhoenixPoint.Tactical.Entities.Equipments;
@@ -354,13 +355,16 @@ namespace Multiplayer.Tactical
         internal const ushort BitCone = 1 << 7;
         internal const ushort BitAttackType = 1 << 8;
         internal const ushort BitObstructionsCheckRadius = 1 << 9;
+        // ─── A7: the two ITEM riders. New bits only; no existing bit moved or reused. ───
+        internal const ushort BitEquipment = 1 << 10;
+        internal const ushort BitTacticalItem = 1 << 11;
 
         /// <summary>Every bit this build can decode. A set bit outside it means the sender declared a field
         /// this reader does not know — the rest of the stream is then misaligned, so it is a THROW, not a
         /// best-effort read. (Mod parity is blocking, law 10, so this can only be a bug, never a version skew.)</summary>
         internal const ushort KnownBits = BitPositionToApply | BitActor | BitShootTargetActor | BitDamageReceiver |
                                           BitActorGridPosition | BitShootFromPos | BitDirection | BitCone |
-                                          BitAttackType | BitObstructionsCheckRadius;
+                                          BitAttackType | BitObstructionsCheckRadius | BitEquipment | BitTacticalItem;
 
         /// <summary>The fields that ACTUALLY ride, in wire order.
         /// A3a: movement needed exactly one thing — <c>MoveAbility.Move</c>:105-144 reads
@@ -377,11 +381,23 @@ namespace Multiplayer.Tactical
         /// the first branch of <c>GetActorPosition</c>:214-226; <c>Direction</c>/<c>Cone</c> shape cone and
         /// line weapons and <c>Cone.Tip</c> is the last-resort working position (:186-189);
         /// <c>ObstructionsCheckRadius</c> is a line-of-fire tolerance that defaults to +Inf and would silently
-        /// differ the moment any caller narrows it.</summary>
+        /// differ the moment any caller narrows it.
+        ///
+        /// A7 PROMOTES THE TWO ITEM FIELDS out of <see cref="Dropped"/>, because a real shipped ability READS
+        /// them off the payload and the drop was silently changing what the mirror did:
+        /// <c>ReloadAbility.ChooseEquipmentAndAmmo</c>:111-114 takes <c>target.Equipment</c> and
+        /// <c>target.TacticalItem</c> as THE weapon and THE magazine and only falls back to
+        /// <c>SelectedEquipment</c> + "first compatible clip" (:133-138) when they are null — so a mirrored
+        /// reload was reloading whatever that peer happened to be holding; and
+        /// <c>DropItemAbility.Activate</c>:36 dereferences <c>tacticalAbilityTarget.TacticalItem</c>
+        /// UNCONDITIONALLY once a non-null target was passed (its null-target fallback at :19-35 never runs for
+        /// us, because the codec always hands it a target object), which is a plain NRE on every mirroring
+        /// peer. <c>ShootAbility</c>:196-221 also stores the aimed-at body item there.</summary>
         internal static readonly string[] Rides =
         {
             "PositionToApply", "Actor", "ShootTargetActor", "DamageReceiver", "ActorGridPosition",
             "ShootFromPos", "Direction", "Cone", "AttackType", "ObstructionsCheckRadius",
+            "Equipment", "TacticalItem",
         };
 
         /// <summary>The fields that deliberately do NOT ride, each with the reason. This list is the other
@@ -390,14 +406,51 @@ namespace Multiplayer.Tactical
         {
             { "GameObject",           "a live scene object; the peer's own equivalent is reached through the actor key, never shipped" },
             { "CoverDirection",       "presentation: which way the actor hugs cover on arrival (law 5 names it local-only)" },
-            { "TacticalItem",         "A4 — the body-part item a snap-to-bodyparts shot aimed at; it needs an item key, and the aim point it feeds GetWorkingPosition:181 is already reached through the shipped DamageReceiver's own slot" },
-            { "Equipment",            "the TARGET's equipment (equipment-targeting abilities, not the firing weapon — that is the ability's own Source); no A3b rider targets equipment" },
             { "ItemContainer",        "A4 (inventory) — a live container reference" },
             { "InventoryComponent",   "A4 (inventory) — a live component reference" },
             { "MultiAbilityTargets",  "recursive list; no rider is a multi-target ability, and shipping it would need the whole codec to nest" },
             { "FollowupAbility",      "a live ability reference. Move+shoot chains: the followup is a SECOND command and rides as its own intent, not as a passenger" },
             { "FollowupAbilityTarget","same — the followup's own payload travels with the followup's own command" },
             { "UseShootOriginCache",  "a per-peer performance hint (a projectile-origin transform cache), never shared state" },
+        };
+
+        /// <summary>
+        /// A7 — THE DROPS THAT SOMETHING ACTUALLY READS, and what the replaying peer does instead.
+        ///
+        /// <see cref="Dropped"/> says a field does not ride; it never said whether anything MISSES it. RailCheck
+        /// L76a now answers that mechanically — it closes each rider ability's own <c>Activate</c> over its
+        /// callees and its coroutine state machines and reports every dropped field the replay path LOADS —
+        /// and the answer for two of them was "the reload picks a different gun" and "DropItemAbility
+        /// dereferences a null", which is why <c>Equipment</c> and <c>TacticalItem</c> now ride.
+        ///
+        /// These five are the remainder: read, still dropped, each with the CONSEQUENCE written down instead
+        /// of discovered in a log at midnight. A drop that something reads must be in this table, and a row
+        /// here that nothing reads any more is a violation too — the declaration may not outlive its reason.
+        /// </summary>
+        internal static readonly Dictionary<string, string> DroppedButRead =
+            new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            { "FollowupAbility",
+              "CaterpillarMoveAbility chains through it. The mirror plays the move alone; the followup reaches " +
+              "every peer as its OWN command a moment later, which is the declared design (a chained order is " +
+              "two orders, not a passenger)" },
+            { "GameObject",
+              "ApplyEffectAbility reaches it through TacticalAbilityTarget.ToEffectTarget:278-282. The mirror's " +
+              "EffectTarget.GameObject is null, so the effect resolves against PositionToApply / the actor key " +
+              "instead of a scene object — correct for every actor-targeted effect, and a scene-object-targeted " +
+              "one lands at the same coordinates rather than on the same instance" },
+            { "InventoryComponent",
+              "ApplyStatusAbility reads it to reach an inventory's owner. The mirror falls through to the same " +
+              "actor by key (TacticalAbilityTarget.GetWorkingPosition:181 uses it only as a POSITION source, " +
+              "after the actor and receiver it is given)" },
+            { "ItemContainer",
+              "ApplyStatusAbility reads it the same way. A crate is keyed on the wire by A6 " +
+              "(ItemContainer IS a TacticalActorBase), so the container this names is reachable — it is the " +
+              "live REFERENCE that is not shipped, and the mirror resolves position instead" },
+            { "MultiAbilityTargets",
+              "BashAbility reads the recursive list. A mirrored multi-target activation replays against its " +
+              "PRIMARY target only; shipping it would make the codec nest itself, and no rider today is " +
+              "authored as a multi-target ability" },
         };
 
         /// <summary>A5 — THE DROP HAS TO BE AUDIBLE, not merely declared. While the rider set was a whitelist of
@@ -422,12 +475,79 @@ namespace Multiplayer.Tactical
                              "crosses, but every other peer replays it without that field — first occurrence only.");
         }
 
+        /// <summary>THE ITEM ADDRESS (A7), and it is A6's container address plus the item's own def guid:
+        /// <c>(actorKey, Inventory|Equipments, defGuid)</c>. An <c>Item</c> carries exactly one back-pointer,
+        /// <c>Item.InventoryComponent</c>:45 (set at <c>OnAddedToInventory</c>:82-85), and
+        /// <c>Equipment.EquipmentComponent</c>:19 is that same field cast — so the owning container IS the
+        /// address A6 already ships, reused rather than reinvented.
+        ///
+        /// KNOWN CEILING, declared rather than papered over: two items of the SAME def in one container are
+        /// interchangeable by this key and the far side resolves the FIRST. Membership is all A6 forces
+        /// (order within a container is deliberately not synchronised), so an ordinal would be false
+        /// precision — it would name a different clip whenever the two lists happened to be sorted
+        /// differently, which is worse than naming an equivalent one.</summary>
+        private static bool ItemAddress(Item item, out int actorKey, out byte kind, out string defGuid)
+        {
+            actorKey = 0; kind = 0; defGuid = null;
+            if (item == null) return false;
+            defGuid = item.ItemDef == null ? null : item.ItemDef.Guid;
+            if (string.IsNullOrEmpty(defGuid)) return false;
+            return TacticalInventorySync.AddressOf(item.InventoryComponent, out actorKey, out kind);
+        }
+
+        /// <summary>The other half. Null + a sentence on any failure — never a "closest match", because a
+        /// reload aimed at the wrong weapon is exactly the divergence this rider exists to stop.</summary>
+        private static Item ResolveItem(BinaryReader r, string field, TacticalLevelController tlc, List<string> unresolved)
+        {
+            int key = r.ReadInt32();
+            byte kind = r.ReadByte();
+            string guid = r.ReadString();
+            string why;
+            var owner = TacticalActorKey.Resolve(tlc, key, out why);
+            if (owner == null)
+            {
+                if (unresolved != null) unresolved.Add(field + " owner (key " + key + "): " + why);
+                return null;
+            }
+            var container = TacticalInventorySync.ContainerOf(owner, kind);
+            if (container == null)
+            {
+                if (unresolved != null)
+                    unresolved.Add(field + ": " + owner.name + " has no container of kind " + kind + " on this peer");
+                return null;
+            }
+            foreach (var it in container.Items)
+                if (it != null && it.ItemDef != null && it.ItemDef.Guid == guid) return it;
+            if (unresolved != null)
+                unresolved.Add(field + ": no item with def guid " + guid + " in " + owner.name + "'s container " +
+                               kind + " on this peer — mod parity should have made that impossible (law 10)");
+            return null;
+        }
+
+        /// <summary>A7 — an item field that RIDES but has no shared address (an item in no container at all,
+        /// or one whose owner this peer cannot key) still has to be audible: the order crosses without it and
+        /// the far side silently picks its own weapon. Same shape as <see cref="NoteDroppedField"/>.</summary>
+        private static void NoteUnkeyableItem(string field, Item item)
+        {
+            if (item == null || !_saidDropped.Add("unkeyed:" + field)) return;
+            Debug.LogWarning("[Multiplayer][tac] an activation carried TacticalAbilityTarget." + field +
+                             " that has NO shared address (it is in no keyed container), so it cannot ride. The " +
+                             "order still crosses, but every other peer resolves that field for itself — " +
+                             "first occurrence only.");
+        }
+
         internal static void Write(BinaryWriter w, TacticalAbilityTarget t)
         {
+            int eqKey = 0, itKey = 0;
+            byte eqKind = 0, itKind = 0;
+            string eqGuid = null, itGuid = null;
+            bool eqRides = false, itRides = false;
             if (t != null)
             {
-                NoteDroppedField("TacticalItem", t.TacticalItem);
-                NoteDroppedField("Equipment", t.Equipment);
+                eqRides = ItemAddress(t.Equipment, out eqKey, out eqKind, out eqGuid);
+                itRides = ItemAddress(t.TacticalItem, out itKey, out itKind, out itGuid);
+                if (!eqRides) NoteUnkeyableItem("Equipment", t.Equipment);
+                if (!itRides) NoteUnkeyableItem("TacticalItem", t.TacticalItem);
                 NoteDroppedField("ItemContainer", t.ItemContainer);
                 NoteDroppedField("InventoryComponent", t.InventoryComponent);
                 NoteDroppedField("MultiAbilityTargets", t.MultiAbilityTargets);
@@ -446,6 +566,8 @@ namespace Multiplayer.Tactical
                 if (t.Cone.Height != 0f || t.Cone.Radius != 0f) mask |= BitCone;
                 if (t.AttackType != AttackType.Regular) mask |= BitAttackType;
                 if (!float.IsPositiveInfinity(t.ObstructionsCheckRadius)) mask |= BitObstructionsCheckRadius;
+                if (eqRides) mask |= BitEquipment;
+                if (itRides) mask |= BitTacticalItem;
             }
             w.Write(mask);
             if (t == null) return;
@@ -467,6 +589,8 @@ namespace Multiplayer.Tactical
             }
             if ((mask & BitAttackType) != 0) w.Write((byte)t.AttackType);
             if ((mask & BitObstructionsCheckRadius) != 0) w.Write(t.ObstructionsCheckRadius);
+            if ((mask & BitEquipment) != 0) { w.Write(eqKey); w.Write(eqKind); w.Write(eqGuid); }
+            if ((mask & BitTacticalItem) != 0) { w.Write(itKey); w.Write(itKind); w.Write(itGuid); }
         }
 
         /// <summary>Decode against the RECEIVING peer's own world: every actor-shaped field is a key that is
@@ -508,6 +632,8 @@ namespace Multiplayer.Tactical
             }
             if ((mask & BitAttackType) != 0) t.AttackType = (AttackType)r.ReadByte();
             if ((mask & BitObstructionsCheckRadius) != 0) t.ObstructionsCheckRadius = r.ReadSingle();
+            if ((mask & BitEquipment) != 0) t.Equipment = ResolveItem(r, "Equipment", tlc, unresolved) as Equipment;
+            if ((mask & BitTacticalItem) != 0) t.TacticalItem = ResolveItem(r, "TacticalItem", tlc, unresolved) as TacticalItem;
             return t;
         }
 
@@ -598,7 +724,16 @@ namespace Multiplayer.Tactical
         // Wire ops on SurfaceIds.TacCommand (host→all) and SurfaceIds.TacCommandIntent (client→host).
         private const byte OpActivate = 1;
         private const byte OpSettle = 2;
+        /// <summary>A7 — SELECTING A WEAPON IS NOT AN ABILITY, which is why it never crossed. The model
+        /// funnel is <c>EquipmentComponent.SetSelectedEquipment</c>:242 (it fires the game's own
+        /// <c>EquipmentChangedEvent</c>:266) and the tactical UI reaches it from three view states —
+        /// <c>UIStateCharacterSelected</c>:748/751, <c>UIStateShoot</c>:854/862,
+        /// <c>UIStateAbilitySelected</c>:725/736 — none of which activates anything, so A3a's prefix on
+        /// <c>TacticalAbility.Activate</c> can never see the click. Ops 3 (host→all) / 4 (client→host) on the
+        /// families that already exist; NO new surface.</summary>
+        private const byte OpSelectEquipment = 3;
         internal const byte OpIntentActivate = 1;
+        internal const byte OpIntentSelectEquipment = 4;
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
 
@@ -647,6 +782,35 @@ namespace Multiplayer.Tactical
               "A6: InventoryAbility.Activate:11-15 ends in ToInventoryViewState() — relaying it YANKS every " +
               "other peer's screen into an inventory nobody there opened. Opening the screen is presentation; " +
               "what the session COMMITS rides 0x84 op 5 (TacticalInventorySync)" },
+        };
+
+        /// <summary>
+        /// A7 — THE NON-ABILITY TACTICAL FUNNELS, declared for the same reason
+        /// <see cref="LocalAbilities"/> and <see cref="TacAbilityTargetCodec.Dropped"/> are: the whole arc keys
+        /// on ONE seam (<c>TacticalAbility.Activate</c>), and a model mutation a player can click that is NOT
+        /// an ability therefore crosses nothing at all — silently, which is this repo's dominant bug class and
+        /// was exactly the 2026-07-31 weapon-switch report.
+        ///
+        /// Keyed <c>Type.Name + "." + method</c>, matching what RailCheck L76b discovers: every method a
+        /// <c>PhoenixPoint.Tactical.View.ViewStates</c> class calls directly on a
+        /// <c>PhoenixPoint.Tactical.Entities</c>* model type whose IL writes an instance field. Each one must
+        /// be either seamed (a Harmony prefix of ours) or named HERE with the reason it may stay local; the
+        /// harness fails a funnel that is neither, and a row that no view state reaches any more.
+        /// </summary>
+        internal static readonly Dictionary<string, string> LocalFunnels =
+            new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            { "TacticalActorViewBase.DoCameraChaseParam",
+              "presentation: where THIS peer's camera looks. Law 5 names the camera local-only by name, and " +
+              "law L75's whole point is that six peers watch six different soldiers" },
+            { "TacticalActorViewBase.ShowNameNotification",
+              "presentation: the floating label over a soldier on this screen. Whatever it announces (a hit, a " +
+              "status, a death) is already replicated as MODEL state on 0x84; relaying the label too would " +
+              "double it" },
+            { "TacticalActorViewBase.UpdateHealthbarPredictions",
+              "presentation: the PREDICTED damage this peer is currently aiming at. Law 5 names hover/preview " +
+              "aiming local-only by name — it is a function of where THIS peer's cursor is, and the real " +
+              "damage arrives resolved on 0x84" },
         };
 
         /// <summary>The declared reason this ability never crosses the wire, or null when it rides. Null is the
@@ -727,6 +891,10 @@ namespace Multiplayer.Tactical
         /// coroutine it starts runs later, on the game loop, with this already cleared.</summary>
         private static ulong _replayOriginPeer;
 
+        /// <summary>When the 0x82 record now being decoded reached this peer, for the mirror telemetry's
+        /// arrival delta. A plain field: the decode and the play are one synchronous call.</summary>
+        private static float _recordArrived;
+
         /// <summary>CLIENT: settles waiting for their actor to go idle, keyed by actor key. A settle applied
         /// while the peer is still playing the mirrored move would be overwritten by that move's own
         /// navigation and vanish without a trace — the silent-swallow class — so it is HELD instead.</summary>
@@ -738,6 +906,13 @@ namespace Multiplayer.Tactical
             public float Ap;
             public float Wp;
             public int WaitedFrames;
+
+            /// <summary>The host sent this one because it REFUSED an order for that actor. The refusing peer
+            /// is precisely the peer whose actor is mid-speculation, so the ordinary "wait until it goes
+            /// idle" hold would sit on the correction for as long as the speculative ability runs — and if
+            /// that ability never ends (a refused throw leaves one executing), forever, with only a periodic
+            /// warning. A forced settle applies immediately and says so.</summary>
+            public bool Forced;
         }
 
         /// <summary>Log-once sets for the two "A3a knowingly does not cover this" notices. Per BATTLE, so the
@@ -748,6 +923,11 @@ namespace Multiplayer.Tactical
         // ~2 s at 60 fps. Not a deadline: a held settle is CORRECT while the actor is still moving, so the
         // hold keeps waiting and only says so periodically — but a hold nobody can see is the bug class.
         private const int SettleWarnFrames = 120;
+
+        // ~10 s at 60 fps — the point past which "the actor is still moving" stops being a credible reason.
+        // ponytail: a frame count, not a measured deadline; raise it if a legitimate cross-map move ever
+        // trips it (the line it prints says which actor and how long, so the evidence arrives with the bug).
+        private const int SettleHoldCeilingFrames = 600;
 
         /// <summary>Per-BATTLE state, dropped at tactical teardown and at session teardown (alongside
         /// <c>TacticalTurnSync.Reset</c>). A leaked pending settle would snap an actor in the NEXT battle to a
@@ -776,6 +956,8 @@ namespace Multiplayer.Tactical
                 // A6: a client's committed inventory batch. Same family for the same reason — the batch is a
                 // client asking the host to make something true, which is what this family is.
                 [TacticalInventorySync.OpIntentInventory] = TacticalInventorySync.HandleInventoryIntent,
+                // A7: "I switched this soldier's weapon". Same family for the same reason as the batch above.
+                [OpIntentSelectEquipment] = HandleSelectEquipment,
             };
             IntentRail.Register(SurfaceIds.TacCommandIntent, "tac-cmd", ops);
         }
@@ -902,6 +1084,130 @@ namespace Multiplayer.Tactical
             return null;
         }
 
+        // ─── A7: THE OTHER TACTICAL FUNNEL — SELECTING A WEAPON ────────────
+
+        /// <summary>The <c>EquipmentComponent.SetSelectedEquipment</c> prefix. It NEVER blocks, and that is a
+        /// decision, not an oversight: the method is also the game's own internal repair path
+        /// (<c>EquipmentComponent</c>:56 on entering play, :102/:118 when an item is added or removed, :272
+        /// when the held weapon is destroyed, <c>RagdollDieAbility</c>:162 clearing it on death), so a
+        /// block-first posture would leave a client holding NOTHING the first time a weapon broke. The
+        /// posture is A3a's instead — the acting peer plays its own click and the host's echo is the
+        /// authority — and it is safe here because the write is idempotent (the native body no-ops when the
+        /// selection is unchanged) and carries no cost.
+        ///
+        /// The derived selections above therefore ride too, harmlessly: they are raised from state that is
+        /// already replicated, so every peer computes the same one and the mirror is a no-op on arrival.</summary>
+        internal static void OnEquipmentSelected(EquipmentComponent component, Equipment equipment)
+        {
+            var engine = LiveEngine();
+            if (engine == null) return;
+            if (SyncApplyScope.Active) return;                       // law 8: this IS a mirror being applied
+            if (component == null) return;
+            if (ReferenceEquals(component.SelectedEquipment, equipment)) return;   // the native body no-ops
+            var actor = component.Actor as TacticalActorBase;
+            if (actor == null) return;
+            int key = TacticalActorKey.Of(actor);
+            if (key == 0)
+            {
+                if (_saidKeyless.Add("sel:" + SafeActorName(actor)))
+                    Debug.LogError("[Multiplayer][tac] a weapon switch on " + SafeActorName(actor) + " cannot be " +
+                                   "relayed — that actor has no shared key. Every other peer keeps showing the " +
+                                   "weapon it was already holding, and the host will refuse any ability whose " +
+                                   "source is the new one (EquipmentNotSelected).");
+                return;
+            }
+            string guid = equipment == null || equipment.ItemDef == null ? "" : equipment.ItemDef.Guid;
+            string what = "select " + actor.name + " -> " + EqName(equipment);
+            if (engine.IsHost)
+                Send(OpSelectEquipment, what, _replayOriginPeer, w => { w.Write(key); w.Write(guid); });
+            else if (actor.TacticalFaction != null && actor.TacticalFaction.IsControlledByPlayer)
+                IntentRail.Send(SurfaceIds.TacCommandIntent, OpIntentSelectEquipment, what,
+                                w => { w.Write(key); w.Write(guid); });
+        }
+
+        /// <summary>The equipment named by <paramref name="guid"/> in this actor's own equipment component,
+        /// or null with a sentence. "" is a real value — <c>RagdollDieAbility</c>:162 selects nothing.</summary>
+        private static bool ResolveEquipment(TacticalActorBase actor, string guid, out EquipmentComponent comp,
+                                             out Equipment equipment, out string why)
+        {
+            comp = null; equipment = null; why = null;
+            var tac = actor as TacticalActor;
+            comp = tac == null ? null : tac.Equipments;
+            if (comp == null) { why = SafeActorName(actor) + " has no equipment component"; return false; }
+            if (string.IsNullOrEmpty(guid)) return true;                    // deliberate "select nothing"
+            foreach (var it in comp.Items)
+            {
+                var eq = it as Equipment;
+                if (eq != null && eq.ItemDef != null && eq.ItemDef.Guid == guid) { equipment = eq; return true; }
+            }
+            why = SafeActorName(actor) + " carries no equipment with def guid " + guid + " on this peer — mod " +
+                  "parity should have made that impossible (law 10)";
+            return false;
+        }
+
+        private static void HandleSelectEquipment(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
+        {
+            int key = r.ReadInt32();
+            string guid = r.ReadString();
+            string why;
+            var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
+            var faction = actor == null ? null : actor.TacticalFaction;
+            EquipmentComponent comp = null; Equipment eq = null; string resolve = null;
+            if (actor != null) ResolveEquipment(actor, guid, out comp, out eq, out resolve);
+
+            string refusal = actor == null ? why
+                           : !actor.IsAlive ? "that actor is dead — a corpse holds nothing"
+                           : faction == null || !faction.IsControlledByPlayer
+                             ? "that actor's faction is not player-controlled — a peer switches weapons on the " +
+                               "shared player team, never on the AI's units"
+                           : resolve;
+            if (refusal != null)
+            {
+                IntentRail.Reject(SurfaceIds.TacCommandIntent, senderPeerId,
+                                  "weapon switch for actor " + key + ": " + refusal);
+                return;
+            }
+            // Native, and the prefix above turns it into the host→all mirror for every OTHER peer.
+            _replayOriginPeer = senderPeerId;
+            try { comp.SetSelectedEquipment(eq); }
+            finally { _replayOriginPeer = 0; }
+            Debug.Log("[Multiplayer][tac] HOST weapon switch from peer=" + senderPeerId + " ACCEPTED — " +
+                      actor.name + " -> " + EqName(eq) + " nonce=" + nonce);
+        }
+
+        private static void ApplySelectEquipment(int key, string guid)
+        {
+            string why;
+            var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
+            if (actor == null)
+            {
+                Debug.LogError("[Multiplayer][tac] the host's weapon switch for actor " + key + " cannot be " +
+                               "applied here — " + why + ". That soldier keeps the weapon this screen shows.");
+                return;
+            }
+            EquipmentComponent comp; Equipment eq;
+            if (!ResolveEquipment(actor, guid, out comp, out eq, out why))
+            {
+                Debug.LogError("[Multiplayer][tac] the host's weapon switch cannot be applied — " + why);
+                return;
+            }
+            using (SyncApplyScope.Enter()) comp.SetSelectedEquipment(eq);
+            Debug.Log("[Multiplayer][tac] CLIENT weapon switch applied — " + actor.name + " -> " +
+                      EqName(eq));
+        }
+
+        /// <summary><c>UnityEngine.Object.name</c> is a native ECall that throws headless; a refusal message
+        /// that cannot be built is a refusal that becomes a crash.</summary>
+        private static string SafeActorName(TacticalActorBase actor)
+        {
+            if (ReferenceEquals(actor, null)) return "<null>";
+            try { return actor.name; } catch { return actor.GetType().Name; }
+        }
+
+        /// <summary>An <c>Item</c> is NOT a Unity object, so it has no <c>name</c>; its def does.</summary>
+        private static string EqName(Item item) =>
+            item == null ? "<none>" : (item.ItemDef == null ? item.GetType().Name : item.ItemDef.name);
+
         /// <summary>The <c>TacticalAbility.ClearPlayingAction</c> postfix — the host's CLOSER. That method is
         /// the one non-virtual funnel every playing action ends through (:1039, it is what calls the virtual
         /// <c>OnPlayingActionEnd</c>), so it fires for a completed move AND for an interrupted one, which is
@@ -917,7 +1223,7 @@ namespace Multiplayer.Tactical
         /// <summary>Ship one actor's authoritative position + AP + WP to every peer. Broadcast to ALL,
         /// including whoever gestured: the acting peer is the one whose speculative local play most needs
         /// correcting.</summary>
-        private static void HostSettle(TacticalActorBase actor)
+        private static void HostSettle(TacticalActorBase actor, bool forced = false)
         {
             var tacActor = actor as TacticalActor;
             if (tacActor == null) return;                 // no CharacterStats to settle (structural targets, etc.)
@@ -929,8 +1235,9 @@ namespace Multiplayer.Tactical
             float ap = stats.ActionPoints;
             float wp = stats.WillPoints;
             Send(OpSettle, "settle " + tacActor.name + " @ " + Fmt(pos) + " ap=" + ap.ToString("0.##") +
-                 " wp=" + wp.ToString("0.##"), 0,
-                 w => { w.Write(key); w.Write(pos.x); w.Write(pos.y); w.Write(pos.z); w.Write(ap); w.Write(wp); });
+                 " wp=" + wp.ToString("0.##") + (forced ? " FORCED" : ""), 0,
+                 w => { w.Write(key); w.Write(pos.x); w.Write(pos.y); w.Write(pos.z); w.Write(ap); w.Write(wp);
+                        w.Write(forced); });
         }
 
         /// <summary>A5 adds the HAS-TARGET flag, and it is not thrift: the codec writes mask 0 for a null
@@ -1035,6 +1342,41 @@ namespace Multiplayer.Tactical
             return null;
         }
 
+        /// <summary>THE GAME'S OWN AUTO-SELECT, RUN ONE STEP EARLY — and it is a BELT, not the fix.
+        ///
+        /// <c>TacticalAbility.Activate</c>:1087-1090 selects the ability's own source equipment before it does
+        /// anything else ("if the source is an unselected Equipment and the def is not
+        /// <c>UsableOnNonSelectedEquipment</c>, select it"). But <see cref="Validate"/> asks the game's gate
+        /// <c>GetDisabledState()</c> BEFORE that call, and one arm of that gate —
+        /// <c>GetDisabledStateInternal</c>:435, <c>EquipmentNotSelected</c> — refuses exactly the case
+        /// :1087-1090 is about to repair. So the host was rejecting orders the native path would have made
+        /// legal the instant it ran them: the 2026-07-31 grenade and reload rejects, verbatim, message for
+        /// message ("Предмет не выбран" IS <c>AbilityDisabledState.EquipmentNotSelected</c>, whose
+        /// <c>ToString</c>:182-185 localizes the key).
+        ///
+        /// The ROOT cause of that divergence is the weapon switch that never crossed (A7's
+        /// <see cref="OnEquipmentSelected"/> seam); this exists because an arbiter must not refuse an order on
+        /// a state the very next line rewrites, whatever else drifts. Running the game's own write here also
+        /// costs nothing: the capture prefix turns it into the ordinary host→all mirror, so every peer's
+        /// soldier draws the same weapon.</summary>
+        private static void PreSelectSourceEquipment(TacticalAbility ability)
+        {
+            if (ability == null || ability.UsableOnNonSelectedEquipment) return;
+            var eq = ability.OverrideEquipment ?? ability.EquipmentSource;
+            if (eq == null || eq.IsSelected) return;
+            var actor = ability.TacticalActor;
+            var comp = actor == null ? null : actor.Equipments;
+            if (comp == null || !comp.Items.Contains(eq)) return;
+            // Only for the shared player team. A command naming an AI actor is about to be refused by
+            // Validate anyway, and a refused intent must leave no trace on host state (law 3).
+            if (actor.TacticalFaction == null || !actor.TacticalFaction.IsControlledByPlayer) return;
+            comp.SetSelectedEquipment(eq);
+            Debug.Log("[Multiplayer][tac] HOST pre-selected " + EqName(eq) + " on " + SafeActorName(actor) +
+                      " before validating its order — the game's own Activate:1087-1090 was about to do the " +
+                      "same, and GetDisabledState would otherwise have refused with EquipmentNotSelected. " +
+                      "Seeing this often means a peer's weapon switch is not reaching the host.");
+        }
+
         private static void HandleActivate(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
             int key = r.ReadInt32();
@@ -1057,6 +1399,8 @@ namespace Multiplayer.Tactical
             var faction = actor == null ? null : actor.TacticalFaction;
             TacticalAbility ability = actor == null ? null
                 : actor.GetAbilityFiltered<TacticalAbility>(a => a.AbilityDef != null && a.AbilityDef.Guid == guid);
+
+            PreSelectSourceEquipment(ability);
 
             string disabled = null;
             if (ability != null)
@@ -1086,7 +1430,10 @@ namespace Multiplayer.Tactical
                 // Snap his speculative local play back — but only if the actor is idle HERE. If it is busy, the
                 // command that won is still running and its own end-of-action settle is the corrector; a settle
                 // taken mid-flight would ship a position the host itself is about to leave.
-                if (actor != null && !actor.HasExecutingAbility()) HostSettle(actor);
+                // FORCED (2026-07-31 RCA): the rejected peer is the one whose actor is stuck mid-speculation,
+                // so its ClientTick would HOLD this correction behind HasExecutingAbility() — forever, if that
+                // ability never ends, which is exactly what "everything went dead" looked like.
+                if (actor != null && !actor.HasExecutingAbility()) HostSettle(actor, forced: true);
                 return;
             }
 
@@ -1109,6 +1456,7 @@ namespace Multiplayer.Tactical
         {
             if (surfaceId != SurfaceIds.TacCommand) return false;
             if (engine == null || engine.IsHost) return true;   // the host never mirrors its own commands
+            _recordArrived = Time.realtimeSinceStartup;
             try
             {
                 using (var ms = new MemoryStream(payload ?? new byte[0]))
@@ -1128,7 +1476,8 @@ namespace Multiplayer.Tactical
                     }
                     else if (op == OpSettle) QueueSettle(r.ReadInt32(),
                                                         new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
-                                                        r.ReadSingle(), r.ReadSingle());
+                                                        r.ReadSingle(), r.ReadSingle(), r.ReadBoolean());
+                    else if (op == OpSelectEquipment) ApplySelectEquipment(r.ReadInt32(), r.ReadString());
                     else
                     {
                         Debug.LogError("[Multiplayer][tac] unknown host→all command op " + op + " (seq=" + seq +
@@ -1183,15 +1532,62 @@ namespace Multiplayer.Tactical
                                "not a declared rider — the two peers disagree about what this arc carries.");
                 return;
             }
+            MirrorTelemetry(actor, ability);
             // The host's fumble is DECLARED before the native body runs, because Activate:1109 rolls it and
             // PlayAction:988-993 consumes it inside the same synchronous call — there is no later moment.
             FumbleGate.Declare(ability, fumbled);
             using (SyncApplyScope.Enter()) ability.Activate(target);
         }
 
-        private static void QueueSettle(int key, Vector3 pos, float ap, float wp)
+        /// <summary>ONE line, measured at the moment a mirrored order is about to play, answering the three
+        /// questions the 2026-07-31 RCA had to argue instead of read (MpDiag-gated: one line per mirrored
+        /// activation is diagnostic volume, and the failures it explains are all reported loudly elsewhere).
+        ///
+        ///  • WHY AN ENEMY ACTION IS INVISIBLE AND FAST. <c>TacticalActorViewBase.SetShownModeInternal</c>:363
+        ///    disables every renderer of a non-<c>Revealed</c> actor (<c>RefreshAddonRenderers</c>:464) AND
+        ///    adds <c>TimingScale 4f</c> (<c>RefreshTimeScale</c>:423-435) — so a mirrored action on an actor
+        ///    this peer has not revealed plays invisibly, at 4x. Health bars share the gate
+        ///    (<c>ShouldRenderUI</c>:395-403: <c>Revealed</c> AND <c>!CurrentFaction.IsControlledByAI</c>).
+        ///  • WHETHER THE PLAY IS SEQUENCED OR ENQUEUED. <c>ShootAbility.Activate</c>:167 branches on
+        ///    <c>TacticalLevelController.AnyAIEvaluationAbilityExecuting</c>:259, which is TRUE on the host
+        ///    during its AI turn and FALSE on a client (<c>ClientAiGate</c> holds the AI there), so the host
+        ///    takes <c>PlayAction</c> and the client takes <c>EnqueueAction(soloAfterCurrent:true)</c>.
+        ///  • WHETHER A CAMERA BLEND IS ABOUT TO COST A WAIT. <c>PlayAction</c>:998 wraps every action in
+        ///    <c>CreateWaitingForCameraBlendingAction</c>, whose wait runs only <c>if (TrackWithCamera)</c>
+        ///    (:971) and then spins while <c>CameraDirector.Chasing</c> (:953-966). Both are printed, so the
+        ///    next run MEASURES the "shots are sequential" complaint instead of reasoning about it.</summary>
+        private static void MirrorTelemetry(TacticalActor actor, TacticalAbility ability)
         {
-            _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0 };
+            try
+            {
+                var tlc = Tlc();
+                var view = actor.TacticalActorViewBase;
+                var faction = tlc == null ? null : tlc.CurrentFaction;
+                var director = actor.CameraDirector;
+                string name = ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name;
+                // ALWAYS ON, but once per DISTINCT answer. Ungated it is one line per mirrored activation —
+                // the volume MpDiag exists to suppress (a live run logged 23642 lines of one family) — and
+                // gated it would be absent from exactly the next run that has to answer the question. The
+                // shape of the answer is what matters, not how many times it repeats, so the key IS the answer.
+                string key = "tel:" + name + "/" + (view == null ? "?" : view.ShownMode.ToString()) + "/" +
+                             (faction != null && faction.IsControlledByAI) + "/" + ability.TrackWithCamera;
+                if (!_saidUncovered.Add(key)) return;
+                Debug.Log("[Multiplayer][tac] MIRROR play " + actor.name + " " + name +
+                          " shownMode=" + (view == null ? "<no view>" : view.ShownMode.ToString()) +
+                          " currentFaction=" + (faction == null || faction.TacticalFactionDef == null
+                                                ? "<none>" : faction.TacticalFactionDef.name) +
+                          " factionIsAi=" + (faction != null && faction.IsControlledByAI) +
+                          " aiEval=" + (tlc != null && tlc.AnyAIEvaluationAbilityExecuting) +
+                          " trackWithCamera=" + ability.TrackWithCamera +
+                          " cameraChasing=" + (director != null && director.Chasing) +
+                          " arrival+" + ((Time.realtimeSinceStartup - _recordArrived) * 1000f).ToString("0.#") + "ms");
+            }
+            catch (Exception ex) { Debug.LogWarning("[Multiplayer][tac] mirror telemetry failed: " + ex.Message); }
+        }
+
+        private static void QueueSettle(int key, Vector3 pos, float ap, float wp, bool forced)
+        {
+            _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced };
         }
 
         /// <summary>The standing settle applier (driven from <c>SyncEngine.Tick</c>, client-only inside). A
@@ -1217,16 +1613,36 @@ namespace Multiplayer.Tactical
                     (lost ?? (lost = new List<int>())).Add(kv.Key);
                     continue;
                 }
-                if (actor.HasExecutingAbility())
+                if (actor.HasExecutingAbility() && !kv.Value.Forced)
                 {
                     var held = kv.Value;
-                    if (++held.WaitedFrames % SettleWarnFrames == 0)
-                        Debug.LogWarning("[Multiplayer][tac] holding the settle for " + actor.name + " — it has " +
-                                         "been executing an ability for " + (held.WaitedFrames / 60) + "s. The " +
-                                         "correction is still pending, not lost.");
+                    ++held.WaitedFrames;
+                    if (held.WaitedFrames >= SettleHoldCeilingFrames)
+                    {
+                        // THE HOLD HAS A CEILING (2026-07-31 RCA). "Still moving" is a correct reason to wait
+                        // and a wrong reason to wait forever: an ability that never ends on this peer — a
+                        // refused throw, a stranded coroutine — turned this hold into a correction that was
+                        // swallowed with nothing but a repeating warning to show for it.
+                        held.Forced = true;
+                        Debug.LogError("[Multiplayer][tac] the settle for " + actor.name + " waited " +
+                                       (held.WaitedFrames / 60) + "s for it to stop executing an ability and is " +
+                                       "being applied ANYWAY. That ability is stuck on this peer; the host's " +
+                                       "position and AP win.");
+                    }
                     _pending[kv.Key] = held;
-                    continue;
+                    if (!held.Forced)
+                    {
+                        if (held.WaitedFrames % SettleWarnFrames == 0)
+                            Debug.LogWarning("[Multiplayer][tac] holding the settle for " + actor.name + " — it has " +
+                                             "been executing an ability for " + (held.WaitedFrames / 60) + "s. The " +
+                                             "correction is still pending, not lost.");
+                        continue;
+                    }
                 }
+                if (kv.Value.Forced && actor.HasExecutingAbility())
+                    Debug.LogWarning("[Multiplayer][tac] applying a FORCED settle to " + actor.name + " while it is " +
+                                     "still executing an ability — the host refused that order, so this peer's " +
+                                     "speculative play is being overruled mid-flight.");
                 ApplySettle(actor, kv.Value);
                 (done ?? (done = new List<int>())).Add(kv.Key);
             }
@@ -1278,6 +1694,29 @@ namespace Multiplayer.Tactical
     {
         private static void Prefix(TacticalAbility __instance, object parameter)
             => TacticalCommandSync.OnAbilityActivated(__instance, parameter);
+    }
+
+    /// <summary>
+    /// A7 — THE SECOND TACTICAL FUNNEL. Switching a soldier's weapon is NOT an ability, so nothing about it
+    /// reaches <see cref="AbilityActivateCapture"/>: the model write is
+    /// <c>EquipmentComponent.SetSelectedEquipment</c>:242-268, clicked straight out of three view states
+    /// (<c>UIStateCharacterSelected</c>:748/751, <c>UIStateShoot</c>:854/862,
+    /// <c>UIStateAbilitySelected</c>:725/736). Until this seam existed, a weapon switch stayed on the peer
+    /// that clicked it, and — far worse than a cosmetic gap — the HOST then refused that peer's next order
+    /// with the game's own <c>EquipmentNotSelected</c> gate
+    /// (<c>TacticalAbility.GetDisabledStateInternal</c>:435 tests <c>isEquipmentOfSelectedGroup</c>:481-499
+    /// against the HOST's selection), which is the 2026-07-31 "threw a grenade, nothing happened, everything
+    /// went dead" report.
+    ///
+    /// A PREFIX so the capture reads the OLD selection and can tell a real change from the native no-op
+    /// (:244 returns immediately when the value is unchanged). It returns void — never blocks — for the
+    /// reasons argued at <see cref="TacticalCommandSync.OnEquipmentSelected"/>.
+    /// </summary>
+    [HarmonyPatch(typeof(EquipmentComponent), nameof(EquipmentComponent.SetSelectedEquipment))]
+    internal static class EquipmentSelectCapture
+    {
+        private static void Prefix(EquipmentComponent __instance, Equipment equipment)
+            => TacticalCommandSync.OnEquipmentSelected(__instance, equipment);
     }
 
     /// <summary>

@@ -134,7 +134,7 @@ namespace Multiplayer.Tactical
         /// <summary>Which of the owning actor's containers this is. Compared BY REFERENCE against the actor's
         /// own two rather than by component type: <c>EquipmentComponent</c> derives from
         /// <c>InventoryComponent</c>, so a type test would answer "inventory" for a weapon slot.</summary>
-        private static bool AddressOf(InventoryComponent component, out int actorKey, out byte kind)
+        internal static bool AddressOf(InventoryComponent component, out int actorKey, out byte kind)
         {
             actorKey = 0;
             kind = KindInventory;
@@ -149,7 +149,7 @@ namespace Multiplayer.Tactical
             return false;
         }
 
-        private static InventoryComponent ContainerOf(TacticalActorBase actor, byte kind)
+        internal static InventoryComponent ContainerOf(TacticalActorBase actor, byte kind)
         {
             if (actor == null) return null;
             if (kind == KindInventory) return actor.Inventory;
@@ -381,7 +381,16 @@ namespace Multiplayer.Tactical
             foreach (var q in queries)
             {
                 var component = LinkedOf(q);
-                if (component == null) continue;
+                if (component == null)
+                {
+                    // WAS A SILENT `continue`, and it is one of the two ways the 2026-07-31 run committed
+                    // inventory sessions with not one line on any peer's log. A query whose linked component
+                    // cannot be read is a container whose contents will never cross.
+                    SayOnce("query-unlinked",
+                        "[Multiplayer][tac] an InventoryQuery in a committing batch has NO linked " +
+                        "InventoryComponent (LinkedOf returned null), so whatever it moves stays on this peer.");
+                    continue;
+                }
                 int key;
                 byte kind;
                 if (!AddressOf(component, out key, out kind))
@@ -406,7 +415,16 @@ namespace Multiplayer.Tactical
                 foreach (var item in q.Items) slot.ItemDefs.Add(DefGuid(item));
                 slots.Add(slot);
             }
-            if (slots.Count == 0) return;
+            if (slots.Count == 0)
+            {
+                // The other silent `return`. Reaching here means the game told us a batch WAS about to be
+                // committed (WillModifyInventory) and not one of its containers could be addressed — never a
+                // no-op, always a batch that vanished.
+                SayOnce("batch-unaddressable",
+                    "[Multiplayer][tac] a committing inventory batch named NO addressable container, so " +
+                    "nothing crosses at all — every item this session moved stays on this peer's screen.");
+                return;
+            }
 
             float ap = PayerAp(payerKey);
             string what = "inventory " + slots.Count + " container(s)" + (charged ? " charged" : "") +
@@ -525,13 +543,20 @@ namespace Multiplayer.Tactical
     {
         private static void Prefix(IEnumerable<InventoryQuery> queries)
         {
-            if (queries == null) return;
-            foreach (var q in queries)
-                if (q != null && q.WillModifyInventory())
+            // ALWAYS AUDIBLE (2026-07-31 RCA): the whole seam produced not one log line across three
+            // instances, and "the screen was opened and closed without moving anything" is indistinguishable
+            // from "the patch never bound" unless the seam says it ran. Rate is one line per inventory
+            // session close, so it is not gated behind MpDiag.
+            int total = 0, willModify = 0;
+            if (queries != null)
+                foreach (var q in queries)
                 {
-                    TacticalInventorySync.OnBatchCommitting(queries);
-                    return;
+                    total++;
+                    if (q != null && q.WillModifyInventory()) willModify++;
                 }
+            Debug.Log("[Multiplayer][tac] inventory commit seam fired, queries=" + total +
+                      " willModify=" + willModify + (willModify == 0 ? " (nothing was moved — nothing to ship)" : ""));
+            if (willModify > 0) TacticalInventorySync.OnBatchCommitting(queries);
         }
     }
 

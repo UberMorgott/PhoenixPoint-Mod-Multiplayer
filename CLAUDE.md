@@ -133,6 +133,25 @@ BEHAVIOR (per-subsystem mirroring).
    `FallNoSupportAbility` stays a declared local by A5's autonomy rule. KNOWN A6 CEILING: dropping onto BARE
    ground spawns a fresh `ItemContainer` that A4 does not replicate, so such a batch ships marked PARTIAL —
    the rest crosses and the dropped item stays in that soldier's pack elsewhere, loudly.
+   **A7** (law L76) = THE SECOND TACTICAL FUNNEL + the two item riders, and it takes **no new surface**:
+   op 3 on **0x82** / op 4 on **0x83**. Switching a soldier's weapon is NOT an ability, so the A3a prefix on
+   `TacticalAbility.Activate` could never see it — the model funnel is `EquipmentComponent.SetSelectedEquipment`:242
+   (raising the game's own `EquipmentChangedEvent`:266), clicked straight out of `UIStateCharacterSelected`:748/751,
+   `UIStateShoot`:854/862 and `UIStateAbilitySelected`:725/736. Un-relayed it was NOT cosmetic: the host validates
+   every order with the game's `GetDisabledState()`, whose `EquipmentNotSelected` arm
+   (`TacticalAbility.GetDisabledStateInternal`:435 → `isEquipmentOfSelectedGroup`:481-499) tests the HOST's
+   selection — so a client that switched locally had its next grenade or reload REJECTED ("Предмет не выбран",
+   2026-07-31). The seam is a NON-BLOCKING prefix, deliberately: the same method is the game's own repair path
+   (`EquipmentComponent`:56/102/118/272, `RagdollDieAbility`:162), so block-first would leave a client holding
+   nothing the first time a weapon broke; the posture is A3a's speculative one and the host's echo is the
+   authority. A BELT rides with it — the host replays `Activate`:1087-1090's own auto-select BEFORE asking
+   `GetDisabledState`, because an arbiter must not refuse an order on a state the next native line rewrites.
+   Also: `TacticalAbilityTarget.Equipment`/`TacticalItem` moved from `Dropped` to `Rides` (bits 1<<10 / 1<<11,
+   keyed `(actorKey, Inventory|Equipments, defGuid)` — A6's container address reused) because
+   `ReloadAbility.ChooseEquipmentAndAmmo`:111-114 reads both and `DropItemAbility`:36 dereferences `TacticalItem`
+   with no null test at all. A settle now carries `[forced:u8]`: one sent because the host REFUSED an order is
+   applied immediately rather than held behind the refused peer's stuck speculative ability, and the ordinary
+   hold gained a 10 s ceiling — a correction that waits forever is a swallowed correction.
    Shared-seed determinism = still a separate future project.
 6. **Canonical diff.** Same state → byte-identical Delta: traversal sorted by stable IDs, fixed
    field order, no nondeterministic dictionary walks. IMPLEMENTATION (recon-bound): diff walks the
