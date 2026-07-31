@@ -130,6 +130,7 @@ namespace RailCheck
             laws.AddRange(RetiredReasonLaw());
             laws.AddRange(ClockRebaseLaw());
             laws.AddRange(WalkBudgetLaw());
+            laws.AddRange(CameraOwnershipLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -8482,6 +8483,91 @@ namespace RailCheck
                 yield return "L74 urgency-owns-the-frame: UrgentSliceBudgetMs (" + fast + " ms) is not under one " +
                              "60 fps frame — a single slice can then consume the whole frame, which is the monolithic " +
                              "walk returning under a new name (L50's measured 34-95 ms stall)";
+        }
+
+        /// <summary>L75 — THE CAMERA FILTER STAYS NARROW, AND IT STAYS A FILTER. Six peers command six
+        /// soldiers at once (law 5), so an ability cinematic belongs to whoever is WATCHING that soldier;
+        /// <see cref="Multiplayer.Tactical.TacticalCameraPolicy"/> is a presentation-seam prefix on the
+        /// game's own hint choke point that drops the rest. Two ways for it to rot silently, and both are
+        /// invisible in a compile:
+        ///  • WIDTH. <c>CameraDirector</c> is shared with the GEOSCAPE (<c>GeoscapeView</c>:1109) and with
+        ///    every non-ability tactical hint — actor reveals and selection chases ride plain
+        ///    <c>TacCamDirectorParams</c>. Widening the test to <c>CameraDirectorParams</c> would eat those
+        ///    too, and the symptom (a geoscape camera that stops obeying) looks nothing like a tactical
+        ///    change. So the arm CALLS the verdict with a reveal's own param type and demands a pass.
+        ///  • BINDING. <c>CameraDirector</c> carries a SECOND, unrelated <c>Hint(CameraHint, object)</c>
+        ///    overload at :167, and <c>AccessTools.Method</c> matches parameters EXACTLY — a lookup that
+        ///    drifts resolves to nothing, <c>TargetMethod</c> returns null and the patch never binds, with
+        ///    no log line anywhere. So the arm RESOLVES both target methods and checks the signature it got.
+        /// The truth table on the pure rule is the third arm: it is the user's rule written down, and
+        /// inverting either half (a shared camera on the player turn, or no shared camera on the AI turn) is
+        /// exactly the complaint this shipped to fix.</summary>
+        private static IEnumerable<string> CameraOwnershipLaw()
+        {
+            var policy = typeof(Multiplayer.Tactical.TacticalCameraPolicy);
+
+            // ── arm A: the rule itself. Enemy turn = everyone; player turn = only this peer's selection.
+            object soldier = new object(), other = new object();
+            if (!Multiplayer.Tactical.TacticalCameraPolicy.Allow(playerTurn: false, actorBase: soldier, selectedActor: other))
+                yield return "L75 no-shared-monster-cam: the AI turn no longer passes every hint — the monster " +
+                             "cinematic every peer is supposed to watch together falls apart, and it was free (A5 " +
+                             "mirrors the alien Activate onto every peer, so each raises the same hint by itself)";
+            if (!Multiplayer.Tactical.TacticalCameraPolicy.Allow(playerTurn: true, actorBase: soldier, selectedActor: soldier))
+                yield return "L75 own-soldier-muted: the peer WATCHING the acting soldier is denied its cinematic — " +
+                             "including the peer that clicked, which always has that soldier selected";
+            if (Multiplayer.Tactical.TacticalCameraPolicy.Allow(playerTurn: true, actorBase: soldier, selectedActor: other))
+                yield return "L75 camera-hijack: on the player turn a hint for a soldier this peer is NOT watching " +
+                             "passes — that is the original complaint, every window yanked onto whichever soldier " +
+                             "someone else just moved while its own is mid-order";
+            if (Multiplayer.Tactical.TacticalCameraPolicy.Allow(playerTurn: true, actorBase: soldier, selectedActor: null))
+                yield return "L75 camera-hijack-unselected: a peer with NOTHING selected is dragged onto a foreign " +
+                             "soldier's cinematic";
+
+            // ── arm B: the narrowing, called for real. NOT asserted through AllowAbilityHint: headless there
+            // is no NetworkEngine, so that method answers "solo, run native" before it ever reaches the type
+            // test and the arm would be vacuously green whatever the width. The ability param is built
+            // WITHOUT its constructor (it wants a live TacticalAbility); it is a plain class, so an
+            // uninitialized instance is a perfectly good answer to "what type is this".
+            if (Multiplayer.Tactical.TacticalCameraPolicy.IsAbilityCinematic(
+                    new PhoenixPoint.Tactical.Cameras.TacCamDirectorParams()))
+                yield return "L75 filter-too-wide: a plain TacCamDirectorParams counts as an ability cinematic. Only " +
+                             "TacAbilityDirectorParams is one; this width also swallows actor reveals, selection " +
+                             "chases and every GEOSCAPE hint on the shared CameraDirector";
+            if (Multiplayer.Tactical.TacticalCameraPolicy.IsAbilityCinematic(null))
+                yield return "L75 filter-eats-null: a hint with no params at all counts as an ability cinematic";
+            if (!Multiplayer.Tactical.TacticalCameraPolicy.IsAbilityCinematic(
+                    (Base.Cameras.CameraDirectorParams)System.Runtime.Serialization.FormatterServices
+                        .GetUninitializedObject(typeof(PhoenixPoint.Tactical.Cameras.TacAbilityDirectorParams))))
+                yield return "L75 filter-too-narrow: a real TacAbilityDirectorParams is NOT recognised as an ability " +
+                             "cinematic — the gate then passes everything and every peer's camera is back to being " +
+                             "yanked onto whichever soldier someone else just moved";
+
+            // ── arm C: both prefixes really bind, to the right overload, and still SKIP.
+            foreach (var (gate, target, ps) in new (string Gate, string Target, Type[] Params)[]
+            {
+                ("CameraAbilityHintGate", "Hint",
+                 new[] { typeof(Base.Cameras.CameraDirectorHint), typeof(Base.Cameras.CameraDirectorParams) }),
+                ("CameraAbilityUnhintGate", "RemoveHint", new[] { typeof(Base.Cameras.CameraDirectorHint) }),
+            })
+            {
+                var patch = policy.Assembly.GetType("Multiplayer.Tactical." + gate);
+                if (patch == null)
+                {
+                    yield return "L75 gate-gone: " + gate + " no longer exists, so the native hint runs unfiltered";
+                    continue;
+                }
+                var resolved = ModMethod(patch, "TargetMethod")?.Invoke(null, null) as MethodBase;
+                var want = AccessTools.Method(typeof(Base.Cameras.CameraDirector), target, ps);
+                if (resolved == null || want == null || !Same(resolved, want))
+                    yield return "L75 unbound: " + gate + ".TargetMethod does not resolve CameraDirector." + target +
+                                 "(" + string.Join(", ", ps.Select(p => p.Name)) + "). AccessTools matches parameters " +
+                                 "EXACTLY and CameraDirector has a second Hint(CameraHint, object) overload — a null " +
+                                 "TargetMethod is how a patch never binds and never says so";
+                var prefix = ModMethod(patch, "Prefix") as MethodInfo;
+                if (prefix == null || prefix.ReturnType != typeof(bool))
+                    yield return "L75 not-a-filter: " + gate + ".Prefix does not return bool — a void prefix cannot " +
+                                 "skip the original, so the gate runs and decides nothing";
+            }
         }
 
         /// <summary>True when a method's IL READS any static field. The purity arm of L65 needs "no static

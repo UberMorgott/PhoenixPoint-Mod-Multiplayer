@@ -428,4 +428,52 @@ namespace Multiplayer.Tactical
             return false;
         }
     }
+
+    /// <summary>
+    /// DIAGNOSTIC ONLY — NO BEHAVIOUR. On maps with a special squad the HOST gets a camera move onto the
+    /// elite unit plus a left-side info panel before the combat UI, and clients jump straight to the ready
+    /// UI. That panel is the NATIVE ContextHelp hint system, not a cutscene and not a TFTV widget:
+    /// <c>TacContextHelpManager</c>:118 subscribes <c>ActorSawOtherFactionActorEvent</c> → <c>OnActorSeen</c>
+    /// :199 → <c>EventTypeTriggered(HintTrigger.ActorSeen, …)</c>:205, and the panel + camera move are
+    /// <c>UIStateTacticalContextHelp.EnterState</c>:75 → <c>TryFocusCameraOnContext</c>:98-110 →
+    /// <c>DoCameraChase()</c>. TFTV only registers <c>ContextHelpHintDef</c>s on that trigger
+    /// (<c>TFTVHints.cs</c>:400-410).
+    ///
+    /// THE HYPOTHESIS THIS LINE EXISTS TO KILL OR CONFIRM: the mission-start replay lives in
+    /// <c>TacContextHelpManager.OnStartTurn</c>:244-262, gated <c>nextFaction == _tacLevel.FirstFaction &amp;&amp;
+    /// nextFaction.TurnNumber == 1</c>, and it is what walks <c>Vision.KnownActors</c> re-firing
+    /// <c>OnActorSeen</c> for everything already visible. The host crosses that edge natively; the client's
+    /// battle is BUILT FROM A MID-TACTICAL SAVE that is already past it, so the replay loop may never run.
+    ///
+    /// WHY THE PREFIX SITS ON THAT EXACT METHOD rather than on <c>NewTurnEvent</c>: the gate reads
+    /// POST-increment <c>TurnNumber</c> (<c>PlayTurnCrt</c> does the +1 before raising the event, whereas
+    /// <c>TacMission.OnNewTurn</c> at TacticalLevelController.cs:712 still sees the pre-increment value), so
+    /// logging anywhere else would print a different number than the gate tests. Patching the gate's own
+    /// method also proves whether it RUNS on the client at all. Both members read here are public —
+    /// <c>TacticalLevelController.FirstFaction</c>:187 and <c>TacticalFactionVision.KnownActors</c>:115 — so
+    /// no reflection is needed to read them; <c>AccessTools</c> is used only because <c>OnStartTurn</c>
+    /// itself is private. NO FIX IS ATTEMPTED IN THIS BATCH.
+    /// </summary>
+    [HarmonyPatch]
+    internal static class ContextHelpTurnEdgeProbe
+    {
+        private static System.Reflection.MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(PhoenixPoint.Tactical.ContextHelp.TacContextHelpManager), "OnStartTurn",
+                               new[] { typeof(TacticalFaction), typeof(TacticalFaction) });
+
+        private static void Prefix(TacticalFaction nextFaction)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return;
+            var tlc = nextFaction == null ? null : nextFaction.TacticalLevel;
+            bool isFirst = tlc != null && nextFaction == tlc.FirstFaction;
+            int turn = nextFaction == null ? -1 : nextFaction.TurnNumber;
+            int known = (nextFaction == null || nextFaction.Vision == null)
+                            ? -1 : nextFaction.Vision.KnownActors.Count;
+            Debug.Log("[Multiplayer][tac] contexthelp turn-edge: host=" + engine.IsHost +
+                      " faction='" + (nextFaction == null ? "<null>" : nextFaction.TacticalFactionDef?.name) +
+                      "' isFirstFaction=" + isFirst + " turnNumber=" + turn + " knownActors=" + known +
+                      " → missionStartReplay=" + (isFirst && turn == 1));
+        }
+    }
 }

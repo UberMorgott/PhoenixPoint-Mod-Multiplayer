@@ -196,6 +196,17 @@ namespace Multiplayer.Network
         // set on the host (OnSaveChunk is client-only).
         private bool _downloadCurtain;
 
+        // WHICH WAIT THE CURTAIN IS SHOWING. _downloadCurtain says "our curtain is up"; it does NOT say
+        // whose turn it is to be slow. Two very different waits share it:
+        //   (a) curtain up, no bytes yet  → we are waiting for the HOST to reach deploy-ready and write its
+        //       mid-tactical save (13.0 s in the 2026-07-31 run, law L71),
+        //   (c) download finished         → we are waiting for the OTHER PLAYERS to finish loading.
+        // False through (a) and (b), true from the first chunk onward. Deliberately NOT cleared in ResetRx:
+        // ResetRx runs at SaveDone, which is precisely the (b)→(c) edge — clearing it there would flip the
+        // label back to "waiting for host" at the exact moment the host is done. Cleared only where a NEW
+        // pre-transfer wait begins, i.e. OnEntryTransferBegin.
+        private bool _rxStarted;
+
         /// <summary>Shared receiver-side roster progress for the overlay UI.</summary>
         public RosterProgressTracker Tracker => _tracker;
 
@@ -1104,7 +1115,8 @@ namespace Multiplayer.Network
             if (_downloadCurtain) return; // already curtained (duplicate delivery / a transfer in flight)
             Debug.Log("[Multiplayer] tac-entry BEGUN on the host — dropping the curtain now (no bytes yet).");
             _downloadCurtain = true;
-            Multiplayer.UI.MultiplayerUI.Instance?.EnterTacLoadCurtain("Entering mission…");
+            _rxStarted = false;   // (a): the curtain is up and NOT one byte has been sent yet
+            Multiplayer.UI.MultiplayerUI.Instance?.EnterTacLoadCurtain("Waiting for host…");
         }
 
         /// <summary>
@@ -1210,6 +1222,7 @@ namespace Multiplayer.Network
                 // off to the real level-load progress at phase-2 (SetLoadingLevel). Client-only (OnSaveChunk
                 // returns early on the host). Once per transfer (this first-chunk branch runs once per id).
                 _downloadCurtain = true;
+                _rxStarted = true;   // (b): bytes are moving — from here the wait is ours, then the players'
                 Multiplayer.UI.MultiplayerUI.Instance?.EnterDownloadLoadingScreen();
                 // Chunks are emitted at fixed ChunkSize offsets (SendBlob), so the index is exact.
                 var chunkCount = (int)((chunk.TotalBytes + ChunkSize - 1) / ChunkSize);
@@ -1847,6 +1860,13 @@ namespace Multiplayer.Network
             // the dropped curtain. When the download finishes we hold the bar full + relabel "Waiting for
             // players…" through the prepare + LOADED-barrier gap; phase-2 (SetLoadingLevel) then hands the
             // bar to the real level-load progress and clears this driver.
+            //
+            // THE ELSE BRANCH SERVES TWO OPPOSITE WAITS and must not confuse them (live bug, fixed here):
+            // OnEntryTransferBegin raises the curtain BEFORE any bytes exist, and IsDownloading (= client &&
+            // _rxTotalBytes > 0) is false then — so this branch used to overwrite that curtain's label with
+            // "Waiting for players…" and a FULL bar within one frame, telling every client it was waiting on
+            // its peers for the whole ~13 s it was actually waiting on the host. _rxStarted is which side of
+            // the transfer we are on; the bar only claims completion once something completed.
             if (_downloadCurtain)
             {
                 if (IsDownloading)
@@ -1856,8 +1876,9 @@ namespace Multiplayer.Network
                 }
                 else
                 {
-                    Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel("Waiting for players…");
-                    Multiplayer.UI.NativeWidgetFactory.SetDownloadBar(1f);
+                    Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel(
+                        _rxStarted ? "Waiting for players…" : "Waiting for host…");
+                    if (_rxStarted) Multiplayer.UI.NativeWidgetFactory.SetDownloadBar(1f);
                 }
             }
 
