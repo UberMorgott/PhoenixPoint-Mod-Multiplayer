@@ -530,7 +530,20 @@ so it is reference identity at walk time:
 8. Mission generation — last.
 Time (unnumbered, rode along 2026-07-23): **DONE pending in-game gate** — 0xB0 intents + "TA"
 anchor + EnforceDrift (see Time sync section).
-Tactical: quarantined port from quarry, mostly as-is, `src/Tactical/` — separate track.
+Tactical (own arc track, quarantine RETIRED 2026-07-31 — MANDATE L5 = shared battle, no ownership
+model, all peers command simultaneously, host-authoritative outcomes):
+- A1 (`7808c7f`) — **DONE**: both peers enter the same battle via the save-transfer entry path (no
+  deploy-snapshot surface); client = suppressed spectator (`ClientSimGate` pattern:
+  `TacticalFaction.RequestEndTurn` blocked, `AIUpdateCrt` held). ZERO wire surfaces.
+- A2 (`285411d`, `90dc585`) — **DONE**: turn mirror + end-turn intent + mission end/return.
+  Surfaces 0x80 TacTurn, 0x81 TacTurnIntent. Faction identified by def GUID, never a list index
+  (law 2). Native turn loop preserved — the host only PACES it, no reflection, no private-field
+  writes. Laws L63+L64 (34 arms, all falsified).
+- A3 — not started: generic command intent + `DamageResult` results; gated on digging three
+  unknowns (the RNG path, `MoveAbility` target encoding, whether TFTV overrides `Activate`).
+- A4 concurrent presentation, A5 inventory/loot, A6 spawn/despawn/destructibles — not started.
+- Surface band: tactical ids stay in 0x80-0x9F (`src/Rail/SurfaceIds.cs:5`), NEVER 0xA0-0xBF
+  (geoscape, occupied through 0xB7) — law L62; v1 RCA 3ff508d.
 
 ## Quarry transfer list (verbatim, ~45 files — landed by skeleton stage)
 

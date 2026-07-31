@@ -32,9 +32,30 @@ BEHAVIOR (per-subsystem mirroring).
 4. **Harmony patches live on 3 seams only:** (a) intent-capture, (b) sim-gating, (c) presentation.
    A patch that transfers or mirrors state is forbidden — the rail does that.
 5. **Layer split.** Geoscape rides the rail: host runs native logic → canonical diff → Delta →
-   client Apply() → UI via subscriptions. Tactical = quarantine (`src/Tactical/`): current hybrid
-   stays (presentation local to actor, outcomes host-computed); shared-seed determinism = separate
-   future project. The rail does not fix tactical bugs — expectations fixed.
+   client Apply() → UI via subscriptions. **Tactical = SHARED BATTLE on the same rail** (quarantine
+   RETIRED by developer decision 2026-07-31): all peers fight one mission; **NO ownership model** —
+   any peer commands ANY soldier, two peers may hold the same one, whoever CLICKS commands it;
+   during the player team's turn ALL peers act SIMULTANEOUSLY (6 soldiers = 6 parallel commanders,
+   NOT turn-passing); first-to-act-wins, same rule as the geoscape. Parallelism is native-safe:
+   `ExecutingAbilities` is per-actor with no global lock (`TacticalActorBase.cs:54`) and
+   `TacticalLevelController.CheckForFallAbilitiesToActivate:1917-1936` already awaits N concurrent
+   activations. Host decides rolls/damage/death/status/TU-AP/reactions/objectives/mission-end; peers
+   apply the host's `DamageResult` verbatim through `TacticalActorBase.ApplyDamage`
+   (`TacticalActorBase.cs:950`) and run native `Activate` for PRESENTATION ONLY, damage-neutered
+   (same posture as `IntentRail.ShouldRunNative()`, `src/Rail/IntentRail.cs:78-100`). ONE generic op:
+   `TacticalAbility.Activate(object parameter = null)` (`TacticalAbility.cs:1078`) +
+   `TacticalAbilityTarget` for move/shoot/grenade/heal/overwatch/melee/jetjump — never v1's 36
+   bespoke surfaces. Conflict = PURE validator shaped like `EventSync.Validate`
+   (`src/Rail/EventSync.cs:63-72`): host executes in arrival order, first spends TU/AP, second
+   re-validates against post-first state and fails → `IntentRail.Reject` + nudge. The TU/AP check IS
+   the arbiter — NO ownership table, NO rewind engine (local play was view-only; rollback = the
+   authoritative delta); `0x40/0x41 PermissionUpdate/SoldierAssignment` stay dead tombstones.
+   Tactical surfaces live in 0x80-0x9F ONLY (`src/Rail/SurfaceIds.cs:5`), NEVER 0xA0-0xBF (law L62).
+   Local-only, never relayed: idle animation, cover-hug on arrival, camera, selection highlight,
+   hover/preview aiming, per-frame pose. Entry = native save-transfer (law 1, zero surfaces); exit =
+   host's native `GameOver` → native teardown on all peers → one authoritative outcome. Shipped:
+   A1 `7808c7f`, A2 `285411d`+`90dc585` (0x80 TacTurn / 0x81 TacTurnIntent, laws L63+L64); A3-A6
+   pending. Shared-seed determinism = still a separate future project.
 6. **Canonical diff.** Same state → byte-identical Delta: traversal sorted by stable IDs, fixed
    field order, no nondeterministic dictionary walks. IMPLEMENTATION (recon-bound): diff walks the
    LIVE game graph guided by the save serializer's type metadata (its field discovery = our
