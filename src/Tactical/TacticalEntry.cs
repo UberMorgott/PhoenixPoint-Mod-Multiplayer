@@ -3,6 +3,7 @@ using Base.Core;
 using Base.Levels;
 using HarmonyLib;
 using Multiplayer.Network;
+using Multiplayer.Network.Sync;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Tactical.Levels;
 using UnityEngine;
@@ -111,47 +112,77 @@ namespace Multiplayer.Tactical
     }
 
     /// <summary>
-    /// CLIENT spectator containment, arm 1 — the turn loop. <c>TacticalFaction.RequestEndTurn</c>
-    /// (TacticalFaction.cs:382) is the ONE thing that lets <c>PlayTurnCrt</c>'s input-wait loop finish
-    /// (TacticalFaction.cs:478 tests <c>_endTurnRequested</c>), so blocking it parks the client inside the
-    /// player faction's turn forever. That is deliberately the LIGHTEST possible containment: the client
-    /// still runs the native turn-START (vision recompute, SetViewerTacticalFaction, actor StartTurn), so
-    /// it sees the battlefield exactly as the host does — it simply can never advance past it and can
-    /// therefore never reach an AI faction's turn. Blocking <c>NextTurnCrt</c> instead would have skipped
-    /// that setup and left the client in permanent fog.
+    /// CLIENT turn control, arm 1 — end-turn (A1 blocked it outright; A2 turns it into an INTENT).
+    /// <c>TacticalFaction.RequestEndTurn</c> (TacticalFaction.cs:382) is the ONE thing that lets
+    /// <c>PlayTurnCrt</c>'s input-wait loop finish (TacticalFaction.cs:478 tests <c>_endTurnRequested</c>),
+    /// which makes it the model funnel this family captures — block-first through the ONE posture
+    /// (<see cref="IntentRail.ShouldRunNative"/>): host and solo run native; a client's own click is
+    /// converted into <see cref="SurfaceIds.TacTurnIntent"/> and never writes the local flag, so the turn
+    /// ends on every peer at the same moment or on none. The client's turn DOES still end here — but only
+    /// when <c>TacticalTurnSync.ClientTick</c> calls this same native method inside a
+    /// <see cref="SyncApplyScope"/> after the host announced the handoff (that is the branch
+    /// <c>ShouldRunNative</c> returns true for).
+    /// A1's containment note still holds and is why <c>NextTurnCrt</c> is untouched: the client runs the
+    /// real turn-START (vision recompute, SetViewerTacticalFaction, actor StartTurn) for every faction, so
+    /// it sees the battlefield as the host does. Blocking <c>NextTurnCrt</c> would skip that and leave
+    /// permanent fog.
     /// </summary>
     [HarmonyPatch(typeof(TacticalFaction), "RequestEndTurn")]
     internal static class ClientEndTurnGate
     {
-        private static bool Prefix()
+        private static bool Prefix(TacticalFaction __instance)
         {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
-            Debug.LogWarning("[Multiplayer][tac] client end-turn BLOCKED — arc A1 has no turn control; the " +
-                             "client is a spectator parked in the host's current turn.");
+            if (IntentRail.ShouldRunNative()) return true;
+            string guid = __instance?.TacticalFactionDef?.Guid;
+            if (string.IsNullOrEmpty(guid))
+            {
+                Debug.LogError("[Multiplayer][tac] client end-turn DROPPED — faction has no def guid to name in the " +
+                               "intent, so the host cannot arbitrate it. The turn stays open.");
+                return false;
+            }
+            IntentRail.Send(SurfaceIds.TacTurnIntent, TacticalTurnSync.OpEndTurn,
+                            "end-turn " + __instance.TacticalFactionDef.name, w => w.Write(guid));
             return false;
         }
     }
 
     /// <summary>
-    /// CLIENT spectator containment, arm 2 — the AI. Independent trigger from arm 1 on purpose: anything
-    /// that ends the client's turn some other way (a scripted faction switch, a game-over branch) would
-    /// otherwise hand the client's own AI a full turn and march the aliens across a battlefield the host
-    /// never moved them on. The AI coroutine is replaced with an empty one, so <c>PlayTurnCrt</c>'s
-    /// <c>Timing.Current.Call(AIUpdateCrt())</c> completes immediately instead of hanging.
+    /// CLIENT turn control, arm 2 — the AI turn. Independent funnel from arm 1 on purpose: an AI faction's
+    /// turn ends when <c>AIUpdateCrt</c> RETURNS (TacticalFaction.cs:443), not on <c>_endTurnRequested</c>.
+    /// The client must never run enemy AI (the aliens would march across a battlefield the host never moved
+    /// them on), but A1's instant-return empty coroutine made the client RACE: every AI turn completed in a
+    /// frame, so the client ran ahead of the host into the next player turn and its turn counter drifted.
+    /// A2 replaces it with a HOLD on the same predicate the player-faction release uses — the client stands
+    /// frozen in the AI faction's turn for exactly as long as the host plays it.
     /// </summary>
     [HarmonyPatch(typeof(TacticalFaction), "AIUpdateCrt")]
     internal static class ClientAiGate
     {
-        private static bool Prefix(ref IEnumerator<NextUpdate> __result)
+        private static bool Prefix(TacticalFaction __instance, ref IEnumerator<NextUpdate> __result)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
-            Debug.LogWarning("[Multiplayer][tac] client AI turn SUPPRESSED — enemy actions are host-only.");
-            __result = NoAi();
+            Debug.LogWarning("[Multiplayer][tac] client AI turn SUPPRESSED — enemy actions are host-only; holding " +
+                             "until the host hands the turn on.");
+            __result = HoldUntilHostHandsOn(__instance);
             return false;
         }
 
-        private static IEnumerator<NextUpdate> NoAi() { yield break; }
+        // ~60 s at 60 fps. Not a deadline — a long alien turn is normal — but a hold nobody can see is the
+        // silent-swallow class this project keeps paying for, so it says so periodically and keeps waiting.
+        private const int HoldWarnFrames = 3600;
+
+        private static IEnumerator<NextUpdate> HoldUntilHostHandsOn(TacticalFaction faction)
+        {
+            string name = faction?.TacticalFactionDef?.name ?? "<unnamed faction>";
+            int frames = 0;
+            while (!TacticalTurnSync.HostHasLeft(faction))
+            {
+                if (++frames % HoldWarnFrames == 0)
+                    Debug.LogWarning("[Multiplayer][tac] still holding in '" + name + "'s turn after " +
+                                     (frames / 60) + "s — the host has announced no handoff yet.");
+                yield return NextUpdate.NextFrame;
+            }
+        }
     }
 }

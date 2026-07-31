@@ -19,6 +19,10 @@ namespace Multiplayer.Network.Sync
     /// </remarks>
     public static class SurfaceIds
     {
+        // ─── Tactical band 0x80-0x9F (arc A2 opens it; A1 needed none — entry rides the save transfer) ───
+        public const byte TacTurn = 0x80;  // TURN CURSOR + MISSION END host→all: [seq:u32][op:u8][body], seq rides SurfaceSeq. op = turn(1, [factionDefGuid:string][turnNumber:i32] — the PRE-increment number both peers read at TacMission.OnNewTurn, since PlayTurnCrt is what does the +1) / end(2, [playerFactionState:u8] = the host's TacFactionState for the Player participant, the ONE authoritative outcome bit the native battle-summary branches on). ONE surface for both ops on purpose: a single seq stream is what makes it impossible for a stale turn message to overtake the game-over (they are strictly ordered against each other, which two surfaces could not guarantee). Host→all only — the client's answer to it is the 0x81 end-turn intent.
+        public const byte TacTurnIntent = 0x81;  // END-TURN client→host INTENT ([nonce:u32][op:u8][factionDefGuid:string], op = endTurn(1)); nonce rides the peer-aware IntentDedup; host validates off its OWN turn cursor (TacticalTurnSync.Validate — the guid must BE the host's CurrentFaction, that faction must be player-controlled and actually playing) + executes NATIVELY (TacticalFaction.RequestEndTurn, the same call the host's own button makes), outcome returns to every peer as the 0x80 turn op. Intent-only surface.
+
         // ─── Geoscape action-relay envelope surfaces (spec 2026-07-02) — RETIRED tombstones ───
         // Were reserved for a single-surface generic intent framework (client intent → host outcome →
         // originator reject). The real framework landed 2026-07-23 as the IntentRail ENGINE instead:

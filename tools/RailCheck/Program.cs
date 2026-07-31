@@ -118,6 +118,8 @@ namespace RailCheck
             laws.AddRange(PersistentHudLaw(game));
             laws.AddRange(TacEntryBlobLaw(game));
             laws.AddRange(SurfaceBandLaw());
+            laws.AddRange(TurnControlLaw());
+            laws.AddRange(MissionEndLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -5696,6 +5698,302 @@ namespace RailCheck
                                  "tactical band 0x80-0x9F — the tactical hook is consulted FIRST, so this id now " +
                                  "silently swallows whatever geoscape surface shares it";
             }
+        }
+
+        // ─── A2 tactical laws (L63/L64) — shared reachability helpers ───────
+        // Cross-assembly on purpose (CalleeSequence has no assembly filter): every arm below is of the form
+        // "OUR seam really reaches THAT native funnel", and the funnels live in Assembly-CSharp.
+
+        private static bool Reaches(MethodBase m, string ownerName, string calleeName) =>
+            m != null && CalleeSequence(m).Any(c => c.Name == calleeName &&
+                                                    (ownerName == null || c.DeclaringType?.Name == ownerName));
+
+        /// <summary>A private/internal method on a mod type, by name. Null when it is gone — every caller
+        /// turns that into its own "the arm checked nothing" violation rather than passing silently.</summary>
+        private static MethodBase ModMethod(Type owner, string name) => owner?.GetMethod(name, AllMembers);
+
+        /// <summary>L63 — CLIENT TURN CONTROL IS HOST-PACED, AND END-TURN IS AN INTENT (tactical arc A2).
+        /// Two ways for a client to advance a turn, and both must be host-driven or the peers silently
+        /// diverge into different battles:
+        ///   • a PLAYER faction's turn ends on <c>_endTurnRequested</c> — so the ONE local writer of it
+        ///     (<c>TacticalFaction.RequestEndTurn</c>) is a block-first capture seam: a client click becomes
+        ///     an intent, and the flag is written only by the standing release that runs AFTER the host
+        ///     announced the handoff, inside a <c>SyncApplyScope</c> (without the scope the release would
+        ///     re-enter its own capture seam and emit intents forever while the turn never ends);
+        ///   • an AI faction's turn ends when <c>AIUpdateCrt</c> RETURNS — so the client's replacement
+        ///     coroutine must HOLD on the host cursor. A1's instant-return version is what made the client
+        ///     race ahead a whole faction per frame, and an empty iterator fails no compile and logs nothing.
+        /// The host half must arbitrate rather than obey: its validator is executed here on the real refusal
+        /// cases, because "any client may end any turn" is precisely what v1's in-game-only arbiter allowed.</summary>
+        private static IEnumerable<string> TurnControlLaw()
+        {
+            var sync = typeof(Multiplayer.Tactical.TacticalTurnSync);
+            var mod = sync.Assembly;
+            var capture = mod.GetType("Multiplayer.Tactical.ClientEndTurnGate");
+            var aiGate = mod.GetType("Multiplayer.Tactical.ClientAiGate");
+            var turnHook = mod.GetType("Multiplayer.Tactical.TacNewTurnHook");
+            if (capture == null || aiGate == null || turnHook == null)
+            {
+                yield return "L63 seams-missing: ClientEndTurnGate / ClientAiGate / TacNewTurnHook no longer exist, " +
+                             "so NOTHING about the client's turn control was actually checked";
+                yield break;
+            }
+
+            // ─── the host's arbiter, EXECUTED (an unrun validator is a comment) ───
+            const string g = "faction-guid-a", other = "faction-guid-b";
+            if (Multiplayer.Tactical.TacticalTurnSync.Validate(g, g, true, true) != null)
+                yield return "L63 validator-refuses-the-legal-case: the host rejects an end-turn for the faction " +
+                             "that IS its current, player-controlled, playing one — no client could ever end a turn";
+            if (Multiplayer.Tactical.TacticalTurnSync.Validate(g, other, true, true) == null)
+                yield return "L63 foreign-turn-accepted: the host accepts an end-turn naming a faction that is NOT " +
+                             "its current one — a peer can end a turn it does not own (v1's open-permission bug)";
+            if (Multiplayer.Tactical.TacticalTurnSync.Validate(g, g, false, true) == null)
+                yield return "L63 ai-turn-endable: the host accepts an end-turn for an AI-CONTROLLED faction — a " +
+                             "client could skip the aliens' turn on the authoritative sim";
+            if (Multiplayer.Tactical.TacticalTurnSync.Validate(g, g, true, false) == null)
+                yield return "L63 mid-handoff-accepted: the host accepts an end-turn for a faction that is not " +
+                             "playing its turn yet — the flag would be wiped by PlayTurnCrt and the click eaten";
+            if (Multiplayer.Tactical.TacticalTurnSync.Validate("", null, true, true) == null)
+                yield return "L63 empty-intent-accepted: the host accepts an end-turn with no faction guid at all";
+
+            // ─── the client never advances on its own cursor-less guess ───
+            string savedGuid = Multiplayer.Tactical.TacticalTurnSync.HostFactionGuid;
+            bool savedOver = Multiplayer.Tactical.TacticalTurnSync.HostMissionOver;
+            Multiplayer.Tactical.TacticalTurnSync.HostFactionGuid = null;
+            Multiplayer.Tactical.TacticalTurnSync.HostMissionOver = false;
+            bool freeWithoutCursor = Multiplayer.Tactical.TacticalTurnSync.HostHasLeft(null);
+            Multiplayer.Tactical.TacticalTurnSync.HostFactionGuid = savedGuid;
+            Multiplayer.Tactical.TacticalTurnSync.HostMissionOver = savedOver;
+            if (freeWithoutCursor)
+                yield return "L63 cursorless-advance: with NO host cursor announced yet, the client's hold predicate " +
+                             "already says the host has left — every hold releases on frame one and the client plays " +
+                             "the whole battle by itself";
+
+            // ─── the client's end-turn is an intent, not a local mutation ───
+            var prefix = ModMethod(capture, "Prefix");
+            if (prefix == null)
+                yield return "L63 capture-gone: ClientEndTurnGate has no Prefix — TacticalFaction.RequestEndTurn is " +
+                             "unguarded and a client writes _endTurnRequested locally";
+            else
+            {
+                if (!Reaches(prefix, "IntentRail", "ShouldRunNative"))
+                    yield return "L63 capture-not-block-first: ClientEndTurnGate.Prefix does not consult " +
+                                 "IntentRail.ShouldRunNative — the ONE posture decides host/solo/apply-scope, and a " +
+                                 "hand-rolled condition is how a family drifts out of block-first";
+                if (!Reaches(prefix, "IntentRail", "Send"))
+                    yield return "L63 capture-is-a-dead-end: ClientEndTurnGate.Prefix never reaches IntentRail.Send — " +
+                                 "the client's click is swallowed with no intent, exactly like arc A1's block, and the " +
+                                 "turn can never end on any peer";
+            }
+
+            // ─── the intent family is really registered on the engine ───
+            var register = ModMethod(sync, "RegisterIntents");
+            if (!Reaches(register, "IntentRail", "Register"))
+                yield return "L63 family-unregistered: TacticalTurnSync.RegisterIntents does not call " +
+                             "IntentRail.Register — the host has no op table for 0x81 and every end-turn intent is " +
+                             "rejected as an unknown surface";
+            var ctor = typeof(Multiplayer.Network.Sync.SyncEngine).GetConstructors(AllMembers).FirstOrDefault();
+            if (ctor == null || !CalleeSequence(ctor).Any(c => c.Name == "RegisterIntents" && c.DeclaringType == sync))
+                yield return "L63 family-unwired: SyncEngine's constructor does not register the tactical turn family " +
+                             "— it exists but nothing arms it, so 0x81 is dead on arrival";
+
+            // ─── the host executes NATIVELY and refuses LOUDLY ───
+            var handle = ModMethod(sync, "HandleEndTurn");
+            if (handle == null)
+                yield return "L63 host-handler-gone: TacticalTurnSync.HandleEndTurn no longer exists";
+            else
+            {
+                if (!Reaches(handle, "TacticalTurnSync", "Validate"))
+                    yield return "L63 host-unvalidated: HandleEndTurn does not call Validate — the host would end " +
+                                 "whatever turn any peer names, which is the arbiter this law exists for";
+                if (!Reaches(handle, "TacticalFaction", "RequestEndTurn"))
+                    yield return "L63 host-not-native: HandleEndTurn does not reach TacticalFaction.RequestEndTurn — " +
+                                 "the accepted intent must run the SAME native call the host's own button runs";
+                if (!Reaches(handle, "IntentRail", "Reject"))
+                    yield return "L63 silent-refusal: HandleEndTurn does not reach IntentRail.Reject — a refused " +
+                                 "end-turn would vanish with no log and no nudge, and the client would keep clicking";
+            }
+
+            // ─── the standing release: correct writer, correct scope, actually driven ───
+            var tick = ModMethod(sync, "ClientTick");
+            if (tick == null)
+                yield return "L63 release-gone: TacticalTurnSync.ClientTick no longer exists — nothing ever ends the " +
+                             "client's player-faction turn and it parks in it forever";
+            else
+            {
+                if (!Reaches(tick, "TacticalTurnSync", "HostHasLeft"))
+                    yield return "L63 release-not-host-paced: ClientTick does not consult HostHasLeft — the client " +
+                                 "would end its turn on some other condition than the host's announced handoff";
+                if (!Reaches(tick, "TacticalFaction", "RequestEndTurn"))
+                    yield return "L63 release-not-native: ClientTick does not reach TacticalFaction.RequestEndTurn — " +
+                                 "any second way of ending a turn is a second, divergent turn machine";
+                if (!Reaches(tick, "SyncApplyScope", "Enter"))
+                    yield return "L63 release-unscoped: ClientTick calls the native end-turn OUTSIDE a SyncApplyScope, " +
+                                 "so its own block-first capture seam catches it and emits an intent instead of ending " +
+                                 "the turn — an endless intent storm with the turn never ending (law 8)";
+            }
+            var engineTick = typeof(Multiplayer.Network.Sync.SyncEngine).GetMethod("Tick", AllMembers);
+            if (engineTick == null || !CalleeSequence(engineTick).Any(c => c.Name == "ClientTick" && c.DeclaringType == sync))
+                yield return "L63 release-undriven: SyncEngine.Tick does not call TacticalTurnSync.ClientTick — the " +
+                             "standing release is never evaluated, so the client's turn never ends";
+
+            // ─── the AI turn HOLDS instead of returning instantly ───
+            var aiPrefix = ModMethod(aiGate, "Prefix");
+            if (aiPrefix == null || !CalleeSequence(aiPrefix).Any(c => c.Name == "HoldUntilHostHandsOn"))
+                yield return "L63 ai-not-held: ClientAiGate.Prefix does not install the host-paced hold coroutine — " +
+                             "an instantly-returning AI turn makes the client race a whole faction per frame";
+            var hold = IteratorBody(aiGate, "HoldUntilHostHandsOn");
+            if (hold == null)
+                yield return "L63 ai-hold-unreadable: ClientAiGate's hold iterator body could not be resolved, so " +
+                             "whether the client waits for the host at all was NOT checked";
+            else if (!Reaches(hold, "TacticalTurnSync", "HostHasLeft"))
+                yield return "L63 ai-hold-hollow: the client's AI-turn coroutine never consults HostHasLeft — it is an " +
+                             "empty yield-break again and the client runs ahead of the host's battle";
+
+            // ─── the cursor edge exists on BOTH peers (broadcast + verify) ───
+            var hookPostfix = ModMethod(turnHook, "Postfix");
+            if (!Reaches(hookPostfix, "TacticalTurnSync", "HostBroadcastTurn"))
+                yield return "L63 cursor-unbroadcast: the TacMission.OnNewTurn postfix does not reach " +
+                             "HostBroadcastTurn — the host advances turns and tells nobody, so every client freezes";
+            if (!Reaches(hookPostfix, "TacticalTurnSync", "ClientVerifyTurn"))
+                yield return "L63 drift-unwatched: the TacMission.OnNewTurn postfix does not reach ClientVerifyTurn — " +
+                             "a client on a different turn than the host would say nothing about it";
+        }
+
+        /// <summary>L64 — MISSION END REACHES EVERY PEER, AND NO PEER IS LEFT STRANDED IN TACTICAL (arc A2).
+        /// This is A1's KNOWN hole, written down: A1 shipped both peers into one battle with no way out, and
+        /// <c>SaveTransferCoordinator.OpenReturnBarrier</c> sat fully written with zero callers. The failure
+        /// is total and silent — the host finishes the battle, walks back to its geoscape, and the client is
+        /// still standing in a tactical level nothing will ever end. Arms:
+        ///   (a) the host's native <c>GameOver</c> is broadcast, and the broadcaster really hits the wire;
+        ///   (b) the client tears down through the NATIVE <c>GameOver()</c>, so the game's own view machine
+        ///       runs its battle-summary → geoscape flow instead of a hand-rolled teardown;
+        ///   (c) the mission-over flag really releases the turn holds (executed, not asserted);
+        ///   (d) the host→all surface is seq-guarded, so a re-delivered turn message cannot overtake the end;
+        ///   (e) tactical teardown arms the return barrier AND drops this battle's mirror state — a leaked
+        ///       mission-over flag ends the NEXT battle on frame one;
+        ///   (f) the client computes no outcome of its own: <c>GeoMission.Complete</c> is gated block-first,
+        ///       because every peer's <c>GoToGeoscape</c> builds a result out of its own unreplicated actors
+        ///       and applying it would rewrite that client's campaign with casualties the host never took.</summary>
+        private static IEnumerable<string> MissionEndLaw()
+        {
+            var sync = typeof(Multiplayer.Tactical.TacticalTurnSync);
+            var mod = sync.Assembly;
+            var overGate = mod.GetType("Multiplayer.Tactical.ClientGameOverGate");
+            var endBarrier = mod.GetType("Multiplayer.Tactical.TacLevelEndBarrier");
+            var resultGate = mod.GetType("Multiplayer.Tactical.ClientMissionResultGate");
+            if (overGate == null || endBarrier == null || resultGate == null)
+            {
+                yield return "L64 seams-missing: ClientGameOverGate / TacLevelEndBarrier / ClientMissionResultGate no " +
+                             "longer exist, so NOTHING about the mission end was actually checked";
+                yield break;
+            }
+
+            // (a) host: the native game-over reaches the wire
+            var postfix = ModMethod(overGate, "Postfix");
+            if (!Reaches(postfix, "TacticalTurnSync", "HostBroadcastEnd"))
+                yield return "L64 end-uncaptured: the TacticalLevelController.GameOver postfix does not reach " +
+                             "HostBroadcastEnd — the host ends the battle and no peer is ever told, which strands " +
+                             "every client in a tactical level that will never end";
+            var broadcastEnd = ModMethod(sync, "HostBroadcastEnd");
+            var send = ModMethod(sync, "Send");
+            if (!Reaches(broadcastEnd, "TacticalTurnSync", "Send"))
+                yield return "L64 end-unsent: HostBroadcastEnd never reaches the surface sender — the mission end is " +
+                             "computed and dropped on the floor";
+            if (!Reaches(send, "NetworkEngine", "BroadcastToAll"))
+                yield return "L64 sender-offline: the tactical surface sender does not call BroadcastToAll — nothing " +
+                             "on this surface (turn cursor OR mission end) ever leaves the host";
+            var overPrefix = ModMethod(overGate, "Prefix");
+            if (!Reaches(overPrefix, "IntentRail", "ShouldRunNative"))
+                yield return "L64 client-declares-its-own-end: the GameOver prefix does not consult " +
+                             "IntentRail.ShouldRunNative — a client's GameOverCondition, judging a mirror whose actors " +
+                             "A2 does not replicate, would end the battle on state the host never reached";
+
+            // (b) client: the teardown is the game's own
+            var applyEnd = ModMethod(sync, "ApplyEnd");
+            if (applyEnd == null)
+                yield return "L64 apply-gone: TacticalTurnSync.ApplyEnd no longer exists — an arriving mission end " +
+                             "does nothing at all";
+            else
+            {
+                if (!Reaches(applyEnd, "TacticalLevelController", "GameOver"))
+                    yield return "L64 teardown-hand-rolled: ApplyEnd does not call the native " +
+                                 "TacticalLevelController.GameOver — only that raises GameOverEvent, and without it " +
+                                 "TacticalView never switches to the battle summary and the client sits in the battle";
+                if (!Reaches(applyEnd, "SyncApplyScope", "Enter"))
+                    yield return "L64 teardown-unscoped: ApplyEnd calls the native GameOver OUTSIDE a SyncApplyScope, " +
+                                 "so its own block-first gate refuses it and the client is never torn down at all";
+            }
+
+            // (c) the mission-over flag really frees the holds — executed
+            string savedGuid = Multiplayer.Tactical.TacticalTurnSync.HostFactionGuid;
+            bool savedOver = Multiplayer.Tactical.TacticalTurnSync.HostMissionOver;
+            Multiplayer.Tactical.TacticalTurnSync.HostFactionGuid = "some-faction-the-client-is-holding-in";
+            Multiplayer.Tactical.TacticalTurnSync.HostMissionOver = true;
+            bool freedByEnd = Multiplayer.Tactical.TacticalTurnSync.HostHasLeft(null);
+            Multiplayer.Tactical.TacticalTurnSync.HostFactionGuid = savedGuid;
+            Multiplayer.Tactical.TacticalTurnSync.HostMissionOver = savedOver;
+            if (!freedByEnd)
+                yield return "L64 held-past-the-end: a peer whose host already ENDED the mission still reports that " +
+                             "the host has not left its turn — the AI-turn hold keeps yielding forever inside a " +
+                             "battle that is over, which is exactly being stranded in tactical";
+
+            // (d) one seq-guarded surface for both ops
+            var inbound = ModMethod(sync, "HandleInbound");
+            if (!Reaches(inbound, "SurfaceSeq", "ShouldApply") || !Reaches(inbound, "SurfaceSeq", "Mark"))
+                yield return "L64 unsequenced: the tactical host→all inbound does not run the SurfaceSeq " +
+                             "strictly-greater guard — a re-delivered turn message could be applied after the mission " +
+                             "end and put the client back into a battle it already left (law 7)";
+
+            // (e) teardown: return barrier armed + per-battle state dropped
+            var endPostfix = ModMethod(endBarrier, "Postfix");
+            if (!Reaches(endPostfix, "SaveTransferCoordinator", "OpenReturnBarrier"))
+                yield return "L64 return-unarmed: the tactical teardown does not call OpenReturnBarrier — the tac→geo " +
+                             "return has no save transfer, so nothing else re-arms the synchronized reveal and the " +
+                             "first peer to finish loading its geoscape lifts its curtain alone";
+            if (!Reaches(endPostfix, "TacticalTurnSync", "Reset"))
+                yield return "L64 state-leaks-between-battles: the tactical teardown does not reset the turn mirror — " +
+                             "the mission-over flag survives into the NEXT battle and ends it on frame one";
+
+            // The same non-vacuity arm L61 uses: is OpenReturnBarrier reachable from OUTSIDE the coordinator
+            // at all? It sat here fully written with zero callers for the whole geoscape migration.
+            var coord = typeof(Multiplayer.Network.SaveTransferCoordinator);
+            var barrier = coord.GetMethod("OpenReturnBarrier", AllMembers);
+            if (barrier == null)
+                yield return "L64 barrier-api-drift: SaveTransferCoordinator.OpenReturnBarrier no longer resolves — " +
+                             "the arming arm checked nothing";
+            else
+            {
+                Type[] declared;
+                try { declared = mod.GetTypes(); }
+                catch (ReflectionTypeLoadException ex) { declared = ex.Types.Where(t => t != null).ToArray(); }
+                bool armed = false;
+                foreach (var t in declared)
+                {
+                    foreach (var m in t.GetMethods(AllMembers).Cast<MethodBase>().Concat(t.GetConstructors(AllMembers)))
+                    {
+                        if (m.DeclaringType == coord) continue; // a self-call is not an arming caller
+                        if (Callees(m, mod).Any(c => c.MetadataToken == barrier.MetadataToken)) { armed = true; break; }
+                    }
+                    if (armed) break;
+                }
+                if (!armed)
+                    yield return "L64 barrier-dead-code: nothing outside SaveTransferCoordinator calls " +
+                                 "OpenReturnBarrier — the return barrier is unreachable again, exactly as arc A1 left it";
+            }
+
+            // (f) the client computes no outcome of its own
+            var attr = resultGate.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                                 .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (attr?.declaringType != typeof(PhoenixPoint.Geoscape.Entities.GeoMission) || attr.methodName != "Complete")
+                yield return "L64 outcome-gate-mistargeted: ClientMissionResultGate no longer patches " +
+                             "GeoMission.Complete (target=" + (attr?.declaringType?.Name ?? "<none>") + "." +
+                             (attr?.methodName ?? "<none>") + ") — that is the ONE funnel that applies a battle to the " +
+                             "campaign, and off it the client rewrites its own save with casualties the host never took";
+            if (!Reaches(ModMethod(resultGate, "Prefix"), "IntentRail", "ShouldRunNative"))
+                yield return "L64 outcome-gate-open: the GeoMission.Complete gate does not consult " +
+                             "IntentRail.ShouldRunNative — the client applies the result its own unreplicated actors " +
+                             "produced instead of mirroring the host's";
         }
 
         private static readonly Dictionary<short, OpCode> OpCodeByValue = BuildOpCodes();
