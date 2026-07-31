@@ -112,6 +112,7 @@ namespace RailCheck
             laws.AddRange(HostSelfRepaintLaw());
             laws.AddRange(DerivedObjectivesLaw(game));
             laws.AddRange(SiteStatusTwinLaw());
+            laws.AddRange(RejectScopeLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -1447,6 +1448,27 @@ namespace RailCheck
                 yield return "L14 twin-coercion: GeoVehicle.Name no longer lands in _vehicleName (the Name property substitutes a localized default)";
             if (fOwnerS == null || fOwnerS.Class != FieldClass.Leaf || !fOwnerS.FactionRef)
                 yield return "L14 twin-coercion: GeoSite.OwnerFactionDef lost the def→GeoFaction coercion";
+            // The REDUCED-DTO rung (RailMeta.LiveTypeWins): the game records a def as its string Id and an
+            // enum as its underlying int, and the rail retypes the field to the LIVE type so the existing
+            // DefRef/Enum leaf codec carries it with no id⇄def or int⇄enum machinery. Both members below were
+            // DECLARED GAPS until the rung landed; without it they silently fall back to "dto-twin
+            // unresolved" (a haven's assigned research topic and a scavenging site's type stop mirroring).
+            foreach (var (liveT, dtoMember, want) in new[]
+                     {
+                         (typeof(PhoenixPoint.Geoscape.Entities.GeoHaven), "AssignedResearchId",
+                          typeof(PhoenixPoint.Geoscape.Entities.Research.ResearchDef)),
+                         (typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoScavengingSite), "ScavengingSiteType",
+                          typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoScavengingSiteType)),
+                     })
+            {
+                var bridge = RailMeta.FindBridge(liveT);
+                var fRed = bridge == null ? null : RailType.GetBridged(liveT, bridge)?.FieldByName(dtoMember);
+                if (fRed == null || fRed.Class != FieldClass.Leaf || fRed.ValueType != want)
+                    yield return "L14 twin-coercion: " + liveT.Name + "." + dtoMember + " lost the reduced-DTO rung — " +
+                                 "expected a Leaf of " + want.Name + ", got " +
+                                 (fRed == null ? "no field at all" : fRed.Class + " of " + fRed.ValueType?.Name) +
+                                 "; the member stops mirroring";
+            }
             // An aircraft's position rides through a PROPERTY hop (GeoActor.Surface is an auto-property,
             // decompile GeoVehicle.cs:89), so a field-only ResolveAliasChain silently classifies both
             // carriers "dto-twin unresolved". Both are now DELIBERATELY excluded — the client derives its
@@ -3838,6 +3860,43 @@ namespace RailCheck
                 }
                 i += size;
             }
+        }
+
+        /// <summary>L57 — A FORCED RE-EMIT SCOPE MUST NAME A PATH THE WALK CAN ACTUALLY PRODUCE.
+        /// <c>IntentRail.Reject</c> converges the losing peer with <c>DiffEngine.ForceReemit(prefix)</c>; a
+        /// prefix matching no covered path re-emits nothing, so the reject converges nobody and the only
+        /// symptom is an absence. <see cref="EventSync"/> shipped <c>"ES.EncounterRecords#&lt;eventId&gt;"</c>
+        /// — the <c>&lt;path&gt;.&lt;Field&gt;#&lt;key&gt;</c> form the walk emits ONLY for
+        /// <see cref="FieldClass.EntityCollection"/> fields (DiffEngine.cs, the keyed-element arm).
+        /// <c>EncounterRecords</c> is an <see cref="FieldClass.EntityList"/>: one canonical blob at its
+        /// OWNER's path, so the only prefix that reaches it is the "ES" root key itself. Both halves are
+        /// pinned here, and the law INVERTS if the classification does — a reclassification to
+        /// EntityCollection makes the root scope the wrong (over-broad) answer, and says so. The runtime belt
+        /// is DiffEngine's zero-match log; this is the static one, because a reject is the one path nobody
+        /// exercises by hand. Falsify by restoring the element form, or by removing "ES" from
+        /// <c>IdentityResolver.RootKinds</c>.</summary>
+        private static IEnumerable<string> RejectScopeLaw()
+        {
+            const string root = "ES";
+            if (!IdentityResolver.RootKinds.Any(r => r.Key == root))
+                yield return "L57 reject-scope: root key '" + root + "' is gone from IdentityResolver.RootKinds — " +
+                             "EventSync.RecordScope names a path the walk never emits, so a rejected event answer " +
+                             "re-emits nothing and the losing peer keeps its open picker";
+            var recF = RailType.Get(typeof(GeoscapeEventSystem))?.FieldByName("EncounterRecords");
+            if (recF == null)
+                yield return "L57 reject-scope: GeoscapeEventSystem.EncounterRecords is no longer in the rail table — " +
+                             "EventSync.RecordScope cannot be checked against the paths the walk produces";
+            else if (recF.Class == FieldClass.EntityCollection)
+            {
+                if (EventSync.RecordScope == root)
+                    yield return "L57 reject-scope: EncounterRecords now classifies EntityCollection, so every record " +
+                                 "HAS its own element path — narrow EventSync.RecordScope to \"" + root +
+                                 ".EncounterRecords#<eventId>\" instead of re-emitting the whole ledger";
+            }
+            else if (EventSync.RecordScope != root)
+                yield return "L57 reject-scope: EncounterRecords rides as " + recF.Class + " (one blob at the OWNER's " +
+                             "path, no element paths), but EventSync.RecordScope is '" + EventSync.RecordScope +
+                             "' — that prefix matches ZERO covered paths and a rejected answer never converges";
         }
 
         /// <summary>L27 — the event-answer arbiter, which is what makes "the first choice is frozen for

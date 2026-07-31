@@ -778,11 +778,11 @@ PhoenixPoint.Geoscape.Entities.Sites.GeoHarvestingSite  <=  InstanceData  resolv
   - EXCLUDED HarvestingNextUpdate (NextUpdate): dto-twin unresolved
   - EXCLUDED Output (List`1): dto-twin unresolved
   + Leaf StartedHarvestingAt (TimeUnit) -> live _startedHarvestingAt
-PhoenixPoint.Geoscape.Entities.GeoHaven  <=  InstanceData  resolved=12/14
+PhoenixPoint.Geoscape.Entities.GeoHaven  <=  InstanceData  resolved=13/14
   + Leaf AlertLevel (HavenAlertLevel)
   + Leaf AlertLevelCooldown (Int32) -> live AlertCooldownDaysLeft
   + Leaf AlienAttackImmunityCounter (Int32)
-  - EXCLUDED AssignedResearchId (String): DECLARED GAP — needs a def⇄string-id coercion rung (live AssignedResearch is a ResearchDef, GeoHaven.cs:140/1526); no such rung exists and one member does not justify inventing it
+  + Leaf AssignedResearchId (ResearchDef) -> live AssignedResearch
   + Leaf EnvironmentTag (MissionTagDef) -> live HavenEnvironmentTag
   + Descend Leader (GeoHavenLeader)
   + Leaf MistRepellerRange (EarthUnits) -> live MistRepeller.Range.Range
@@ -803,14 +803,14 @@ PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase  <=  InstanceData  resolved=
   + Leaf ScannerEnabled (Boolean) -> live SiteScanner.ScannerEnabled
   + Leaf SiteScannerRange (EarthUnits) -> live SiteScanner.Range.Range
   - EXCLUDED Version (Int32): serializer schema version, not state — the DTO's [SerializeType(Version=3)] stamp
-PhoenixPoint.Geoscape.Entities.Sites.GeoScavengingSite  <=  InstanceData  resolved=0/2
+PhoenixPoint.Geoscape.Entities.Sites.GeoScavengingSite  <=  InstanceData  resolved=1/2
   - EXCLUDED NextEnemyRefreshUpdate (NextUpdate): scheduler handle, not state — the DTO records an IUpdateable.NextUpdate whose writer is Timing.Start and whose live handle field is private with no counterpart of this name. What it schedules is a MONOTONE ACCUMULATOR clamped to a def-fixed maximum, and the accumulated VALUE now mirrors through a twin alias, which is the half that matters. Mirroring the client's own next-wakeup time on top of its own live scheduler would fight it (law 4b); correcting the value will not. Same class as the exploration handle above
-  - EXCLUDED ScavengingSiteType (Int32): DECLARED GAP — needs an enum⇄underlying-int coercion rung (live _scavengingType is GeoScavengingSiteType, GeoScavengingSite.cs:119/126); host never mutates it post-creation
+  + Leaf ScavengingSiteType (GeoScavengingSiteType) -> live _scavengingType
 PhoenixPoint.Geoscape.Entities.VehicleFactionController  <=  InstanceData  resolved=2/3
   + Leaf LastVisitedSite (GeoSite) -> live _lastVisitedSited
   + Leaf WaitForSiteMission (GeoSite) -> live _waitSiteMission
   - EXCLUDED WaitingUpdateTime (NextUpdate): scheduler handle, not state — the DTO records an IUpdateable.NextUpdate whose writer is Timing.Start and whose live handle field is private with no counterpart of this name. What it schedules is a MONOTONE ACCUMULATOR clamped to a def-fixed maximum, and the accumulated VALUE now mirrors through a twin alias, which is the half that matters. Mirroring the client's own next-wakeup time on top of its own live scheduler would fight it (law 4b); correcting the value will not. Same class as the exploration handle above
-twin summary: resolved=78 gaps=37 dispatch=7
+twin summary: resolved=80 gaps=35 dispatch=7
 
 null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), GeoHavenDefenseMissionInstanceData.AttackingSites (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
 

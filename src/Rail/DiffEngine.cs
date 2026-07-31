@@ -331,11 +331,13 @@ namespace Multiplayer.Network.Sync
         private static bool PrefixMatch(IEnumerable<string> prefixes, string path)
         {
             foreach (var p in prefixes)
-                if (path.Length >= p.Length && string.CompareOrdinal(path, 0, p, 0, p.Length) == 0 &&
-                    (path.Length == p.Length || path[p.Length] == '.'))
-                    return true;
+                if (PrefixMatchOne(p, path)) return true;
             return false;
         }
+
+        private static bool PrefixMatchOne(string p, string path) =>
+            path.Length >= p.Length && string.CompareOrdinal(path, 0, p, 0, p.Length) == 0 &&
+            (path.Length == p.Length || path[p.Length] == '.');
 
         private static GeoLevelController GeoLevel()
         {
@@ -711,6 +713,24 @@ namespace Multiplayer.Network.Sync
             // Consumed: the emit below carries the forced scope (censuses + values). Only the prefixes THIS
             // cycle walked with are retired — one armed mid-cycle never got its census and stays armed.
             foreach (var p in _cycleForcePrefixes) _forcePrefixes.Remove(p);
+
+            // LOUD zero-match (the swallow class this rail keeps re-learning): a forced scope that matches
+            // no covered path re-emits NOTHING, so whatever armed it — a reject's convergence, a CRC heal —
+            // never converges anybody, and the ONLY evidence used to be the absence of a delta. EventSync
+            // shipped "ES.EncounterRecords#<id>", the element-path form the walk emits ONLY for
+            // EntityCollection fields, and every rejected event answer died there in silence. One scan of
+            // this cycle's entries per armed prefix, at reject/heal rate.
+            if (anyForced)
+                foreach (var p in _cycleForcePrefixes)
+                {
+                    bool hit = false;
+                    for (int i = 0; i < ordered.Count && !hit; i++) hit = PrefixMatchOne(p, ordered[i].Path);
+                    if (!hit)
+                        Debug.LogError("[Multiplayer][rail] ForceReemit scope '" + p + "' matched ZERO covered paths — " +
+                                       "nothing was re-emitted and whatever armed it will NOT converge. A scope is whole " +
+                                       "path SEGMENTS from a root key (\"S#12\", \"ES\"); the element form " +
+                                       "\"<path>.<Field>#<key>\" exists only for EntityCollection fields.");
+                }
 
             int packets = 0, bytes = 0;
             // Structural create/destroy FIRST: the same batch's value entries for a just-created root

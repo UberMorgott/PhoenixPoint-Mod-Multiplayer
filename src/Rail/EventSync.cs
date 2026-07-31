@@ -28,7 +28,7 @@ namespace Multiplayer.Network.Sync
     /// occurrence id, which every reload invalidated; a record survives save/load and the save transfer,
     /// so there is nothing to reset. Two peers answering within one RTT is the NORMAL case, not an
     /// error: the second is REJECTED (never thrown) and reconverged by IntentRail.Reject's scoped
-    /// re-emit of <c>ES.EncounterRecords#&lt;eventId&gt;</c> + the reject nudge, after which that peer's
+    /// re-emit of <see cref="RecordScope"/> + the reject nudge, after which that peer's
     /// open picker is closed by the repaint (<see cref="EventPopup.RepaintDialog"/>) — the record delta IS
     /// the dismiss signal, so this family ships no dismiss message.
     ///
@@ -41,6 +41,18 @@ namespace Multiplayer.Network.Sync
     public static class EventSync
     {
         internal const byte OpAnswer = 1;  // [eventId:string][choiceIndex:i32]
+
+        /// <summary>The forced re-emit scope for a rejected answer — the "ES" ROOT, not a per-record path.
+        /// <c>EncounterRecords</c> classifies <see cref="FieldClass.EntityList"/> (docs/rail-baseline.txt:470),
+        /// so the whole ledger rides as ONE canonical blob at its OWNER's path (DiffEngine.AddEntityListEntry)
+        /// and no per-record path exists to narrow to; the record's subtree IS the root. This used to read
+        /// <c>"ES.EncounterRecords#" + eventId</c> — the <c>&lt;path&gt;.&lt;Field&gt;#&lt;key&gt;</c> form the
+        /// walk emits ONLY for EntityCollection fields (DiffEngine.cs:919) — so every reject re-emitted
+        /// NOTHING and the losing peer's picker stayed open forever, with no log line. RailCheck L57 pins both
+        /// halves against the live classifier; DiffEngine now logs any forced scope that matches zero paths.</summary>
+        /// (static readonly, not const: RailCheck L57 compares it against the root key it re-derives, and a
+        /// const would constant-fold that comparison away at compile time — a law that cannot fail.)
+        internal static readonly string RecordScope = "ES";
 
         internal static void RegisterIntents()
         {
@@ -68,7 +80,6 @@ namespace Multiplayer.Network.Sync
         {
             string eventId = r.ReadString();
             int index = r.ReadInt32();
-            string scope = "ES.EncounterRecords#" + eventId; // DiffEngine.cs:811 keyed-element path form
 
             var geo = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>();
             var es = geo?.EventSystem;
@@ -80,12 +91,12 @@ namespace Multiplayer.Network.Sync
             if (rec == null || data == null)
             {
                 IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "no " + (rec == null ? "record" : "def") +
-                                  " for event '" + eventId + "' on the host", scope);
+                                  " for event '" + eventId + "' on the host", RecordScope);
                 return;
             }
             string why = Validate(rec.State, index, data.Choices == null ? 0 : data.Choices.Count);
             if (why != null)
-            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "event '" + eventId + "': " + why, scope); return; }
+            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "event '" + eventId + "': " + why, RecordScope); return; }
 
             // Prefer the host's OWN live instance: it carries the real Context (site + vehicle) the reward
             // and any mission launch are applied against. Otherwise synthesise the same shape the game

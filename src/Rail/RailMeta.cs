@@ -323,6 +323,10 @@ namespace Multiplayer.Network.Sync
             var liveT = RailMeta.MemberType(live);
             if (liveT != valType)
             {
+                // The DTO records a REDUCED form of the live member (a def as its string Id, an enum as its
+                // underlying int): retype the field to the LIVE type and let the existing leaf codec carry
+                // it — see RailMeta.LiveTypeWins. Nothing downstream changes.
+                if (RailMeta.LiveTypeWins(liveT, valType)) { valType = liveT; f.ValueType = liveT; }
                 f.WrapFi = RailMeta.WrapperField(liveT, valType);
                 f.FactionRef = liveT == typeof(GeoFaction) && typeof(BaseDef).IsAssignableFrom(valType);
             }
@@ -650,19 +654,11 @@ namespace Multiplayer.Network.Sync
             { "PhoenixPoint.Geoscape.Entities.Sites.GeoScavengingSite.NextEnemyRefreshUpdate", ExpansionHandleOptOut },
             { "PhoenixPoint.Geoscape.Entities.VehicleFactionController.WaitingUpdateTime", ExpansionHandleOptOut },
 
-            // DECLARED GAPS — stated, not fixed. Each needs a COERCION rung the twin machinery does not
-            // have, and inventing one for a single member is the per-subsystem crutch the mandate forbids.
-            //   AssignedResearchId: DTO `string` against live `AssignedResearch` (ResearchDef,
-            //     GeoHaven.cs:140). The game does the id⇄def lookup by hand at record/process time
-            //     (GeoHaven.cs:1526). Cost: a client shows no haven-assigned research topic.
-            //   ScavengingSiteType: DTO `int` against live `_scavengingType` (enum GeoScavengingSiteType,
-            //     GeoScavengingSite.cs:119/126) — an explicit (int)/(enum) cast on both sides.
-            //     Cost: a client's scavenging sites keep their save-loaded type; the host never changes it
-            //     after creation, so this is inert until it isn't.
-            //   Exit for both: one generic coercion rung beside WrapperField/FactionRef (def⇄id and
-            //     enum⇄underlying), which would also close any future member of the same two shapes.
-            { "PhoenixPoint.Geoscape.Entities.GeoHaven.AssignedResearchId", "DECLARED GAP — needs a def⇄string-id coercion rung (live AssignedResearch is a ResearchDef, GeoHaven.cs:140/1526); no such rung exists and one member does not justify inventing it" },
-            { "PhoenixPoint.Geoscape.Entities.Sites.GeoScavengingSite.ScavengingSiteType", "DECLARED GAP — needs an enum⇄underlying-int coercion rung (live _scavengingType is GeoScavengingSiteType, GeoScavengingSite.cs:119/126); host never mutates it post-creation" },
+            // (The two DECLARED GAPS that used to sit here — GeoHaven.AssignedResearchId and
+            // GeoScavengingSite.ScavengingSiteType — are CLOSED: `RailMeta.LiveTypeWins` is the generic
+            // reduced-DTO coercion rung their exit note asked for, and both now ride as ordinary leaves of
+            // their LIVE type. Their DTO→live name mapping is a row in `_twinAliases`, like every other twin.)
+
             // v<4 save-migration leftover (PreviousNames "Recruit"), NOT written by RecordInstanceData at all
             // (GeoHaven.cs:1509-1527) — the live recruit rides as NewRecruit -> AvailableRecruit. Same class
             // as GeoscapeEventSystem.OldTriggeredEncounters: keep the unique-type fallback from landing it on
@@ -962,6 +958,11 @@ namespace Multiplayer.Network.Sync
             { "PhoenixPoint.Geoscape.Entities.GeoHaven.AlertLevelCooldown", "AlertCooldownDaysLeft" },    // GeoHaven.cs:1520 — the haven ALERT countdown (:904 decrements it)
             { "PhoenixPoint.Geoscape.Entities.GeoHaven.OfferedResources", "StockedResources" },           // GeoHaven.cs:1519 — the trade stock the haven screen shows
             { "PhoenixPoint.Geoscape.Entities.GeoHaven.RecruitChecked", "QuerySpawnNewRecruit" },         // GeoHaven.cs:1515
+            // The two REDUCED-DTO twins (RailMeta.LiveTypeWins): the DTO member keeps the game's own
+            // reduction — an id string / an (int) cast — while the live member is the def / the enum. The
+            // rung retypes the field to the live type, so these are ordinary alias rows, not a coercion table.
+            { "PhoenixPoint.Geoscape.Entities.GeoHaven.AssignedResearchId", "AssignedResearch" },         // GeoHaven.cs:1525 record (AssignedResearch.Id) / :1400-1407 process (GetResearchById -> ResearchDef)
+            { "PhoenixPoint.Geoscape.Entities.Sites.GeoScavengingSite.ScavengingSiteType", "_scavengingType" }, // GeoScavengingSite.cs:119 record ((int)_scavengingType) / :126 process
             { "PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.MistRepellerRange", "MistRepeller.Range.Range" }, // GeoPhoenixBase.cs:1108 / :969
             { "PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.SiteScannerRange", "SiteScanner.Range.Range" },   // GeoPhoenixBase.cs:1111 — the scan radius that reveals sites
             { "PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.ScannerEnabled", "SiteScanner.ScannerEnabled" },  // GeoPhoenixBase.cs:1113 (one hop — it only ever needed the row)
@@ -1065,6 +1066,7 @@ namespace Multiplayer.Network.Sync
         {
             if (liveT == dtoT) return true;
             if (WrapperField(liveT, dtoT) != null) return true;
+            if (LiveTypeWins(liveT, dtoT)) return true; // def ← DTO string Id, enum ← DTO underlying int
             if (liveT == typeof(GeoFaction) &&
                 (dtoT == typeof(GeoFactionDef) || dtoT == typeof(PhoenixPoint.Common.Core.PPFactionDef))) return true;
             var de = ElemTypeOf(dtoT);
@@ -1122,6 +1124,20 @@ namespace Multiplayer.Network.Sync
             var ms = SerializedMembers(ser, liveT);
             return ms.Count == 1 && ms[0] is FieldInfo fi && !fi.IsInitOnly && fi.FieldType == dtoT ? fi : null;
         }
+
+        /// <summary>THE generic reduced-DTO coercion rung, beside <see cref="WrapperField"/> and FactionRef.
+        /// The game's *InstanceData routinely records a REDUCED form of the live member — a def as its string
+        /// Id (GeoHaven.cs:1525 <c>AssignedResearch.Id</c>, re-looked-up at :1400-1407), an enum as its
+        /// underlying int (GeoScavengingSite.cs:119 <c>(int)_scavengingType</c>, re-cast at :126). The rail
+        /// does NOT reproduce that reduction and needs no id⇄def or int⇄enum codec: the LIVE type is the
+        /// richer one and the leaf codec already carries it losslessly (<see cref="LeafKind.DefRef"/> = guid +
+        /// DefRepository lookup, <see cref="LeafKind.Enum"/> = int64), so BuildField simply retypes the field
+        /// to the live type and encode/decode/apply stay the one generic path. Wire parity holds because both
+        /// peers derive the table from the same LIVE type, never from an instance (law 6). Closes any future
+        /// member of the same two shapes, not just the two that exposed it (RailCheck L14).</summary>
+        internal static bool LiveTypeWins(Type liveT, Type dtoT) =>
+            (dtoT == typeof(string) && typeof(BaseDef).IsAssignableFrom(liveT)) ||
+            (liveT.IsEnum && dtoT == Enum.GetUnderlyingType(liveT));
 
         /// <summary>Read half of the FactionRef coercion: the def the DTO records for a live GeoFaction
         /// member (GeoVehicle.RecordInstanceData:1054 `Owner.Def.PPFactionDef`, GeoSite's records `Owner.Def`).</summary>
