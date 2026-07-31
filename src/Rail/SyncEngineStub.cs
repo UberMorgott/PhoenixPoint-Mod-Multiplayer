@@ -78,6 +78,10 @@ namespace Multiplayer.Network.Sync
             // would be overwritten by that move's own navigation and vanish with no log line.
             Multiplayer.Tactical.TacticalCommandSync.ClientTick(_engine);
             Multiplayer.Tactical.TacticalDamageSync.ClientTick(_engine);   // A3b: emit an armed 0x84-gap resnapshot request
+            // host-only inside: A4 ships a death no damage record carried (a status kill, a scripted one, a
+            // mod's). Deferred by one frame ON PURPOSE — inline it could overtake the damage stream it must
+            // stay behind, and a death whose corpse manifest arrives before the corpse is a silent drop.
+            Multiplayer.Tactical.TacticalActorLifecycle.HostTick(_engine);
             GenericApplier.ClientCrcTick(_engine); // client-only inside: law-7 drift backstop, one root per second
             // (No event pump: an event WINDOW is a live host→client 0xB6 raise, not a derivation over the
             // mirrored records — a peer that was not in the session when it fired never sees it. The 1 Hz

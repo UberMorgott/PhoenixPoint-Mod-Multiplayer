@@ -59,9 +59,14 @@ namespace Multiplayer.Tactical
     /// than resolved. Derived keys are NEGATIVE so they can never collide with a real <c>GeoTacUnitId</c>
     /// (the geoscape mints those from a positive counter), and 0 still means "no shared identity".
     ///
-    /// KNOWN CEILING, stated rather than hidden: an actor that ENTERS play after the build (reinforcement
-    /// spawn — arc A5) gets no key and every command or result naming it is refused with a sentence. That is
-    /// the correct A3b behaviour: A5 is what makes spawns exist on both peers in the first place.
+    /// A4 CLOSES THE CEILING A3b LEFT: an actor that ENTERS play after the build cannot be keyed by ANY
+    /// derived scheme, because a derived key is a function of a shared snapshot and that actor was in no
+    /// snapshot. Its key is therefore HOST-ASSIGNED (<see cref="AssignHostKey"/>) and ships WITH the spawn
+    /// event; every other peer <see cref="Adopt"/>s it verbatim. The two schemes share ONE counter
+    /// (<c>_nextDerived</c>) so they can never mint the same number: the build runs first on every peer
+    /// (<see cref="Built"/> gates assignment), consumes -1..-N over the identical shared board, and every
+    /// mid-battle spawn continues from -(N+1). Adoption never consumes the counter — the key is given, not
+    /// minted — which is what keeps a peer that adopts BEFORE its own build from shifting its own ordinals.
     /// </summary>
     internal static class TacticalActorKey
     {
@@ -69,6 +74,10 @@ namespace Multiplayer.Tactical
             new Dictionary<TacticalActorBase, int>();
         private static readonly Dictionary<int, TacticalActorBase> _byDerived = new Dictionary<int, TacticalActorBase>();
         private static bool _built;
+
+        /// <summary>The next free derived ordinal, shared by the battle-start build and by every mid-battle
+        /// host assignment (A4). One counter, so the two schemes can never mint the same number.</summary>
+        private static int _nextDerived = -1;
 
         /// <summary>Whether <see cref="BuildBattleKeys"/> has run for this battle. A command that needs a
         /// derived key before the map exists is refused with that reason, never resolved by accident.</summary>
@@ -79,6 +88,7 @@ namespace Multiplayer.Tactical
             _derived.Clear();
             _byDerived.Clear();
             _built = false;
+            _nextDerived = -1;
         }
 
         /// <summary>Build the derived-key map for THIS battle. Idempotent by design — it runs at the FIRST
@@ -92,7 +102,10 @@ namespace Multiplayer.Tactical
             if (tlc == null || tlc.Map == null) return;
             var keyless = new List<TacticalActorBase>();
             foreach (var a in tlc.Map.GetActors<TacticalActorBase>())
-                if ((int)a.GeoUnitId == 0) keyless.Add(a);
+                // A4: an actor that already carries an ADOPTED host key is deliberately NOT in the ordinal
+                // set. The host built its map before that actor existed, so including it here would shift
+                // every ordinal after it and point this peer's alien keys at different monsters.
+                if ((int)a.GeoUnitId == 0 && !_derived.ContainsKey(a)) keyless.Add(a);
             keyless.Sort(CanonicalOrder);
             for (int i = 0; i < keyless.Count; i++)
             {
@@ -101,7 +114,7 @@ namespace Multiplayer.Tactical
                                    keyless[i].name + " and " + keyless[i - 1].name + " at " + keyless[i].Pos +
                                    ") — their derived keys depend on enumeration order and the peers may disagree " +
                                    "about which is which. Every shot naming either of them is suspect.");
-                int key = -(i + 1);
+                int key = _nextDerived--;
                 _derived[keyless[i]] = key;
                 _byDerived[key] = keyless[i];
             }
@@ -124,9 +137,55 @@ namespace Multiplayer.Tactical
             return string.CompareOrdinal(a.name, b.name);
         }
 
+        /// <summary>A4 — THE HOST MINTS the key for an actor that entered play mid-battle, at the moment it
+        /// entered. This is the only scheme that can work for such an actor: a DERIVED key is a function of a
+        /// board both peers snapshotted, and a mid-battle spawn was in nobody's snapshot. A real
+        /// <c>GeoUnitId</c> still wins (a deployed <c>GeoCharacter</c> already has a cross-layer identity and
+        /// stamping a second one over it would break <c>PhoenixStatisticsManager</c>); otherwise the next free
+        /// ordinal is taken and the number rides on the spawn event for every other peer to
+        /// <see cref="Adopt"/>. Idempotent: a second call for the same actor returns the same key.</summary>
+        internal static int AssignHostKey(TacticalActorBase actor)
+        {
+            if (ReferenceEquals(actor, null)) return 0;
+            int geo = (int)actor.GeoUnitId;
+            if (geo != 0) return geo;
+            int existing;
+            if (_derived.TryGetValue(actor, out existing)) return existing;
+            int key = _nextDerived--;
+            _derived[actor] = key;
+            _byDerived[key] = actor;
+            return key;
+        }
+
+        /// <summary>A4 — take the host's number verbatim, and DO NOT touch the counter. The key is GIVEN, not
+        /// minted, and moving the counter for it would shift this peer's own battle-start ordinals whenever a
+        /// spawn record lands before <see cref="BuildBattleKeys"/> runs here. It is safe to leave the counter
+        /// alone because a host-assigned key is ALWAYS below the build range: the host builds first (assignment
+        /// is gated on <see cref="Built"/>), so it has already consumed -1..-N over the same board this peer is
+        /// about to consume -1..-N over, and everything it hands out afterwards starts at -(N+1). A collision
+        /// would therefore mean the two peers disagree about the battle-start roster, which is why the one that
+        /// is detected here is reported as loudly as it is.</summary>
+        internal static void Adopt(TacticalActorBase actor, int key)
+        {
+            if (ReferenceEquals(actor, null) || key >= 0) return;   // 0 = no identity, positive = its own GeoUnitId
+            TacticalActorBase other;
+            if (_byDerived.TryGetValue(key, out other) && !ReferenceEquals(other, actor))
+                Debug.LogError("[Multiplayer][tac] the host's spawn key " + key + " is ALREADY taken on this peer by " +
+                               SafeName(other) + " — the peers disagree about this battle's starting roster, so two " +
+                               "actors now answer to one key and every command or result naming it reaches the " +
+                               "wrong one.");
+            _derived[actor] = key;
+            _byDerived[key] = actor;
+        }
+
         internal static int Of(TacticalActorBase actor)
         {
-            if (actor == null) return 0;
+            // ReferenceEquals, not ==, for the reason ResolveReceiver already spells out: Unity's overloaded
+            // == answers "is this object DESTROYED", and a destroyed actor still has a key — a corpse the game
+            // just destroyed (DieAbility.PostProcessDeath:71) is exactly what a trailing damage or settle
+            // record names, and answering 0 for it would drop that record with a "no shared key" line about an
+            // actor that has one.
+            if (ReferenceEquals(actor, null)) return 0;
             int geo = (int)actor.GeoUnitId;
             if (geo != 0) return geo;
             int derived;
@@ -141,9 +200,9 @@ namespace Multiplayer.Tactical
             why = null;
             if (key == 0)
             {
-                why = "actor key 0 — this actor carries GeoTacUnitId.None and was not present when this " +
-                      "battle's derived keys were built (a mid-battle spawn, arc A5), so the peers share no " +
-                      "identity for it";
+                why = "actor key 0 = no shared identity — this actor carries GeoTacUnitId.None, was not present when this battle's " +
+                      "derived keys were built, and carries no host-assigned spawn key either (A4 assigns one " +
+                      "to every mid-battle spawn, so a key-0 actor here entered play on this peer ALONE)";
                 return null;
             }
             // The DERIVED branch is answered BEFORE the map is consulted, and deliberately: a derived key is
@@ -151,20 +210,21 @@ namespace Multiplayer.Tactical
             // is never the reason a peer gives for failing to find an alien.
             if (key < 0)
             {
+                // The MAP is consulted before the built flag, and that order is A4's: a host-assigned spawn key
+                // is adopted the moment its spawn record lands, which can legitimately be BEFORE this peer
+                // reaches its own first turn edge. Asking "is the map built?" first would refuse a key that is
+                // sitting right there.
+                TacticalActorBase derived;
+                if (_byDerived.TryGetValue(key, out derived)) return derived;
                 if (!_built)
                 {
                     why = "derived actor key " + key + " arrived before this peer built its battle key map — " +
                           "the peers are not at the same point in the battle";
                     return null;
                 }
-                TacticalActorBase derived;
-                if (!_byDerived.TryGetValue(key, out derived))
-                {
-                    why = "no actor carries derived key " + key + " on this peer — the peers built different " +
-                          "key maps, so every alien named on the wire is suspect";
-                    return null;
-                }
-                return derived;
+                why = "no actor carries derived key " + key + " on this peer — either the peers built different " +
+                      "key maps or a host spawn record never arrived, so every actor named on the wire is suspect";
+                return null;
             }
             if (tlc == null || tlc.Map == null)
             {
@@ -477,9 +537,21 @@ namespace Multiplayer.Tactical
         /// (the ground-vehicle move) derives from <c>MoveAbility</c> and is the same order with the same payload.
         /// Everything OUTSIDE the set stays exactly as arc A2 left it — local and unrelayed — and says so once
         /// per ability def, because "my grenade did nothing on the other screen" with no log line is this
-        /// project's dominant bug class.</summary>
+        /// project's dominant bug class.
+        ///
+        /// A4 ADDS EVACUATION, and it needs NOTHING else: <c>ExitMissionAbility.Activate</c>:32-36 and
+        /// <c>EvacuateMountedActorsAbility.Activate</c>:57-69 both call <c>base.Activate(parameter)</c>, so the
+        /// A3a capture already sees them, and what they do — <c>HideActorInExitZone</c>:25-30 applies
+        /// <c>EvacuatedStatusDef</c>, unapplies every OTHER status, and hands the actor to the exit zone's
+        /// <c>VehicleComponent.ApplyMountedStatus</c> — is exactly the native HIDE the mandate requires.
+        /// Relaying the ORDER therefore makes every peer run the game's own hide; NOTHING in this repo
+        /// destroys an evacuated actor, which is the v1 regression (d41b8f8: an empty BattleSummary, per-frame
+        /// NREs in UIStateCharacterSelected, a dead evac button). The game itself never destroys a live actor
+        /// either — <c>ActorSpawner.DestroyActor</c> has exactly ONE caller in the whole assembly,
+        /// <c>DieAbility.PostProcessDeath</c>:63-74, and only when the def says not to keep the body.</summary>
         internal static bool IsRider(TacticalAbility ability) =>
-            ability is MoveAbility || ability is ShootAbility || ability is BashAbility;
+            ability is MoveAbility || ability is ShootAbility || ability is BashAbility ||
+            ability is ExitMissionAbility || ability is EvacuateMountedActorsAbility;
 
         /// <summary>HOST: the peer whose intent is currently being replayed natively, so the mirror can skip
         /// the peer that already played it locally. 0 = the host's own gesture (mirror to everyone). Scoped by
@@ -577,8 +649,8 @@ namespace Multiplayer.Tactical
                 string name = ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name;
                 if (_saidUncovered.Add(name))
                     Debug.LogWarning("[Multiplayer][tac] '" + name + "' is NOT a declared rider — it ran " +
-                                     "LOCALLY on this peer only and no other peer will see it. A3a/A3b carry " +
-                                     "movement, shooting (incl. thrown and melee weapons) and bash.");
+                                     "LOCALLY on this peer only and no other peer will see it. A3a/A3b/A4 carry " +
+                                     "movement, shooting (incl. thrown and melee weapons), bash and evacuation.");
                 return;
             }
 

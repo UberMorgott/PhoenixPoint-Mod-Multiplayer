@@ -71,9 +71,23 @@ BEHAVIOR (per-subsystem mirroring).
    a TFTV class list; late-bound via `TftvLateBinder`). Post-hit hp/ap/wp are overwritten from the host's
    snapshot and any non-zero correction is logged as a double-apply. Aliens are keyed by a DERIVED battle key
    (negative ordinal over battle-start position, built once at the first turn edge) — there is NO serialized
-   per-actor identity, and a synthetic `GeoUnitId` is refused (`GeoMission:788-795` errors on it). A4-A6
-   (inventory/loot, spawn/despawn, destructibles) pending. Shared-seed determinism = still a separate future
-   project.
+   per-actor identity, and a synthetic `GeoUnitId` is refused (`GeoMission:788-795` errors on it). **A4** (law
+   L67) = ACTOR LIFECYCLE, and it takes NO new surface: spawn(3) + death(4) join **0x84**, because a spawn and a
+   death are the same discrete-event shape (so they inherit its gap check + resnapshot) and because one seq
+   stream is the only thing that stops a hit from overtaking the spawn of the actor it names. A mid-battle
+   spawn's key is **HOST-ASSIGNED** (`TacticalActorKey.AssignHostKey`, one counter shared with the battle-start
+   ordinals) and adopted verbatim — a derived key cannot name an actor that was in no shared snapshot. The
+   client's own spawn RNG is gated at `TacParticipantSpawn.DeployForTurn` (reinforcements; TFTV reaches it from
+   a POSTFIX on `RequestEndTurn`, which runs even when our end-turn prefix skipped the original) and, as a
+   universal backstop, at `ActorComponent.DoEnterPlay` — CONTAINED (never enters play), never destroyed. Death
+   is forced through the game's own trigger (`Health.Set(0)` → `OnHealthChange:616-622` → `Die`) by both the
+   damage applier and the resnapshot, replacing A3b's log-only split; the corpse manifest is pre-rolled on the
+   host at the `Die` prefix and rides WITH the killing hit (the mirror's death runs inside that same
+   `ApplyDamage`). **Evacuation is an ordinary A3a rider** — every peer runs the native
+   `ExitMissionAbility.HideActorInExitZone` hide (EvacuatedStatus + UnapplyAll + MountedStatus); nothing in this
+   arc destroys an actor, and RailCheck asserts that mechanically (v1's `d41b8f8` destroy = empty
+   BattleSummary + per-frame NREs + dead evac button). A5-A6 (inventory UI, destructibles) pending.
+   Shared-seed determinism = still a separate future project.
 6. **Canonical diff.** Same state → byte-identical Delta: traversal sorted by stable IDs, fixed
    field order, no nondeterministic dictionary walks. IMPLEMENTATION (recon-bound): diff walks the
    LIVE game graph guided by the save serializer's type metadata (its field discovery = our

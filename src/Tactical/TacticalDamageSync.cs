@@ -336,6 +336,12 @@ namespace Multiplayer.Tactical
     {
         private const byte OpDamage = 1;
         private const byte OpResnap = 2;
+        /// <summary>A4 — the actor LIFECYCLE ops. They ride 0x84 rather than a surface of their own because
+        /// this is already the discrete-event stream with the contiguity check and the resnapshot recovery,
+        /// and because ONE seq stream is the only thing that can stop a damage record from overtaking the
+        /// spawn of the actor it names (the same argument that puts turn+end on 0x80).</summary>
+        internal const byte OpSpawn = 3;
+        internal const byte OpDeath = 4;
         /// <summary>Op 2 on <see cref="SurfaceIds.TacCommandIntent"/> (op 1 is the command). Registered by
         /// <c>TacticalCommandSync.RegisterIntents</c> — one family, one op table.</summary>
         internal const byte OpIntentResnap = 2;
@@ -359,6 +365,7 @@ namespace Multiplayer.Tactical
             _said.Clear();
             MirrorApplyScope.Reset();
             CooldownDurationMirror.Reset();
+            TacticalActorLifecycle.Reset();   // A4: pending deaths, loot memos and the spawn-apply depth
         }
 
         internal static void SayOnce(string key, string message)
@@ -366,13 +373,13 @@ namespace Multiplayer.Tactical
             if (_said.Add(key)) Debug.LogError(message);
         }
 
-        private static TacticalLevelController Tlc()
+        internal static TacticalLevelController Tlc()
         {
             var level = GameUtl.CurrentLevel();
             return level == null ? null : level.GetComponent<TacticalLevelController>();
         }
 
-        private static NetworkEngine LiveEngine()
+        internal static NetworkEngine LiveEngine()
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return null;
@@ -413,6 +420,11 @@ namespace Multiplayer.Tactical
             }
             string slot = TacticalActorKey.SlotOf(receiver) ?? "";
             var stats = (actor as TacticalActor)?.CharacterStats;
+            // A4: if this hit KILLED, the corpse manifest the host just pre-rolled rides with it. It has to
+            // ride HERE and not behind: the mirror's own death starts the instant it applies this very
+            // DamageResult, and DieAbility.DropItems asks its questions inside that same synchronous chain —
+            // no later message could possibly get there first (the same trap the fumble pre-roll exists for).
+            var loot = actor.IsDead ? TacticalActorLifecycle.TakePendingDeath(key) : null;
             Send(OpDamage,
                  "damage " + actor.name + (slot.Length == 0 ? "" : "/" + slot) + " hp-" + result.HealthDamage.ToString("0.##") +
                  " arm-" + result.ArmorDamage.ToString("0.##"),
@@ -427,12 +439,13 @@ namespace Multiplayer.Tactical
                      w.Write(stats == null ? float.NaN : (float)stats.ActionPoints);
                      w.Write(stats == null ? float.NaN : (float)stats.WillPoints);
                      w.Write((byte)(actor.IsDead ? 1 : 0));
+                     if (actor.IsDead) TacticalActorLifecycle.WriteLoot(w, loot);
                  });
         }
 
-        private static float Stat(BaseStat s) => s == null ? float.NaN : (float)s;
+        internal static float Stat(BaseStat s) => s == null ? float.NaN : (float)s;
 
-        private static void Send(byte op, string what, Action<BinaryWriter> writeBody)
+        internal static void Send(byte op, string what, Action<BinaryWriter> writeBody)
         {
             var engine = NetworkEngine.Instance;
             try
@@ -519,6 +532,8 @@ namespace Multiplayer.Tactical
                     if (HasGap(seq)) RequestResnap(seq);
                     if (op == OpDamage) ApplyDamage(r);
                     else if (op == OpResnap) ApplyResnap(r);
+                    else if (op == OpSpawn) TacticalActorLifecycle.ApplySpawn(r);
+                    else if (op == OpDeath) TacticalActorLifecycle.ApplyDeath(r);
                     else
                     {
                         Debug.LogError("[Multiplayer][tac] unknown host→all result op " + op + " (seq=" + seq +
@@ -583,6 +598,7 @@ namespace Multiplayer.Tactical
             float recvHp = r.ReadSingle(), recvArmor = r.ReadSingle();
             float actorHp = r.ReadSingle(), ap = r.ReadSingle(), wp = r.ReadSingle();
             bool dead = r.ReadByte() != 0;
+            var loot = dead ? TacticalActorLifecycle.ReadLoot(r) : null;
 
             string why;
             var actor = TacticalActorKey.Resolve(tlc, key, out why);
@@ -605,6 +621,10 @@ namespace Multiplayer.Tactical
                 Debug.LogWarning("[Multiplayer][tac] resolved damage for " + actor.name + " arrived with parts this " +
                                  "peer could not rebuild: " + string.Join("; ", notes.ToArray()));
 
+            // A4: the corpse manifest is DECLARED BEFORE the hit, never after — the death this ApplyDamage is
+            // about to start runs DieAbility.DropItems inside the same synchronous chain (law L67d).
+            if (dead) LootMirror.Declare(key, loot);
+
             // VERBATIM, through the game's OWN writer — statuses, effects, notifications, contribution and
             // death all come from the native body, and none of it is re-derived here (law L66a).
             using (SyncApplyScope.Enter())
@@ -620,11 +640,15 @@ namespace Multiplayer.Tactical
                 Correct(stats.ActionPoints, ap, actor.name + " AP");
                 Correct(stats.WillPoints, wp, actor.name + " WP");
             }
-            if (dead != actor.IsDead)
-                Debug.LogError("[Multiplayer][tac] " + actor.name + " is " + (actor.IsDead ? "DEAD" : "alive") +
-                               " here but " + (dead ? "DEAD" : "alive") + " on the host after the same hit — death " +
-                               "is a structural event this arc does not replicate (arc A5), so the two battles " +
-                               "have parted ways.");
+            // A4: death is a REPLICATED STRUCTURAL FACT, not a log line. The overwrite above normally does it
+            // by itself (Health.Set is the game's own death trigger), so reaching this branch means the host's
+            // snapshot did not kill it here — force it through the same native trigger rather than leave the
+            // peers disagreeing about who is standing.
+            if (dead && !actor.IsDead) TacticalActorLifecycle.ForceDeath(actor, "the host's resolved hit");
+            else if (!dead && actor.IsDead)
+                Debug.LogError("[Multiplayer][tac] " + actor.name + " is DEAD here but ALIVE on the host after the " +
+                               "same hit — this peer killed something the host did not, which nothing can undo. " +
+                               "The damage neuter (law L66a) is supposed to make this unreachable.");
         }
 
         /// <summary>Overwrite from the host's snapshot AND report it. A correction that is not zero means
@@ -675,10 +699,10 @@ namespace Multiplayer.Tactical
                         Correct(stats.ActionPoints, ap, actor.name + " AP");
                         Correct(stats.WillPoints, wp, actor.name + " WP");
                     }
-                    if (dead && !actor.IsDead)
-                        Debug.LogError("[Multiplayer][tac] resnapshot says " + actor.name + " is dead on the host but " +
-                                       "it is alive here — a corpse is a structural difference this arc cannot repair " +
-                                       "(arc A5).");
+                    // A4: the resnapshot's dead flag is now ACTED ON. It is the recovery path's only structural
+                    // repair, and it is why a lost 0x84 death record is not permanent. No corpse manifest
+                    // travels with a resnapshot, so this peer keeps every item (loudly, in LootMirror).
+                    if (dead && !actor.IsDead) TacticalActorLifecycle.ForceDeath(actor, "the host's resnapshot");
                 }
             _resnapRequested = false;
             Debug.LogWarning("[Multiplayer][tac] CLIENT applied the host's resnapshot: " + fixedUp + " actor(s) " +
@@ -835,25 +859,31 @@ namespace Multiplayer.Tactical
     }
 
     /// <summary>
-    /// VANILLA RE-ROLL LEAK 3 — the death loot roll. <c>DieAbility.ShouldDestroyItem</c>:186-201 draws from
-    /// <c>SharedData.Random</c>, which is a per-battle <c>new System.Random()</c> (<c>SharedData</c>:69) and
-    /// is therefore not comparable between peers at all — AND it is the same stream the spawn tables use
-    /// (<c>TacParticipantSpawn</c>), so a client consuming it desynchronises more than loot. Made host-only:
-    /// a client answers "keep the item" without drawing. What lands in the corpse's container is arc A4's
-    /// (inventory/loot) to replicate; this arc's job is only that no peer invents a roll.
+    /// VANILLA RE-ROLL LEAK 3 — the death loot roll. <c>DieAbility.ShouldDestroyItem</c>:187-200 draws from
+    /// <c>SharedData.Random</c>, which is a per-peer <c>new System.Random()</c> (<c>SharedData</c>:69) and is
+    /// therefore not comparable between peers at all — AND it is the same stream the spawn tables use
+    /// (<c>TacParticipantSpawn</c>), so a client consuming it desynchronises more than loot.
+    ///
+    /// A3b made it host-only and left the CONTENTS to A4; A4 is here. The memo is consulted FIRST for both
+    /// roles — the host's own pre-rolled draw (so exactly one roll happens per item, as in vanilla) and the
+    /// mirror's declared answer from <see cref="LootMirror"/>. Only a peer with no answer at all falls back to
+    /// "keep it", and never to a draw.
     /// </summary>
     [HarmonyPatch(typeof(DieAbility), "ShouldDestroyItem")]
     internal static class LootRollHostOnly
     {
-        private static bool Prefix(ref bool __result)
+        private static bool Prefix(DieAbility __instance, TacticalItem item, ref bool __result)
         {
+            if (LootMirror.TryConsume(TacticalActorKey.Of(__instance == null ? null : __instance.TacticalActorBase),
+                                      item, out __result)) return false;
             var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;   // solo or host: roll natively
             __result = false;
             TacticalDamageSync.SayOnce("loot-roll",
-                "[Multiplayer][tac] the death loot roll is HOST-ONLY — this client keeps every droppable item " +
-                "instead of drawing from SharedData.Random (the same stream the spawn tables use). Corpse " +
-                "contents are replicated by arc A4, not here.");
+                "[Multiplayer][tac] a corpse's contents arrived with no host manifest — this client keeps every " +
+                "droppable item instead of drawing from SharedData.Random (the same stream the spawn tables " +
+                "use). The manifest rides with the killing hit; a death that reached here by any other route " +
+                "has none.");
             return false;
         }
     }

@@ -122,6 +122,7 @@ namespace RailCheck
             laws.AddRange(MissionEndLaw());
             laws.AddRange(CommandSeamLaw(game));
             laws.AddRange(ResolvedDamageLaw(game));
+            laws.AddRange(ActorLifecycleLaw(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -6711,9 +6712,14 @@ namespace RailCheck
                                  "). The derived branch must answer BEFORE the level is consulted, or a peer that " +
                                  "simply has no map blames the map for an alien it could never have named anyway";
                 probe = new object[] { null, 0, null };
-                if (resolve.Invoke(null, probe) != null || string.IsNullOrEmpty(probe[2] as string))
-                    yield return "L66 derived-key-zero: key 0 either resolves to an actor or is refused without a " +
-                                 "reason — 0 is 'no shared identity' and must always be a loud refusal";
+                // The reason must NAME the zero case. "Refused with SOME reason" was vacuous: with the key==0
+                // branch deleted, 0 falls through to the positive branch and is refused with "no tactical map
+                // on this peer" — a passing arm reporting the wrong thing about a key that means "nobody".
+                if (resolve.Invoke(null, probe) != null || !(probe[2] as string ?? "").Contains("no shared identity"))
+                    yield return "L66 derived-key-zero: key 0 either resolves to an actor or is not refused AS the " +
+                                 "no-identity case (got: " + (probe[2] as string ?? "<no reason>") + "). 0 is 'no " +
+                                 "shared identity' and the refusal has to say so, or a peer is told its map is " +
+                                 "missing when the truth is that the sender could not name the actor at all";
                 var build = ModMethod(keyer, "BuildBattleKeys");
                 var built = keyer.GetProperty("Built", AllMembers);
                 if (build == null || built == null)
@@ -6908,6 +6914,410 @@ namespace RailCheck
                 yield return "L66 state-leaks-between-battles: the tactical teardown does not reset the damage " +
                              "family — the next battle would inherit this one's seq cursor and either refuse every " +
                              "record as stale or report a gap that is not there";
+        }
+
+        /// <summary>L67 — AN ACTOR'S LIFE IS THE HOST'S (tactical arc A4). Four arms, one per way a battle can
+        /// quietly become two different battles once actors start appearing and disappearing:
+        ///   (a) EVERY ACTOR THE WIRE CAN NAME HAS A PEER-AGREED KEY, mid-battle spawns included. The two
+        ///       schemes (battle-start ordinal, host-assigned mint) share one counter and must not collide,
+        ///       adoption must not move that counter, an adopted key must resolve BEFORE this peer's own map
+        ///       is built, and the build must not re-key what was adopted.
+        ///   (b) HIDDEN, NEVER DESTROYED. Evacuation is an ordinary rider so every peer runs the game's own
+        ///       hide — and the arc is asserted to contain NO destroy of any kind, which is the v1 regression
+        ///       stated as a mechanical fact rather than a promise.
+        ///   (c) SPAWN AND DEATH ARE REPLICATED, THEIR RNG IS HOST-ONLY. The deploy roll is gated, the
+        ///       enter-play seam has both halves and honours the "a postfix runs even when the prefix skipped"
+        ///       rule, the client rebuilds through the GAME'S spawner, and a death is FORCED rather than
+        ///       merely complained about — which is exactly what A3b left vacuous.
+        ///   (d) THE CORPSE'S CONTENTS ARE THE HOST'S ROLL. The manifest arbiter is pure and is executed here,
+        ///       subsequence rule included, and the gate consults it BEFORE deciding anybody may draw.</summary>
+        private static IEnumerable<string> ActorLifecycleLaw(Assembly game)
+        {
+            var sync = typeof(Multiplayer.Tactical.TacticalDamageSync);
+            var mod = sync.Assembly;
+            var life = mod.GetType("Multiplayer.Tactical.TacticalActorLifecycle");
+            var loot = mod.GetType("Multiplayer.Tactical.LootMirror");
+            var spawnScope = mod.GetType("Multiplayer.Tactical.SpawnApplyScope");
+            var keyer = mod.GetType("Multiplayer.Tactical.TacticalActorKey");
+            if (life == null || loot == null || spawnScope == null || keyer == null)
+            {
+                yield return "L67 seams-missing: TacticalActorLifecycle / LootMirror / SpawnApplyScope / " +
+                             "TacticalActorKey no longer exist, so NOTHING about the actor-lifecycle arc was checked";
+                yield break;
+            }
+
+            // ─── (a) MID-BATTLE IDENTITY ───
+            var assign = ModMethod(keyer, "AssignHostKey");
+            var adopt = ModMethod(keyer, "Adopt");
+            var of = ModMethod(keyer, "Of");
+            var resolve = ModMethod(keyer, "Resolve");
+            var resetKeys = ModMethod(keyer, "Reset");
+            if (assign == null || adopt == null || of == null || resolve == null || resetKeys == null)
+                yield return "L67 key-mint-gone: TacticalActorKey.AssignHostKey / Adopt no longer exist — a " +
+                             "mid-battle spawn then has no identity at all and every command or result naming it " +
+                             "is refused, which is precisely the hole A3b left open";
+            else
+            {
+                Func<object> newActor = () => System.Runtime.Serialization.FormatterServices
+                    .GetUninitializedObject(typeof(PhoenixPoint.Tactical.Entities.TacticalActorBase));
+                resetKeys.Invoke(null, null);
+                if ((int)assign.Invoke(null, new object[] { null }) != 0)
+                    yield return "L67 key-mint-invents: AssignHostKey names a NULL actor";
+                var a1 = newActor();
+                var a2 = newActor();
+                int k1 = (int)assign.Invoke(null, new[] { a1 });
+                int k2 = (int)assign.Invoke(null, new[] { a2 });
+                if (k1 == 0 || k2 == 0)
+                    yield return "L67 key-mint-empty: AssignHostKey hands a mid-battle spawn key 0 — the one value " +
+                                 "that means 'no shared identity', so the spawn is unnameable the moment it exists";
+                if (k1 == k2)
+                    yield return "L67 key-mint-collides: two mid-battle spawns were assigned the SAME key (" + k1 +
+                                 ") — every hit on one lands on the other on every other screen";
+                if (k1 >= 0 || k2 >= 0)
+                    yield return "L67 key-mint-positive: a minted key (" + k1 + "/" + k2 + ") is not negative, so it " +
+                                 "can collide with a real GeoTacUnitId (the geoscape mints those from a positive " +
+                                 "counter) and a spawned alien would answer to a soldier's id";
+                if ((int)assign.Invoke(null, new[] { a1 }) != k1)
+                    yield return "L67 key-mint-not-idempotent: AssignHostKey minted a SECOND key for the same actor, " +
+                                 "so the key shipped with its spawn is not the key its damage is addressed by";
+                if ((int)of.Invoke(null, new[] { a1 }) != k1)
+                    yield return "L67 key-mint-unreadable: TacticalActorKey.Of does not report the minted key, so the " +
+                                 "capture seams address a spawned actor as key 0";
+                var probe = new object[] { null, k1, null };
+                if (!ReferenceEquals(resolve.Invoke(null, probe), a1))
+                    yield return "L67 key-mint-unresolvable: a minted key does not resolve back to its actor (reason: " +
+                                 (probe[2] as string ?? "<none>") + ")";
+
+                // Adoption: verbatim, and it must NOT move the counter — a spawn record can legitimately land
+                // before this peer reaches its own first turn edge, and a counter that moved for it would shift
+                // every battle-start ordinal this peer is about to mint.
+                resetKeys.Invoke(null, null);
+                var adopted = newActor();
+                adopt.Invoke(null, new[] { adopted, (object)(-7) });
+                if ((int)of.Invoke(null, new[] { adopted }) != -7)
+                    yield return "L67 key-adopt-loses-it: an adopted host key does not come back out — the peers " +
+                                 "agree on the wire and disagree in memory";
+                probe = new object[] { null, -7, null };
+                if (!ReferenceEquals(resolve.Invoke(null, probe), adopted))
+                    yield return "L67 key-adopt-unresolvable-before-build: an adopted key is refused while this peer's " +
+                                 "battle key map is still unbuilt (reason: " + (probe[2] as string ?? "<none>") +
+                                 "). A spawn record legitimately arrives before this peer's first turn edge, so the " +
+                                 "adopted map must be consulted BEFORE the built flag is";
+                var afterAdopt = newActor();
+                if ((int)assign.Invoke(null, new[] { afterAdopt }) != -1)
+                    yield return "L67 key-adopt-moves-the-counter: adopting the host's key consumed local ordinals " +
+                                 "(the next mint was " + (int)assign.Invoke(null, new[] { newActor() }) + ", not -1). " +
+                                 "The battle-start build mints -1..-N over a board both peers share, so shifting the " +
+                                 "counter for a GIVEN key makes this peer's ordinals name different actors";
+                // Observed through Of, NOT through Resolve: Resolve refuses key 0 in its own first branch and
+                // answers a POSITIVE key out of the live map, so an arm phrased against it would pass with the
+                // guard deleted — it would be measuring Resolve's early-outs, not Adopt. Of is where a
+                // wrongly-registered key actually becomes visible.
+                var notAdopted = newActor();
+                adopt.Invoke(null, new[] { notAdopted, (object)5 });
+                if ((int)of.Invoke(null, new[] { notAdopted }) != 0)
+                    yield return "L67 key-adopt-non-negative: Adopt registered a NON-NEGATIVE key. Positive ids " +
+                                 "belong to the geoscape's own GeoTacUnitId counter and 0 means 'no shared " +
+                                 "identity' — registering either one hands an actor a key the wire cannot mean";
+                resetKeys.Invoke(null, null);
+
+                var build = ModMethod(keyer, "BuildBattleKeys");
+                if (!Reaches(build, "Dictionary`2", "ContainsKey"))
+                    yield return "L67 key-build-rekeys-adopted: BuildBattleKeys does not skip actors that already " +
+                                 "carry an adopted host key. The host built its map BEFORE those actors existed, so " +
+                                 "including them here shifts every ordinal after them and points this peer's alien " +
+                                 "keys at different monsters";
+            }
+
+            // ─── (b) HIDDEN, NEVER DESTROYED ───
+            var isRider = ModMethod(typeof(Multiplayer.Tactical.TacticalCommandSync), "IsRider");
+            if (isRider == null)
+                yield return "L67 evac-rider-gone: TacticalCommandSync.IsRider no longer exists";
+            else
+                foreach (var t in new[]
+                {
+                    typeof(PhoenixPoint.Tactical.Entities.Abilities.ExitMissionAbility),
+                    typeof(PhoenixPoint.Tactical.Entities.Abilities.EvacuateMountedActorsAbility),
+                })
+                {
+                    var inst = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(t);
+                    if (!(bool)isRider.Invoke(null, new[] { inst }))
+                        yield return "L67 evac-not-a-rider: " + t.Name + " is not a declared rider, so an evacuation " +
+                                     "reaches no other peer — the soldier boards the aircraft on one screen and " +
+                                     "stands in the exit zone on every other";
+                }
+            // The native hide is what riding the ORDER buys; if the game stopped doing it, relaying the order
+            // relays nothing and this arc would be hiding nobody while believing it did.
+            var hide = HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Tactical.Entities.Abilities.ExitMissionAbility),
+                                                     "HideActorInExitZone");
+            var hideSeq = hide == null ? new List<MethodBase>() : CalleeSequence(hide);
+            if (hide == null || !hideSeq.Any(c => c.Name == "ApplyStatus") ||
+                !hideSeq.Any(c => c.Name == "UnapplyAllStatusesFiltered") ||
+                !hideSeq.Any(c => c.Name == "ApplyMountedStatus"))
+                yield return "L67 evac-hide-premise-stale: ExitMissionAbility.HideActorInExitZone no longer applies " +
+                             "the evacuated status, strips the others and mounts the actor on the exit zone. That " +
+                             "native hide IS what relaying the order buys; without it the arc relays an order that " +
+                             "hides nobody";
+            // THE v1 REGRESSION, as a mechanical fact: nothing in this arc destroys an actor. v1 destroyed
+            // evacuated soldiers (d41b8f8) and got an empty BattleSummary, per-frame NREs in
+            // UIStateCharacterSelected, a wedged view and a dead evac button on the second client.
+            foreach (var t in mod.GetTypes().Where(t => t.Namespace == "Multiplayer.Tactical")
+                                            .OrderBy(t => t.Name, StringComparer.Ordinal))
+                foreach (var m in t.GetMethods(AllMembers).Cast<MethodBase>().Concat(t.GetConstructors(AllMembers)))
+                    foreach (var c in CalleeSequence(m))
+                        if (c.Name == "DestroyActor" || ((c.Name == "Destroy" || c.Name == "DestroyImmediate") &&
+                                                         c.DeclaringType == typeof(UnityEngine.Object)))
+                        {
+                            yield return "L67 lifecycle-destroys: " + t.Name + "." + m.Name + " calls " +
+                                         (c.DeclaringType?.Name ?? "?") + "." + c.Name + ". An actor this repo " +
+                                         "removes from play is HIDDEN, never destroyed — the game's only destroy is " +
+                                         "its own DieAbility.PostProcessDeath, reached natively on each peer, and " +
+                                         "v1 shipped exactly this call for evacuation and got an empty battle " +
+                                         "summary with a wedged view";
+                            goto destroyReported;
+                        }
+            destroyReported:
+            var evacGuard = mod.GetType("Multiplayer.Tactical.EvacuateZoneGuard");
+            var evacTargets = ModMethod(evacGuard, "TargetMethods") is MethodInfo etm
+                ? (etm.Invoke(null, null) as System.Collections.IEnumerable) : null;
+            var evacNames = new List<string>();
+            if (evacTargets != null) foreach (MethodBase m in evacTargets) evacNames.Add(m.DeclaringType.Name + "." + m.Name);
+            foreach (var want in new[] { "ExitMissionAbility.HideActorInExitZone", "EvacuateMountedActorsAbility.HideInExitZone" })
+                if (!evacNames.Contains(want))
+                    yield return "L67 evac-guard-unbound: the evacuation crash guard does not cover " + want +
+                                 " (it has: " + (evacNames.Count == 0 ? "<nothing>" : string.Join(", ", evacNames.ToArray())) +
+                                 "). Both dereference the exit zone UNGUARDED after the actor has already been " +
+                                 "stripped of every status, so a mirrored order whose zone this peer cannot find " +
+                                 "leaves a half-hidden soldier and an NRE per frame";
+            var evacPrefix = ModMethod(evacGuard, "Prefix");
+            if (evacPrefix == null)
+                yield return "L67 evac-guard-inert: EvacuateZoneGuard has no Prefix";
+            else
+            {
+                var ability = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(
+                    typeof(PhoenixPoint.Tactical.Entities.Abilities.ExitMissionAbility));
+                bool refused = false;
+                Exception threw = null;
+                try { refused = !(bool)evacPrefix.Invoke(null, new object[] { ability, null }); }
+                catch (Exception ex) { threw = ex.InnerException ?? ex; }
+                if (threw != null)
+                    yield return "L67 evac-guard-throws: the guard itself threw on a null exit zone (" +
+                                 threw.GetType().Name + ") — it would crash where it is meant to refuse";
+                else if (!refused)
+                    yield return "L67 evac-guard-open: a null exit zone is not refused, so vanilla's unguarded " +
+                                 "dereference runs and the actor is left marked evacuated, stripped of every status, " +
+                                 "and never mounted";
+            }
+
+            // ─── (c) SPAWN AND DEATH ───
+            var deploy = HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Tactical.Levels.Missions.TacParticipantSpawn), "DeployForTurn", new[] { typeof(int) });
+            var onNewTurn = HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Tactical.Levels.Missions.TacMission), "OnNewTurn");
+            if (deploy == null || !CalleeSequence(deploy).Any(c => c.Name == "GenerateNextActorToDeploy"))
+                yield return "L67 spawn-premise-stale: TacParticipantSpawn.DeployForTurn no longer generates the " +
+                             "wave, so the client deploy gate guards nothing";
+            if (onNewTurn == null || !CalleeSequence(onNewTurn).Any(c => c.Name == "DeployForTurn"))
+                yield return "L67 spawn-premise-stale: TacMission.OnNewTurn no longer reaches DeployForTurn — " +
+                             "reinforcements stopped riding the turn edge every peer runs, and the gate is on the " +
+                             "wrong funnel";
+            var deployGate = mod.GetType("Multiplayer.Tactical.ClientDeployGate");
+            var deployAttr = deployGate?.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                                       .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (deployAttr?.declaringType != typeof(PhoenixPoint.Tactical.Levels.Missions.TacParticipantSpawn) || deployAttr.methodName != "DeployForTurn" ||
+                ModMethod(deployGate, "Prefix") == null)
+                yield return "L67 spawn-roll-open: the client deploy gate no longer prefixes " +
+                             "TacParticipantSpawn.DeployForTurn — a client then rolls its OWN wave off " +
+                             "SharedData.Random against enemy positions the peers legitimately disagree about " +
+                             "(aliens only move on the host), and charges DeploymentPointsUsed for it";
+            var enterSeam = mod.GetType("Multiplayer.Tactical.ActorEnterPlaySeam");
+            var enterAttr = enterSeam?.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                                     .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (enterAttr?.declaringType != typeof(Base.Entities.ActorComponent) || enterAttr.methodName != "DoEnterPlay")
+                yield return "L67 spawn-seam-mistargeted: the lifecycle seam no longer patches " +
+                             "ActorComponent.DoEnterPlay (target=" + (enterAttr?.declaringType?.Name ?? "<none>") + "." +
+                             (enterAttr?.methodName ?? "<none>") + "). There is no single spawn SITE — deploy zones, " +
+                             "resurrect, spawn abilities and effects, child-actor statuses and TFTV all call the " +
+                             "generic ActorSpawner — but there is exactly ONE enter-play edge";
+            if (ModMethod(enterSeam, "Prefix") == null || ModMethod(enterSeam, "Postfix") == null)
+                yield return "L67 spawn-seam-half: the lifecycle seam is missing its Prefix (the client gate) or its " +
+                             "Postfix (the host capture) — one without the other is either a client rolling its own " +
+                             "monsters or a host spawning silently";
+            var entering = ModMethod(life, "OnActorEnteringPlay");
+            var entered = ModMethod(life, "OnActorEnteredPlay");
+            if (!Reaches(entering, "SpawnApplyScope", "get_Active"))
+                yield return "L67 spawn-gate-eats-the-mirror: the enter-play gate does not consult SpawnApplyScope, " +
+                             "so it blocks the host's OWN spawn record from being replayed and no reinforcement ever " +
+                             "appears on a client at all";
+            if (!Reaches(entering, "TacticalActorKey", "get_Built"))
+                yield return "L67 spawn-gate-eats-the-battle: the enter-play gate does not consult " +
+                             "TacticalActorKey.Built, so it also fires during level load — when every actor comes " +
+                             "from the shared entry save (TacticalLevelController:638 enters them all) — and a client " +
+                             "would start the battle with an empty map";
+            if (!Reaches(entered, "ActorComponent", "get_InPlay"))
+                yield return "L67 spawn-capture-ships-a-ghost: the host capture does not check that the actor really " +
+                             "entered play. Harmony runs a postfix even when a prefix SKIPPED the original, so a " +
+                             "contained spawn would still be minted a key and broadcast";
+            if (!Reaches(entered, "TacticalActorKey", "AssignHostKey"))
+                yield return "L67 spawn-unkeyed: the host capture does not mint a key, so the spawn ships with no " +
+                             "identity and every hit on the new actor is refused on arrival";
+            var applySpawn = ModMethod(life, "ApplySpawn");
+            if (!Reaches(applySpawn, "TacticalDeployZone", "SpawnActor"))
+                yield return "L67 spawn-hand-rolled: the client does not rebuild the actor through the game's own " +
+                             "TacticalDeployZone.SpawnActor — a second way to create an actor is a second, divergent " +
+                             "set of instance data, faction stamping and enter-play work";
+            if (!Reaches(applySpawn, "TacticalActorKey", "Adopt"))
+                yield return "L67 spawn-key-dropped: the client rebuilds the host's actor and never adopts its key, " +
+                             "so the two peers hold the same monster under different names";
+            if (!Reaches(applySpawn, "SpawnApplyScope", "Enter") || !Reaches(applySpawn, "SyncApplyScope", "Enter"))
+                yield return "L67 spawn-unscoped: the spawn applier runs outside SpawnApplyScope (its own gate then " +
+                             "blocks it) or outside SyncApplyScope (law 8 — the enter-play work echoes back as intents)";
+            var spawnActive = spawnScope.GetProperty("Active", AllMembers);
+            var spawnEnter = ModMethod(spawnScope, "Enter");
+            if (spawnActive == null || spawnEnter == null)
+                yield return "L67 spawn-scope-gone: SpawnApplyScope.Active / Enter no longer exist";
+            else
+            {
+                if ((bool)spawnActive.GetValue(null, null))
+                    yield return "L67 spawn-scope-leaked: SpawnApplyScope is active before this law even started";
+                using (var s = (IDisposable)spawnEnter.Invoke(null, null))
+                    if (!(bool)spawnActive.GetValue(null, null))
+                        yield return "L67 spawn-scope-inert: SpawnApplyScope.Enter does not make the scope active, so " +
+                                     "the client's own gate blocks every host spawn it is meant to let through";
+                if ((bool)spawnActive.GetValue(null, null))
+                    yield return "L67 spawn-scope-sticks: SpawnApplyScope stays active after its scope is disposed — " +
+                                 "every later client-local spawn is then waved through as if the host had sent it";
+                using (Multiplayer.Network.Sync.SyncApplyScope.Enter())
+                    if ((bool)spawnActive.GetValue(null, null))
+                        yield return "L67 spawn-scope-conflated: SpawnApplyScope reads as active inside a plain " +
+                                     "SyncApplyScope, so any geoscape delta apply would wave a client-local tactical " +
+                                     "spawn through";
+            }
+            var deathSeam = mod.GetType("Multiplayer.Tactical.ActorDeathSeam");
+            var deathTarget = ModMethod(deathSeam, "TargetMethod") is MethodInfo dtm ? dtm.Invoke(null, null) as MethodBase : null;
+            if (deathTarget == null || deathTarget.Name != "Die" ||
+                deathTarget.DeclaringType != typeof(PhoenixPoint.Tactical.Entities.TacticalActorBase))
+                yield return "L67 death-seam-unbound: ActorDeathSeam.TargetMethod does not resolve to " +
+                             "TacticalActorBase.Die (got " + (deathTarget == null ? "null" :
+                             deathTarget.DeclaringType?.Name + "." + deathTarget.Name) + ") — AccessTools does no " +
+                             "widening, so a near-miss binds nothing and no death ever reaches the wire";
+            if (ModMethod(deathSeam, "Prefix") == null)
+                yield return "L67 death-capture-too-late: the death capture is not a Prefix. It must run BEFORE the " +
+                             "base body activates the die ability, because that is the only moment the corpse " +
+                             "manifest can still be pre-rolled in time to ride out with the killing hit";
+            var healthChange = HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Tactical.Entities.TacticalActorBase), "OnHealthChange");
+            if (healthChange == null || !CalleeSequence(healthChange).Any(c => c.Name == "Die"))
+                yield return "L67 death-trigger-stale: TacticalActorBase.OnHealthChange no longer calls Die when " +
+                             "health crosses zero. That stat event IS how a mirror kills — setting health to zero " +
+                             "would then leave a walking corpse and the forced death would silently do nothing";
+            var force = ModMethod(life, "ForceDeath");
+            if (!Reaches(force, "BaseStat", "Set"))
+                yield return "L67 death-hand-rolled: ForceDeath does not go through the health stat — any other way " +
+                             "to kill skips the game's own corpse, drop, unmount, statistics and objective work";
+            // THE ARM A3b LEFT VACUOUS: it detected the dead/alive split and only LOGGED it. Both readers must
+            // now repair it, and naming ForceDeath is what makes deleting the repair turn this red.
+            if (!Reaches(ModMethod(sync, "ApplyDamage"), "TacticalActorLifecycle", "ForceDeath"))
+                yield return "L67 death-unforced: the resolved-damage applier reports a host-dead/here-alive split " +
+                             "without repairing it — that is A3b's known hole, and a log line is not replication";
+            if (!Reaches(ModMethod(sync, "ApplyResnap"), "TacticalActorLifecycle", "ForceDeath"))
+                yield return "L67 death-unforced-on-recovery: the resnapshot applier does not act on the host's dead " +
+                             "flag, so the ONE recovery path this surface has cannot repair a lost death";
+            if (!Reaches(ModMethod(life, "OnHostDeath"), "LootMirror", "HostPreRoll"))
+                yield return "L67 death-manifest-unrolled: the host death capture does not pre-roll the corpse, so " +
+                             "there is nothing for the killing hit to carry";
+            var engineTick = typeof(Multiplayer.Network.Sync.SyncEngine).GetMethod("Tick", AllMembers);
+            if (engineTick == null || !CalleeSequence(engineTick).Any(c => c.Name == "HostTick" && c.DeclaringType == life))
+                yield return "L67 death-undriven: SyncEngine.Tick does not call TacticalActorLifecycle.HostTick, so a " +
+                             "death no damage record carried — a status kill, a scripted one, a mod's — is pre-rolled " +
+                             "and never shipped";
+
+            // ─── (d) THE CORPSE'S CONTENTS ───
+            var declare = ModMethod(loot, "Declare");
+            var tryDeclared = ModMethod(loot, "TryDeclared");
+            var resetLoot = ModMethod(loot, "Reset");
+            if (declare == null || tryDeclared == null || resetLoot == null)
+                yield return "L67 loot-manifest-gone: LootMirror.Declare / TryDeclared / Reset no longer exist";
+            else
+            {
+                Func<string, bool, KeyValuePair<string, bool>> e = (g, d) => new KeyValuePair<string, bool>(g, d);
+                resetLoot.Invoke(null, null);
+                var probe = new object[] { -5, "A", false };
+                if ((bool)tryDeclared.Invoke(null, probe))
+                    yield return "L67 loot-manifest-invents: TryDeclared answers for a corpse nobody declared, so a " +
+                                 "peer would destroy an item the host kept";
+                declare.Invoke(null, new object[] { -5, new List<KeyValuePair<string, bool>> { e("A", true), e("B", false) } });
+                probe = new object[] { -5, "A", false };
+                if (!(bool)tryDeclared.Invoke(null, probe) || !(bool)probe[2])
+                    yield return "L67 loot-manifest-loses-it: a DECLARED destroy does not come back out, so this peer's " +
+                                 "corpse keeps an item the host destroyed";
+                probe = new object[] { -5, "B", false };
+                if (!(bool)tryDeclared.Invoke(null, probe) || (bool)probe[2])
+                    yield return "L67 loot-manifest-misreads: the second manifest entry did not come back as declared";
+                probe = new object[] { -5, "A", false };
+                if ((bool)tryDeclared.Invoke(null, probe))
+                    yield return "L67 loot-manifest-sticks: the manifest is not consumed, so the NEXT corpse inherits " +
+                                 "this one's answers";
+                // THE SUBSEQUENCE RULE: DropItems asks about a SUBSET of the pre-rolled list (body parts are
+                // skipped in the mount branch), so an answer must be found by scanning FORWARD, not by position.
+                declare.Invoke(null, new object[] { -6, new List<KeyValuePair<string, bool>> { e("SKIP", false), e("WANT", true) } });
+                probe = new object[] { -6, "WANT", false };
+                if (!(bool)tryDeclared.Invoke(null, probe) || !(bool)probe[2])
+                    yield return "L67 loot-manifest-positional: an answer the mirror skips past cannot be found again — " +
+                                 "DieAbility.DropItems asks about a SUBSET of the droppable list, so the manifest has " +
+                                 "to be scanned forward or every corpse after the first skipped body part is wrong";
+                declare.Invoke(null, new object[] { -8, new List<KeyValuePair<string, bool>> { e("A", true) } });
+                probe = new object[] { -8, "NOPE", false };
+                if ((bool)tryDeclared.Invoke(null, probe) || (bool)probe[2])
+                    yield return "L67 loot-manifest-guesses: an item the manifest does not name is answered anyway — " +
+                                 "the fallback must be a LOUD keep, never a borrowed answer from another item";
+                resetLoot.Invoke(null, null);
+            }
+            var lootPrefix = ModMethod(mod.GetType("Multiplayer.Tactical.LootRollHostOnly"), "Prefix");
+            var lootSeq = lootPrefix == null ? new List<MethodBase>() : CalleeSequence(lootPrefix);
+            int iConsume = IndexOfCall(lootSeq, "TryConsume", "LootMirror");
+            int iHost = IndexOfCall(lootSeq, "get_IsHost");
+            if (iConsume < 0 || iHost < 0 || iConsume > iHost)
+                yield return "L67 loot-gate-rolls-first: the loot gate does not consult the manifest BEFORE deciding " +
+                             "who may draw (consume@" + iConsume + ", host@" + iHost + "). The host's own pre-roll is " +
+                             "served from that same memo, so asking later means the host draws TWICE per item and " +
+                             "ships a number it did not apply";
+            if (!Reaches(ModMethod(sync, "ApplyDamage"), "LootMirror", "Declare"))
+                yield return "L67 loot-declared-nowhere: the resolved-damage applier never declares the corpse " +
+                             "manifest, so the mirror's own death asks and gets nothing";
+            var applyDamageSeq = CalleeSequence(ModMethod(sync, "ApplyDamage"));
+            int iLoot = IndexOfCall(applyDamageSeq, "Declare", "LootMirror");
+            int iApply = IndexOfCall(applyDamageSeq, "ApplyDamage", "IDamageReceiver");
+            if (iLoot < 0 || iApply < 0 || iLoot > iApply)
+                yield return "L67 loot-declared-too-late: the manifest is declared AFTER the hit is applied " +
+                             "(declare@" + iLoot + ", apply@" + iApply + "). That hit is what starts the death, and " +
+                             "DieAbility.DropItems asks its questions inside the same synchronous chain — a " +
+                             "declaration afterwards changes nothing at all";
+
+            // ─── ONE STREAM, NO NEW SURFACE ───
+            var opFields = new Dictionary<string, byte>(StringComparer.Ordinal);
+            foreach (var n in new[] { "OpDamage", "OpResnap", "OpSpawn", "OpDeath" })
+            {
+                var f = sync.GetField(n, AllMembers);
+                if (f == null || !f.IsLiteral) { yield return "L67 op-gone: TacticalDamageSync." + n + " is not a constant"; continue; }
+                opFields[n] = (byte)f.GetRawConstantValue();
+            }
+            foreach (var pair in opFields.Where(a => opFields.Any(b => b.Key != a.Key && b.Value == a.Value))
+                                         .Select(a => a.Key).OrderBy(k => k, StringComparer.Ordinal))
+                yield return "L67 op-collides: TacticalDamageSync." + pair + " shares its op byte with another op on " +
+                             "the SAME surface — one of the two families is silently interpreted as the other, and " +
+                             "an op byte, like a surface id, is never reused";
+            foreach (var m in life.GetMethods(AllMembers).Cast<MethodBase>()
+                                  .Concat(loot.GetMethods(AllMembers).Cast<MethodBase>()))
+                if (CalleeSequence(m).Any(c => c.Name == "EncodeEnvelope"))
+                {
+                    yield return "L67 surface-forked: " + m.DeclaringType.Name + "." + m.Name + " builds its own " +
+                                 "envelope instead of going through TacticalDamageSync.Send. A4 takes NO new surface " +
+                                 "on purpose: spawn, death and damage share one seq stream because that is the only " +
+                                 "thing that stops a hit from overtaking the spawn of the actor it names";
+                    break;
+                }
+            if (!Reaches(ModMethod(sync, "Reset"), "TacticalActorLifecycle", "Reset"))
+                yield return "L67 state-leaks-between-battles: the damage family's reset does not drop the lifecycle " +
+                             "state, so the next battle starts holding the previous one's pending deaths, corpse " +
+                             "manifests and spawn-apply depth";
         }
 
         /// <summary>True when a method's IL READS any static field. The purity arm of L65 needs "no static
