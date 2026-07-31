@@ -1185,4 +1185,43 @@ namespace Multiplayer.Network.Sync
             return null;
         }
     }
+
+    /// <summary>
+    /// DIAGNOSTIC ONLY — no fix, by design. The 2026-07-31 live run produced "an empty modal with an OK
+    /// button and no text" on a peer, and the RCA could not name the window because ZERO <c>[MP][modals]</c>
+    /// lines exist for it. <c>UIModuleSiteEncounters.SetClosingEncounter</c> (:324-356) is the outcome page
+    /// and is the prime suspect BY SHAPE: it composes exactly one choice whose text falls back to
+    /// <c>OKTextKey</c> (:345-354) over a body that is <c>closingChoice.Outcome.OutcomeText</c> and, when
+    /// that resolves empty and <c>useEventTexts</c> is false, is NEVER refilled (:332-337) — an OK button
+    /// over nothing. This prefix records the lengths on EVERY peer so the next run identifies it instead of
+    /// guessing. It is a PREFIX (the inputs are what decide the page) and it changes nothing.
+    /// </summary>
+    [HarmonyPatch(typeof(UIModuleSiteEncounters), "SetClosingEncounter")]
+    internal static class ClosingEncounterProbe
+    {
+        private static void Prefix(GeoscapeEvent geoEvent, GeoEventChoice closingChoice, bool useEventTexts)
+        {
+            try
+            {
+                // Exactly the two strings the native body composes the page from (:332 and the :335
+                // fallback), resolved through the game's own EventTextVariation.GetText.
+                var outcomeText = closingChoice?.Outcome?.OutcomeText;
+                string body = null, fallback = null;
+                try { body = outcomeText?.GetText(geoEvent?.Context); } catch { /* length is the datum */ }
+                var descr = geoEvent?.EventData?.Description;
+                try { if (descr != null && descr.Count > 0) fallback = descr[descr.Count - 1]?.GetText(geoEvent.Context); } catch { }
+                Debug.Log("[MP][modals] SetClosingEncounter host=" + (NetworkEngine.Instance?.IsHost.ToString() ?? "solo") +
+                          " event='" + (geoEvent?.EventID ?? "<null>") + "'" +
+                          " useEventTexts=" + useEventTexts +
+                          " hasChoice=" + (closingChoice != null) +
+                          " hasOutcome=" + (closingChoice?.Outcome != null) +
+                          " outcomeLen=" + (body?.Length ?? -1) +
+                          " descrFallbackLen=" + (fallback?.Length ?? -1) +
+                          " choiceTextKey='" + (closingChoice?.Text?.LocalizationKey ?? "<none>") + "'" +
+                          " — outcomeLen 0/-1 with useEventTexts=False IS the empty modal with an OK button " +
+                          "(the :335 fallback only runs when useEventTexts is True).");
+            }
+            catch (Exception e) { Debug.LogWarning("[MP][modals] SetClosingEncounter probe failed: " + e.Message); }
+        }
+    }
 }

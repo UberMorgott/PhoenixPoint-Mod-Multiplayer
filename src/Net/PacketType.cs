@@ -62,6 +62,12 @@ namespace Multiplayer.Network.MessageLayer
                                    // transfer never started) — clients drop the stashed deploy + stall watchdog and
                                    // lift their curtain back to the live geoscape mirror; the host self-reveals.
                                    // Payload: [reason:str] (diagnostics only — the abort action is unconditional).
+        EntryTransferBegin = 0x48, // host->all: a tactical entry has BEGUN (host reached LaunchTacticalGame) — every
+                                   // peer drops the native curtain NOW instead of staying fully interactive until its
+                                   // own first save chunk arrives (13.0 s later in the 2026-07-31 live run: host
+                                   // 00:24:06.037 vs both clients 00:24:19.04). No payload — the signal IS the event,
+                                   // and the curtain drop is unconditional + idempotent with the first-chunk drop.
+                                   // Pairs with 0x47: that one takes the same curtain back down. Law L71.
 
         // ActionSync 0x60-0x6F
         // 0x60 (ActionRequest) + 0x61 (ActionApply) + 0x62 (ActionReject) RETIRED at the envelope cutover — the

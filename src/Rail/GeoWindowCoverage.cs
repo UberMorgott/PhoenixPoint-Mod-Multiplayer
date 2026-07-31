@@ -86,9 +86,19 @@ namespace Multiplayer.Network.Sync
             [typeof(UIStateRosterDeployment)] = new WindowRule
             {
                 Sync = WindowSync.LocalOnly,
-                Why = "tactical deployment is law 5 quarantine — the mission reaches the other peer through the " +
-                      "tactical deploy channel, not as a geoscape window, and the roster picked here is the " +
-                      "deploying peer's own",
+                // REASON REPLACED 2026-08-01: the old one cited "law 5 quarantine", and law 5 RETIRED the
+                // quarantine on 2026-07-31 (MANDATE-v2 §9, commit f3b01c2). The VERDICT survives the
+                // retirement — but on an entry-mechanism fact, not on a quarantine that no longer exists,
+                // and a stale citation is how nobody noticed. Law L72 now fails the build for one.
+                Why = "deployment is HOST-ONLY because tactical ENTRY is (law 5, entry clause): the battle is " +
+                      "built once on the host and shipped to every peer as a mid-tactical save " +
+                      "(TacticalEntry.TacLaunchGate + SaveTransferCoordinator), so the host is the only peer " +
+                      "whose squad pick can ever be committed — GeoscapeView.LaunchMission:1043-1050 opens " +
+                      "this screen and the Deploy button ends in GeoLevelController.LaunchTacticalGame, which " +
+                      "TacLaunchGate BLOCKS on a client by construction. Mirroring the screen without a squad " +
+                      "intent would hand a client a live Deploy button that silently does nothing — the exact " +
+                      "hazard the mission-BRIEF gap below refuses to ship. Shared deployment (all peers pick " +
+                      "from one roster, host commits) is a real arc and is NOT this declaration's to assume",
             },
             [typeof(UIStateGeoscapeTutorial)] = new WindowRule
             {
@@ -202,11 +212,17 @@ namespace Multiplayer.Network.Sync
                 "already there: the mission is site.ActiveMission and the rail structurally creates it on the " +
                 "client (docs/rail-baseline.txt, GeoSite twin table `Descend ActiveMission`). The BUTTONS are what " +
                 "is missing — ModalResultCallback:798 maps Confirm to LaunchMission and Cancel to mission.Cancel(), " +
-                "both host-authoritative — and behind them a decision this rail has NOT made: LaunchMission walks " +
-                "into deployment, and UIStateRosterDeployment is LocalOnly under law 5 quarantine, so \"the client " +
-                "clicked Launch\" has no defined meaning yet. Shipping it read-only would put a live LAUNCH MISSION " +
-                "button on the client that silently does nothing, which is worse than the gap. Needs the intent " +
-                "op + a host→all hide keyed on GeoscapeView.ModalClosed:793 — the next window work",
+                "both host-authoritative — and behind them a decision this rail has NOT made. REASON RESTATED " +
+                "2026-08-01 (the previous wording rested on the tactical containment law 5 RETIRED on " +
+                "2026-07-31, MANDATE-v2 §9 — see git blame; law L72 now fails the build for a reason that " +
+                "cites a retired law). The blocker was never that law and survives its retirement intact: " +
+                "Confirm → LaunchMission:1043-1050 walks straight into the DEPLOYMENT screen, and " +
+                "deployment is host-only for an entry-mechanism reason law 5's rewrite did not touch: the host " +
+                "builds the battle and ships it as a save, so a client's squad pick has nowhere to be committed. " +
+                "So \"the client clicked Launch\" still has no defined meaning, and shipping this read-only would " +
+                "put a live LAUNCH MISSION button on the client that silently does nothing, which is worse than " +
+                "the gap. Needs a squad INTENT (client picks → host commits) before the modal intent op + the " +
+                "host→all hide keyed on GeoscapeView.ModalClosed:793 are worth building",
                 ModalType.GeoHavenAttackBrief, ModalType.GeoAlienBaseBrief, ModalType.GeoScavengeBrief,
                 ModalType.GeoPhoenixBaseDefenseBrief, ModalType.GeoAmbushBrief,
                 ModalType.GeoPhoenixBaseInfestationBrief, ModalType.AncientSiteAttackBrief,

@@ -125,6 +125,9 @@ namespace RailCheck
             laws.AddRange(ActorLifecycleLaw(game));
             laws.AddRange(EnemyActionLaw(game));
             laws.AddRange(InventoryAndDestructionLaw(game));
+            laws.AddRange(LevelTeardownLaw());
+            laws.AddRange(EntryCurtainLaw());
+            laws.AddRange(RetiredReasonLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -8074,6 +8077,199 @@ namespace RailCheck
                 yield return "L69 state-leaks-between-battles: the damage family's reset does not drop this arc's " +
                              "state, so the next battle starts holding the previous one's destructible index (whose " +
                              "objects are all destroyed Unity references) and a stale observed AP charge";
+        }
+
+        /// <summary>L70 — A LEVEL TEARDOWN IS SAFE BEFORE IT STARTS AND LOUD IF IT FAILS ANYWAY.
+        /// The 2026-07-31 live blocker: a peer sat in <c>UIStateEditSoldier</c> while its level was torn
+        /// down, <c>StateStack.Clear</c> ran that screen's <c>ExitState</c> AFTER the current level had
+        /// already switched, <c>GeoCharacter.Faction</c> NRE'd on a null <c>GeoLevelController</c>, and —
+        /// because <c>StateStack.Clear</c> has no per-state try/catch — the throw escaped and killed the
+        /// level-switch coroutine. Tactical was never reached and NOTHING in the log named the screen.
+        /// Two arms, and the second exists precisely because the first can only fix the screens we know:
+        ///   (a) THE RESET HAPPENS BEFORE THE SWITCH, ON THE FUNNEL. The seam must be
+        ///       <c>PhoenixGame.FinishLevel</c> — the one method the host launch, the client entry, the F2
+        ///       reload and the quit all end in — and must be a PREFIX, because a postfix runs after the
+        ///       monitor pulse. It must reach <c>ToLoadingState</c> and must NOT reach
+        ///       <c>ResetViewState</c>: that one pushes <c>UIStateInitial</c>, which THROWS outright on a
+        ///       faction with no vehicle and no inspected site (UIStateInitial.cs:80-87), trading this
+        ///       teardown exception for another one at the same moment.
+        ///   (b) IF A STATE STILL THROWS, IT IS NAMED AND THE TEARDOWN CONTINUES. A FINALIZER on
+        ///       <c>GeoscapeViewState.Exit</c> — never a Prefix, which would SKIP every exit instead of
+        ///       protecting it — and it must log an ERROR: a finalizer that swallows quietly is the
+        ///       silent-swallow bug class wearing the fix's clothes.</summary>
+        private static IEnumerable<string> LevelTeardownLaw()
+        {
+            var mod = typeof(Multiplayer.Network.Sync.GeoWindowCoverage).Assembly;
+            var reset = mod.GetType("Multiplayer.Network.Sync.GeoTeardownResetGate");
+            var loud = mod.GetType("Multiplayer.Network.Sync.ViewStateExitLoudGate");
+            if (reset == null || loud == null)
+            {
+                yield return "L70 seams-missing: GeoTeardownResetGate / ViewStateExitLoudGate no longer exist, so " +
+                             "NOTHING about level teardown was checked — a peer may again tear its level down with a " +
+                             "sub-screen open and freeze the load forever";
+                yield break;
+            }
+
+            // ── (a) the pre-teardown reset ──
+            var resetAttr = reset.GetCustomAttributes(typeof(HarmonyPatch), inherit: false)
+                                 .Cast<HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (resetAttr == null || resetAttr.declaringType != typeof(PhoenixPoint.Common.Game.PhoenixGame) ||
+                resetAttr.methodName != "FinishLevel")
+                yield return "L70 reset-off-funnel: GeoTeardownResetGate does not patch PhoenixGame.FinishLevel " +
+                             "(declaringType=" + (resetAttr?.declaringType?.Name ?? "none") + ", method=" +
+                             (resetAttr?.methodName ?? "none") + ") — that method is the ONE convergence point of " +
+                             "the host launch, the client entry, the F2 reload and the quit; anywhere else and " +
+                             "three of those four paths tear down unguarded again";
+            var pre = reset.GetMethod("Prefix", AllMembers);
+            if (pre == null)
+                yield return "L70 reset-too-late: GeoTeardownResetGate has no Prefix. FinishLevel pulses the " +
+                             "level-switch monitor, so a Postfix parks the view state after the switch is already " +
+                             "in flight — which is the failure, not the fix";
+            else
+            {
+                if (!Reaches(pre, "GeoscapeView", "ToLoadingState"))
+                    yield return "L70 reset-inert: the FinishLevel prefix never reaches GeoscapeView.ToLoadingState, " +
+                                 "so the open sub-screen is still on the stack when CleanupView clears it and its " +
+                                 "ExitState runs against a level that has already changed";
+                if (Reaches(pre, "GeoscapeView", "ResetViewState"))
+                    yield return "L70 reset-can-throw: the FinishLevel prefix reaches GeoscapeView.ResetViewState, " +
+                                 "which pushes UIStateInitial — and UIStateInitial.EnterState THROWS on a faction " +
+                                 "with no vehicles and no inspected site (UIStateInitial.cs:80-87). That swaps one " +
+                                 "teardown exception for another at the same instant. ToLoadingState is the game's " +
+                                 "OWN call on this transition (LaunchTacticalGameCrt:1444) and cannot fail";
+            }
+
+            // ── (b) the loud belt ──
+            var loudAttr = loud.GetCustomAttributes(typeof(HarmonyPatch), inherit: false)
+                               .Cast<HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (loudAttr == null || loudAttr.declaringType != typeof(PhoenixPoint.Geoscape.View.GeoscapeViewState) ||
+                loudAttr.methodName != "Exit")
+                yield return "L70 belt-off-seam: ViewStateExitLoudGate does not patch GeoscapeViewState.Exit " +
+                             "(declaringType=" + (loudAttr?.declaringType?.Name ?? "none") + ", method=" +
+                             (loudAttr?.methodName ?? "none") + ") — that is the one base method every sub-screen's " +
+                             "exit passes through, and StateStack.Clear's missing try/catch is exactly there";
+            var fin = loud.GetMethod("Finalizer", AllMembers);
+            if (fin == null)
+                yield return "L70 belt-not-a-finalizer: ViewStateExitLoudGate has no Finalizer — only a finalizer " +
+                             "can see the exception a view-state exit threw. Without one the throw escapes into the " +
+                             "level-switch coroutine again and the load hangs with no line naming the state";
+            else if (!Reaches(fin, "Debug", "LogError"))
+                yield return "L70 belt-mute: the Exit finalizer does not log an ERROR. Swallowing the exception " +
+                             "WITHOUT naming the state that threw is the silent-swallow class this project keeps " +
+                             "paying for — the teardown would complete and the real bug would be invisible";
+            if (loud.GetMethod("Prefix", AllMembers) != null)
+                yield return "L70 belt-suppresses: ViewStateExitLoudGate grew a Prefix — a prefix on Exit can SKIP " +
+                             "the exit entirely, leaving every sub-screen's own teardown undone. The belt must " +
+                             "OBSERVE the failure, never replace the exit";
+        }
+
+        /// <summary>L71 — WHEN THE LOAD STARTS, EVERY PEER IS BEHIND THE CURTAIN. In the 2026-07-31 run the
+        /// host armed its tac-entry hold at 00:24:06.037 and the clients' first save chunk — their ONLY
+        /// signal that a battle was starting — landed at 00:24:19.04: 13.0 seconds of fully interactive
+        /// geoscape on every peer but the host. That is the user's complaint in its own right AND the
+        /// upstream cause of L70's blocker, because an interactive peer is a peer that can be standing
+        /// inside a sub-screen when its level is torn down. So the host announces the entry on the wire,
+        /// and the announcement must (a) actually leave the host, (b) drop the curtain on arrival, and
+        /// (c) leave that curtain UNDOABLE — the abort path takes the bar down by testing the same flag,
+        /// so a curtain dropped without setting it strands the peer under our label.</summary>
+        private static IEnumerable<string> EntryCurtainLaw()
+        {
+            var coord = typeof(Multiplayer.Network.SaveTransferCoordinator);
+            var arm = ModMethod(coord, "OpenTacticalEntryBarrier");
+            var handler = ModMethod(coord, "OnEntryTransferBegin");
+
+            if (!Enum.IsDefined(typeof(Multiplayer.Network.MessageLayer.PacketType), "EntryTransferBegin"))
+            {
+                yield return "L71 signal-missing: PacketType.EntryTransferBegin no longer exists — the clients are " +
+                             "back to learning about a tactical entry only from their own first save chunk, seconds " +
+                             "of live geoscape after the host already committed to the battle";
+                yield break;
+            }
+            // Id collision = the router silently hands this to the other family's handler. Read the FIELDS,
+            // not Enum.GetValues: two names on one value are one value, and ToString() answers with the
+            // first of them — so a value-level comparison here would be an arm that can never fire.
+            var packetFields = typeof(Multiplayer.Network.MessageLayer.PacketType)
+                .GetFields(BindingFlags.Public | BindingFlags.Static)
+                .ToDictionary(f => f.Name, f => (byte)f.GetRawConstantValue());
+            var beginId = packetFields["EntryTransferBegin"];
+            foreach (var other in packetFields.Where(kv => kv.Value == beginId && kv.Key != "EntryTransferBegin")
+                                              .Select(kv => kv.Key).OrderBy(n => n, StringComparer.Ordinal))
+                yield return "L71 signal-collides: EntryTransferBegin shares wire id 0x" + beginId.ToString("X2") +
+                             " with " + other + " — RouteMessage switches on exactly that byte, so one of the two " +
+                             "families is silently eaten by the other's handler";
+
+            if (arm == null || !Reaches(arm, "NetworkEngine", "BroadcastToAll"))
+                yield return "L71 never-announced: SaveTransferCoordinator.OpenTacticalEntryBarrier does not " +
+                             "broadcast — every peer but the host stays interactive until its own first chunk " +
+                             "arrives, which in the live run was 13.0 s of clickable geoscape while the battle was " +
+                             "already being built";
+
+            if (handler == null)
+                yield return "L71 never-received: SaveTransferCoordinator.OnEntryTransferBegin does not exist, so " +
+                             "the announcement is sent into nothing";
+            else
+            {
+                if (!Reaches(handler, "MultiplayerUI", "EnterTacLoadCurtain"))
+                    yield return "L71 no-curtain: OnEntryTransferBegin does not call MultiplayerUI" +
+                                 ".EnterTacLoadCurtain — the peer is told a battle is starting and its screen does " +
+                                 "not change, which is the same as not telling it";
+                var curtainFlag = coord.GetField("_downloadCurtain", AllMembers);
+                if (curtainFlag == null || !FieldRefs(handler, OpCodes.Stfld).Any(f => f == curtainFlag))
+                    yield return "L71 curtain-not-undoable: OnEntryTransferBegin drops the curtain without setting " +
+                                 "_downloadCurtain — OnEntryTransferAbort tests that flag to take our bar and label " +
+                                 "back down, so an aborted entry would lift the curtain and leave the peer looking " +
+                                 "at OUR loading label over a live geoscape";
+            }
+
+            var route = ModMethod(typeof(Multiplayer.Network.NetworkEngine), "RouteMessage");
+            if (handler != null && (route == null ||
+                !Callees(route, coord.Assembly, directCallsOnly: false).Any(c => Same(c, handler))))
+                yield return "L71 unrouted: NetworkEngine.RouteMessage does not dispatch EntryTransferBegin to " +
+                             "OnEntryTransferBegin — the packet arrives and falls through the switch, which logs " +
+                             "nothing and looks exactly like a network problem";
+        }
+
+        /// <summary>L72 — A DECLARED REASON MAY NOT REST ON A RETIRED LAW. Every window and modal rule in
+        /// <see cref="Multiplayer.Network.Sync.GeoWindowCoverage"/> carries a <c>Why</c>, and L48 already
+        /// insists it is non-empty. That is not enough: on 2026-07-31 law 5 retired the tactical quarantine,
+        /// and TWO rules kept citing it as their justification. Both verdicts happened to survive on other
+        /// grounds, but nobody knew that — the declarations read as reviewed and were not, and the first
+        /// live 3-peer tactical run is where it surfaced. A reason is a REVIEW; when the thing it rests on
+        /// is withdrawn, the review is void and must be redone, not inherited. The table below is the
+        /// mechanism: retiring a concept means adding one row here, and every declaration still leaning on
+        /// it goes red at once instead of waiting for a play session to find it.</summary>
+        private static IEnumerable<string> RetiredReasonLaw()
+        {
+            // phrase (matched case-insensitively, anywhere in a Why) → what withdrew it.
+            var retired = new (string Phrase, string Withdrawn)[]
+            {
+                ("quarantine",
+                 "law 5 RETIRED the tactical quarantine on 2026-07-31 (MANDATE-v2 §9, commit f3b01c2) — tactical " +
+                 "is a shared battle on the same rail, so 'tactical is quarantined' justifies nothing any more"),
+            };
+
+            var rules = new List<(string Where, string Why)>();
+            foreach (var kv in Multiplayer.Network.Sync.GeoWindowCoverage.Declared
+                                        .OrderBy(k => k.Key.FullName, StringComparer.Ordinal))
+                rules.Add(("Declared[" + kv.Key.Name + "]", kv.Value?.Why));
+            foreach (var kv in Multiplayer.Network.Sync.GeoWindowCoverage.DeclaredModals
+                                        .OrderBy(k => k.Key.ToString(), StringComparer.Ordinal))
+                rules.Add(("DeclaredModals[" + kv.Key + "]", kv.Value?.Why));
+
+            if (rules.Count == 0)
+                yield return "L72 nothing-to-check: neither GeoWindowCoverage.Declared nor .DeclaredModals holds a " +
+                             "single rule, so this law swept nothing and its green means nothing";
+
+            foreach (var (where, why) in rules)
+            {
+                if (string.IsNullOrEmpty(why)) continue; // L48 owns the empty-reason arm
+                foreach (var (phrase, withdrawn) in retired)
+                    if (why.IndexOf(phrase, StringComparison.OrdinalIgnoreCase) >= 0)
+                        yield return "L72 reason-cites-retired-law: GeoWindowCoverage." + where + " justifies itself " +
+                                     "with \"" + phrase + "\" — " + withdrawn + ". The VERDICT may well still be " +
+                                     "right, but it has to be re-argued on grounds that still exist; a rule whose " +
+                                     "stated reason is void is an unreviewed rule wearing a review's clothes";
+            }
         }
 
         /// <summary>True when a method's IL READS any static field. The purity arm of L65 needs "no static

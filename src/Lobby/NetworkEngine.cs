@@ -661,6 +661,10 @@ namespace Multiplayer.Network
                     SaveTransfer?.OnLoadComplete(msg);
                     break;
 
+                case PacketType.EntryTransferBegin:
+                    SaveTransfer?.OnEntryTransferBegin(msg);
+                    break;
+
                 case PacketType.EntryTransferAbort:
                     SaveTransfer?.OnEntryTransferAbort(msg);
                     break;

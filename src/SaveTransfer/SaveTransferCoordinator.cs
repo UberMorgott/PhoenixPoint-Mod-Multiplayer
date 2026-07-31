@@ -1070,6 +1070,41 @@ namespace Multiplayer.Network
             _reachedPlaying = false;  // so OnReachedPlaying fires again at the tactical Playing (label + host done-mark)
             Debug.Log($"[Multiplayer] host reveal-hold armed (tac-entry): sessionStarted={SessionStarted} " +
                       $"revealed={_revealed} — host holds its loading screen until all clients load-complete.");
+
+            // Law L71 — THE CURTAIN IS EVERYONE'S, and it falls when the LOAD starts, not when this peer's
+            // own bytes start arriving. Everything above is host-LOCAL state; before this line the clients
+            // learned a battle was starting only in OnSaveChunk's first-chunk branch, which is after the
+            // host's deploy-ready wait + mid-tactical save write: 13.0 s of fully interactive geoscape in
+            // the 2026-07-31 run (host 00:24:06.037 "reveal-hold armed" vs clients 00:24:19.040/00:24:19.061
+            // "OnSaveChunk FIRST"). A peer that can still click for 13 s is not merely a UX complaint — it
+            // is how a peer ends up INSIDE a sub-screen when its level is torn down, which is law L70's
+            // blocker. So this broadcast is the preventive half of that fix, not decoration.
+            Debug.Log("[Multiplayer] tac-entry: broadcasting EntryTransferBegin — every peer curtains NOW.");
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferBegin));
+        }
+
+        /// <summary>
+        /// CLIENT: a tactical entry has begun on the host. Drop the native curtain immediately — no save
+        /// bytes exist yet (the host still has to reach deploy-ready and write its mid-tactical save), so
+        /// this uses <c>EnterTacLoadCurtain</c> and NOT <c>EnterDownloadLoadingScreen</c>: the latter's
+        /// "Downloading save…" label would be a lie for the next ~13 s, and its lobby hide is a menu-only
+        /// concern with nothing to do here (this fires IN-GAME, on a live geoscape). That is exactly the
+        /// case <c>EnterTacLoadCurtain</c> was written for and never wired to.
+        /// The first-chunk drop in <see cref="OnSaveChunk"/> stays as it is and simply relabels when the
+        /// real download starts — both halves are idempotent (DropCurtainEarly is instant-and-idempotent,
+        /// BeginDownloadBar reassigns, and SetCurtainLabel captures the native string only on the FIRST
+        /// call so RestoreCurtainLabel still puts the right text back).
+        /// <c>_downloadCurtain</c> is set here on purpose: it is the flag <see cref="OnEntryTransferAbort"/>
+        /// tests to take our bar back down, and an early curtain with the flag unset would leave a peer
+        /// staring at OUR label after an abort lifted the curtain out from under it.
+        /// </summary>
+        public void OnEntryTransferBegin(NetworkMessage msg)
+        {
+            if (_engine.IsHost) return;   // the host ignores its own broadcast (0x47 does the same)
+            if (_downloadCurtain) return; // already curtained (duplicate delivery / a transfer in flight)
+            Debug.Log("[Multiplayer] tac-entry BEGUN on the host — dropping the curtain now (no bytes yet).");
+            _downloadCurtain = true;
+            Multiplayer.UI.MultiplayerUI.Instance?.EnterTacLoadCurtain("Entering mission…");
         }
 
         /// <summary>
@@ -1224,7 +1259,7 @@ namespace Multiplayer.Network
             if (_rxBuffer == null || transferId != _rxTransferId)
             {
                 Debug.LogError("[Multiplayer] SaveDone for an unknown transfer; ignoring.");
-                SendLoaded(transferId, false);
+                SendPrepared(transferId, false);
                 // Match the incomplete/CRC branches below: a faulting-alloc transfer left _rxBuffer
                 // null with _rxTotalBytes>0 — without ResetRx TransferActive/IsDownloading stay true
                 // and pin the client's host-heartbeat/half-open detector off forever.
@@ -1238,7 +1273,7 @@ namespace Multiplayer.Network
             {
                 Debug.LogError($"[Multiplayer] Save transfer incomplete: got {_rxReceived}/{totalBytes} bytes, " +
                                $"{_rxChunksRemaining} chunk(s) still missing.");
-                SendLoaded(transferId, false);
+                SendPrepared(transferId, false);
                 ResetRx();
                 AbortDownloadCurtain("download incomplete");
                 return;
@@ -1248,7 +1283,7 @@ namespace Multiplayer.Network
             if (actualCrc != crc32)
             {
                 Debug.LogError($"[Multiplayer] Save transfer crc mismatch: 0x{actualCrc:X8} != 0x{crc32:X8}.");
-                SendLoaded(transferId, false);
+                SendPrepared(transferId, false);
                 ResetRx();
                 AbortDownloadCurtain("checksum mismatch");
                 return;
@@ -1257,7 +1292,7 @@ namespace Multiplayer.Network
             // Verified blob — load it in memory, but DEFER entering the level until BEGIN.
             PhoenixGame game;
             PhoenixSaveManager saveManager;
-            if (!TryGetGame(out game, out saveManager)) { SendLoaded(transferId, false); AbortDownloadCurtain("load init"); return; }
+            if (!TryGetGame(out game, out saveManager)) { SendPrepared(transferId, false); AbortDownloadCurtain("load init"); return; }
 
             var blob = _rxBuffer;
             var loadExt = string.IsNullOrEmpty(ext) ? SerializationComponent.DefaultExtension : ext;
@@ -1267,7 +1302,7 @@ namespace Multiplayer.Network
             ResetRx();
 
             var timing = GetTiming();
-            if (timing == null) { SendLoaded(transferId, false); return; }
+            if (timing == null) { SendPrepared(transferId, false); return; }
             Debug.Log($"[Multiplayer] OnSaveDone: verified OK → ClientLoadCrt (onDemandJoin={onDemandJoin})");
             timing.Start(ClientLoadCrt(game, blob, loadExt, transferId, onDemandJoin));
         }
@@ -1297,9 +1332,9 @@ namespace Multiplayer.Network
                 yield break;
             }
 
-            Debug.Log($"[Multiplayer] ClientLoadCrt: prepared ok={ok} → SendLoaded");
+            Debug.Log($"[Multiplayer] ClientLoadCrt: prepared ok={ok} → SendPrepared");
             // Ack the barrier AFTER the load is prepared but BEFORE FinishLevel.
-            SendLoaded(transferId, ok);
+            SendPrepared(transferId, ok);
             // Prepare failed: the barrier will never get our LOADED(true). Don't strand us on the curtain.
             if (!ok) AbortDownloadCurtain("prepare");
         }
@@ -1402,9 +1437,20 @@ namespace Multiplayer.Network
         //  Barrier: LOADED collection (host) + BEGIN
         // ══════════════════════════════════════════════════════════════════
 
-        private void SendLoaded(Guid transferId, bool ok)
+        /// <summary>
+        /// Ack the barrier. NAMED "prepared", not "loaded", because that is what it means: every caller
+        /// fires at the END OF <c>PrepareEntryFromBlobCrt</c> — the save is deserialized and
+        /// <c>_pendingResult</c> is built, but <c>FinishLevel</c> has NOT been called and no world has been
+        /// loaded (ClientLoadCrt says so in its own comment: "AFTER the load is prepared but BEFORE
+        /// FinishLevel"). The wire id stays <c>PacketType.ClientLoaded</c> and the host still calls its
+        /// collection the LOADED barrier — renaming the protocol would be a compatibility break for a
+        /// naming bug — but the barrier is a PREPARE barrier and the next reader should not have to
+        /// re-derive that from the call sites, as the 2026-07-31 RCA did.
+        /// </summary>
+        private void SendPrepared(Guid transferId, bool ok)
         {
-            Debug.Log($"[Multiplayer] SendLoaded: transfer={transferId} ok={ok} → host");
+            Debug.Log($"[Multiplayer] SendPrepared (barrier ack — prepared, NOT yet loaded): " +
+                      $"transfer={transferId} ok={ok} → host");
             var payload = MessageSerializer.SerializeClientLoaded(_engine.LocalSteamId, transferId, ok);
             _engine.SendToHost(new NetworkMessage(PacketType.ClientLoaded, payload));
         }
