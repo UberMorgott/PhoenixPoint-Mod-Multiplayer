@@ -115,6 +115,7 @@ namespace RailCheck
             laws.AddRange(RejectScopeLaw());
             laws.AddRange(PeerLocalContainmentLaw(game));
             laws.AddRange(MistCoverageLaw(game));
+            laws.AddRange(PersistentHudLaw(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -5399,8 +5400,16 @@ namespace RailCheck
         /// methods its native build reaches. Same BFS shape and same discriminators as
         /// <see cref="FirstModelCommand"/> — descend through presentation, stop at the model boundary — but
         /// it collects the OWNERS instead of the first command, and keeps statics (a static helper on the kind
-        /// is still that kind's code, and over-collecting only rejects more declarations).</summary>
-        private static HashSet<Type> ReadKinds(MethodBase root, Assembly game)
+        /// is still that kind's code, and over-collecting only rejects more declarations).
+        ///
+        /// <paramref name="includeAccessors"/> flips the ONE approximation L38 documents. L38 lets a
+        /// getter-only read pass because on a VIEW STATE the getter either returns a derived value or a
+        /// reference to an object that is its own replicated kind and marks dirty on its own account —
+        /// i.e. something else will repaint. L60 asks the question of a panel that the mark never reaches
+        /// AT ALL, so nothing else will; there a derived getter IS the painted content
+        /// (<c>vehicle.ExplorationTimeRemaining</c> is literally the tracker row's text), and excluding
+        /// accessors would make that law read an empty set and call itself vacuous.</summary>
+        private static HashSet<Type> ReadKinds(MethodBase root, Assembly game, bool includeAccessors = false)
         {
             var reads = new HashSet<Type>();
             var seen = new HashSet<int> { root.MetadataToken };
@@ -5412,9 +5421,77 @@ namespace RailCheck
                     var owner = callee.DeclaringType;
                     if (owner?.FullName == null || !seen.Add(callee.MetadataToken)) continue;
                     if (IsPresentation(owner)) { queue.Enqueue(callee); continue; }
-                    if (!callee.IsConstructor && !IsAccessor(callee)) reads.Add(owner);
+                    if (!callee.IsConstructor && (includeAccessors || !IsAccessor(callee))) reads.Add(owner);
                 }
             return reads;
+        }
+
+        /// <summary>L60 — THE PERSISTENT HUD IS NO SCREEN'S TO SILENCE. <c>UiNativeRepaint.IgnoredKinds</c>
+        /// is a claim about ONE view state's own reads, and L38 proves it against exactly that state's
+        /// <c>EnterState</c>. But the skip it drives lands on <c>OpenUiRepaint.MarkDirty(Type, ...)</c>, and
+        /// what a mark eventually runs is <c>RepaintOpenGeoscapeScreen</c>, whose FIRST act is
+        /// <c>RefreshPersistentHud</c> — the top-right agenda tracker, which belongs to no view state and
+        /// therefore appears in no <c>EnterState</c> L38 ever walks. So a per-screen exclusion was silently
+        /// buying its fps back out of a panel it never audited: the tracker's rebuild reads the aircraft
+        /// actions (<c>UIModuleFactionAgendaTracker.InitialSetup</c>:162-168 →
+        /// <c>VehicleActionsViewService.GetCurrentActionTime</c>) that UIStateEditSoldier declares
+        /// irrelevant TO ITSELF. Split the flag: the screen keeps declining, the HUD always hears.
+        ///
+        /// Three call-shaped arms, because a <c>stfld</c> is invisible to a callee walk — which is why the
+        /// production side spends one named method (<c>MarkHudDirty</c>) rather than an inline flag write.
+        /// Arm 1: the declined branch must reach that method. Arm 2: <c>FlushIfDirty</c> must reach
+        /// <c>RefreshPersistentHud</c> DIRECTLY — reaching it only through
+        /// <c>RepaintOpenGeoscapeScreen</c> is the pre-fix world and proves nothing. Arm 3, anti-vacuity:
+        /// the HUD's real refresh target (read from the same <c>MethodInfo</c> production resolves, never a
+        /// name repeated here) must actually read a kind somebody declares irrelevant — otherwise this
+        /// split guards a hole that does not exist and the law should say so out loud.</summary>
+        private static IEnumerable<string> PersistentHudLaw(Assembly game)
+        {
+            var ours = typeof(OpenUiRepaint).Assembly;
+            var flush = typeof(OpenUiRepaint).GetMethod("FlushIfDirty", AllMembers);
+            var kindMark = typeof(OpenUiRepaint).GetMethod("MarkDirty", AllMembers, null,
+                                                           new[] { typeof(Type), typeof(PhoenixPoint.Geoscape.Levels.GeoLevelController) }, null);
+            var hudMark = typeof(OpenUiRepaint).GetMethod("MarkHudDirty", AllMembers);
+            var refresh = typeof(OpenUiRepaint).GetMethod("RefreshPersistentHud", AllMembers);
+            if (flush == null || kindMark == null || hudMark == null || refresh == null)
+            {
+                yield return "L60 wiring-unresolved: OpenUiRepaint.FlushIfDirty / MarkDirty(Type, GeoLevelController) / " +
+                             "MarkHudDirty / RefreshPersistentHud did not all resolve — the split that keeps a " +
+                             "per-screen exclusion from silencing the persistent HUD cannot be verified at all";
+                yield break;
+            }
+            if (!Callees(kindMark, ours, directCallsOnly: true).Any(c => Same(c, hudMark)))
+                yield return "L60 skip-drops-hud: OpenUiRepaint.MarkDirty(Type, GeoLevelController) does not call " +
+                             "MarkHudDirty on the declared-irrelevant branch — a kind a SCREEN declines then also " +
+                             "skips the persistent HUD, whose reads that screen's EnterState never covered, so the " +
+                             "top-right tracker can drop a live row with nothing red";
+            if (!Callees(flush, ours, directCallsOnly: true).Any(c => Same(c, refresh)))
+                yield return "L60 hud-refresh-unreachable: OpenUiRepaint.FlushIfDirty never calls RefreshPersistentHud " +
+                             "directly — the only remaining path is through RepaintOpenGeoscapeScreen, which runs " +
+                             "solely for marks the open screen ACCEPTED, so every declined mark loses the HUD again";
+
+            // The HUD's read set comes from the MethodInfo the mod itself invokes: if the game renames
+            // UpdateData, RefreshPersistentHud's own null-guard turns the whole HUD refresh into a silent
+            // no-op at runtime (OpenUiRepaint.cs, "if (TrackerUpdateData == null ...) return"), and a
+            // static red here is the only warning anyone gets.
+            var target = typeof(OpenUiRepaint).GetField("TrackerUpdateData", AllMembers)?.GetValue(null) as MethodBase;
+            var flag = typeof(OpenUiRepaint).GetField("TrackerNeedsRefresh", AllMembers)?.GetValue(null);
+            if (target == null || flag == null)
+            {
+                yield return "L60 hud-target-unresolved: UIModuleFactionAgendaTracker.UpdateData()/_needsRefresh no " +
+                             "longer resolve — RefreshPersistentHud returns on its own null-guard, so the persistent " +
+                             "HUD silently stops repainting on EVERY peer and no log line says so";
+                yield break;
+            }
+            var declared = new HashSet<Type>();
+            foreach (var kinds in UiNativeRepaint.IgnoredKinds.Values) declared.UnionWith(kinds);
+            var hudReads = ReadKinds(target, game, includeAccessors: true);
+            hudReads.IntersectWith(declared);
+            if (hudReads.Count == 0)
+                yield return "L60 vacuous: the persistent HUD's refresh path reads NO kind that any screen declares " +
+                             "irrelevant, so keeping the HUD outside the per-screen exclusion guards nothing and this " +
+                             "law asserts nothing — either a declaration shrank or the tracker stopped reading the " +
+                             "world layer, and the split should be re-derived rather than trusted";
         }
 
         /// <summary>BFS from a screen teardown through presentation code; returns "Type.Method" of the first

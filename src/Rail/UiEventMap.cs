@@ -401,6 +401,17 @@ namespace Multiplayer.Network.Sync
         ///
         /// UIStateEditVehicle is deliberately NOT declared: same reseed shape, but its whole subject IS a
         /// GeoVehicle and its read path was not audited. One line to add once it is.
+        ///
+        /// UIStateBionics / UIStateMutate are deliberately NOT declared either, and that is a MEASURED
+        /// decision, not a pending audit (2026-07-31): L38 ACCEPTS both rows — neither EnterState reaches a
+        /// non-accessor method of any <see cref="WorldLayerKinds"/> entry — but a row here only pays for
+        /// itself when it skips an expensive rebuild, and there is none to skip. Their <see cref="Table"/>
+        /// entry is <c>RepaintAugmentScreen</c>, which is a guard-and-return: armed selection → return, or
+        /// live armour still equal to snapshot/trial → return. What a row would save is a StageSnapshot
+        /// miss plus one list compare at rail-batch rate — orders of magnitude under this repo's smallest
+        /// measured main-thread cost — while adding two claims that must stay true across game updates and
+        /// that gate the screen's own model-moved-under-me correctness arm. UIStateEditSoldier is declared
+        /// because its rebuild is faction storage + both equip lists + the whole perk tree (4-5 fps).
         /// </summary>
         internal static readonly Dictionary<Type, HashSet<Type>> IgnoredKinds =
             new Dictionary<Type, HashSet<Type>>

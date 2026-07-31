@@ -36,6 +36,7 @@ namespace Multiplayer.Network.Sync
     public static class OpenUiRepaint
     {
         private static bool _dirty;
+        private static bool _hudDirty;
         private static int _deferredFrames;
         private static bool _deferLogged;
         private static int _marksSinceFlush;
@@ -142,16 +143,33 @@ namespace Multiplayer.Network.Sync
                 if (_loggedSkips.Add(screen.GetType().Name + ":" + kind.Name))
                     Debug.Log("[MP][uirepaint] SKIP " + kind.Name + " on " + screen.GetType().Name +
                               " — kind declared irrelevant to this screen (logged once per kind per screen)");
+                MarkHudDirty();
                 return;
             }
             MarkDirty();
         }
+
+        /// <summary>The SCREEN declined this kind, so the persistent HUD still has to hear about it.
+        /// <see cref="UiNativeRepaint.IgnoredKinds"/> is a claim about one VIEW STATE's own reads, and L38
+        /// proves it against that state's <c>EnterState</c> — but the skip it drives used to suppress the
+        /// whole of <see cref="RepaintOpenGeoscapeScreen"/>, and the first thing that does is
+        /// <see cref="RefreshPersistentHud"/>, which belongs to no view state and was never in that audit.
+        /// The tracker's rebuild reads exactly the aircraft actions UIStateEditSoldier declares irrelevant
+        /// TO ITSELF (InitialSetup:162-168 → VehicleActionsViewService.GetCurrentActionTime), so a vehicle
+        /// leaving on a mission while a peer sits on the soldier screen could drop its tracker row with
+        /// nothing red. Masked in practice — GeoPhoenixFaction/GeoCharacter churn in the same batches and
+        /// are not declared — which is exactly why it needed finding statically rather than in play.
+        ///
+        /// A named method, not an inline flag write: RailCheck L60 walks callees, and a stfld is invisible
+        /// to a callee walk — an inline write would leave half this split unprovable.</summary>
+        private static void MarkHudDirty() { _hudDirty = true; }
 
         /// <summary>Session teardown: drop the pending repaint so the NEXT session's first Tick does not
         /// inherit a dirty flag from the dead one, and re-arm the one-shot diagnostics.</summary>
         public static void Reset()
         {
             _dirty = false;
+            _hudDirty = false;
             _deferredFrames = 0;
             _deferLogged = false;
             _marksSinceFlush = 0;
@@ -172,7 +190,14 @@ namespace Multiplayer.Network.Sync
         /// </summary>
         public static void FlushIfDirty()
         {
-            if (!_dirty) return;
+            if (!_dirty)
+            {
+                // Every mark the open screen declined still owes the persistent HUD a refresh (L60,
+                // see MarkHudDirty). Same once-per-frame coalescing as the screen repaint, and it does
+                // not touch a single widget the drag/typing defer below exists to protect.
+                if (_hudDirty) { _hudDirty = false; RefreshPersistentHud(); }
+                return;
+            }
             if (LocalInputInFlight())
             {
                 // ponytail: bounded defer, ceiling = MaxDeferFrames. A leaked gesture flag or a wedged
@@ -190,6 +215,7 @@ namespace Multiplayer.Network.Sync
             }
             _deferredFrames = 0;
             _dirty = false;
+            _hudDirty = false; // RepaintOpenGeoscapeScreen opens with the HUD refresh itself
             RepaintOpenGeoscapeScreen();
         }
 
