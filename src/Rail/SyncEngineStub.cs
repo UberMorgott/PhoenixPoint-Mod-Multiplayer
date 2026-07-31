@@ -65,9 +65,15 @@ namespace Multiplayer.Network.Sync
         // post-reload deltas keep applying).
         public void Tick()
         {
+            // RailCost: one always-on cost line per 10 s (see RailCost). The steps charged by name are the
+            // ones that can plausibly own a frame; everything else is covered by the tick total, and
+            // frameMax is the control that says whether a hitch is the rail's at all.
+            long t0 = RailCost.Now(), t = t0;
             ManufactureSync.HostTick(_engine);
             MistSync.Tick(_engine); // host: recompute the "M#mist" payload; client: hand it to the native loader
+            t = RailCost.Charge("mist", t);
             DiffEngine.HostTick(_engine);
+            t = RailCost.Charge("walk", t);
             TimeSync.ClientTick(_engine); // client-only inside: TimeAnchor drift enforcement (~1 Hz)
             // client-only inside: release the client's PLAYER-faction turn once the host has left it. A
             // STANDING condition, not a one-shot in the applier — PlayTurnCrt clears _endTurnRequested on
@@ -82,14 +88,19 @@ namespace Multiplayer.Network.Sync
             // mod's). Deferred by one frame ON PURPOSE — inline it could overtake the damage stream it must
             // stay behind, and a death whose corpse manifest arrives before the corpse is a silent drop.
             Multiplayer.Tactical.TacticalActorLifecycle.HostTick(_engine);
+            t = RailCost.Charge("tac", t);
             GenericApplier.ClientCrcTick(_engine); // client-only inside: law-7 drift backstop, one root per second
+            // (it charges itself per ROOT — the name in the log says which root cost the frame)
             // (No event pump: an event WINDOW is a live host→client 0xB6 raise, not a derivation over the
             // mirrored records — a peer that was not in the session when it fired never sees it. The 1 Hz
             // record-scan pump that used to live here is what buried every joiner under the campaign's whole
             // event history; deleted 2026-07-30 with the derivation it drove.)
             // Law 11 UNIVERSAL: flush one open-screen re-enter per frame if anything marked dirty —
             // client mirror batches AND host post-intent reseeds (EquipSync/PersonnelSync) both land here.
+            t = RailCost.Now();
             OpenUiRepaint.FlushIfDirty();
+            RailCost.Charge("repaint", t);
+            RailCost.EndFrame(t0);
         }
 
         public void DetachAllChannels()

@@ -220,8 +220,10 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>The local user has UNCOMMITTED input in flight. Asked of input state, not of screens:
-        /// a screen with no drag icon simply answers false, so this needs no per-screen table.</summary>
-        private static bool LocalInputInFlight()
+        /// a screen with no drag icon simply answers false, so this needs no per-screen table.
+        /// Internal because DiffEngine.RunSlice asks the same question before spending the URGENT walk
+        /// budget — same reason, same answer: work that costs frame time waits out a live gesture.</summary>
+        internal static bool LocalInputInFlight()
         {
             // Typing guard: Exit+Enter rebuilds every widget, wiping an active text entry mid-word
             // (soldier rename = UnityEngine.UI.InputField, UIModuleActorCycle.SoldierNameEditField:71;

@@ -102,8 +102,11 @@ namespace Multiplayer.Network.Sync
                     return true;
                 }
                 if (engine == null || engine.IsHost) return true; // host never applies its own surface
-                if (payload[0] == DiffEngine.MsgDelta) ApplyDelta(engine, payload);
-                else if (payload[0] == DiffEngine.MsgStructural) ApplyStructural(engine, payload);
+                // Charged by RailCost: this runs on the NETWORK DRAIN, not inside SyncEngine.Tick, so the
+                // tick total cannot see it — and "the client hitches, the host does not" points here first.
+                long t = RailCost.Now();
+                if (payload[0] == DiffEngine.MsgDelta) { ApplyDelta(engine, payload); RailCost.Charge("apply", t); }
+                else if (payload[0] == DiffEngine.MsgStructural) { ApplyStructural(engine, payload); RailCost.Charge("structural", t); }
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][rail] GenericApplier inbound failed: " + ex); }
             return true;
@@ -1138,7 +1141,20 @@ namespace Multiplayer.Network.Sync
             _crcRoot++;
             try
             {
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 uint crc = DiffEngine.RootCrc(key, obj);
+                double crcMs = sw.Elapsed.TotalMilliseconds;
+                // BUDGET (the gap L50 left: it budgets the HOST's RunSlice only, and this is the same
+                // VisitEntity walk run client-side with nothing watching it). A whole root is hashed inside
+                // ONE frame and cannot be sliced — a torn hash would false-alarm the backstop — so it is
+                // RATE-limited instead: charge the measured cost against the same per-frame budget the host
+                // walk obeys and push the next root out proportionally. Average cost then stays ≈
+                // SliceBudgetMs per CrcInterval whatever shape the graph has, and a fat root (GL/F#/ES)
+                // cannot come back a second later. Backstop semantics are unharmed — it notices within a
+                // minute, not within a frame (see the summary above).
+                if (crcMs > DiffEngine.SliceBudgetMs)
+                    _crcNextAt = Time.realtimeSinceStartup + (float)(CrcInterval * crcMs / DiffEngine.SliceBudgetMs);
+                RailCost.Charge("crc:" + key, crcMs);
                 using (var ms = new MemoryStream())
                 using (var w = new BinaryWriter(ms, Encoding.UTF8))
                 {

@@ -151,6 +151,13 @@ REM --- step 5b: launch env ----------------------------------------------------
 set "SteamClientLaunch="
 set "SteamAppId=839770"
 set "SteamGameId=839770"
+REM MpDiag switch: turns on the per-entry investigation traces ([MP][rail] cycle, [MP][uirepaint],
+REM [MP][inv], [MP][mfgdiag], [MP][scrap]). The 2026-07-31 three-instance session was RCA'd with this
+REM unset in every instance, so the whole stutter hunt had no cycle lines at all. Set here so a test
+REM copy can never launch without them. (The always-on [Multiplayer][rail] cost/10s line does not
+REM need it.) Instance 1 = the real Steam install: set it there via Steam launch options or a shell
+REM `$env:MULTIPLAYER_DIAG=1` before starting the game.
+set "MULTIPLAYER_DIAG=1"
 
 if /I "%~1"=="sync" (
     echo Sync done ^(no launch^).

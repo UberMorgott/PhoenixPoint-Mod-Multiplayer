@@ -128,6 +128,8 @@ namespace RailCheck
             laws.AddRange(LevelTeardownLaw());
             laws.AddRange(EntryCurtainLaw());
             laws.AddRange(RetiredReasonLaw());
+            laws.AddRange(ClockRebaseLaw());
+            laws.AddRange(WalkBudgetLaw());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -8270,6 +8272,216 @@ namespace RailCheck
                                      "right, but it has to be re-argued on grounds that still exist; a rule whose " +
                                      "stated reason is void is an unreviewed rule wearing a review's clothes";
             }
+        }
+
+        /// <summary>L73 — A CLOCK WRITE MAY NOT ZERO THE LEVEL CLOCK'S OWN ACCRUAL, AND THE CHURN ALARM
+        /// MUST BE ABLE TO FIRE.
+        ///
+        /// Measured defect (user, 3 instances, 2026-07-31/08-01): the host geoscape was smooth while every
+        /// CLIENT's aircraft froze and rubber-banded — forward, snap back, forward — yet still arrived.
+        /// Cause: every geoscape actor owns its OWN Timing parented to the LEVEL clock
+        /// (ActorComponent.Initialize:85-90; GeoLevelController IS that TimeSource), and a child derives from
+        /// its parent's OwnNow (Timing.ParentOwnNow:176), never its Now, against a _parentSetTime latched at
+        /// creation. TimeAnchor applied the host anchor with OwnNow = TimeUnit.Zero, and
+        /// ProcessInstanceData writes _ownSetTime from it (Timing.cs:222-232) — so every apply dropped the
+        /// LEVEL clock's accrual to 0 and teleported every ACTOR clock BACKWARD by the whole interval since
+        /// the previous apply. The aircraft's pose is closed-form on exactly that clock, recomputed EVERY
+        /// FRAME (GeoNavComponent.NavigateRoutine:104-116 — it yields NextUpdate.NextFrame, whose NextTime is
+        /// Invalid, so it is not a timed wake and no scheduler jump can park it).
+        ///
+        /// The precedent this restores — ship the ORDER, never the pose — is already falsifiable as L43. What
+        /// was NOT was the INPUT that derivation runs on: the client's own clocks. This is that arm.
+        ///
+        ///   A. PREMISE (bound against the real game assembly, so a game change is red, not silent): actor
+        ///      clocks really are children of the level clock — GeoVehicle is an ActorComponent,
+        ///      ActorComponent.Initialize sets Timing.ParentTime, GeoLevelController is a TimeSource.
+        ///   B. every caller of Timing.ProcessInstanceData in OUR assembly must call RecordInstanceData —
+        ///      the live accrual is the thing it has to carry across.
+        ///   C. no such caller may touch TimeUnit.Zero. Zeroing the accrual IS the defect; that one static
+        ///      field read is its whole signature, and nothing else in the rail writes a clock.
+        ///   D. every such caller must reschedule (TimingScheduler.RescheduleForTiming). The BASE still
+        ///      moves by the host↔client error, so wakes computed against the pre-jump clock are stale —
+        ///      Risk R12, and this is the explicit reschedule R12 itself prescribed.
+        ///   E. the churn alarm must be able to fire: TimeAnchor.ChurnThreshold has to sit BELOW the
+        ///      maximum possible latch rate, ChurnWindowSeconds / DiffEngine.TickInterval. It used to be
+        ///      exactly AT it (20 in 10 s vs a 0.5 s tick = 20), i.e. the anchor could re-latch on every
+        ///      single walk cycle forever and the check would never say a word.
+        /// NON-VACUITY: every subject must RESOLVE and the ProcessInstanceData caller set must be NON-EMPTY,
+        /// so the law cannot pass by finding nothing. Negating the fix trips it: restore OwnNow =
+        /// TimeUnit.Zero → C; drop the RecordInstanceData read → B; drop the reschedule loop → D; put the
+        /// threshold back to 20 → E.</summary>
+        private static IEnumerable<string> ClockRebaseLaw()
+        {
+            var timing = typeof(Base.Core.Timing);
+            var process = timing.GetMethod("ProcessInstanceData", AllMembers);
+            var record = timing.GetMethod("RecordInstanceData", AllMembers);
+            var resched = typeof(Base.Core.TimingScheduler).GetMethod("RescheduleForTiming", AllMembers);
+            var zero = typeof(Base.Core.TimeUnit).GetField("Zero", AllMembers);
+            if (process == null || record == null || resched == null || zero == null)
+            {
+                yield return "L73 unresolved: Timing.ProcessInstanceData / Timing.RecordInstanceData / " +
+                             "TimingScheduler.RescheduleForTiming / TimeUnit.Zero did not all resolve — the clock " +
+                             "law cannot be evaluated and asserts nothing";
+                yield break;
+            }
+
+            // ── arm A: the premise. Actor clocks hang off the level clock, which is what makes a level-clock
+            // write a fleet-wide teleport in the first place.
+            var actorComponent = typeof(Base.Entities.ActorComponent);
+            if (!actorComponent.IsAssignableFrom(typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle)))
+                yield return "L73 premise-gone: GeoVehicle is no longer an ActorComponent, so it may no longer own a " +
+                             "child Timing — re-derive why the anchor apply is safe before trusting this law's green";
+            if (!typeof(Base.Core.TimeSource).IsAssignableFrom(typeof(PhoenixPoint.Geoscape.Levels.GeoLevelController)))
+                yield return "L73 premise-gone: GeoLevelController is no longer a TimeSource — the clock TimeAnchor " +
+                             "writes is not the one actors parent to, and this law is guarding the wrong object";
+            var actorInit = actorComponent.GetMethod("Initialize", AllMembers);
+            var setParent = timing.GetProperty("ParentTime", AllMembers)?.GetSetMethod();
+            if (actorInit == null || setParent == null)
+                yield return "L73 premise-unresolved: ActorComponent.Initialize / Timing.ParentTime setter did not " +
+                             "resolve, so the parent-clock relationship this law rests on cannot be checked";
+            else if (!Callees(actorInit, timing.Assembly).Any(c => c.MetadataToken == setParent.MetadataToken &&
+                                                                   c.Module == setParent.Module))
+                yield return "L73 premise-gone: ActorComponent.Initialize no longer sets Timing.ParentTime — actor " +
+                             "clocks may have stopped deriving from the level clock, which is the entire reason a " +
+                             "level-clock write has to preserve OwnNow";
+
+            // ── arms B/C/D: every clock write in our assembly, whatever calls it.
+            var writers = new List<MethodBase>();
+            foreach (var m in OurMethods())
+                if (CalleeSequence(m).Any(c => c.MetadataToken == process.MetadataToken && c.Module == process.Module))
+                    writers.Add(m);
+            if (writers.Count == 0)
+            {
+                yield return "L73 vacuous: nothing in our assembly calls Timing.ProcessInstanceData — arms B-D swept " +
+                             "nothing, so their green means nothing (the rail's clock sync has moved or died)";
+            }
+            foreach (var m in writers.OrderBy(m => m.DeclaringType.Name + "." + m.Name, StringComparer.Ordinal))
+            {
+                string who = m.DeclaringType.Name + "." + m.Name;
+                var seq = CalleeSequence(m);
+                if (!seq.Any(c => c.MetadataToken == record.MetadataToken && c.Module == record.Module))
+                    yield return "L73 accrual-unread: " + who + " writes the clock through ProcessInstanceData without " +
+                                 "reading RecordInstanceData — it cannot be preserving the level clock's OwnNow, and " +
+                                 "every actor Timing parented to that clock jumps by whatever it dropped";
+                if (ReadsField(m, zero))
+                    yield return "L73 accrual-zeroed: " + who + " writes the clock AND touches TimeUnit.Zero — shipping " +
+                                 "OwnNow = Zero re-anchors the level clock's accrual to nothing, so every actor clock " +
+                                 "hanging off it (ParentOwnNow) teleports BACKWARD by the whole interval since the last " +
+                                 "write. That is the frozen, rubber-banding client aircraft, closed-form on that clock";
+                if (!seq.Any(c => c.MetadataToken == resched.MetadataToken && c.Module == resched.Module))
+                    yield return "L73 unrescheduled: " + who + " moves the clock base without calling " +
+                                 "TimingScheduler.RescheduleForTiming — timed updateables keep wake times computed " +
+                                 "against the pre-jump clock, so a backward correction stalls every research/manufacture " +
+                                 "ETA until the old wake arrives (Risk R12, TimeAnchor's own note)";
+            }
+
+            // ── arm E: the churn alarm has to sit below the rate a latch can even occur at.
+            var thresholdF = typeof(TimeAnchor).GetField("ChurnThreshold", AllMembers);
+            var windowF = typeof(TimeAnchor).GetField("ChurnWindowSeconds", AllMembers);
+            var tickF = typeof(DiffEngine).GetField("TickInterval", AllMembers);
+            if (thresholdF == null || windowF == null || tickF == null)
+                yield return "L73 churn-unresolved: TimeAnchor.ChurnThreshold / ChurnWindowSeconds / " +
+                             "DiffEngine.TickInterval did not all resolve — the alarm's own reachability is unchecked";
+            else
+            {
+                double threshold = Convert.ToDouble(thresholdF.GetRawConstantValue());
+                double window = Convert.ToDouble(windowF.GetRawConstantValue());
+                double tick = Convert.ToDouble(tickF.GetRawConstantValue());
+                double ceiling = tick > 0 ? window / tick : 0;
+                if (!(threshold < ceiling))
+                    yield return "L73 churn-blind: TimeAnchor's alarm needs " + threshold + " re-latches in " + window +
+                                 " s, but a latch can happen at most once per host walk cycle (HostDto is asked from " +
+                                 "IdentityResolver.Roots, snapshotted at BeginCycle), so the ceiling is " + ceiling +
+                                 ". The alarm can never fire: the anchor may re-latch on EVERY cycle forever and the " +
+                                 "log stays perfectly healthy — the one failure mode this class was built to confess";
+            }
+        }
+
+        /// <summary>L74 — NO UNBUDGETED GRAPH WALK, AND URGENCY NEVER OUTBIDS LOCAL INPUT.
+        ///
+        /// L50 proved the HOST's periodic walk cannot go monolithic again — but it budgets exactly one
+        /// driver, DiffEngine.RunSlice. DiffEngine.RootCrc is the SAME VisitEntity machinery, run CLIENT-side
+        /// once a second over a whole root inside one frame, and NO law saw it. "Host smooth, both clients
+        /// hitch" is precisely the shape of a client-exclusive unbudgeted walk.
+        ///
+        ///   A. VisitEntity may be entered from exactly the three known places (its own recursion, VisitRoot,
+        ///      RootCrc) — a fourth walk entrance is a fourth thing nobody is budgeting.
+        ///   B. BOTH drivers charge against the budget: RunSlice reads SliceBudgetMs, and ClientCrcTick reads
+        ///      it too (a whole-root hash cannot be sliced — a torn hash would false-alarm the backstop — so
+        ///      it pays by RATE, pushing the next root out in proportion to what the last one cost).
+        ///   C. if RunSlice spends the URGENT budget it must first ask OpenUiRepaint.LocalInputInFlight. The
+        ///      low floor exists for a live drag; an urgency that outbids it costs frame time during exactly
+        ///      the interaction the floor was bought to protect.
+        ///   D. the urgent budget is bigger than the floor and still smaller than one 60 fps frame — a walk
+        ///      may go faster, never own a frame.
+        /// NON-VACUITY: every subject must RESOLVE and each caller set must be non-empty. Negating trips it:
+        /// drop the CRC's budget charge → B; delete the LocalInputInFlight call → C; raise the urgent budget
+        /// past a frame → D; add a new VisitEntity caller → A.</summary>
+        private static IEnumerable<string> WalkBudgetLaw()
+        {
+            var visitEntity = typeof(DiffEngine).GetMethods(AllMembers).FirstOrDefault(m => m.Name == "VisitEntity");
+            var runSlice = typeof(DiffEngine).GetMethod("RunSlice", AllMembers);
+            var crcTick = typeof(GenericApplier).GetMethod("ClientCrcTick", AllMembers);
+            var rootCrc = typeof(DiffEngine).GetMethod("RootCrc", AllMembers);
+            var slice = typeof(DiffEngine).GetField("SliceBudgetMs", AllMembers);
+            var urgent = typeof(DiffEngine).GetField("UrgentSliceBudgetMs", AllMembers);
+            var inFlight = typeof(OpenUiRepaint).GetMethod("LocalInputInFlight", AllMembers);
+            if (visitEntity == null || runSlice == null || crcTick == null || rootCrc == null ||
+                slice == null || urgent == null || inFlight == null)
+            {
+                yield return "L74 unresolved: DiffEngine.VisitEntity / RunSlice / RootCrc / SliceBudgetMs / " +
+                             "UrgentSliceBudgetMs / GenericApplier.ClientCrcTick / OpenUiRepaint.LocalInputInFlight " +
+                             "did not all resolve — the walk-budget law cannot be evaluated and asserts nothing";
+                yield break;
+            }
+
+            // ── arm A: every entrance into the walk primitive is a known one.
+            var allowed = new HashSet<string>(StringComparer.Ordinal)
+                { "DiffEngine.VisitEntity", "DiffEngine.VisitRoot", "DiffEngine.RootCrc" };
+            var entrances = CallersOf(visitEntity, OurMethods());
+            if (entrances.Count == 0)
+                yield return "L74 vacuous: nothing calls DiffEngine.VisitEntity — arm A found no walk at all, so its " +
+                             "green means nothing";
+            foreach (var e in entrances)
+                if (!allowed.Contains(e))
+                    yield return "L74 unbudgeted-walk: " + e + " enters DiffEngine.VisitEntity — every graph walk must " +
+                                 "come through a driver that charges against a per-frame budget (RunSlice slices it, " +
+                                 "ClientCrcTick rate-limits it). A new entrance is a new unmeasured frame cost, which " +
+                                 "on a client reads as a periodic hitch the host never has";
+
+            // ── arm B: both drivers actually consult the budget.
+            if (!ReadsField(runSlice, slice))
+                yield return "L74 slice-unbudgeted: DiffEngine.RunSlice does not read SliceBudgetMs — the host walk " +
+                             "runs a cycle to completion inside one frame and slicing is decoration";
+            if (!ReadsField(crcTick, slice))
+                yield return "L74 crc-unbudgeted: GenericApplier.ClientCrcTick does not read DiffEngine.SliceBudgetMs — " +
+                             "the law-7 backstop hashes a WHOLE root through the same VisitEntity walk inside one frame " +
+                             "with nothing charging it, so a fat root (GL/F#/ES) is a client-only hitch on repeat";
+
+            // ── arm C: urgency exists, and it defers to uncommitted local input. The existence half is not
+            // decoration: written as "IF it reads the urgent budget THEN it must ask", the arm passes
+            // VACUOUSLY the moment someone deletes the urgency branch — and arm D would keep passing too,
+            // since it only compares the two field VALUES. So demand the read outright.
+            if (!ReadsField(runSlice, urgent))
+                yield return "L74 urgency-absent: DiffEngine.RunSlice does not read UrgentSliceBudgetMs — a cycle a " +
+                             "GESTURE asked for finishes no sooner than an idle one, so an inventory/equip change is " +
+                             "back to waiting out the whole 625-root walk at the floor budget (~¼-⅓ s to the peers)";
+            else if (!CalleeSequence(runSlice).Any(c => c.MetadataToken == inFlight.MetadataToken && c.Module == inFlight.Module))
+                yield return "L74 urgency-outbids-input: DiffEngine.RunSlice spends UrgentSliceBudgetMs without asking " +
+                             "OpenUiRepaint.LocalInputInFlight — the larger budget is then spent DURING the drag the " +
+                             "3 ms floor exists to protect, which is the objection that killed the naive version";
+
+            // ── arm D: faster, never a whole frame.
+            double floor = Convert.ToDouble(slice.GetValue(null));
+            double fast = Convert.ToDouble(urgent.GetValue(null));
+            if (!(fast > floor))
+                yield return "L74 urgency-inert: UrgentSliceBudgetMs (" + fast + ") is not above SliceBudgetMs (" +
+                             floor + ") — an urgent cycle finishes no sooner, so the gesture latency it was added " +
+                             "for (~¼-⅓ s on an inventory change) is unchanged and the branch is decoration";
+            if (!(fast < 16.6))
+                yield return "L74 urgency-owns-the-frame: UrgentSliceBudgetMs (" + fast + " ms) is not under one " +
+                             "60 fps frame — a single slice can then consume the whole frame, which is the monolithic " +
+                             "walk returning under a new name (L50's measured 34-95 ms stall)";
         }
 
         /// <summary>True when a method's IL READS any static field. The purity arm of L65 needs "no static

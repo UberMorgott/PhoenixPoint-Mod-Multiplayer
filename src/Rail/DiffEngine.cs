@@ -50,6 +50,15 @@ namespace Multiplayer.Network.Sync
         // the IL as a literal and RailCheck L50 could then no longer see that the walk loop actually reads
         // a budget — i.e. it could not tell a budget-gated walk from a monolithic one.
         internal static readonly double SliceBudgetMs = 3.0;
+        // The URGENT budget: a cycle a gesture asked for (FlushNow) may spend this much per frame instead.
+        // Measured need — an inventory/equip change took ~¼-⅓ s to appear on the other peers, because
+        // DiffAndEmit only runs when the WHOLE 625-root graph has been walked: at 3 ms/frame that is ~15
+        // frames on top of the tick wait, and FlushOnHostGesture only makes a cycle START earlier, never
+        // FINISH earlier. At 8 ms the same cycle completes in ~6 frames (~100 ms) while still costing well
+        // under one 60 fps frame, so the walk can never own a frame outright. Spent ONLY when the local user
+        // has no uncommitted input in flight (RunSlice) — that drag is the one thing the 3 ms floor was
+        // bought for. Field, not const, for the same reason as SliceBudgetMs: RailCheck L74 must SEE the read.
+        internal static readonly double UrgentSliceBudgetMs = 8.0;
 
         internal struct Entry
         {
@@ -76,6 +85,7 @@ namespace Multiplayer.Network.Sync
         private static bool _forceFull;
         private static readonly List<string> _forcePrefixes = new List<string>(); // scoped forced re-emit, see ForceReemit
         private static float _nextTickAt;
+        private static bool _cycleUrgent;   // a FlushNow is outstanding — see RunSlice / UrgentSliceBudgetMs
         private static float _nextPerfLogAt;
         private static bool _reportWritten;
         private static Timing _armedTiming;                                                 // N3, see ArmChangeDrivenFlush
@@ -271,6 +281,11 @@ namespace Multiplayer.Network.Sync
         private static readonly Dictionary<string, uint> _rootTouchedSeq = new Dictionary<string, uint>(StringComparer.Ordinal);
         private static readonly Dictionary<string, int> _crcHeals = new Dictionary<string, int>(StringComparer.Ordinal); // "<peer>|<root>" → re-emits spent
         private static bool _crcWalk;   // inside RootCrc: the walk must ship NOTHING and touch no tick state
+        // RootCrc's own scratch — see there. Separate from the periodic walk's set on purpose: a CRC may be
+        // taken on the host mid-cycle (HandleCrcReport) and must not disturb the cycle in progress.
+        private static readonly List<Entry> _crcOrdered = new List<Entry>();
+        private static readonly HashSet<object> _crcVisited = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        private static readonly Dictionary<string, Entry> _crcSnap = new Dictionary<string, Entry>(StringComparer.Ordinal);
         // Subtree paths the rail declares PER-PEER (see IsPeerLocal). Recorded by the walk where it drops the
         // element; excluded from the CRC because both peers legitimately hold different ones, so hashing them
         // would report permanent false divergence. BELT ONLY since law 58: the element is dropped at its
@@ -380,16 +395,20 @@ namespace Multiplayer.Network.Sync
         internal static uint RootCrc(string rootKey, object rootObj)
         {
             if (rootObj == null || (rootObj is UnityEngine.Object uo && uo == null)) return 0u;
-            var ordered = new List<Entry>();
+            // Scratch is REUSED and cleared, not reallocated — "fresh" means EMPTY, which is what the
+            // cross-root-alias argument above actually needs. The periodic walk made the same call
+            // (double-buffered _ordered/_visited/_snapshotBack) after a fresh set of three per tick at 23k
+            // entries turned out to be megabytes of garbage for nothing; this one runs on the CLIENT, once
+            // a second, over roots up to the same size. Not reentrant, and never was: both drivers
+            // (ClientCrcTick, HandleCrcReport) run on the game loop and VisitEntity never calls back in.
+            _crcOrdered.Clear();
+            _crcVisited.Clear();
+            _crcSnap.Clear();
             _peerLocalPaths.Clear();
             _crcWalk = true;
-            try
-            {
-                VisitEntity(rootKey, rootObj, new HashSet<object>(ReferenceEqualityComparer.Instance), ordered,
-                            new Dictionary<string, Entry>(StringComparer.Ordinal), 0);
-            }
+            try { VisitEntity(rootKey, rootObj, _crcVisited, _crcOrdered, _crcSnap, 0); }
             finally { _crcWalk = false; }
-            return CrcOfEntries(ordered, _peerLocalPaths);
+            return CrcOfEntries(_crcOrdered, _peerLocalPaths);
         }
 
         /// <summary>The hash itself, split out so the harness can assert what it must detect (L25): entries
@@ -489,14 +508,16 @@ namespace Multiplayer.Network.Sync
         /// stays capped at <see cref="SliceBudgetMs"/> per frame, and N gestures inside one cycle coalesce
         /// into ONE walk by construction (a cycle already running simply keeps running). Nothing is
         /// skipped and no tick rate was lowered — the walk, its order and its emit are byte-identical.
-        /// COST, stated: a forced delta now ships at cycle completion (≤ ~250 ms at 60 fps) rather than in
-        /// the same frame. The periodic path always had that latency. Upgrade path if it ever matters: a
-        /// larger slice budget while a cycle is urgent — deliberately not built until something needs it.
+        /// COST, stated: a forced delta ships at cycle completion rather than in the same frame. That is the
+        /// latency the user measured on inventory (~¼-⅓ s), so the upgrade path this comment reserved is now
+        /// TAKEN: the flag also marks the cycle URGENT, and an urgent cycle walks at
+        /// <see cref="UrgentSliceBudgetMs"/> per frame (~100 ms end to end) unless the local user has
+        /// uncommitted input in flight. Still not the same frame — the whole point is that no walk owns one.
         ///
         /// No guards needed: <see cref="HostTick"/> still returns on non-host / no session / no geoscape,
         /// so this can be called from any seam that knows the host just changed something the client
         /// must not wait for.</summary>
-        public static void FlushNow() { _nextTickAt = 0f; }
+        public static void FlushNow() { _nextTickAt = 0f; _cycleUrgent = true; }
 
         /// <summary>N3 third arm — HOST-LOCAL gestures. The law-4a capture seams fire on the host too
         /// (they conclude "run native"); this is their one-line exit into the same change-driven flush
@@ -623,12 +644,18 @@ namespace Multiplayer.Network.Sync
         /// existing getter-throw → Incident path in VisitEntity.</summary>
         private static void RunSlice(NetworkEngine engine)
         {
+            // The urgency gate (the upgrade path FlushNow reserved). An urgent cycle is one a GESTURE asked
+            // for, and a gesture's delta is what the other peers are waiting on — so it may spend the larger
+            // budget. It may NOT while the local user has uncommitted input in flight: the low floor exists
+            // for exactly that drag, and raising it there would cost frame time during the interaction it
+            // was bought to protect. Asked of input state, not of screens (OpenUiRepaint.LocalInputInFlight).
+            double budget = _cycleUrgent && !OpenUiRepaint.LocalInputInFlight() ? UrgentSliceBudgetMs : SliceBudgetMs;
             var sw = Stopwatch.StartNew();
             while (_cycleNext < _cycleRoots.Count)
             {
                 var root = _cycleRoots[_cycleNext++];
                 VisitRoot(root.Key, root.Value);
-                if (sw.Elapsed.TotalMilliseconds >= SliceBudgetMs) break;
+                if (sw.Elapsed.TotalMilliseconds >= budget) break;
             }
             _cycleFrames++;
             double ms = sw.Elapsed.TotalMilliseconds;
@@ -637,6 +664,7 @@ namespace Multiplayer.Network.Sync
             if (_cycleNext < _cycleRoots.Count) return;
             int roots = _cycleRoots.Count;
             _cycleRoots = null;
+            _cycleUrgent = false; // this cycle carried whatever the flush asked for
             DiffAndEmit(engine, (long)Math.Round(_cycleWalkMs), _maxSliceMs, _cycleFrames, roots);
         }
 
