@@ -123,6 +123,7 @@ namespace RailCheck
             laws.AddRange(CommandSeamLaw(game));
             laws.AddRange(ResolvedDamageLaw(game));
             laws.AddRange(ActorLifecycleLaw(game));
+            laws.AddRange(EnemyActionLaw(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -6311,9 +6312,12 @@ namespace RailCheck
 
             // the rider set is non-vacuous, and the base-method postfix really is reached by every rider
             var moveAbility = game.GetType("PhoenixPoint.Tactical.Entities.Abilities.MoveAbility");
-            var endTurnAbility = game.GetType("PhoenixPoint.Tactical.Entities.Abilities.EndTurnAbility");
-            if (moveAbility == null || endTurnAbility == null)
-                yield return "L65 rider-probe-gone: MoveAbility / EndTurnAbility no longer resolve, so whether the " +
+            // A5 INVERTED the set (whitelist → declared drops), so the "does it discriminate" probe had to move
+            // with it: EndTurnAbility now rides ON PURPOSE (an alien ending its own turn is an ordinary order),
+            // and the thing that must still NOT ride is the ambient presentation law 5 names by name.
+            var localAbility = game.GetType("PhoenixPoint.Tactical.Entities.Abilities.IdleAbility");
+            if (moveAbility == null || localAbility == null)
+                yield return "L65 rider-probe-gone: MoveAbility / IdleAbility no longer resolve, so whether the " +
                              "rider set discriminates anything was NOT checked";
             else
             {
@@ -6326,9 +6330,10 @@ namespace RailCheck
                 if (!riderOf(moveAbility))
                     yield return "L65 rider-set-empty: MoveAbility is not in the declared rider set — A3a's one and " +
                                  "only rider is not carried, so the arc relays nothing at all";
-                if (riderOf(endTurnAbility))
-                    yield return "L65 rider-set-unbounded: EndTurnAbility counts as an A3a rider — the set is not " +
-                                 "discriminating, so abilities whose payload this codec cannot carry would be relayed";
+                if (riderOf(localAbility))
+                    yield return "L65 rider-set-unbounded: IdleAbility counts as a rider — the set is not " +
+                                 "discriminating at all, so the idle pose and the cover hug (law 5's named " +
+                                 "local-only presentation) would be relayed and settled on every peer";
                 // The seam is a postfix on the BASE Activate, so a rider subclass that overrides Activate WITHOUT
                 // reaching base.Activate is invisible to it — no compile error, no log, just a soldier that moves
                 // on one screen. CaterpillarMoveAbility (the ground-vehicle move) is exactly such a subclass.
@@ -7318,6 +7323,251 @@ namespace RailCheck
                 yield return "L67 state-leaks-between-battles: the damage family's reset does not drop the lifecycle " +
                              "state, so the next battle starts holding the previous one's pending deaths, corpse " +
                              "manifests and spawn-apply depth";
+        }
+
+        /// <summary>L68 — AN ENEMY ACTION IS THE HOST'S, AND A CLIENT ONLY WATCHES (tactical arc A5). Five arms,
+        /// one per way "the aliens finally move on a client" can quietly become two different battles:
+        ///   (a) A CLIENT NEVER RUNS AI DECISION-MAKING FOR A MIRRORED FACTION. The AI turn stays held at
+        ///       <c>TacticalFaction.AIUpdateCrt</c>, and a client that reaches the command seam with an AI
+        ///       faction's ORDERED ability is REPORTED, never relayed — the AI draws from the global generator
+        ///       before it activates anything, so a re-deriving peer picks a different TARGET, not merely a
+        ///       different roll.
+        ///   (b) EVERY ENEMY ACTION A PEER SEES CAME FROM THE HOST'S STREAM. The host mirrors EVERY faction,
+        ///       and the premise that makes one seam enough is asserted rather than assumed: the AI's whole
+        ///       action vocabulary funnels through <c>ExecuteAndWait</c> → <c>Activate</c>.
+        ///   (c) AUTONOMOUS REACTIONS NEVER CROSS, IN EITHER DIRECTION. Overwatch, return fire, zone-of-control
+        ///       and synced fire are raised per-peer off replicated state; mirroring one (or emitting one as an
+        ///       intent) fires it TWICE. The declared-local ability set is complete, reasoned, and matches by
+        ///       assignability rather than exact type.
+        ///   (d) THE MIRROR'S EXEMPTION IS NOT A HOLE. A mirrored activation is exempt from the capture seam
+        ///       (<c>SyncApplyScope</c>) and from NOTHING ELSE — in particular it must NOT enter
+        ///       <c>MirrorApplyScope</c>, which would stand down the damage neuter and every foreign-patch
+        ///       guard for the whole animation.
+        ///   (e) THE TWO A4 CEILINGS ARE CLOSED. An unrebuildable spawn is a NAMED refusal, and the resnapshot
+        ///       carries the host's corpse manifest.</summary>
+        private static IEnumerable<string> EnemyActionLaw(Assembly game)
+        {
+            var sync = typeof(Multiplayer.Tactical.TacticalCommandSync);
+            var mod = sync.Assembly;
+            var aiGate = mod.GetType("Multiplayer.Tactical.ClientAiGate");
+            var life = mod.GetType("Multiplayer.Tactical.TacticalActorLifecycle");
+            var keyer = mod.GetType("Multiplayer.Tactical.TacticalActorKey");
+            if (aiGate == null || life == null || keyer == null)
+            {
+                yield return "L68 seams-missing: ClientAiGate / TacticalActorLifecycle / TacticalActorKey no " +
+                             "longer exist, so NOTHING about the enemy-action arc was checked";
+                yield break;
+            }
+            var TCS = typeof(Multiplayer.Tactical.TacticalCommandSync);
+            Func<bool, bool, bool, bool, string> decide = Multiplayer.Tactical.TacticalCommandSync.RelayDecision;
+
+            // ─── (a) A CLIENT NEVER DECIDES FOR A MIRRORED FACTION ───
+            if (decide(false, false, true, false) != Multiplayer.Tactical.TacticalCommandSync.RelayClientRanAi)
+                yield return "L68 client-runs-the-aliens: a CLIENT activating an AI faction's ORDERED ability is " +
+                             "not reported as local AI (got '" + decide(false, false, true, false) + "'). Either it " +
+                             "is relayed as an ordinary order — a client commanding the Pandorans — or it is " +
+                             "silently dropped, and the one thing that must never happen is that it passes unnoticed: " +
+                             "ClientAiGate holding the AI turn is what makes this state unreachable, and this is the " +
+                             "detector for the day it stops holding";
+            if (decide(false, true, true, false) != Multiplayer.Tactical.TacticalCommandSync.RelayIntent)
+                yield return "L68 client-mute: a client's own PLAYER-team order is no longer emitted as an intent — " +
+                             "A3a's whole client half is gone";
+            var aiAttr = aiGate.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                               .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (ModMethod(aiGate, "Prefix") == null ||
+                aiAttr?.declaringType != typeof(PhoenixPoint.Tactical.Levels.TacticalFaction) ||
+                aiAttr.methodName != "AIUpdateCrt")
+                yield return "L68 ai-gate-mistargeted: ClientAiGate no longer prefixes TacticalFaction.AIUpdateCrt " +
+                             "(target=" + (aiAttr?.declaringType?.Name ?? "<none>") + "." + (aiAttr?.methodName ?? "<none>") +
+                             ") — that coroutine IS the AI turn, and off it every client runs its own enemy AI while " +
+                             "also playing the host's mirrored one";
+
+            // ─── (b) THE HOST RELAYS EVERY FACTION, AND ONE SEAM REALLY IS ENOUGH ───
+            if (decide(true, false, true, false) != Multiplayer.Tactical.TacticalCommandSync.RelayMirror)
+                yield return "L68 enemy-unmirrored: the HOST does not mirror an AI faction's ordered ability (got '" +
+                             decide(true, false, true, false) + "') — THIS IS ARC A5. Without it a client watches a " +
+                             "frozen enemy side: aliens teleport in state through the damage and resnapshot records " +
+                             "and never act on screen";
+            if (decide(true, true, true, false) != Multiplayer.Tactical.TacticalCommandSync.RelayMirror)
+                yield return "L68 player-unmirrored: the host no longer mirrors the shared player team either";
+            var activated = ModMethod(sync, "OnAbilityActivated");
+            if (!Reaches(activated, "TacticalCommandSync", "RelayDecision"))
+                yield return "L68 capture-decides-inline: the command capture does not consult RelayDecision — the " +
+                             "who-relays-what rule is then unexecutable, and every arm above is about a function " +
+                             "nothing calls";
+            // THE PREMISE THE WHOLE ARC RESTS ON: the AI reaches the SAME funnel a player click does. Its actions
+            // are coroutines, so the calls live in compiler-generated state machines, not in Execute's own IL.
+            var aiAction = game.GetType("PhoenixPoint.Tactical.AI.Actions.AIActionMoveAndAttack");
+            var execWait = HarmonyLib.AccessTools.Method(
+                typeof(PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility), "ExecuteAndWait", new[] { typeof(object) });
+            if (aiAction == null || execWait == null)
+                yield return "L68 ai-funnel-gone: AIActionMoveAndAttack / TacticalAbility.ExecuteAndWait no longer " +
+                             "resolve, so whether enemy actions reach this arc's seam at all was NOT checked";
+            else
+            {
+                bool aiReachesFunnel = aiAction.GetNestedTypes(AllMembers).Concat(new[] { aiAction })
+                    .SelectMany(t => t.GetMethods(AllMembers).Cast<MethodBase>())
+                    .Any(m => Reaches(m, null, "ExecuteAndWait"));
+                if (!aiReachesFunnel)
+                    yield return "L68 ai-funnel-drifted: the AI's action classes no longer reach " +
+                                 "TacticalAbility.ExecuteAndWait — every one of the twelve used to, which is WHY A5 " +
+                                 "needed no enemy-specific channel. Off that funnel the enemy is unreplicated again " +
+                                 "and nothing here would say so";
+                if (!Reaches(execWait, null, "Activate"))
+                    yield return "L68 funnel-broken: TacticalAbility.ExecuteAndWait no longer calls Activate. That " +
+                                 "three-line wrapper is the ONLY reason one prefix on Activate covers the AI, " +
+                                 "overwatch, return fire and zone-of-control — all of which enter through Execute";
+            }
+
+            // ─── (c) AUTONOMOUS REACTIONS ARE LOCAL, BOTH WAYS ───
+            if (decide(true, false, true, true) != Multiplayer.Tactical.TacticalCommandSync.RelayLocalAutonomous)
+                yield return "L68 reaction-mirrored: the host MIRRORS an autonomous reaction (got '" +
+                             decide(true, false, true, true) + "'). The receiving peer raises its own from the same " +
+                             "replicated board, so the mirrored copy is a SECOND overwatch shot on that screen";
+            if (decide(false, true, true, true) != Multiplayer.Tactical.TacticalCommandSync.RelayLocalAutonomous)
+                yield return "L68 reaction-intended: a CLIENT emits an autonomous reaction as an intent (got '" +
+                             decide(false, true, true, true) + "') — the host already fired its own, so the peer's " +
+                             "soldier shoots twice. This is the exact hazard A5 opens by making enemies move on a " +
+                             "client at all, and it is the one arm that must never be vacuous";
+            var regular = new PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget();
+            if (Multiplayer.Tactical.TacticalCommandSync.IsAutonomous(regular))
+                yield return "L68 autonomy-overreaches: an ordinary Regular-attack payload reads as autonomous, so " +
+                             "NOTHING would ever be relayed";
+            if (Multiplayer.Tactical.TacticalCommandSync.IsAutonomous(null))
+                yield return "L68 autonomy-invents: a payload-less activation reads as autonomous — an alien " +
+                             "evacuating (AIActionMoveAndEscape:46 passes null) would stop crossing";
+            foreach (var at in new[]
+            {
+                PhoenixPoint.Tactical.Entities.Abilities.AttackType.Overwatch,
+                PhoenixPoint.Tactical.Entities.Abilities.AttackType.ReturnFire,
+                PhoenixPoint.Tactical.Entities.Abilities.AttackType.ZoneControl,
+                PhoenixPoint.Tactical.Entities.Abilities.AttackType.Synced,
+            })
+            {
+                var t = new PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget { AttackType = at };
+                if (!Multiplayer.Tactical.TacticalCommandSync.IsAutonomous(t))
+                    yield return "L68 autonomy-misses-" + at + ": a shot the engine itself tags " + at + " does not " +
+                                 "read as autonomous. Those four are exactly the set " +
+                                 "TacticalLevelController.GetReturnFireAbilities:1401 refuses to chain reactions " +
+                                 "from — the engine's own word for 'nobody ordered this'";
+            }
+            if (!Reaches(activated, "TacticalCommandSync", "IsAutonomous"))
+                yield return "L68 autonomy-unconsulted: the command capture never asks whether the activation was " +
+                             "autonomous, so the rule above is about a function nothing calls";
+            // The premise: overwatch really is raised per-peer off movement, outside any intent stream.
+            if (HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Tactical.Levels.TacticalLevelController),
+                                              "TriggerOverwatch") == null)
+                yield return "L68 reaction-premise-stale: TacticalLevelController.TriggerOverwatch is gone — the " +
+                             "per-peer overwatch trigger this whole arm exists for may no longer be there, and the " +
+                             "autonomous rule would be guarding nothing";
+
+            // THE DECLARED-LOCAL SET: complete, reasoned, and matched by ASSIGNABILITY.
+            var localSet = Multiplayer.Tactical.TacticalCommandSync.LocalAbilities;
+            if (localSet == null || localSet.Count == 0)
+                yield return "L68 local-set-empty: no ability is declared local, so the inverted rider set relays " +
+                             "the idle pose, the death ability and every fall — dropping is allowed, dropping " +
+                             "SILENTLY is not, and relaying everything is the other half of the same failure";
+            else
+                foreach (var kv in localSet.OrderBy(k => k.Key.Name, StringComparer.Ordinal))
+                {
+                    if (string.IsNullOrEmpty(kv.Value))
+                        yield return "L68 local-unreasoned: " + kv.Key.Name + " is declared local with an empty " +
+                                     "reason — that is an omission wearing a decision's clothes";
+                    if (kv.Key.Assembly != game)
+                        yield return "L68 local-not-a-game-type: " + kv.Key.FullName + " is declared local but does " +
+                                     "not come from the game assembly";
+                }
+            Func<Type, bool> rides = t =>
+            {
+                var inst = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(t);
+                return Multiplayer.Tactical.TacticalCommandSync.IsRider(
+                    (PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility)inst);
+            };
+            // (that the set DISCRIMINATES at all — MoveAbility rides, IdleAbility does not — is L65's arm and
+            // is deliberately not repeated here. What is A5's and only A5's is HOW it matches.)
+            // ASSIGNABILITY, not exact type: TacticalHurtReactionAbility is abstract with four shipped
+            // subclasses, and an exact-match set would have relayed every one of them.
+            var reposition = game.GetType("PhoenixPoint.Tactical.Entities.Abilities.RepositionAbility");
+            if (reposition == null)
+                yield return "L68 local-subclass-probe-gone: RepositionAbility no longer resolves, so whether the " +
+                             "declared-local set matches SUBCLASSES was NOT checked";
+            else if (rides(reposition))
+                yield return "L68 local-set-exact-match-only: RepositionAbility rides even though its base " +
+                             "TacticalHurtReactionAbility is declared local — the set is being matched by exact " +
+                             "type, so every hurt-reaction subclass leaks onto the wire and fires twice";
+
+            // The inversion's own cost, made audible: while the set was a whitelist of five analysed classes the
+            // codec's Dropped list was a design note; now that anything may ride, an activation that really
+            // carries a dropped field must SAY so or it is replayed aiming at something else.
+            var codec = mod.GetType("Multiplayer.Tactical.TacAbilityTargetCodec");
+            if (!Reaches(ModMethod(codec, "Write"), "TacAbilityTargetCodec", "NoteDroppedField"))
+                yield return "L68 drop-inaudible: the ability-target codec no longer reports a payload field it " +
+                             "DROPS. A whitelist made that a design note; the inverted set makes it a live hazard — " +
+                             "an ability nobody analysed rides with its ItemContainer/Equipment/MultiAbilityTargets " +
+                             "missing and every other peer replays a different action, silently";
+
+            // ─── (d) THE EXEMPTION IS NOT A HOLE ───
+            if (!Reaches(activated, "SyncApplyScope", "get_Active"))
+                yield return "L68 mirror-echoes: the capture does not stand down inside a SyncApplyScope, so every " +
+                             "mirrored enemy action is re-captured and relayed straight back (law 8)";
+            var applyActivate = ModMethod(sync, "ApplyActivate");
+            if (Reaches(applyActivate, "MirrorApplyScope", "Enter"))
+                yield return "L68 exemption-too-wide: the mirrored ACTIVATION runs inside a MirrorApplyScope. That " +
+                             "scope means 'the host's already-resolved damage is being re-applied' and it stands " +
+                             "down the damage neuter AND every foreign ref-DamageResult patch — holding it open " +
+                             "across a whole mirrored animation would let this peer compute its own damage for the " +
+                             "shot and apply it on top of the host's";
+
+            // ─── (e) THE TWO A4 CEILINGS ───
+            var refuse = ModMethod(keyer, "Refuse");
+            var resolve = ModMethod(keyer, "Resolve");
+            var resetKeys = ModMethod(keyer, "Reset");
+            if (refuse == null || resolve == null || resetKeys == null)
+                yield return "L68 refusal-gone: TacticalActorKey.Refuse no longer exists — a spawn this peer cannot " +
+                             "rebuild goes back to being reported as a lost packet, which sends every later reader " +
+                             "hunting a message that was never sent";
+            else
+            {
+                resetKeys.Invoke(null, null);
+                refuse.Invoke(null, new object[] { -3, "THE DECLARED REASON" });
+                var probe = new object[] { null, -3, null };
+                if (resolve.Invoke(null, probe) != null || (probe[2] as string) != "THE DECLARED REASON")
+                    yield return "L68 refusal-unnamed: a REFUSED key does not come back with its own reason (got '" +
+                                 (probe[2] as string ?? "<none>") + "') — the refusal is then indistinguishable from " +
+                                 "a key map the peers built differently";
+                resetKeys.Invoke(null, null);
+                probe = new object[] { null, -3, null };
+                resolve.Invoke(null, probe);   // the arm is about what RESOLVE says after a reset — asking it is the arm
+                if ((probe[2] as string) == "THE DECLARED REASON")
+                    yield return "L68 refusal-leaks-between-battles: a refusal survived Reset, so the NEXT battle " +
+                                 "refuses a key that battle never refused";
+                if (!Reaches(ModMethod(life, "ApplySpawn"), "TacticalActorKey", "Refuse"))
+                    yield return "L68 refusal-unregistered: the spawn applier logs that it cannot rebuild the host's " +
+                                 "actor and registers NOTHING, so every command and hit naming that key is refused " +
+                                 "with the wrong reason for the rest of the mission";
+            }
+            var damage = typeof(Multiplayer.Tactical.TacticalDamageSync);
+            // The resnapshot body is written by a LAMBDA handed to Send, so its calls live in a
+            // compiler-generated display class rather than in HandleResnapRequest's own IL (the same trap L65
+            // documents for SyncEngine's inbound chain). BOTH calls are required in the SAME method on purpose:
+            // WriteLoot alone would be satisfied by OnDamageApplied's writer lambda and the arm would pass with
+            // the resnapshot half deleted, while ManifestFor has exactly one caller in the repo.
+            bool resnapShipsManifest = damage.GetNestedTypes(AllMembers).Concat(new[] { damage })
+                .SelectMany(t => t.GetMethods(AllMembers).Cast<MethodBase>())
+                .Any(m => Reaches(m, "TacticalActorLifecycle", "ManifestFor") &&
+                          Reaches(m, "TacticalActorLifecycle", "WriteLoot"));
+            if (!resnapShipsManifest)
+                yield return "L68 resnap-manifestless: the host's resnapshot does not carry the corpse manifest for " +
+                             "the actors it reports DEAD. That is the recovery path's own copy of A4's rule, and " +
+                             "without it a recovered corpse keeps every item the host destroyed";
+            var resnapSeq = CalleeSequence(ModMethod(damage, "ApplyResnap"));
+            int iDeclare = IndexOfCall(resnapSeq, "Declare", "LootMirror");
+            int iForce = IndexOfCall(resnapSeq, "ForceDeath", "TacticalActorLifecycle");
+            if (iDeclare < 0 || iForce < 0 || iDeclare > iForce)
+                yield return "L68 resnap-manifest-too-late: the resnapshot declares the corpse manifest after it " +
+                             "forces the death (declare@" + iDeclare + ", force@" + iForce + ") — DieAbility.DropItems " +
+                             "asks its questions inside that same synchronous chain, so a declaration afterwards " +
+                             "changes nothing at all";
         }
 
         /// <summary>True when a method's IL READS any static field. The purity arm of L65 needs "no static

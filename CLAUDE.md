@@ -86,7 +86,25 @@ BEHAVIOR (per-subsystem mirroring).
    `ApplyDamage`). **Evacuation is an ordinary A3a rider** — every peer runs the native
    `ExitMissionAbility.HideActorInExitZone` hide (EvacuatedStatus + UnapplyAll + MountedStatus); nothing in this
    arc destroys an actor, and RailCheck asserts that mechanically (v1's `d41b8f8` destroy = empty
-   BattleSummary + per-frame NREs + dead evac button). A5-A6 (inventory UI, destructibles) pending.
+   BattleSummary + per-frame NREs + dead evac button). **A5** (law L68) = ENEMY / AI ACTION REPLICATION,
+   and it takes **no new surface and no new op**: an enemy action IS the `TacticalAbility.Activate` A3a
+   already mirrors — all twelve `PhoenixPoint.Tactical.AI.Actions` classes reach
+   `TacticalAbility.ExecuteAndWait:1168` (three lines over `Activate:1078`), AI movement is the same
+   `MoveAbility` a player click uses, and nothing under `Tactical.AI.Actions` mutates the model directly —
+   so the HOST simply mirrors EVERY faction instead of only the player's. The AI stays host-only because
+   its DECISION draws from `UnityEngine.Random` before anything activates (`AIFaction.SelectTarget:395`),
+   so a re-deriving peer picks a different TARGET, not merely a different roll; `ClientAiGate` still holds
+   the client's AI turn and `RelayDecision` is the runtime detector for the day it stops. Two consequences:
+   the rider WHITELIST became a declared DROP list (`TacticalCommandSync.LocalAbilities` — the AI executes
+   data-configured ability defs, which no whitelist can enumerate; five of the seven entries are exactly
+   the classes `TacticalLevelController.AbilityExecuted:1183` calls ambient), and an **autonomous**
+   activation — `TacticalAbilityTarget.AttackType != Regular`, i.e. the engine's own
+   Overwatch/ReturnFire/ZoneControl/Synced set — **never crosses in either direction**, because every peer
+   raises its own off the same replicated board and a mirror would be a SECOND overwatch shot (the exact
+   hazard that appears the moment enemies move on a client). A5 also closed A4's two ceilings: a spawn with
+   a runtime-generated `ComponentSetDef` is a NAMED refusal registered against its key
+   (`TacticalActorKey.Refuse`) instead of a misleading "a spawn record never arrived", and the 0x84
+   resnapshot carries the host's archived corpse manifest. A6 (inventory UI, destructibles) pending.
    Shared-seed determinism = still a separate future project.
 6. **Canonical diff.** Same state → byte-identical Delta: traversal sorted by stable IDs, fixed
    field order, no nondeterministic dictionary walks. IMPLEMENTATION (recon-bound): diff walks the

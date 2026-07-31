@@ -75,6 +75,18 @@ namespace Multiplayer.Tactical
         private static readonly Dictionary<int, TacticalActorBase> _byDerived = new Dictionary<int, TacticalActorBase>();
         private static bool _built;
 
+        /// <summary>A5 — KEYS THIS PEER HAS PERMANENTLY REFUSED, with the reason. A4 left one honest ceiling:
+        /// a spawn whose <c>ComponentSetDef</c> is RUNTIME-GENERATED (a deployed <c>GeoCharacter</c>, a
+        /// mod-built template) carries no guid any other peer can look up, so the actor really does exist on
+        /// the host alone. That is not fixable from here — the rebuild would need the character's whole
+        /// loadout, and the geoscape level it lives in is not even loaded during a battle — so A5 makes the
+        /// FAILURE first-class instead: the key is registered with its reason, and every later command, hit or
+        /// settle naming it says "the host spawned an actor this peer cannot rebuild" instead of the generic
+        /// and actively misleading "either the peers built different key maps or a spawn record never
+        /// arrived". A refusal that names its own cause is a documented boundary; one that names the wrong
+        /// cause sends the next reader hunting a lost packet that never existed.</summary>
+        private static readonly Dictionary<int, string> _refused = new Dictionary<int, string>();
+
         /// <summary>The next free derived ordinal, shared by the battle-start build and by every mid-battle
         /// host assignment (A4). One counter, so the two schemes can never mint the same number.</summary>
         private static int _nextDerived = -1;
@@ -87,8 +99,15 @@ namespace Multiplayer.Tactical
         {
             _derived.Clear();
             _byDerived.Clear();
+            _refused.Clear();
             _built = false;
             _nextDerived = -1;
+        }
+
+        /// <summary>Record that this peer can never resolve <paramref name="key"/>, and why. Idempotent.</summary>
+        internal static void Refuse(int key, string why)
+        {
+            if (key != 0 && !string.IsNullOrEmpty(why)) _refused[key] = why;
         }
 
         /// <summary>Build the derived-key map for THIS battle. Idempotent by design — it runs at the FIRST
@@ -216,6 +235,7 @@ namespace Multiplayer.Tactical
                 // sitting right there.
                 TacticalActorBase derived;
                 if (_byDerived.TryGetValue(key, out derived)) return derived;
+                if (_refused.TryGetValue(key, out why)) return null;   // A5: the documented refusal wins
                 if (!_built)
                 {
                     why = "derived actor key " + key + " arrived before this peer built its battle key map — " +
@@ -237,6 +257,7 @@ namespace Multiplayer.Tactical
                 if ((int)a.GeoUnitId == key) { hits++; found = a; }
             if (hits == 0)
             {
+                if (_refused.TryGetValue(key, out why)) return null;   // A5: the documented refusal wins
                 why = "no actor with GeoUnitId " + key + " exists on this peer — the peers are looking at " +
                       "different rosters";
                 return null;
@@ -379,8 +400,39 @@ namespace Multiplayer.Tactical
             { "UseShootOriginCache",  "a per-peer performance hint (a projectile-origin transform cache), never shared state" },
         };
 
+        /// <summary>A5 — THE DROP HAS TO BE AUDIBLE, not merely declared. While the rider set was a whitelist of
+        /// five classes their payloads were known and the <see cref="Dropped"/> list was a design note. A5
+        /// inverts the set, so abilities nobody analysed now cross — and one whose payload really does carry a
+        /// dropped field would be replayed WITHOUT it, silently aiming at something else. This says so once per
+        /// field, the same shape as every other "this peer knowingly did less" notice in the arc. The list is
+        /// the reference-typed entries that a real activation can actually populate; the value-typed and
+        /// presentation ones (CoverDirection, UseShootOriginCache, GameObject) are reached another way or are
+        /// local by law 5.</summary>
+        private static readonly HashSet<string> _saidDropped = new HashSet<string>(StringComparer.Ordinal);
+
+        internal static void ResetDropNotices() => _saidDropped.Clear();
+
+        private static void NoteDroppedField(string field, object value)
+        {
+            if (value == null || !_saidDropped.Add(field)) return;
+            string why;
+            Dropped.TryGetValue(field, out why);
+            Debug.LogWarning("[Multiplayer][tac] an activation carried TacticalAbilityTarget." + field +
+                             ", which this codec DROPS (" + (why ?? "no declared reason") + "). The order still " +
+                             "crosses, but every other peer replays it without that field — first occurrence only.");
+        }
+
         internal static void Write(BinaryWriter w, TacticalAbilityTarget t)
         {
+            if (t != null)
+            {
+                NoteDroppedField("TacticalItem", t.TacticalItem);
+                NoteDroppedField("Equipment", t.Equipment);
+                NoteDroppedField("ItemContainer", t.ItemContainer);
+                NoteDroppedField("InventoryComponent", t.InventoryComponent);
+                NoteDroppedField("MultiAbilityTargets", t.MultiAbilityTargets);
+                NoteDroppedField("FollowupAbility", t.FollowupAbility);
+            }
             ushort mask = 0;
             if (t != null)
             {
@@ -515,6 +567,25 @@ namespace Multiplayer.Tactical
     /// Divergence is therefore cosmetic and self-correcting on arrival, which is what makes shipping the order
     /// instead of the path safe.
     ///
+    /// A5 — THE ENEMY RIDES THIS SAME SEAM, and needed NO new surface, NO new op and no enemy-specific
+    /// channel. An enemy action is not a new concept: every one of the twelve
+    /// <c>PhoenixPoint.Tactical.AI.Actions</c> classes reaches <c>TacticalAbility.ExecuteAndWait</c>, which is
+    /// three lines over <c>Activate</c> (<c>TacticalAbility</c>:1168-1176 → :1078) — the very funnel this seam
+    /// already captures — and AI movement is the SAME <c>MoveAbility</c> a player click uses
+    /// (<c>AIActionMoveAndAttack</c>:27, <c>AIActionMoveToPosition</c>:25). There is no bypass: nothing under
+    /// <c>Tactical.AI.Actions</c> touches Navigate/SetTransform/ApplyDamage/SpawnActor directly. So A5 is one
+    /// changed decision — the HOST now mirrors EVERY faction, not just the player's — plus the two things that
+    /// decision makes necessary: the rider whitelist becomes a declared DROP list (the AI executes
+    /// data-configured ability defs, which no whitelist can enumerate) and autonomous reactions are pinned
+    /// LOCAL (see <see cref="IsAutonomous"/>) so that mirrored enemy movement cannot make both peers fire the
+    /// same overwatch.
+    ///
+    /// WHY THE HOST KEEPS THE AI: the decision itself consumes the global generator BEFORE any ability
+    /// activates (<c>AIFaction.SelectTarget</c>:395 <c>WeightedRandomElement</c>, <c>AIActionYuggothAbility</c>
+    /// :76-80), and its INPUTS diverge by construction on a client, so a re-deriving peer picks a different
+    /// TARGET, not merely a different roll. The client's AI stays held by A2's <c>ClientAiGate</c>; A5 adds the
+    /// runtime detector for the day it stops holding (<see cref="RelayClientRanAi"/>).
+    ///
     /// ARBITRATION is <see cref="Validate"/>, a PURE function of replicated state shaped exactly like
     /// <c>EventSync.Validate</c> — no ownership table, no claim ledger, no in-memory arbiter of any kind (v1's
     /// was in-memory and every reload wiped it). The host executes intents in ARRIVAL ORDER; the first spends,
@@ -531,27 +602,120 @@ namespace Multiplayer.Tactical
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
 
-        /// <summary>THE DECLARED RIDER SET — which abilities this arc actually carries. A3a is movement and
-        /// nothing else; A3b adds the attack abilities here and to <see cref="TacAbilityTargetCodec.Rides"/>,
-        /// with no new surface. <c>is</c> rather than an exact type match on purpose: <c>CaterpillarMoveAbility</c>
-        /// (the ground-vehicle move) derives from <c>MoveAbility</c> and is the same order with the same payload.
-        /// Everything OUTSIDE the set stays exactly as arc A2 left it — local and unrelayed — and says so once
-        /// per ability def, because "my grenade did nothing on the other screen" with no log line is this
-        /// project's dominant bug class.
+        /// <summary>
+        /// A5 INVERTS THE RIDER SET, and the inversion IS the arc's generic content. A3a..A4 kept a WHITELIST
+        /// of five ability classes; A5 had to carry the enemy AI, and the enemy AI does not use five classes —
+        /// all twelve <c>PhoenixPoint.Tactical.AI.Actions</c> classes reach one funnel with a DATA-CONFIGURED
+        /// ability def (<c>AIActionExecuteAbility</c>:32, <c>AIActionMoveAndExecuteAbility</c>:61 execute
+        /// whatever <c>AIActionExecuteAbilityDef.AbilityDefs</c> names — which is how every Chiron/Siren/Scylla
+        /// special, every worm/egg spawn and every TFTV alien ability is authored). A whitelist cannot enumerate
+        /// a def-driven set, and growing it per alien is precisely the per-subsystem hand-sync the mandate
+        /// forbids. So the list is now the DROP list, in the same shape and for the same reason as
+        /// <see cref="TacAbilityTargetCodec.Dropped"/>: dropping is allowed, dropping SILENTLY is not.
         ///
-        /// A4 ADDS EVACUATION, and it needs NOTHING else: <c>ExitMissionAbility.Activate</c>:32-36 and
-        /// <c>EvacuateMountedActorsAbility.Activate</c>:57-69 both call <c>base.Activate(parameter)</c>, so the
-        /// A3a capture already sees them, and what they do — <c>HideActorInExitZone</c>:25-30 applies
-        /// <c>EvacuatedStatusDef</c>, unapplies every OTHER status, and hands the actor to the exit zone's
-        /// <c>VehicleComponent.ApplyMountedStatus</c> — is exactly the native HIDE the mandate requires.
-        /// Relaying the ORDER therefore makes every peer run the game's own hide; NOTHING in this repo
-        /// destroys an evacuated actor, which is the v1 regression (d41b8f8: an empty BattleSummary, per-frame
-        /// NREs in UIStateCharacterSelected, a dead evac button). The game itself never destroys a live actor
-        /// either — <c>ActorSpawner.DestroyActor</c> has exactly ONE caller in the whole assembly,
-        /// <c>DieAbility.PostProcessDeath</c>:63-74, and only when the def says not to keep the body.</summary>
-        internal static bool IsRider(TacticalAbility ability) =>
-            ability is MoveAbility || ability is ShootAbility || ability is BashAbility ||
-            ability is ExitMissionAbility || ability is EvacuateMountedActorsAbility;
+        /// THE SET IS THE GAME'S OWN, not one invented here. Five of the seven are exactly the classes
+        /// <c>TacticalLevelController.AbilityExecuted</c>:1183 excludes from its panic sweep — the engine's own
+        /// answer to "which activations are ambient machinery rather than an action". The other two are this
+        /// repo's own arcs: death belongs to A4 and falling is raised per-peer from each peer's own map update.
+        /// <c>IsAssignableFrom</c> and not an exact match: <c>TacticalHurtReactionAbility</c> is abstract with
+        /// four shipped subclasses (<c>RepositionAbility</c>, <c>SpawnMistAbility</c>,
+        /// <c>StartPreparingAbility</c>, <c>YuggothShieldsAbility</c>) and a whitelist by exact type would have
+        /// relayed every one of them.
+        /// </summary>
+        internal static readonly Dictionary<Type, string> LocalAbilities = new Dictionary<Type, string>
+        {
+            { typeof(IdleAbility),
+              "presentation: the idle pose and the cover hug on arrival, which law 5 names local-only by name" },
+            { typeof(EnterPlayAbility),
+              "the actor's own entry animation; A4 replicates the SPAWN (0x84 op 3) and every peer then plays " +
+              "this for the actor it just built" },
+            { typeof(PanicAbility),
+              "ambient: TacticalLevelController.ExecuteQueuedAbilitiesSequence:1225 raises it on every peer from " +
+              "the same replicated willpower" },
+            { typeof(AIEvaluationAbility),
+              "ambient: the AI's own evaluation pass, and a client runs no AI at all (ClientAiGate)" },
+            { typeof(TacticalHurtReactionAbility),
+              "ambient: fired from OnActorDamaged:110-129 by damage that is ALREADY replicated (0x84), so every " +
+              "peer raises it for itself off the same hit" },
+            { typeof(DieAbility),
+              "A4 owns death: every peer dies through the game's own Health.Set(0) -> OnHealthChange:616-622 -> " +
+              "Die trigger, and its parameter is a DeathReport rather than a TacticalAbilityTarget" },
+            { typeof(FallNoSupportAbility),
+              "ambient: TacticalLevelController.CheckForFallAbilitiesToActivate:1917-1930 activates it for EVERY " +
+              "actor of EVERY faction from each peer's own OnMapUpdate, so relaying it would fall twice" },
+        };
+
+        /// <summary>The declared reason this ability never crosses the wire, or null when it rides. Null is the
+        /// DEFAULT — that is the inversion.</summary>
+        internal static string LocalReason(TacticalAbility ability)
+        {
+            if (ability == null) return "there is no ability";
+            var t = ability.GetType();
+            foreach (var kv in LocalAbilities)
+                if (kv.Key.IsAssignableFrom(t)) return kv.Value;
+            return null;
+        }
+
+        /// <summary>Everything rides except a DECLARED local. Kept under its A3a name because it is still the
+        /// same question — "does this arc carry this ability" — and because <see cref="Validate"/>,
+        /// <see cref="ApplyActivate"/> and RailCheck all ask it.</summary>
+        internal static bool IsRider(TacticalAbility ability) => LocalReason(ability) == null;
+
+        /// <summary>
+        /// AN AUTONOMOUS ACTIVATION — one the GAME raised off replicated board state, not one a peer ordered.
+        /// It must never cross the wire in EITHER direction: the host must not mirror it (the receiving peer's
+        /// own machinery is about to raise the same one, so it would fire twice) and a client must not emit it
+        /// as an intent (the host already raised its own, so it would fire twice THERE — the double-shot A5
+        /// would otherwise introduce the moment enemies start moving on a client).
+        ///
+        /// THE MARKER IS THE GAME'S OWN: <c>TacticalAbilityTarget.AttackType</c>. Overwatch
+        /// (<c>TacticalLevelController.ExecuteOverwatch</c>:1375 builds its target with
+        /// <c>AttackType.Overwatch</c>), return fire (:1434/:1494, <c>AttackType.ReturnFire</c> — note
+        /// <c>ReturnFireAbility.Activate</c>:82-85 THROWS, so what actually activates is the retaliation
+        /// ShootAbility/BashAbility), zone of control (<c>TriggerAbilityZoneOfControlStatus</c>:231,
+        /// <c>AttackType.ZoneControl</c>) and synced fire (<c>MassShootTargetActorEffect</c>:68,
+        /// <c>AttackType.Synced</c>) are EXACTLY the four the engine itself refuses to chain further reactions
+        /// from (<c>TacticalLevelController.GetReturnFireAbilities</c>:1401). So "not Regular" is not a
+        /// heuristic — it is the engine's own word for "nobody ordered this".
+        ///
+        /// WHY LOCAL AND NOT BLOCKED ON THE CLIENT: every input these six triggers read is already replicated
+        /// (position by the 0x82 mirror + settle, damage by 0x84, the map by both), so both peers raise the
+        /// same reaction off the same board; and the only AUTHORITATIVE consequence — the damage — is already
+        /// neutered on a client (<c>DamageAccumulation.ApplyAddedDamage</c>, law L66a) and arrives resolved on
+        /// 0x84. Blocking them instead would also have to block <c>IdleAbility</c>, which law 5 names as
+        /// local-only presentation, and would strand the native coroutines that unapply the overwatch status
+        /// after the shot. KNOWN CEILING: a reaction that fires on one peer and not the other leaves that
+        /// peer's AP/status different until the host's next settle for that actor or a resnapshot.
+        /// </summary>
+        internal static bool IsAutonomous(TacticalAbilityTarget target) =>
+            target != null && target.AttackType != AttackType.Regular;
+
+        // ─── THE RELAY DECISION, pure so the whole arc is falsifiable headless ───
+
+        internal const string RelayMirror = "mirror";
+        internal const string RelayIntent = "intent";
+        internal const string RelayLocalAutonomous = "local-autonomous";
+        internal const string RelayLocalDeclared = "local-declared";
+        internal const string RelayClientRanAi = "client-ran-ai";
+
+        /// <summary>WHO RELAYS WHAT, as a PURE function of four booleans — no statics, no game types — so
+        /// A5's whole containment story is executable in RailCheck (law L68) instead of argued in a comment.
+        /// Shaped exactly like <see cref="Validate"/> and for the same reason.
+        ///
+        /// <see cref="RelayClientRanAi"/> is not a relay decision at all, it is a DETECTOR: a client reaching
+        /// this seam with a non-player faction's ordered ability means its own AI decided something, which
+        /// <c>ClientAiGate</c> is supposed to make impossible. It is reported as loudly as it is because the
+        /// AI's decisions consume the global <c>UnityEngine.Random</c> BEFORE any ability activates
+        /// (<c>AIFaction.SelectTarget</c>:395 <c>WeightedRandomElement</c>), so a re-deriving peer picks
+        /// different TARGETS, not merely different rolls.</summary>
+        internal static string RelayDecision(bool isHost, bool factionIsPlayerControlled, bool abilityIsRider,
+                                             bool activationIsAutonomous)
+        {
+            if (activationIsAutonomous) return RelayLocalAutonomous;
+            if (!abilityIsRider) return RelayLocalDeclared;
+            if (isHost) return RelayMirror;                       // A5: EVERY faction, the AI's included
+            return factionIsPlayerControlled ? RelayIntent : RelayClientRanAi;
+        }
 
         /// <summary>HOST: the peer whose intent is currently being replayed natively, so the mirror can skip
         /// the peer that already played it locally. 0 = the host's own gesture (mirror to everyone). Scoped by
@@ -592,6 +756,7 @@ namespace Multiplayer.Tactical
             _saidKeyless.Clear();
             _replayOriginPeer = 0;
             TacticalActorKey.Reset();   // A3b: the derived alien keys belong to ONE battle and to no other
+            TacAbilityTargetCodec.ResetDropNotices();   // A5: each battle reports its own dropped fields
             FumbleGate.Reset();
         }
 
@@ -635,47 +800,67 @@ namespace Multiplayer.Tactical
             if (SyncApplyScope.Active) return;           // law 8: this activation IS a mirror being applied
             var actor = ability == null ? null : ability.TacticalActorBase;
             if (actor == null) return;
-            // The SHARED PLAYER TEAM only. Enemy abilities are the host's own AI acting on the host, and A2
-            // already holds every client inside the whole AI turn (ClientAiGate), so relaying them is arc A5's
-            // job — not a gap here, and emphatically not something to shout about once per alien.
             var faction = actor.TacticalFaction;
-            if (faction == null || !faction.IsControlledByPlayer) return;
+            if (faction == null) return;
 
-            if (!IsRider(ability))
+            var target = parameter as TacticalAbilityTarget;
+            string name = ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name;
+            string relay = RelayDecision(engine.IsHost, faction.IsControlledByPlayer, IsRider(ability),
+                                         IsAutonomous(target));
+
+            if (relay == RelayLocalAutonomous)
             {
-                // The honest boundary, said out loud exactly once per ability def per battle: a player
-                // gesture that reaches no other peer is invisible divergence, which is this project's
-                // dominant bug class.
-                string name = ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name;
+                // Said once, at Log level: this is a DECISION, not a gap. Every peer raises the same reaction
+                // off the same replicated board and the damage is the host's on 0x84.
+                if (_saidUncovered.Add("auto:" + name))
+                    Debug.Log("[Multiplayer][tac] '" + name + "' activated as " + target.AttackType + " — an " +
+                              "autonomous reaction, so it stays LOCAL on every peer (each raises its own off the " +
+                              "same replicated board; only its damage crosses, on 0x84).");
+                return;
+            }
+            if (relay == RelayLocalDeclared)
+            {
                 if (_saidUncovered.Add(name))
-                    Debug.LogWarning("[Multiplayer][tac] '" + name + "' is NOT a declared rider — it ran " +
-                                     "LOCALLY on this peer only and no other peer will see it. A3a/A3b/A4 carry " +
-                                     "movement, shooting (incl. thrown and melee weapons), bash and evacuation.");
+                    Debug.Log("[Multiplayer][tac] '" + name + "' is DECLARED LOCAL — " + LocalReason(ability) +
+                              ". It ran on this peer only, by design.");
+                return;
+            }
+            if (relay == RelayClientRanAi)
+            {
+                // Law L68a's runtime detector. ClientAiGate holds the whole AI turn, so a client reaching here
+                // with an AI faction's ORDERED ability means it decided something the host never did.
+                if (_saidKeyless.Add("ai:" + name))
+                    Debug.LogError("[Multiplayer][tac] this CLIENT activated '" + name + "' on " + actor.name +
+                                   ", whose faction is AI-controlled — the client ran enemy AI of its own. Enemy " +
+                                   "actions are the host's and arrive on 0x82; a locally-decided one picks a " +
+                                   "DIFFERENT target (the AI draws from UnityEngine.Random before it activates " +
+                                   "anything). Nothing is relayed and the two battles have parted ways.");
                 return;
             }
 
             int key = TacticalActorKey.Of(actor);
             string guid = ability.AbilityDef == null ? null : ability.AbilityDef.Guid;
-            var target = parameter as TacticalAbilityTarget;
             // A3b: the payload now names OTHER actors too, and an unkeyable one would ride as key 0 and be
             // refused on the far side AFTER the order was already accepted — so it is refused HERE, where the
-            // gesture still belongs to somebody, and said out loud.
+            // gesture still belongs to somebody, and said out loud. A NULL target is NOT a refusal any more
+            // (A5): the game legitimately activates with no payload — AIActionMoveAndEscape:46 evacuates with
+            // ExecuteAndWait(null) — and the order is still meaningful, so the wire carries "no target" as
+            // itself rather than dropping the whole command.
             string unkeyable = target == null ? null : FirstUnkeyableTargetField(target);
-            if (key == 0 || string.IsNullOrEmpty(guid) || target == null || unkeyable != null)
+            if (key == 0 || string.IsNullOrEmpty(guid) || unkeyable != null)
             {
-                string who = actor.name + " / " + (ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name);
+                string who = actor.name + " / " + name;
                 if (_saidKeyless.Add(who))
                     Debug.LogError("[Multiplayer][tac] command NOT relayed for " + who + " — " +
                                    (key == 0 ? "the commanded actor has no shared key (no GeoTacUnitId and no derived battle key)"
                                     : string.IsNullOrEmpty(guid) ? "the ability def has no guid"
-                                    : target == null ? "the activation carried no TacticalAbilityTarget"
                                     : "the payload's " + unkeyable + " has no shared key, so no peer could tell " +
                                       "WHICH actor is being targeted") +
                                    ". This peer acted alone; no other peer will follow.");
                 return;
             }
 
-            if (engine.IsHost)
+            if (relay == RelayMirror)
             {
                 // THE FUMBLE PRE-ROLL (law L66d). TacticalAbility.Activate:1109 rolls the fumble INSIDE the
                 // native body — after this prefix — and TacticalAbility.PlayAction:988-993 (and TFTV's
@@ -685,12 +870,12 @@ namespace Multiplayer.Tactical
                 // native roll here and memoizes it, so :1109 gets the same value and the bit rides WITH the
                 // order. Clients never roll at all (FumbleCheckGate).
                 bool fumbled = FumbleGate.RollForHost(ability);
-                Send(OpActivate, "mirror " + actor.name + " " + Fmt(target.PositionToApply) + (fumbled ? " FUMBLED" : ""),
+                Send(OpActivate, "mirror " + actor.name + " " + name + " " + Where(target) + (fumbled ? " FUMBLED" : ""),
                      _replayOriginPeer, w => { WriteCommand(w, key, guid, target); w.Write(fumbled); });
             }
             else
                 IntentRail.Send(SurfaceIds.TacCommandIntent, OpIntentActivate,
-                                "command " + actor.name + " " + Fmt(target.PositionToApply),
+                                "command " + actor.name + " " + name + " " + Where(target),
                                 w => WriteCommand(w, key, guid, target));
         }
 
@@ -741,14 +926,28 @@ namespace Multiplayer.Tactical
                  w => { w.Write(key); w.Write(pos.x); w.Write(pos.y); w.Write(pos.z); w.Write(ap); w.Write(wp); });
         }
 
+        /// <summary>A5 adds the HAS-TARGET flag, and it is not thrift: the codec writes mask 0 for a null
+        /// target and reads it back as an EMPTY one, so without the flag "the game passed null" and "the game
+        /// passed a blank payload" arrive identical. <c>TacticalAbility.Activate</c>:1086 assigns
+        /// <c>LastAbilityTarget = parameter as TacticalAbilityTarget</c> from it, which later readers branch on
+        /// (<c>TacAchievementTracker</c>:181 dereferences it), so the mirror must pass exactly what the host
+        /// passed. Abilities really do activate with null: <c>AIActionMoveAndEscape</c>:46 evacuates with
+        /// <c>ExecuteAndWait(null)</c>.</summary>
         private static void WriteCommand(BinaryWriter w, int actorKey, string abilityGuid, TacticalAbilityTarget target)
         {
             w.Write(actorKey);
             w.Write(abilityGuid);
-            TacAbilityTargetCodec.Write(w, target);
+            w.Write(target != null);
+            if (target != null) TacAbilityTargetCodec.Write(w, target);
         }
 
+        private static TacticalAbilityTarget ReadCommandTarget(BinaryReader r, List<string> unresolved) =>
+            r.ReadBoolean() ? TacAbilityTargetCodec.Read(r, Tlc(), unresolved) : null;
+
         private static string Fmt(Vector3 v) => v.IsNaN() ? "<none>" : v.ToString("0.#");
+
+        private static string Where(TacticalAbilityTarget t) =>
+            t == null ? "<no target>" : Fmt(t.PositionToApply);
 
         private static void Send(byte op, string what, ulong excludePeer, Action<BinaryWriter> writeBody)
         {
@@ -837,7 +1036,7 @@ namespace Multiplayer.Tactical
             // A throw here funnels into IntentRail's reject path. A key that does not resolve is NOT a throw —
             // it is a named refusal, so the losing peer is told which actor the host could not find.
             var unresolved = new List<string>();
-            var target = TacAbilityTargetCodec.Read(r, tlc, unresolved);
+            var target = ReadCommandTarget(r, unresolved);
             if (unresolved.Count > 0)
             {
                 IntentRail.Reject(SurfaceIds.TacCommandIntent, senderPeerId,
@@ -892,7 +1091,7 @@ namespace Multiplayer.Tactical
             finally { _replayOriginPeer = 0; }
             Debug.Log("[Multiplayer][tac] HOST command from peer=" + senderPeerId + " ACCEPTED — " + actor.name +
                       " " + (ability.AbilityDef == null ? "?" : ability.AbilityDef.name) + " → " +
-                      Fmt(target.PositionToApply) + " nonce=" + nonce);
+                      Where(target) + " nonce=" + nonce);
         }
 
         // ─── CLIENT: apply ─────────────────────────────────────────────────
@@ -916,7 +1115,7 @@ namespace Multiplayer.Tactical
                         int actorKey = r.ReadInt32();
                         string abilityGuid = r.ReadString();
                         var unresolved = new List<string>();
-                        var target = TacAbilityTargetCodec.Read(r, Tlc(), unresolved);
+                        var target = ReadCommandTarget(r, unresolved);
                         bool fumbled = r.ReadBoolean();
                         ApplyActivate(actorKey, abilityGuid, target, fumbled, unresolved);
                     }

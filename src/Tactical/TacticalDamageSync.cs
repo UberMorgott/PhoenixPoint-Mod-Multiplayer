@@ -413,9 +413,9 @@ namespace Multiplayer.Tactical
             {
                 SayOnce("unkeyed-" + (actor == null ? "<null>" : actor.name),
                     "[Multiplayer][tac] damage to " + (actor == null ? "an ownerless receiver" : actor.name) +
-                    " is NOT relayed — it has no shared key (no GeoTacUnitId and no derived battle key, so it " +
-                    "entered play after this battle's key map was built: arc A5). That actor's health will " +
-                    "differ on every other screen for the rest of the mission.");
+                    " is NOT relayed — it has no shared key (no GeoTacUnitId, no derived battle key and no " +
+                    "host-assigned spawn key, which A4 mints for every mid-battle spawn). That actor's health " +
+                    "will differ on every other screen for the rest of the mission.");
                 return;
             }
             string slot = TacticalActorKey.SlotOf(receiver) ?? "";
@@ -496,11 +496,17 @@ namespace Multiplayer.Tactical
                 foreach (var a in actors)
                 {
                     var stats = (a as TacticalActor)?.CharacterStats;
-                    w.Write(TacticalActorKey.Of(a));
+                    int aKey = TacticalActorKey.Of(a);
+                    w.Write(aKey);
                     w.Write(Stat(a.Health));
                     w.Write(stats == null ? float.NaN : (float)stats.ActionPoints);
                     w.Write(stats == null ? float.NaN : (float)stats.WillPoints);
                     w.Write((byte)(a.IsDead ? 1 : 0));
+                    // A5 closes A4's last ceiling: a resnapshot-FORCED death used to carry no corpse manifest,
+                    // so the recovered corpse kept every item the host had destroyed. The host's own pre-roll is
+                    // archived for the whole battle, so the recovery path can carry the same answers the killing
+                    // hit did.
+                    if (a.IsDead) TacticalActorLifecycle.WriteLoot(w, TacticalActorLifecycle.ManifestFor(aKey));
                     var slots = new List<ItemSlot>();
                     var body = (a as TacticalActor)?.BodyState;
                     if (body != null) foreach (var s in body.GetHealthSlots()) slots.Add(s);
@@ -676,6 +682,9 @@ namespace Multiplayer.Tactical
                     int key = r.ReadInt32();
                     float hp = r.ReadSingle(), ap = r.ReadSingle(), wp = r.ReadSingle();
                     bool dead = r.ReadByte() != 0;
+                    // A5: the manifest must be DECLARED before the forced death below, for exactly A4's reason —
+                    // DieAbility.DropItems asks its questions inside that same synchronous chain.
+                    if (dead) LootMirror.Declare(key, TacticalActorLifecycle.ReadLoot(r));
                     int slots = r.ReadInt32();
                     string why;
                     var actor = TacticalActorKey.Resolve(tlc, key, out why);
@@ -700,8 +709,9 @@ namespace Multiplayer.Tactical
                         Correct(stats.WillPoints, wp, actor.name + " WP");
                     }
                     // A4: the resnapshot's dead flag is now ACTED ON. It is the recovery path's only structural
-                    // repair, and it is why a lost 0x84 death record is not permanent. No corpse manifest
-                    // travels with a resnapshot, so this peer keeps every item (loudly, in LootMirror).
+                    // repair, and it is why a lost 0x84 death record is not permanent. A5 gave it the host's
+                    // archived corpse manifest too (declared above), so a recovered corpse holds what the
+                    // host's does instead of everything.
                     if (dead && !actor.IsDead) TacticalActorLifecycle.ForceDeath(actor, "the host's resnapshot");
                 }
             _resnapRequested = false;

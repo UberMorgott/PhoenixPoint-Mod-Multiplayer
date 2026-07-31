@@ -100,11 +100,29 @@ namespace Multiplayer.Tactical
         private static readonly Dictionary<int, List<KeyValuePair<string, bool>>> _pendingDeath =
             new Dictionary<int, List<KeyValuePair<string, bool>>>();
 
+        /// <summary>HOST: every corpse manifest this battle has produced, kept rather than consumed. A4 shipped
+        /// the manifest only with the killing hit or the death op, which left the RESNAPSHOT — the one recovery
+        /// path this surface has — forcing deaths with no manifest at all, so a recovered corpse kept every item
+        /// the host had destroyed (loudly, in <see cref="LootMirror.TryDeclared"/>, but wrongly). The archive is
+        /// what makes the recovery path carry the same answers the live path did; it is per-battle and a battle
+        /// has tens of deaths, so keeping them costs nothing.</summary>
+        private static readonly Dictionary<int, List<KeyValuePair<string, bool>>> _deathManifest =
+            new Dictionary<int, List<KeyValuePair<string, bool>>>();
+
         private static readonly HashSet<string> _said = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>The archived manifest for an actor the host has already buried, or null. Never consumed —
+        /// a resnapshot may legitimately be asked for more than once.</summary>
+        internal static List<KeyValuePair<string, bool>> ManifestFor(int key)
+        {
+            List<KeyValuePair<string, bool>> list;
+            return _deathManifest.TryGetValue(key, out list) ? list : null;
+        }
 
         internal static void Reset()
         {
             _pendingDeath.Clear();
+            _deathManifest.Clear();
             _said.Clear();
             SpawnApplyScope.Reset();
             LootMirror.Reset();
@@ -204,11 +222,25 @@ namespace Multiplayer.Tactical
             var factionDef = string.IsNullOrEmpty(factionGuid) || repo == null ? null : repo.GetDef(factionGuid) as TacticalFactionDef;
             if (setDef == null || factionDef == null)
             {
-                Debug.LogError("[Multiplayer][tac] the host spawned an actor this peer CANNOT rebuild (set guid '" +
-                               setGuid + "' -> " + (setDef == null ? "nothing" : setDef.name) + ", faction guid '" +
-                               factionGuid + "' -> " + (factionDef == null ? "nothing" : factionDef.name) +
-                               "). It will fight on the host's screen and be absent from this one for the rest of " +
-                               "the mission; every command and every hit naming key " + key + " is refused from here on.");
+                // A5 — A FIRST-CLASS REFUSAL, not a log line and a shrug. The commonest cause is a
+                // RUNTIME-GENERATED ComponentSetDef (a deployed GeoCharacter, a mod-built template): it has no
+                // guid any other peer can look up, and it cannot be rebuilt from here at all — the actor's real
+                // identity is its geoscape character, and the geoscape level is not loaded during a battle. So
+                // the key is REGISTERED as unresolvable WITH THIS REASON, and every later record naming it says
+                // so, instead of the generic "a spawn record never arrived" that sends the next reader hunting
+                // a lost packet. The refusal is the boundary; the silence would be the bug.
+                string why = "the host spawned this actor with " +
+                             (setDef == null
+                                ? (string.IsNullOrEmpty(setGuid)
+                                    ? "a RUNTIME-GENERATED ComponentSetDef (no shared guid at all — the shape a " +
+                                      "deployed GeoCharacter or a mod-built template has), which no peer can look up"
+                                    : "ComponentSetDef guid '" + setGuid + "', which resolves to nothing here")
+                                : "TacticalFactionDef guid '" + factionGuid + "', which resolves to nothing here") +
+                             ", so it exists on the host alone and can never be rebuilt on this peer";
+                TacticalActorKey.Refuse(key, why);
+                Debug.LogError("[Multiplayer][tac] host spawn key " + key + " REFUSED — " + why +
+                               ". It will fight on the host's screen and be absent from this one for the rest of " +
+                               "the mission; every command and every hit naming it is refused with this reason.");
                 return;
             }
 
@@ -260,7 +292,7 @@ namespace Multiplayer.Tactical
                     "be told — it stays alive on every other screen for the rest of the mission.");
                 return;
             }
-            _pendingDeath[key] = LootMirror.HostPreRoll(actor);
+            _pendingDeath[key] = _deathManifest[key] = LootMirror.HostPreRoll(actor);
         }
 
         /// <summary>Take the pending loot list for an actor the killing damage record is about to name; null
