@@ -395,6 +395,7 @@ namespace Multiplayer.Tactical
             if (state == Level.State.Loading || state == Level.State.Playing) return;
             if (prevState != Level.State.Playing) return;
             TacticalTurnSync.Reset();
+            TacticalCommandSync.Reset();   // A3a: 0x82 seq + pending settles must not survive into the next battle
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return;
             engine.SaveTransfer?.OpenReturnBarrier();

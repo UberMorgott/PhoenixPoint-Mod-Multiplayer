@@ -120,6 +120,7 @@ namespace RailCheck
             laws.AddRange(SurfaceBandLaw());
             laws.AddRange(TurnControlLaw());
             laws.AddRange(MissionEndLaw());
+            laws.AddRange(CommandSeamLaw(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -5996,6 +5997,374 @@ namespace RailCheck
                 yield return "L64 outcome-gate-open: the GeoMission.Complete gate does not consult " +
                              "IntentRail.ShouldRunNative — the client applies the result its own unreplicated actors " +
                              "produced instead of mirroring the host's";
+        }
+
+        /// <summary>L65 — THE PER-SOLDIER COMMAND SEAM IS GENERIC, ARBITRATED AND CONTAINED (tactical arc A3a).
+        /// One law, three arms, because A3a's three ways to fail are three different silences:
+        ///   (a) CODEC — the <c>TacticalAbilityTarget</c> payload is an EXPLICIT declared field set and no
+        ///       field of the game type is silently dropped. The type holds live references, so a reflective
+        ///       codec is unsound; a hand-written one drifts the moment the game type grows a field. Both
+        ///       halves of the declaration are checked against the REAL type, the round-trip is EXECUTED, and
+        ///       an undecodable field bit must THROW rather than read a misaligned stream.
+        ///   (b) ARBITER — <c>Validate</c> is PURE: no static reads, no game types in its signature, so there
+        ///       is no ownership table and no in-memory claim ledger for a reload to lose (v1's died on every
+        ///       reload and nobody noticed for a month). Every refusal case is executed here, including the
+        ///       two that decide the "two peers, one soldier" race — the actor is already executing, and the
+        ///       AP check — because an arbiter that is only exercised in-game is an arbiter nobody has tested.
+        ///   (c) CONTAINMENT — a client's own click reaches the wire as an INTENT and never stays local-only;
+        ///       every model write a mirror peer makes runs inside a <c>SyncApplyScope</c> through the game's
+        ///       OWN writers; and the host really ships the closer, without which the acting peer's
+        ///       speculative local play is never corrected and the arc's whole "no rewind engine" premise is
+        ///       a lie. Plus the two Harmony handles really bind, and the base-method postfix really is
+        ///       reached by every rider subclass — an override that stopped calling <c>base.Activate</c> would
+        ///       delete this seam with no compile error and no log line.</summary>
+        private static IEnumerable<string> CommandSeamLaw(Assembly game)
+        {
+            var sync = typeof(Multiplayer.Tactical.TacticalCommandSync);
+            var mod = sync.Assembly;
+            var codec = mod.GetType("Multiplayer.Tactical.TacAbilityTargetCodec");
+            var keyer = mod.GetType("Multiplayer.Tactical.TacticalActorKey");
+            var capture = mod.GetType("Multiplayer.Tactical.AbilityActivateCapture");
+            var closer = mod.GetType("Multiplayer.Tactical.AbilityActionEndCapture");
+            if (codec == null || keyer == null || capture == null || closer == null)
+            {
+                yield return "L65 seams-missing: TacAbilityTargetCodec / TacticalActorKey / AbilityActivateCapture / " +
+                             "AbilityActionEndCapture no longer exist, so NOTHING about the command seam was checked";
+                yield break;
+            }
+
+            // ─── (a) CODEC: the declared field set really covers the game type ───
+            var payload = typeof(PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget);
+            var rides = new HashSet<string>(Multiplayer.Tactical.TacAbilityTargetCodec.Rides, StringComparer.Ordinal);
+            var dropped = Multiplayer.Tactical.TacAbilityTargetCodec.Dropped;
+            if (rides.Count == 0)
+                yield return "L65 codec-vacuous: the codec declares NO riding field, so every command ships an empty " +
+                             "payload and no soldier ever receives a destination";
+            var real = payload.GetFields(BindingFlags.Public | BindingFlags.Instance)
+                              .Select(f => f.Name).ToList();
+            foreach (var name in real)
+            {
+                bool r = rides.Contains(name), d = dropped.ContainsKey(name);
+                if (!r && !d)
+                    yield return "L65 codec-uncovered: TacticalAbilityTarget." + name + " is declared NEITHER riding " +
+                                 "NOR dropped — the field set drifted away from the game type, which is exactly how a " +
+                                 "payload starts silently losing something";
+                else if (r && d)
+                    yield return "L65 codec-double-declared: TacticalAbilityTarget." + name + " is in BOTH the riding " +
+                                 "and the dropped list, so what the codec does with it is undecidable";
+                else if (d && string.IsNullOrEmpty(dropped[name]))
+                    yield return "L65 codec-unreasoned-drop: TacticalAbilityTarget." + name + " is dropped with an " +
+                                 "empty reason — a drop without a stated reason is an omission wearing a declaration";
+            }
+            var realSet = new HashSet<string>(real, StringComparer.Ordinal);
+            foreach (var name in rides.Concat(dropped.Keys).Where(n => !realSet.Contains(n)).OrderBy(n => n, StringComparer.Ordinal))
+                yield return "L65 codec-stale-declaration: the codec declares '" + name + "' but TacticalAbilityTarget " +
+                             "has no such public instance field — the declaration is describing a type that no longer exists";
+            int bits = 0;
+            for (ushort k = Multiplayer.Tactical.TacAbilityTargetCodec.KnownBits; k != 0; k >>= 1) bits += k & 1;
+            if (bits != rides.Count)
+                yield return "L65 codec-bitless-field: " + rides.Count + " field(s) declared riding but KnownBits has " +
+                             bits + " bit(s) set — a riding field with no bit can never be signalled as present";
+
+            // The round-trip, EXECUTED — an un-run codec is a comment.
+            var sent = new PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget
+            { PositionToApply = new Vector3(1.5f, -2.25f, 3.75f) };
+            PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget back = null;
+            byte[] wire;
+            using (var ms = new MemoryStream())
+            {
+                using (var w = new BinaryWriter(ms, Encoding.UTF8)) Multiplayer.Tactical.TacAbilityTargetCodec.Write(w, sent);
+                wire = ms.ToArray();
+            }
+            using (var ms = new MemoryStream(wire))
+            using (var rd = new BinaryReader(ms, Encoding.UTF8))
+                back = Multiplayer.Tactical.TacAbilityTargetCodec.Read(rd);
+            if (back == null || back.PositionToApply != sent.PositionToApply)
+                yield return "L65 codec-roundtrip: a destination written by the codec does not read back equal (" +
+                             sent.PositionToApply + " -> " + (back == null ? "<null>" : back.PositionToApply.ToString()) +
+                             ") — every relayed move would land somewhere else";
+            // "no destination" must survive as no destination: HasPositionToApply is literally "not NaN", so a
+            // codec that wrote a zero here would turn "move nowhere" into "move to the map origin".
+            using (var ms = new MemoryStream())
+            {
+                using (var w = new BinaryWriter(ms, Encoding.UTF8))
+                    Multiplayer.Tactical.TacAbilityTargetCodec.Write(w, new PhoenixPoint.Tactical.Entities.Abilities.TacticalAbilityTarget());
+                wire = ms.ToArray();
+            }
+            using (var ms = new MemoryStream(wire))
+            using (var rd = new BinaryReader(ms, Encoding.UTF8))
+                back = Multiplayer.Tactical.TacAbilityTargetCodec.Read(rd);
+            if (back == null || back.HasPositionToApply)
+                yield return "L65 codec-invents-a-destination: a target with NO PositionToApply reads back as having " +
+                             "one — an ability with no destination would be relayed as a move to the map origin";
+            // An unknown field bit must ABORT, not read past a misaligned payload.
+            bool threw = false;
+            using (var ms = new MemoryStream(new byte[] { 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }))
+            using (var rd = new BinaryReader(ms, Encoding.UTF8))
+            { try { Multiplayer.Tactical.TacAbilityTargetCodec.Read(rd); } catch { threw = true; } }
+            if (!threw)
+                yield return "L65 codec-swallows-unknown-fields: a payload declaring field bits this build cannot " +
+                             "decode is read anyway — every byte after the mask is then misaligned and the command " +
+                             "is executed against garbage instead of being refused";
+
+            // ─── (b) ARBITER: pure, and every refusal executed ───
+            var validate = ModMethod(sync, "Validate");
+            if (validate == null)
+                yield return "L65 arbiter-gone: TacticalCommandSync.Validate no longer exists";
+            else
+            {
+                foreach (var p in validate.GetParameters())
+                    if (!p.ParameterType.IsPrimitive && p.ParameterType != typeof(string))
+                        yield return "L65 arbiter-impure-signature: Validate takes '" + p.Name + "' of type " +
+                                     p.ParameterType.Name + " — a live game object in the arbiter's signature is how " +
+                                     "session-local state creeps back into a decision that must survive a reload";
+                if (ReadsAnyStatic(validate))
+                    yield return "L65 arbiter-reads-static: Validate reads static state — that is an ownership table / " +
+                                 "claim ledger by another name, and a reload empties it silently (v1's exact bug)";
+            }
+            // accept, then each refusal in turn. Every arm is a real case the host will meet.
+            const string ok = null;
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, false, null, 4f, 1f, 10f, 0f) != ok)
+                yield return "L65 arbiter-refuses-the-legal-case: a living player soldier on its own turn, with a " +
+                             "rider ability it can afford, is REFUSED — no peer could command anything";
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(false, true, true, true, true, true, false, null, 4f, 1f, 10f, 0f) == null)
+                yield return "L65 arbiter-accepts-a-ghost: a command for an actor the host cannot find is accepted";
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, false, true, true, true, true, false, null, 4f, 1f, 10f, 0f) == null)
+                yield return "L65 arbiter-commands-the-dead: a command for a DEAD actor is accepted";
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, false, true, true, true, false, null, 4f, 1f, 10f, 0f) == null)
+                yield return "L65 arbiter-commands-the-aliens: a command for an actor whose faction is NOT " +
+                             "player-controlled is accepted — a peer could walk the Pandorans around";
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, false, true, true, false, null, 4f, 1f, 10f, 0f) == null)
+                yield return "L65 arbiter-ignores-the-turn: a command is accepted while that faction is not playing " +
+                             "its turn — soldiers would move during the aliens' turn";
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, false, true, false, null, 4f, 1f, 10f, 0f) == null)
+                yield return "L65 arbiter-invents-abilities: a command naming a def guid the actor does not have is accepted";
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, false, false, null, 4f, 1f, 10f, 0f) == null)
+                yield return "L65 arbiter-runs-non-riders: a command for an ability outside the declared rider set is " +
+                             "accepted — the host would execute something no peer is mirroring";
+            // THE two-peers-one-soldier arms. These are the arbitration, not decoration.
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, true, null, 4f, 1f, 10f, 0f) == null)
+                yield return "L65 arbiter-double-commands: a second peer's command for a soldier that is ALREADY " +
+                             "executing an ability is accepted — both orders queue on one soldier and first-to-act-wins " +
+                             "is not enforced at all";
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, false, "NeedsMovementLeft", 4f, 1f, 10f, 0f) == null)
+                yield return "L65 arbiter-overrides-the-game: a command the game's OWN disabled-state gate refuses is " +
+                             "accepted — for movement that gate IS the out-of-AP rule (ActionPoints < 1)";
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, false, null, 0.5f, 1f, 10f, 0f) == null)
+                yield return "L65 arbiter-spends-what-is-gone: a command costing more AP than the actor has left is " +
+                             "accepted — the AP check IS the cross-turn arbiter for two peers on one soldier";
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, false, null, 4f, 1f, 1f, 3f) == null)
+                yield return "L65 arbiter-spends-willpower-it-lacks: a command costing more WP than the actor has is accepted";
+
+            // the host really consults it, really runs native, really refuses out loud
+            var handle = ModMethod(sync, "HandleActivate");
+            if (handle == null)
+                yield return "L65 host-handler-gone: TacticalCommandSync.HandleActivate no longer exists";
+            else
+            {
+                if (!Reaches(handle, "TacticalCommandSync", "Validate"))
+                    yield return "L65 host-unvalidated: HandleActivate does not call Validate — the host would run " +
+                                 "whatever any peer asked for, which is the arbiter this law exists for";
+                // Owner is Ability, not TacticalAbility: Activate's virtual SLOT is declared on Ability
+                // (Ability.cs:34) and that is the type the call token names, whatever the receiver's static
+                // type is. Naming TacticalAbility here would be a permanently-red law about nothing.
+                if (!Reaches(handle, "Ability", "Activate"))
+                    yield return "L65 host-not-native: HandleActivate does not reach TacticalAbility.Activate — an " +
+                                 "accepted command must run the SAME native funnel the host's own click runs";
+                if (!Reaches(handle, "IntentRail", "Reject"))
+                    yield return "L65 silent-refusal: HandleActivate does not reach IntentRail.Reject — a refused " +
+                                 "command would vanish with no log and no nudge, and the losing peer would keep its " +
+                                 "speculative local move forever";
+                if (!Reaches(handle, "TacticalCommandSync", "HostSettle"))
+                    yield return "L65 loser-unreconciled: HandleActivate never reaches HostSettle — a REJECTED command " +
+                                 "leaves that peer's speculative local play standing, and 'rollback is just the " +
+                                 "authoritative delta' becomes false";
+            }
+
+            // ─── (c) CONTAINMENT + delivery ───
+            var activated = ModMethod(sync, "OnAbilityActivated");
+            if (activated == null)
+                yield return "L65 capture-gone: TacticalCommandSync.OnAbilityActivated no longer exists — no click on " +
+                             "any peer ever reaches the wire";
+            else
+            {
+                if (!Reaches(activated, "IntentRail", "Send"))
+                    yield return "L65 client-click-is-local-only: the capture never reaches IntentRail.Send — a client " +
+                                 "would move its soldier on its own screen and tell nobody, which is precisely the " +
+                                 "divergence arc A2 left behind and A3a exists to close";
+                if (!Reaches(activated, "TacticalCommandSync", "Send"))
+                    yield return "L65 host-click-unmirrored: the capture never reaches the host's surface sender — the " +
+                                 "host's own orders would reach no peer";
+                if (!Reaches(activated, "TacticalCommandSync", "IsRider"))
+                    yield return "L65 capture-unfiltered: the capture does not consult the declared rider set — A3a " +
+                                 "would relay abilities whose payload the codec cannot carry";
+                if (!Reaches(activated, "TacticalActorKey", "Of"))
+                    yield return "L65 capture-unkeyed: the capture does not take the actor key — nothing on the wire " +
+                                 "would name WHICH soldier was commanded";
+            }
+            var send = ModMethod(sync, "Send");
+            if (!Reaches(send, "NetworkEngine", "BroadcastToAll") || !Reaches(send, "NetworkEngine", "BroadcastExcept"))
+                yield return "L65 sender-offline: the command surface sender does not reach both BroadcastToAll and " +
+                             "BroadcastExcept — the mirror must skip the peer that already played the order locally, " +
+                             "and the settle must reach everyone including it";
+            var ended = ModMethod(sync, "OnAbilityActionEnded");
+            var settle = ModMethod(sync, "HostSettle");
+            if (!Reaches(ended, "TacticalCommandSync", "HostSettle") || !Reaches(settle, "TacticalCommandSync", "Send"))
+                yield return "L65 closer-missing: the action-end seam does not ship a settle — move's AP cost is " +
+                             "charged once at end of traversal against an interrupt-dependent distance and is NOT " +
+                             "reproducible, so without the closer every peer's AP drifts from the host's silently";
+            var applyActivate = ModMethod(sync, "ApplyActivate");
+            if (applyActivate == null)
+                yield return "L65 mirror-gone: TacticalCommandSync.ApplyActivate no longer exists — a mirrored order " +
+                             "does nothing on the receiving peer";
+            else
+            {
+                if (!Reaches(applyActivate, "SyncApplyScope", "Enter"))
+                    yield return "L65 mirror-unscoped: ApplyActivate runs the native Activate OUTSIDE a SyncApplyScope, " +
+                                 "so its own capture postfix catches it and emits a fresh intent for an order it just " +
+                                 "received — an echo storm (law 8)";
+                if (!Reaches(applyActivate, "Ability", "Activate"))   // the virtual slot's declaring type — see above
+                    yield return "L65 mirror-hand-rolled: ApplyActivate does not run the native TacticalAbility.Activate " +
+                                 "— any second way of playing an order is a second, divergent tactical engine";
+            }
+            var applySettle = ModMethod(sync, "ApplySettle");
+            if (applySettle == null)
+                yield return "L65 settle-apply-gone: TacticalCommandSync.ApplySettle no longer exists — the host's " +
+                             "authoritative position and AP arrive and are thrown away";
+            else
+            {
+                // Same slot rule: SetTransform is declared on ActorComponent and overridden by
+                // TacticalActorBase (:665), so the call token names the base.
+                if (!Reaches(applySettle, "ActorComponent", "SetTransform"))
+                    yield return "L65 settle-not-native: ApplySettle does not write the position through the native " +
+                                 "SetTransform — only that raises ActorMoved / ActorMovedInNewTile, so vision and voxel " +
+                                 "state would silently stay at the pre-settle tile";
+                if (!Reaches(applySettle, "SyncApplyScope", "Enter"))
+                    yield return "L65 settle-unscoped: ApplySettle writes the model OUTSIDE a SyncApplyScope";
+            }
+            var clientTick = ModMethod(sync, "ClientTick");
+            if (clientTick == null || !Reaches(clientTick, "TacticalActorBase", "HasExecutingAbility"))
+                yield return "L65 settle-applied-too-early: the settle applier does not hold until its actor stops " +
+                             "executing — snapping a soldier while this peer is still playing the mirrored move is " +
+                             "overwritten by that move's own navigation and vanishes with no log line";
+            var engineTick = typeof(Multiplayer.Network.Sync.SyncEngine).GetMethod("Tick", AllMembers);
+            if (engineTick == null || !CalleeSequence(engineTick).Any(c => c.Name == "ClientTick" && c.DeclaringType == sync))
+                yield return "L65 settle-undriven: SyncEngine.Tick does not call TacticalCommandSync.ClientTick — every " +
+                             "settle is queued and never applied";
+
+            // ─── registration, teardown, and the two Harmony handles ───
+            if (!Reaches(ModMethod(sync, "RegisterIntents"), "IntentRail", "Register"))
+                yield return "L65 family-unregistered: TacticalCommandSync.RegisterIntents does not call " +
+                             "IntentRail.Register — the host has no op table for 0x83 and every command is rejected " +
+                             "as an unknown surface";
+            var ctor = typeof(Multiplayer.Network.Sync.SyncEngine).GetConstructors(AllMembers).FirstOrDefault();
+            if (ctor == null || !CalleeSequence(ctor).Any(c => c.Name == "RegisterIntents" && c.DeclaringType == sync))
+                yield return "L65 family-unwired: SyncEngine's constructor does not register the command family — it " +
+                             "exists but nothing arms it, so 0x83 is dead on arrival";
+            // The inbound chain is built as a LAMBDA in the constructor, so the call lives in a
+            // compiler-generated closure method, not in the ctor's own IL — sweep the type and its nested
+            // display classes rather than only the ctor (which is what made this arm fire on working code).
+            var engineType = typeof(Multiplayer.Network.Sync.SyncEngine);
+            bool inboundWired = engineType.GetNestedTypes(AllMembers).Concat(new[] { engineType })
+                .SelectMany(t => t.GetMethods(AllMembers).Cast<MethodBase>().Concat(t.GetConstructors(AllMembers)))
+                .Any(m => CalleeSequence(m).Any(c => c.Name == "HandleInbound" && c.DeclaringType == sync));
+            if (!inboundWired)
+                yield return "L65 inbound-unwired: SyncEngine's constructor does not chain " +
+                             "TacticalCommandSync.HandleInbound into the tactical inbound hook — every 0x82 mirror and " +
+                             "settle is dropped on arrival";
+            var barrier = mod.GetType("Multiplayer.Tactical.TacLevelEndBarrier");
+            if (!Reaches(ModMethod(barrier, "Postfix"), "TacticalCommandSync", "Reset"))
+                yield return "L65 state-leaks-between-battles: the tactical teardown does not reset the command family " +
+                             "— a pending settle would snap an actor in the NEXT battle to a position from the last one";
+
+            // PREFIX, not postfix, and RailCheck must say so: a postfix here would emit AFTER the native
+            // mutation, which is exactly the result-ship L19 condemns.
+            if (ModMethod(capture, "Prefix") == null)
+                yield return "L65 capture-patch-gone: AbilityActivateCapture has no Prefix — the command seam is " +
+                             "unbound, or it drifted to a Postfix and now ships results instead of capturing orders";
+            var captureAttr = capture.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                                     .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (captureAttr?.declaringType != typeof(PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility) ||
+                captureAttr.methodName != "Activate")
+                yield return "L65 capture-mistargeted: AbilityActivateCapture no longer patches TacticalAbility.Activate " +
+                             "(target=" + (captureAttr?.declaringType?.Name ?? "<none>") + "." +
+                             (captureAttr?.methodName ?? "<none>") + ") — that is THE one funnel every command passes " +
+                             "through, and off it the seam sees nothing";
+            var closerTarget = ModMethod(closer, "TargetMethod") is MethodInfo tm
+                ? tm.Invoke(null, null) as MethodBase : null;
+            if (closerTarget == null)
+                yield return "L65 closer-handle-unbound: AbilityActionEndCapture.TargetMethod resolves to null — " +
+                             "AccessTools does no widening and skips no parameter, so PatchAll turns this into one " +
+                             "swallowed warning that kills every later patch in the same pass (L23), and the settle " +
+                             "is never sent by anyone";
+            else if (closerTarget.Name != "ClearPlayingAction" ||
+                     closerTarget.DeclaringType != typeof(PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility))
+                yield return "L65 closer-mistargeted: the closer patches " + closerTarget.DeclaringType?.Name + "." +
+                             closerTarget.Name + " instead of the non-virtual TacticalAbility.ClearPlayingAction — a " +
+                             "VIRTUAL end funnel can be overridden without calling base, which deletes the settle";
+
+            // the rider set is non-vacuous, and the base-method postfix really is reached by every rider
+            var moveAbility = game.GetType("PhoenixPoint.Tactical.Entities.Abilities.MoveAbility");
+            var endTurnAbility = game.GetType("PhoenixPoint.Tactical.Entities.Abilities.EndTurnAbility");
+            if (moveAbility == null || endTurnAbility == null)
+                yield return "L65 rider-probe-gone: MoveAbility / EndTurnAbility no longer resolve, so whether the " +
+                             "rider set discriminates anything was NOT checked";
+            else
+            {
+                var isRider = ModMethod(sync, "IsRider");
+                Func<Type, bool> riderOf = t =>
+                {
+                    var inst = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(t);
+                    return (bool)isRider.Invoke(null, new[] { inst });
+                };
+                if (!riderOf(moveAbility))
+                    yield return "L65 rider-set-empty: MoveAbility is not in the declared rider set — A3a's one and " +
+                                 "only rider is not carried, so the arc relays nothing at all";
+                if (riderOf(endTurnAbility))
+                    yield return "L65 rider-set-unbounded: EndTurnAbility counts as an A3a rider — the set is not " +
+                                 "discriminating, so abilities whose payload this codec cannot carry would be relayed";
+                // The seam is a postfix on the BASE Activate, so a rider subclass that overrides Activate WITHOUT
+                // reaching base.Activate is invisible to it — no compile error, no log, just a soldier that moves
+                // on one screen. CaterpillarMoveAbility (the ground-vehicle move) is exactly such a subclass.
+                Type[] all;
+                try { all = game.GetTypes(); }
+                catch (ReflectionTypeLoadException ex) { all = ex.Types.Where(t => t != null).ToArray(); }
+                foreach (var t in all.Where(t => t != moveAbility && moveAbility.IsAssignableFrom(t) && !t.IsAbstract)
+                                     .OrderBy(t => t.Name, StringComparer.Ordinal))
+                {
+                    var ov = t.GetMethod("Activate", AllMembers, null, new[] { typeof(object) }, null);
+                    if (ov == null || ov.DeclaringType != t) continue;   // inherits the override, nothing to check
+                    if (!CalleeSequence(ov).Any(c => c.Name == "Activate"))
+                        yield return "L65 rider-skips-base: " + t.Name + ".Activate overrides the funnel without " +
+                                     "calling through it, so the capture postfix on TacticalAbility.Activate never " +
+                                     "fires for it and orders for that unit reach no other peer";
+                }
+            }
+        }
+
+        /// <summary>True when a method's IL READS any static field. The purity arm of L65 needs "no static
+        /// state" and not "not this one field": an arbiter is impure whichever ledger it consults.</summary>
+        private static bool ReadsAnyStatic(MethodBase m)
+        {
+            byte[] il = null;
+            try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) return false;
+            int i = 0;
+            while (i < il.Length)
+            {
+                short code = il[i++];
+                if (code == 0xFE)
+                {
+                    if (i >= il.Length) return false;
+                    code = (short)(0xFE00 | il[i++]);
+                }
+                if (!OpCodeByValue.TryGetValue(code, out var op)) return false;
+                int size = OperandSize(op.OperandType, il, i);
+                if (size < 0 || i + size > il.Length) return false;
+                if (op == OpCodes.Ldsfld || op == OpCodes.Ldsflda) return true;
+                i += size;
+            }
+            return false;
         }
 
         private static readonly Dictionary<short, OpCode> OpCodeByValue = BuildOpCodes();

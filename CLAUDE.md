@@ -54,7 +54,14 @@ BEHAVIOR (per-subsystem mirroring).
    Local-only, never relayed: idle animation, cover-hug on arrival, camera, selection highlight,
    hover/preview aiming, per-frame pose. Entry = native save-transfer (law 1, zero surfaces); exit =
    host's native `GameOver` → native teardown on all peers → one authoritative outcome. Shipped:
-   A1 `7808c7f`, A2 `285411d`+`90dc585` (0x80 TacTurn / 0x81 TacTurnIntent, laws L63+L64); A3-A6
+   A1 `7808c7f`, A2 `285411d`+`90dc585` (0x80 TacTurn / 0x81 TacTurnIntent, laws L63+L64); A3a
+   (0x82 TacCommand / 0x83 TacCommandIntent, law L65) = the generic per-soldier COMMAND seam with
+   MOVEMENT as its only rider: capture is a PREFIX on `TacticalAbility.Activate` (base method — every
+   rider override calls through it), the payload is an EXPLICIT declared `TacticalAbilityTarget` field
+   set (`TacAbilityTargetCodec`, never reflection — the type holds live refs), the actor key is
+   `TacticalActorBase.GeoUnitId` (serialized in `TacActorBaseInstanceData`, so reload- AND
+   save-transfer-stable), the acting peer plays its own click SPECULATIVELY and the host's `settle`
+   (final pos + AP + WP, shipped at `ClearPlayingAction`) is the authority. A3b (attacks/damage), A4-A6
    pending. Shared-seed determinism = still a separate future project.
 6. **Canonical diff.** Same state → byte-identical Delta: traversal sorted by stable IDs, fixed
    field order, no nondeterministic dictionary walks. IMPLEMENTATION (recon-bound): diff walks the
