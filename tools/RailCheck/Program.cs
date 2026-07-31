@@ -5753,7 +5753,9 @@ namespace RailCheck
             if (Multiplayer.Tactical.TacticalTurnSync.Validate(g, g, true, false) == null)
                 yield return "L63 mid-handoff-accepted: the host accepts an end-turn for a faction that is not " +
                              "playing its turn yet — the flag would be wiped by PlayTurnCrt and the click eaten";
-            if (Multiplayer.Tactical.TacticalTurnSync.Validate("", null, true, true) == null)
+            // Both sides EMPTY on purpose: a "" == "" pair sails through every other arm, so this is the one
+            // case that can only be caught by the guid-present check itself.
+            if (Multiplayer.Tactical.TacticalTurnSync.Validate("", "", true, true) == null)
                 yield return "L63 empty-intent-accepted: the host accepts an end-turn with no faction guid at all";
 
             // ─── the client never advances on its own cursor-less guess ───
