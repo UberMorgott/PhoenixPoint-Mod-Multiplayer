@@ -35,6 +35,9 @@ namespace Multiplayer
                 // Same deferral for the TFTV UI/aircraft/tactical-script GUARD patches: they too gate on a
                 // TFTV type in Prepare(), so PatchAll silently skipped them (TFTV loads after us) and every
                 // TFTV guard was dead in prod (126x geoscape-teardown NRE storm). Bind them when TFTV loads.
+                // A3b: neutralise foreign ref-DamageResult patches during a mirror apply. Installed HERE for
+                // mods already loaded, and AGAIN from TftvLateBinder once TFTV lands (it is idempotent).
+                Multiplayer.Tactical.MirrorApplyGuard.Install(harmony);
                 Multiplayer.Harmony.TftvLateBinder.Install(harmony);
             }
             catch (System.Exception e)

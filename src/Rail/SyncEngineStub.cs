@@ -46,7 +46,8 @@ namespace Multiplayer.Network.Sync
             // is armed in the chain below (this hook returns false for it, so it falls straight through).
             SurfaceRouter.TacticalInbound = (peer, surfaceId, payload) =>
                 Multiplayer.Tactical.TacticalTurnSync.HandleInbound(_engine, peer, surfaceId, payload)
-                || Multiplayer.Tactical.TacticalCommandSync.HandleInbound(_engine, peer, surfaceId, payload);
+                || Multiplayer.Tactical.TacticalCommandSync.HandleInbound(_engine, peer, surfaceId, payload)
+                || Multiplayer.Tactical.TacticalDamageSync.HandleInbound(_engine, peer, surfaceId, payload);
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
                 ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || EventPopup.HandleInbound(_engine, peer, surfaceId, payload)
@@ -76,6 +77,7 @@ namespace Multiplayer.Network.Sync
             // one-shot at arrival — a settle that lands while this peer is still playing the mirrored move
             // would be overwritten by that move's own navigation and vanish with no log line.
             Multiplayer.Tactical.TacticalCommandSync.ClientTick(_engine);
+            Multiplayer.Tactical.TacticalDamageSync.ClientTick(_engine);   // A3b: emit an armed 0x84-gap resnapshot request
             GenericApplier.ClientCrcTick(_engine); // client-only inside: law-7 drift backstop, one root per second
             // (No event pump: an event WINDOW is a live host→client 0xB6 raise, not a derivation over the
             // mirrored records — a peer that was not in the session when it fired never sees it. The 1 Hz
@@ -101,6 +103,7 @@ namespace Multiplayer.Network.Sync
             GeoModalMirror.Reset();  // 0xB7 modal raise seq stream, same teardown-only contract
             Multiplayer.Tactical.TacticalTurnSync.Reset();  // 0x80 seq + the client's turn cursor / mission-over flag
             Multiplayer.Tactical.TacticalCommandSync.Reset();  // 0x82 seq + pending settles + the per-battle "not covered" notices
+            Multiplayer.Tactical.TacticalDamageSync.Reset();   // 0x84 seq + gap cursor + the mirror-apply scope depth
             GeoWindowCoverage.Reset();  // per-session "announced once" set, so a gap is loud in EVERY session
             // Rail statics that survive an engine teardown and had no home in this aggregate until the
             // SessionEnd seam went in. Kept HERE, not in SessionEnd: this is the one full-teardown reset

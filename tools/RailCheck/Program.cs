@@ -121,6 +121,7 @@ namespace RailCheck
             laws.AddRange(TurnControlLaw());
             laws.AddRange(MissionEndLaw());
             laws.AddRange(CommandSeamLaw(game));
+            laws.AddRange(ResolvedDamageLaw(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -6078,7 +6079,7 @@ namespace RailCheck
             }
             using (var ms = new MemoryStream(wire))
             using (var rd = new BinaryReader(ms, Encoding.UTF8))
-                back = Multiplayer.Tactical.TacAbilityTargetCodec.Read(rd);
+                back = Multiplayer.Tactical.TacAbilityTargetCodec.Read(rd, null, null);
             if (back == null || back.PositionToApply != sent.PositionToApply)
                 yield return "L65 codec-roundtrip: a destination written by the codec does not read back equal (" +
                              sent.PositionToApply + " -> " + (back == null ? "<null>" : back.PositionToApply.ToString()) +
@@ -6093,19 +6094,23 @@ namespace RailCheck
             }
             using (var ms = new MemoryStream(wire))
             using (var rd = new BinaryReader(ms, Encoding.UTF8))
-                back = Multiplayer.Tactical.TacAbilityTargetCodec.Read(rd);
+                back = Multiplayer.Tactical.TacAbilityTargetCodec.Read(rd, null, null);
             if (back == null || back.HasPositionToApply)
                 yield return "L65 codec-invents-a-destination: a target with NO PositionToApply reads back as having " +
                              "one — an ability with no destination would be relayed as a move to the map origin";
-            // An unknown field bit must ABORT, not read past a misaligned payload.
-            bool threw = false;
+            // An unknown field bit must ABORT, not read past a misaligned payload. The exception TYPE is part
+            // of the arm: a short garbage payload runs out of bytes and throws EndOfStreamException on its own,
+            // so "it threw" alone would pass with the guard deleted — the arm has to see the guard's OWN throw.
+            Exception unknownBits = null;
             using (var ms = new MemoryStream(new byte[] { 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }))
             using (var rd = new BinaryReader(ms, Encoding.UTF8))
-            { try { Multiplayer.Tactical.TacAbilityTargetCodec.Read(rd); } catch { threw = true; } }
-            if (!threw)
+            { try { Multiplayer.Tactical.TacAbilityTargetCodec.Read(rd, null, null); } catch (Exception e) { unknownBits = e; } }
+            if (!(unknownBits is InvalidDataException))
                 yield return "L65 codec-swallows-unknown-fields: a payload declaring field bits this build cannot " +
-                             "decode is read anyway — every byte after the mask is then misaligned and the command " +
-                             "is executed against garbage instead of being refused";
+                             "decode is not refused with InvalidDataException (got " +
+                             (unknownBits == null ? "no exception at all" : unknownBits.GetType().Name) +
+                             ") — every byte after the mask is then misaligned and the command is executed against " +
+                             "garbage instead of being refused";
 
             // ─── (b) ARBITER: pure, and every refusal executed ───
             var validate = ModMethod(sync, "Validate");
@@ -6340,6 +6345,569 @@ namespace RailCheck
                                      "fires for it and orders for that unit reach no other peer";
                 }
             }
+        }
+
+        /// <summary>L66 — A RESOLVED ATTACK IS THE HOST'S, VERBATIM (tactical arc A3b). Five arms, because
+        /// A3b has five ways to silently produce two different battles:
+        ///   (a) NO PEER RECOMPUTES DAMAGE. The <c>DamageResult</c> codec covers the game struct field for
+        ///       field, its round trip is EXECUTED, an undecodable bit THROWS, and the one client-side
+        ///       computation funnel (<c>DamageAccumulation.ApplyAddedDamage</c>) is really gated — while the
+        ///       mirror applier really re-enters the game's own writer instead of a second damage engine.
+        ///   (b) FOREIGN <c>ref DamageResult</c> MUTATORS CANNOT RUN ON A MIRROR APPLY. The guard is executed
+        ///       here in both scope states and in both patch shapes, because the bool shape getting it wrong
+        ///       would not double damage — it would DELETE it, silently, by telling Harmony to skip the
+        ///       original. And it must be LATE-BOUND: installed only at PatchAll it would find zero foreign
+        ///       patches (TFTV loads after us) and bind nothing without a word.
+        ///   (c) THE RECEIVER KEY ROUND-TRIPS PER BODY PART. Executed both ways, including the two refusals
+        ///       (a slot on an actor with no body, a key that predates the battle key map), plus the GAME'S
+        ///       OWN guarantees the key leans on: <c>CharacterBodyState.GetSlot</c> is the resolver and
+        ///       <c>TacticalActor.ValidateActor</c> is what makes slot names unique in the first place.
+        ///   (d) THE FUMBLE RIDES. Executed on the memo, ordered on the applier, and anchored to the reason
+        ///       the design is not simpler: <c>PlayAction</c> still consumes <c>FumbledAction</c> inside the
+        ///       same synchronous <c>Activate</c>, so a fumble shipped afterwards is always too late.
+        ///   (e) THE THREE VANILLA RE-ROLL LEAKS. Each arm asserts BOTH that the leak still exists in the game
+        ///       and that our gate still covers it — a gate for a leak that is gone is dead weight, and a leak
+        ///       with no gate is a double-apply.</summary>
+        private static IEnumerable<string> ResolvedDamageLaw(Assembly game)
+        {
+            var sync = typeof(Multiplayer.Tactical.TacticalDamageSync);
+            var mod = sync.Assembly;
+            var codec = mod.GetType("Multiplayer.Tactical.DamageResultCodec");
+            var scope = mod.GetType("Multiplayer.Tactical.MirrorApplyScope");
+            var guard = mod.GetType("Multiplayer.Tactical.MirrorApplyGuard");
+            var keyer = mod.GetType("Multiplayer.Tactical.TacticalActorKey");
+            var fumble = mod.GetType("Multiplayer.Tactical.FumbleGate");
+            if (codec == null || scope == null || guard == null || keyer == null || fumble == null)
+            {
+                yield return "L66 seams-missing: DamageResultCodec / MirrorApplyScope / MirrorApplyGuard / " +
+                             "TacticalActorKey / FumbleGate no longer exist, so NOTHING about the resolved-attack " +
+                             "arc was checked";
+                yield break;
+            }
+
+            // ─── (a) NO PEER RECOMPUTES DAMAGE ───
+            var payload = typeof(PhoenixPoint.Tactical.Entities.DamageResult);
+            var rides = new HashSet<string>(Multiplayer.Tactical.DamageResultCodec.Rides, StringComparer.Ordinal);
+            var dropped = Multiplayer.Tactical.DamageResultCodec.Dropped;
+            if (rides.Count == 0)
+                yield return "L66 codec-vacuous: the damage codec declares NO riding field, so every resolved hit " +
+                             "ships empty and no peer ever takes damage";
+            if (dropped.Count != 0)
+                yield return "L66 codec-drops-a-result-field: " + string.Join(", ", dropped.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray()) +
+                             " is declared dropped. On the VALUE rail a drop is a legal decision; on a resolved " +
+                             "DamageResult it is not — whatever is dropped is a part of the hit that the receiving " +
+                             "peer must then invent, which is the one thing this arc exists to forbid";
+            var realFields = payload.GetFields(BindingFlags.Public | BindingFlags.Instance).Select(f => f.Name).ToList();
+            foreach (var name in realFields)
+            {
+                bool r = rides.Contains(name), d = dropped.ContainsKey(name);
+                if (!r && !d)
+                    yield return "L66 codec-uncovered: DamageResult." + name + " is declared NEITHER riding NOR " +
+                                 "dropped — the codec drifted away from the game struct, which is exactly how a " +
+                                 "resolved hit starts silently losing a part of itself";
+                else if (r && d)
+                    yield return "L66 codec-double-declared: DamageResult." + name + " is in BOTH lists, so what the " +
+                                 "codec does with it is undecidable";
+            }
+            var realSet = new HashSet<string>(realFields, StringComparer.Ordinal);
+            foreach (var name in rides.Concat(dropped.Keys).Where(n => !realSet.Contains(n)).OrderBy(n => n, StringComparer.Ordinal))
+                yield return "L66 codec-stale-declaration: the damage codec declares '" + name + "' but DamageResult " +
+                             "has no such public instance field — the declaration describes a struct that no longer exists";
+            int bits = 0;
+            for (ushort k = Multiplayer.Tactical.DamageResultCodec.KnownBits; k != 0; k >>= 1) bits += k & 1;
+            if (bits != rides.Count)
+                yield return "L66 codec-bitless-field: " + rides.Count + " field(s) declared riding but KnownBits has " +
+                             bits + " bit(s) set — a riding field with no bit can never be signalled as present";
+
+            // The round trip, EXECUTED on the SCALARS (the reference-shaped fields need a live DefRepository
+            // and a live map, which is the harness's honest gap — they are covered by the coverage arms above
+            // and by the in-game gate).
+            var sent = new PhoenixPoint.Tactical.Entities.DamageResult
+            {
+                HealthDamage = 17.5f,
+                ArmorDamage = 3.25f,
+                ArmorMitigatedDamage = 1.75f,
+                StunValue = 9f,
+                HealValue = 2.5f,
+                ImpactForce = new Vector3(1f, 2f, 3f),
+                DamageOrigin = new Vector3(-4f, 5f, -6f),
+                forceHurt = true,
+            };
+            var hitIn = default(Base.Levels.CastHit);
+            hitIn.Point = new Vector3(7f, 8f, 9f);
+            hitIn.Normal = new Vector3(0f, 1f, 0f);
+            sent.ImpactHit = hitIn;
+            byte[] wire;
+            using (var ms = new MemoryStream())
+            {
+                using (var w = new BinaryWriter(ms, Encoding.UTF8)) Multiplayer.Tactical.DamageResultCodec.Write(w, sent);
+                wire = ms.ToArray();
+            }
+            PhoenixPoint.Tactical.Entities.DamageResult back;
+            using (var ms = new MemoryStream(wire))
+            using (var rd = new BinaryReader(ms, Encoding.UTF8))
+                back = Multiplayer.Tactical.DamageResultCodec.Read(rd, null, new List<string>());
+            if (back.HealthDamage != sent.HealthDamage || back.ArmorDamage != sent.ArmorDamage ||
+                back.ArmorMitigatedDamage != sent.ArmorMitigatedDamage || back.StunValue != sent.StunValue ||
+                back.HealValue != sent.HealValue || back.ImpactForce != sent.ImpactForce ||
+                back.DamageOrigin != sent.DamageOrigin || back.forceHurt != sent.forceHurt ||
+                back.ImpactHit.Point != sent.ImpactHit.Point || back.ImpactHit.Normal != sent.ImpactHit.Normal)
+                yield return "L66 codec-roundtrip: a resolved hit written by the codec does not read back equal (" +
+                             sent + " -> " + back + ", forceHurt " + sent.forceHurt + " -> " + back.forceHurt +
+                             ", impact " + sent.ImpactHit.Point + " -> " + back.ImpactHit.Point + ") — every " +
+                             "mirrored hit would land a different amount of damage";
+            using (var ms = new MemoryStream())
+            {
+                using (var w = new BinaryWriter(ms, Encoding.UTF8))
+                    Multiplayer.Tactical.DamageResultCodec.Write(w, default(PhoenixPoint.Tactical.Entities.DamageResult));
+                wire = ms.ToArray();
+            }
+            using (var ms = new MemoryStream(wire))
+            using (var rd = new BinaryReader(ms, Encoding.UTF8))
+                back = Multiplayer.Tactical.DamageResultCodec.Read(rd, null, new List<string>());
+            if (back.HealthDamage != 0f || back.ApplyStatuses != null || back.StatModifications != null ||
+                back.ActorEffects != null || back.forceHurt)
+                yield return "L66 codec-invents-a-hit: an EMPTY DamageResult reads back carrying something — a " +
+                             "status-only or effect-only result would arrive with damage nobody dealt";
+            // Same trap as L65's: a short garbage payload throws EndOfStreamException on its own, so the arm
+            // must insist on the guard's OWN InvalidDataException or it passes with the guard deleted.
+            Exception unknownBits = null;
+            using (var ms = new MemoryStream(new byte[] { 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }))
+            using (var rd = new BinaryReader(ms, Encoding.UTF8))
+            { try { Multiplayer.Tactical.DamageResultCodec.Read(rd, null, new List<string>()); } catch (Exception e) { unknownBits = e; } }
+            if (!(unknownBits is InvalidDataException))
+                yield return "L66 codec-swallows-unknown-fields: a resolved hit declaring field bits this build " +
+                             "cannot decode is not refused with InvalidDataException (got " +
+                             (unknownBits == null ? "no exception at all" : unknownBits.GetType().Name) +
+                             ") — the damage applied would be whatever the misaligned bytes happen to say";
+
+            // The neuter is where the mandate says it is, and it consults the one predicate.
+            var accumGate = mod.GetType("Multiplayer.Tactical.AccumulationClientGate");
+            var accumAttr = accumGate?.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                                     .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (accumAttr?.declaringType != typeof(PhoenixPoint.Tactical.Entities.DamageAccumulation) ||
+                accumAttr.methodName != "ApplyAddedDamage")
+                yield return "L66 neuter-mistargeted: the client damage neuter no longer patches " +
+                             "DamageAccumulation.ApplyAddedDamage (target=" + (accumAttr?.declaringType?.Name ?? "<none>") +
+                             "." + (accumAttr?.methodName ?? "<none>") + ") — that is the ONE funnel where a computed " +
+                             "hit becomes a real one, and the mandate puts the neuter there and NOT at ApplyDamage " +
+                             "precisely because the foreign DamageResult FACTORY sits upstream of it";
+            var somebodyElses = ModMethod(sync, "DamageIsSomebodyElses");
+            if (!Reaches(ModMethod(accumGate, "Prefix"), "TacticalDamageSync", "DamageIsSomebodyElses"))
+                yield return "L66 neuter-unconditional: the DamageAccumulation gate does not consult " +
+                             "DamageIsSomebodyElses — it either neuters the HOST (no damage happens anywhere) or " +
+                             "nobody (every client double-applies every hit)";
+            if (!Reaches(somebodyElses, "MirrorApplyScope", "get_Active"))
+                yield return "L66 neuter-eats-the-mirror: DamageIsSomebodyElses does not consult MirrorApplyScope, " +
+                             "so the client's own re-application of the HOST'S result is neutered too and no peer " +
+                             "ever takes damage at all";
+            var applyDamage = ModMethod(sync, "ApplyDamage");
+            if (applyDamage == null)
+                yield return "L66 mirror-gone: TacticalDamageSync.ApplyDamage no longer exists — resolved hits " +
+                             "arrive and are thrown away";
+            else
+            {
+                if (!Reaches(applyDamage, "IDamageReceiver", "ApplyDamage"))
+                    yield return "L66 mirror-hand-rolled: the mirror applier does not call the native " +
+                                 "IDamageReceiver.ApplyDamage — any second way of applying a hit is a second, " +
+                                 "divergent damage engine (statuses, effects, death and notifications all live in " +
+                                 "the native body)";
+                if (!Reaches(applyDamage, "MirrorApplyScope", "Enter"))
+                    yield return "L66 mirror-unscoped: the mirror applier runs the native ApplyDamage OUTSIDE " +
+                                 "MirrorApplyScope, so every foreign ref-DamageResult mutator rewrites the host's " +
+                                 "already-final numbers a second time";
+                if (!Reaches(applyDamage, "SyncApplyScope", "Enter"))
+                    yield return "L66 mirror-echoes: the mirror applier runs outside a SyncApplyScope (law 8)";
+                if (CalleeSequence(applyDamage).Any(c => c.DeclaringType == typeof(PhoenixPoint.Tactical.Entities.DamageAccumulation)))
+                    yield return "L66 mirror-recomputes: the mirror applier reaches DamageAccumulation — a peer " +
+                                 "applying a SHIPPED result must never re-enter the computation that produced it";
+                if (!Reaches(applyDamage, "TacticalDamageSync", "Correct"))
+                    yield return "L66 snapshot-unapplied: the mirror applier never overwrites from the host's " +
+                                 "post-hit snapshot, so a residual double-apply stays on the screen forever and " +
+                                 "nothing ever reports it";
+            }
+            // The capture must see the MUTATED struct: ApplyDamage passes it BY VALUE to ApplyDamageInternal,
+            // which is where the foreign ref-mutators sit, so a capture on the public method ships a number the
+            // host itself never applied.
+            var actorSeam = mod.GetType("Multiplayer.Tactical.ActorDamageSeam");
+            var actorTarget = ModMethod(actorSeam, "TargetMethod") is MethodInfo atm ? atm.Invoke(null, null) as MethodBase : null;
+            if (actorTarget == null)
+                yield return "L66 capture-handle-unbound: ActorDamageSeam.TargetMethod resolves to null — AccessTools " +
+                             "does no widening and skips no parameter, so PatchAll turns this into one swallowed " +
+                             "warning (L23) and NO resolved hit is ever shipped by anyone";
+            else if (actorTarget.Name != "ApplyDamageInternal" ||
+                     actorTarget.DeclaringType != typeof(PhoenixPoint.Tactical.Entities.TacticalActorBase))
+                yield return "L66 capture-mistargeted: the actor capture patches " + actorTarget.DeclaringType?.Name +
+                             "." + actorTarget.Name + " instead of TacticalActorBase.ApplyDamageInternal — the " +
+                             "public ApplyDamage passes the struct BY VALUE, so a capture there ships the " +
+                             "PRE-mutator numbers and every mirror applies damage the host never dealt";
+            if (ModMethod(actorSeam, "Postfix") == null)
+                yield return "L66 capture-not-a-postfix: ActorDamageSeam has no Postfix — a prefix would run before " +
+                             "the foreign ref-DamageResult mutators and ship the wrong number";
+            if (ModMethod(actorSeam, "Prefix") != null)
+                yield return "L66 capture-has-a-prefix: ActorDamageSeam gained a Prefix on ApplyDamageInternal — " +
+                             "whatever it does, it runs before the mutators that make the result final";
+            var slotSeam = mod.GetType("Multiplayer.Tactical.SlotDamageSeam");
+            var slotAttr = slotSeam?.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                                   .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (slotAttr?.declaringType != typeof(PhoenixPoint.Tactical.Entities.Equipments.ItemSlot) ||
+                slotAttr.methodName != "ApplyDamage")
+                yield return "L66 bodypart-seam-mistargeted: the body-part seam no longer patches " +
+                             "ItemSlot.ApplyDamage — that is where a limb's health and armour actually move " +
+                             "(ItemSlot.cs:120-128), and off it every body-part hit is invisible to the wire";
+            if (ModMethod(slotSeam, "Prefix") == null || ModMethod(slotSeam, "Postfix") == null)
+                yield return "L66 bodypart-seam-half: the body-part seam is missing its Prefix (the client neuter) " +
+                             "or its Postfix (the host capture) — one without the other is either a double-apply " +
+                             "or a limb that never takes damage on any other screen";
+            var onApplied = ModMethod(sync, "OnDamageApplied");
+            if (!Reaches(onApplied, "MirrorApplyScope", "get_Active"))
+                yield return "L66 capture-reships: OnDamageApplied does not stand down inside a mirror apply — a " +
+                             "peer would re-broadcast the very hit it was just told about";
+            if (!Reaches(onApplied, "TacticalActorKey", "Of") || !Reaches(onApplied, "TacticalActorKey", "SlotOf"))
+                yield return "L66 capture-unaddressed: OnDamageApplied does not take BOTH halves of the receiver " +
+                             "key (actor + slot name), so a shipped hit cannot name which body part it landed on";
+
+            // ─── (b) THE MIRROR-APPLY GUARD ───
+            var skipVoid = ModMethod(guard, "SkipVoid");
+            var skipBool = ModMethod(guard, "SkipBool");
+            var enter = ModMethod(scope, "Enter");
+            if (skipVoid == null || skipBool == null || enter == null)
+                yield return "L66 guard-gone: MirrorApplyGuard.SkipVoid / SkipBool / MirrorApplyScope.Enter no " +
+                             "longer exist — foreign ref-DamageResult mutators run unopposed on every mirrored hit";
+            else
+            {
+                // OUTSIDE a mirror apply — single player and the host — nothing may be stood down.
+                if (!(bool)skipVoid.Invoke(null, null))
+                    yield return "L66 guard-eats-single-player: the void guard skips a foreign patch OUTSIDE a " +
+                                 "mirror apply, so TFTV's acid resistance, Die Hard and suppression would stop " +
+                                 "working in a solo game and on the host";
+                var boolArgs = new object[] { false };
+                if (!(bool)skipBool.Invoke(null, boolArgs))
+                    yield return "L66 guard-eats-single-player: the bool guard skips a foreign PREFIX outside a " +
+                                 "mirror apply";
+                using (var s = (IDisposable)enter.Invoke(null, null))
+                {
+                    if ((bool)skipVoid.Invoke(null, null))
+                        yield return "L66 guard-inert: the void guard lets a foreign patch run DURING a mirror " +
+                                     "apply — every mirrored hit is then mutated twice (acid resistance applied " +
+                                     "again, Die Hard re-rolled off a wall-clock reseed of the global RNG)";
+                    boolArgs = new object[] { false };
+                    if ((bool)skipBool.Invoke(null, boolArgs))
+                        yield return "L66 guard-inert: the bool guard lets a foreign PREFIX run during a mirror apply";
+                    else if (!(bool)boolArgs[0])
+                        yield return "L66 guard-deletes-the-damage: the bool guard skips a foreign prefix but leaves " +
+                                     "__result false, which tells Harmony to skip the ORIGINAL — the host's resolved " +
+                                     "damage is then never applied at all. This is the arm whose failure looks like " +
+                                     "'invulnerable soldiers', not like 'double damage'";
+                }
+                if (Multiplayer.Network.Sync.SyncApplyScope.Active)
+                    yield return "L66 scope-leaked: SyncApplyScope is active before this law even started";
+                using (Multiplayer.Network.Sync.SyncApplyScope.Enter())
+                    if (!(bool)skipVoid.Invoke(null, null))
+                        yield return "L66 scope-conflated: MirrorApplyScope reads as active inside a plain " +
+                                     "SyncApplyScope — every geoscape delta apply would then stand foreign damage " +
+                                     "patches down, far outside the one call this guard is meant to wrap";
+            }
+            var install = ModMethod(guard, "Install");
+            if (install == null)
+                yield return "L66 guard-uninstalled: MirrorApplyGuard.Install no longer exists";
+            else
+            {
+                if (!Reaches(install, "Harmony", "GetPatchInfo"))
+                    yield return "L66 guard-hand-listed: Install does not ask Harmony which patches sit on the " +
+                                 "damage entries — a hard-coded list of TFTV class names rots on the next TFTV " +
+                                 "release and covers no other mod at all";
+                if (!Reaches(install, "Harmony", "Patch"))
+                    yield return "L66 guard-never-patches: Install resolves foreign patches and does nothing to them";
+                // Asserted against the guard's OWN resolved list, not a copy of it: a copy would let a typo in
+                // MirrorApplyGuard pass while the harness resolved the real method next to it.
+                var entriesM = ModMethod(guard, "Entries");
+                var entries = entriesM == null ? null : entriesM.Invoke(null, null) as System.Collections.IEnumerable;
+                var names = new List<string>();
+                if (entries != null) foreach (MethodBase m in entries) names.Add(m.DeclaringType.Name + "." + m.Name);
+                foreach (var want in new[]
+                {
+                    "TacticalActorBase.ApplyDamageInternal", "TacticalActor.ApplyDamageInternal",
+                    "TacticalActor.TriggerHurt", "TacticalActorBase.ApplyDamage",
+                })
+                    if (!names.Contains(want))
+                        yield return "L66 guard-entry-unresolved: the guard's damage-entry list does not contain " +
+                                     want + " (it has: " + (names.Count == 0 ? "<nothing>" : string.Join(", ", names.ToArray())) +
+                                     "). AccessTools does no widening and skips no parameter, so a near-miss resolves " +
+                                     "to null and the guard scans that entry for nothing at all — silently";
+            }
+            var binder = mod.GetType("Multiplayer.Harmony.TftvLateBinder");
+            if (!Reaches(ModMethod(binder, "BindAll"), "MirrorApplyGuard", "Install"))
+                yield return "L66 guard-not-late-bound: TftvLateBinder does not install the mirror-apply guard after " +
+                             "TFTV loads. At PatchAll time TFTV has installed NONE of its damage patches (it is " +
+                             "enabled after us), so a startup-only install enumerates an empty set and binds nothing " +
+                             "— silently, which is exactly the cross-mod trap this repo has already paid for once";
+
+            // ─── (c) THE RECEIVER KEY ───
+            var slotOf = ModMethod(keyer, "SlotOf");
+            var resolveReceiver = ModMethod(keyer, "ResolveReceiver");
+            if (slotOf == null || resolveReceiver == null)
+                yield return "L66 receiver-key-gone: TacticalActorKey.SlotOf / ResolveReceiver no longer exist — " +
+                             "nothing on the wire can name WHICH body part a hit landed on";
+            else
+            {
+                var bodyState = game.GetType("PhoenixPoint.Common.Entities.Characters.CharacterBodyState");
+                if (bodyState?.GetMethod("GetSlot", new[] { typeof(string) }) == null)
+                    yield return "L66 receiver-resolver-gone: CharacterBodyState.GetSlot(string) is gone — that is " +
+                                 "the GAME'S own slot-name resolver and the whole reason a slot NAME is a legal key";
+                else if (!Reaches(resolveReceiver, "CharacterBodyState", "GetSlot"))
+                    yield return "L66 receiver-hand-resolved: ResolveReceiver does not go through " +
+                                 "CharacterBodyState.GetSlot — a second, hand-rolled slot lookup is a second answer " +
+                                 "to 'which limb is this'";
+                // The grouping lambda lives in a compiler-generated closure, so the SLOT-NAME call is not in
+                // ValidateActor's own IL — what IS in it, and is what the guarantee rests on, is that it walks
+                // the health slots and can shout about them.
+                var validate = HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Tactical.Entities.TacticalActor), "ValidateActor");
+                var validateSeq = validate == null ? new List<MethodBase>() : CalleeSequence(validate);
+                if (!validateSeq.Any(c => c.Name == "GetHealthSlots") || !validateSeq.Any(c => c.Name == "LogError"))
+                    yield return "L66 receiver-uniqueness-unfounded: TacticalActor.ValidateActor no longer inspects " +
+                                 "the health slots and complains about them, so the game itself has stopped " +
+                                 "guaranteeing slot names are unique per actor — and a slot NAME then addresses more " +
+                                 "than one receiver";
+                var args = new object[] { null, "ARM", null };
+                if (resolveReceiver.Invoke(null, args) != null || string.IsNullOrEmpty(args[2] as string))
+                    yield return "L66 receiver-resolves-nothing: ResolveReceiver either answers for a NULL actor or " +
+                                 "refuses without a reason — a mute refusal is the silent-swallow class";
+                var actorSelf = (PhoenixPoint.Tactical.Entities.TacticalActorBase)
+                    System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(PhoenixPoint.Tactical.Entities.TacticalActorBase));
+                if ((string)slotOf.Invoke(null, new object[] { actorSelf }) != "")
+                    yield return "L66 receiver-key-ambiguous: an ACTOR's own slot name is not \"\" — the wire uses " +
+                                 "the empty name to mean 'the actor itself', so it must be exactly what the game's " +
+                                 "TacticalActorBase.GetSlotName() returns";
+                args = new object[] { actorSelf, "", null };
+                if (!ReferenceEquals(resolveReceiver.Invoke(null, args), actorSelf))
+                    yield return "L66 receiver-key-actor-lost: the empty slot name no longer resolves back to the " +
+                                 "actor itself, so every whole-actor hit lands on nothing";
+                args = new object[] { actorSelf, "ARM", null };
+                if (resolveReceiver.Invoke(null, args) != null)
+                    yield return "L66 receiver-key-falls-back: a body-part name on an actor that has no body state " +
+                                 "resolves to SOMETHING — a silent fallback to the actor would apply arm damage to " +
+                                 "the torso and hide the drift forever";
+                else if (string.IsNullOrEmpty(args[2] as string))
+                    yield return "L66 receiver-key-mute: a refused body-part lookup gives no reason, which is the " +
+                                 "silent-swallow class this project keeps paying for";
+            }
+            // The derived key for actors the geoscape never named: refusals are LOUD, and an unbuilt map never
+            // resolves anything by accident.
+            var of = ModMethod(keyer, "Of");
+            var resolve = ModMethod(keyer, "Resolve");
+            var resetKeys = ModMethod(keyer, "Reset");
+            if (of == null || resolve == null || resetKeys == null)
+                yield return "L66 derived-key-gone: TacticalActorKey.Of / Resolve / Reset no longer exist";
+            else
+            {
+                resetKeys.Invoke(null, null);
+                if ((int)of.Invoke(null, new object[] { null }) != 0)
+                    yield return "L66 derived-key-invents: TacticalActorKey.Of names a NULL actor";
+                var probe = new object[] { null, -1, null };
+                if (resolve.Invoke(null, probe) != null || !(probe[2] as string ?? "").Contains("key map"))
+                    yield return "L66 derived-key-resolves-unbuilt: a derived (negative) key is not refused with " +
+                                 "'the key map does not exist yet' (got: " + (probe[2] as string ?? "<no reason>") +
+                                 "). The derived branch must answer BEFORE the level is consulted, or a peer that " +
+                                 "simply has no map blames the map for an alien it could never have named anyway";
+                probe = new object[] { null, 0, null };
+                if (resolve.Invoke(null, probe) != null || string.IsNullOrEmpty(probe[2] as string))
+                    yield return "L66 derived-key-zero: key 0 either resolves to an actor or is refused without a " +
+                                 "reason — 0 is 'no shared identity' and must always be a loud refusal";
+                var build = ModMethod(keyer, "BuildBattleKeys");
+                var built = keyer.GetProperty("Built", AllMembers);
+                if (build == null || built == null)
+                    yield return "L66 derived-key-unbuilt: TacticalActorKey.BuildBattleKeys / Built is gone";
+                else
+                {
+                    build.Invoke(null, new object[] { null });
+                    if ((bool)built.GetValue(null, null))
+                        yield return "L66 derived-key-builds-from-nothing: BuildBattleKeys(null) marked the map BUILT. " +
+                                     "It is a one-shot, so a peer that armed it with no level would then answer every " +
+                                     "alien key from an EMPTY map for the whole battle — and never rebuild";
+                }
+                if (!Reaches(ModMethod(mod.GetType("Multiplayer.Tactical.TacNewTurnHook"), "Postfix"),
+                             "TacticalActorKey", "BuildBattleKeys"))
+                    yield return "L66 derived-key-never-built: the turn edge does not build the battle key map. That " +
+                                 "edge is the ONLY moment both peers provably see the same board — after it the AI " +
+                                 "turn moves aliens on the host and never on a client, so a map built any later " +
+                                 "points every alien key at a different monster on each screen";
+            }
+
+            // ─── (d) THE FUMBLE ───
+            var fumbleGate = mod.GetType("Multiplayer.Tactical.FumbleCheckGate");
+            var fumbleTarget = ModMethod(fumbleGate, "TargetMethod") is MethodInfo ftm ? ftm.Invoke(null, null) as MethodBase : null;
+            if (fumbleTarget == null || fumbleTarget.Name != "FumbleActionCheck")
+                yield return "L66 fumble-handle-unbound: FumbleCheckGate.TargetMethod does not resolve to " +
+                             "TacticalAbility.FumbleActionCheck — the host's roll then never reaches the wire and " +
+                             "every peer rolls its own fumble on a shot the host landed";
+            var playAction = HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility), "PlayAction",
+                new[] { typeof(Func<Base.Entities.PlayingAction, IEnumerator<Base.Core.NextUpdate>>), typeof(object), typeof(Base.Entities.ActionChannel?) });
+            if (playAction == null || !CalleeSequence(playAction).Any(c => c.Name == "get_FumbledAction"))
+                yield return "L66 fumble-premise-stale: TacticalAbility.PlayAction no longer reads FumbledAction " +
+                             "inside the same synchronous Activate. The whole pre-roll exists because the value is " +
+                             "consumed before Activate returns; if that stopped being true the fumble could simply " +
+                             "be shipped afterwards and this machinery is dead weight";
+            var declare = ModMethod(fumble, "Declare");
+            var consume = ModMethod(fumble, "TryConsume");
+            if (declare == null || consume == null)
+                yield return "L66 fumble-memo-gone: FumbleGate.Declare / TryConsume no longer exist";
+            else
+            {
+                var ability = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(
+                    typeof(PhoenixPoint.Tactical.Entities.Abilities.ShootAbility));
+                var probe = new object[] { ability, false };
+                if ((bool)consume.Invoke(null, probe))
+                    yield return "L66 fumble-memo-invents: TryConsume answers for an ability nobody declared, so a " +
+                                 "peer would force a fumble that never happened";
+                declare.Invoke(null, new object[] { ability, true });
+                probe = new object[] { ability, false };
+                if (!(bool)consume.Invoke(null, probe) || !(bool)probe[1])
+                    yield return "L66 fumble-memo-loses-it: a DECLARED fumble does not come back out of the memo, so " +
+                                 "the host's fumbled shot plays as a normal one on every other screen";
+                probe = new object[] { ability, false };
+                if ((bool)consume.Invoke(null, probe))
+                    yield return "L66 fumble-memo-sticks: the memo is not consumed, so the NEXT activation of the " +
+                                 "same ability inherits the previous shot's fumble";
+            }
+            if (!Reaches(ModMethod(typeof(Multiplayer.Tactical.TacticalCommandSync), "OnAbilityActivated"),
+                         "FumbleGate", "RollForHost"))
+                yield return "L66 fumble-not-pre-rolled: the command capture does not take the host's fumble roll " +
+                             "before the order leaves, so the bit cannot possibly ride WITH the order";
+            var applyActivate = ModMethod(typeof(Multiplayer.Tactical.TacticalCommandSync), "ApplyActivate");
+            var seq2 = applyActivate == null ? new List<MethodBase>() : CalleeSequence(applyActivate);
+            int iDeclare = IndexOfCall(seq2, "Declare", "FumbleGate");
+            int iActivate = IndexOfCall(seq2, "Activate", "Ability");
+            if (iDeclare < 0 || iActivate < 0 || iDeclare > iActivate)
+                yield return "L66 fumble-declared-too-late: the mirror does not declare the host's fumble BEFORE it " +
+                             "runs the native Activate (declare@" + iDeclare + ", activate@" + iActivate + "). " +
+                             "FumbledAction is rolled at Activate:1109 and consumed by PlayAction before Activate " +
+                             "returns, so a declaration afterwards changes nothing at all";
+
+            // ─── (e) THE THREE VANILLA RE-ROLL LEAKS ───
+            var applyInternal = HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Tactical.Entities.TacticalActorBase),
+                "ApplyDamageInternal", new[] { typeof(PhoenixPoint.Tactical.Entities.DamageResult) });
+            bool leakReturnMelee = applyInternal != null &&
+                CalleeSequence(applyInternal).Any(c => c.DeclaringType == typeof(PhoenixPoint.Tactical.Entities.Abilities.TacticalReturnMeleeDamage) ||
+                                                       (c.Name == "GetAbility" && c.IsGenericMethod));
+            var meleeGate = mod.GetType("Multiplayer.Tactical.ReturnMeleeMirrorGate");
+            var meleeAttr = meleeGate?.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                                     .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (!leakReturnMelee)
+                yield return "L66 leak-return-melee-stale: TacticalActorBase.ApplyDamageInternal no longer activates " +
+                             "TacticalReturnMeleeDamage from inside itself — the nested-damage leak this gate exists " +
+                             "for is gone, and the gate is now dead weight guarding nothing";
+            if (meleeAttr?.declaringType != typeof(PhoenixPoint.Tactical.Entities.Abilities.TacticalReturnMeleeDamage) ||
+                !Reaches(ModMethod(meleeGate, "Prefix"), "MirrorApplyScope", "get_Active"))
+                yield return "L66 leak-return-melee-open: the return-melee gate is missing or does not consult " +
+                             "MirrorApplyScope — a mirror re-applying the host's hit would deal the retaliation " +
+                             "damage a SECOND time on top of the host's own shipped record";
+            var cooldownApply = HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Tactical.Entities.Statuses.CooldownStatus), "OnApply");
+            if (cooldownApply == null || !CalleeSequence(cooldownApply).Any(c => c.Name == "Range" && c.DeclaringType?.Name == "Random"))
+                yield return "L66 leak-cooldown-stale: CooldownStatus.OnApply no longer rolls its duration, so the " +
+                             "duration mirror guards a leak that no longer exists";
+            var durationProp = typeof(PhoenixPoint.Tactical.Entities.Statuses.TacStatus).GetProperty("DurationInTurns", AllMembers);
+            if (durationProp == null || !CalleeSequence(durationProp.GetGetMethod(true)).Any(c => c.Name == "get_TacStatusDef"))
+                yield return "L66 leak-cooldown-unrepairable: TacStatus.DurationInTurns no longer reads the DEF live. " +
+                             "Restoring the host's duration in a POSTFIX is only valid because the status instance " +
+                             "never cached the rolled number — if it does now, the repair silently does nothing";
+            var cdGate = mod.GetType("Multiplayer.Tactical.CooldownDurationGate");
+            var cdAttr = cdGate?.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                               .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (cdAttr?.declaringType != typeof(PhoenixPoint.Tactical.Entities.Statuses.CooldownStatus) ||
+                !Reaches(ModMethod(cdGate, "Postfix"), "MirrorApplyScope", "get_Active"))
+                yield return "L66 leak-cooldown-open: the cooldown-duration gate is missing or unscoped — a status " +
+                             "the host shipped would live for a different number of turns on every other peer";
+            var durationField = typeof(PhoenixPoint.Tactical.Entities.Statuses.TacStatusDef).GetField("DurationTurns", AllMembers);
+            if (durationField == null || !ReadsField(ModMethod(codec, "Write"), durationField))
+                yield return "L66 leak-cooldown-unshipped: the damage codec does not read the host's resolved " +
+                             "TacStatusDef.DurationTurns, so there is nothing for the mirror to restore and the gate " +
+                             "repairs a value it never received";
+            var shouldDestroy = HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Tactical.Entities.Abilities.DieAbility), "ShouldDestroyItem");
+            if (shouldDestroy == null)
+                yield return "L66 leak-loot-stale: DieAbility.ShouldDestroyItem is gone, so the loot-roll gate " +
+                             "targets nothing";
+            else if (!CalleeSequence(shouldDestroy).Any(c => c.Name == "Range"))
+                yield return "L66 leak-loot-stale: DieAbility.ShouldDestroyItem no longer draws a random number — the " +
+                             "gate guards a roll that no longer happens";
+            var lootGate = mod.GetType("Multiplayer.Tactical.LootRollHostOnly");
+            var lootAttr = lootGate?.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                                   .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+            if (lootAttr?.declaringType != typeof(PhoenixPoint.Tactical.Entities.Abilities.DieAbility) ||
+                lootAttr.methodName != "ShouldDestroyItem" || ModMethod(lootGate, "Prefix") == null)
+                yield return "L66 leak-loot-open: the death loot roll is not host-only — a client drawing from " +
+                             "SharedData.Random consumes the SAME stream the spawn tables use, so it desynchronises " +
+                             "more than the corpse's pockets";
+
+            // ─── THE GAP: detection and the one recovery path ───
+            var inbound = ModMethod(sync, "HandleInbound");
+            var request = ModMethod(sync, "RequestResnap");
+            // HasGap, not RequestResnap: the inbound's catch block also asks for a resnapshot, so asserting the
+            // REQUEST would stay true with the contiguity test deleted — the arm has to name the DETECTOR.
+            if (!Reaches(inbound, "TacticalDamageSync", "HasGap"))
+                yield return "L66 gap-undetected: the 0x84 inbound never consults the contiguity check. SurfaceSeq " +
+                             "only DEDUPS; on a stream of discrete events a HOLE is a soldier who stays permanently " +
+                             "too healthy, and no re-emit will ever heal it";
+            // The request is ARMED on the receive path and EMITTED from the standing tick — sending it inline
+            // would make an intent reachable from every inbound dispatch (the shape L19 condemns). Both halves
+            // are asserted, plus the driver, because an armed flag nothing pumps is a silent no-recovery.
+            var damageTick = ModMethod(sync, "ClientTick");
+            if (!Reaches(damageTick, "IntentRail", "Send"))
+                yield return "L66 gap-unrecoverable: TacticalDamageSync.ClientTick does not ask the host for " +
+                             "anything, so a detected gap is a log line and nothing else";
+            var pendingFlag = sync.GetField("_resnapPending", AllMembers);
+            if (pendingFlag == null || request == null || !ReadsField(damageTick, pendingFlag))
+                yield return "L66 gap-request-unarmed: the gap detector and the emitter do not share the pending " +
+                             "flag, so a hole noticed on the receive path never becomes a request";
+            var engineTick = typeof(Multiplayer.Network.Sync.SyncEngine).GetMethod("Tick", AllMembers);
+            if (engineTick == null || !CalleeSequence(engineTick).Any(c => c.Name == "ClientTick" && c.DeclaringType == sync))
+                yield return "L66 gap-request-undriven: SyncEngine.Tick does not call TacticalDamageSync.ClientTick, " +
+                             "so a resnapshot request is armed and never sent";
+            if (!Reaches(ModMethod(sync, "HandleResnapRequest"), "TacticalDamageSync", "Send"))
+                yield return "L66 resnap-unanswered: the host's resnapshot handler ships nothing";
+            if (!Reaches(ModMethod(sync, "ApplyResnap"), "TacticalDamageSync", "Correct"))
+                yield return "L66 resnap-unapplied: the client's resnapshot handler writes nothing back, so the " +
+                             "recovery path recovers nothing";
+            var register = ModMethod(typeof(Multiplayer.Tactical.TacticalCommandSync), "RegisterIntents");
+            if (register == null || !Callees(register, mod).Any(c => c.Name == "HandleResnapRequest"))
+                yield return "L66 resnap-unregistered: the 0x83 intent family has no op for the resnapshot request, " +
+                             "so a client asking for one is rejected as an unknown op and never recovers";
+
+            // ─── wiring and teardown ───
+            // Read the constants REFLECTIVELY: a `SurfaceIds.TacResult != 0x84` written literally is folded at
+            // compile time into a check that can never fire, i.e. a vacuous arm. What is worth asserting is
+            // that the new id is inside the tactical band and collides with NOTHING — two independently
+            // declared constants agreeing is a real fact, not a tautology.
+            var surfaceConsts = typeof(Multiplayer.Network.Sync.SurfaceIds)
+                .GetFields(BindingFlags.Public | BindingFlags.Static)
+                .Where(f => f.IsLiteral && f.FieldType == typeof(byte))
+                .ToDictionary(f => f.Name, f => (byte)f.GetRawConstantValue());
+            byte tacResult;
+            if (!surfaceConsts.TryGetValue("TacResult", out tacResult))
+                yield return "L66 surface-gone: SurfaceIds no longer declares TacResult";
+            else
+            {
+                if (tacResult < 0x80 || tacResult > 0x9F)
+                    yield return "L66 surface-out-of-band: the resolved-attack surface is 0x" + tacResult.ToString("X2") +
+                                 ", outside the tactical band 0x80-0x9F (law L62 — 0xA0-0xBF is the geoscape's)";
+                foreach (var other in surfaceConsts.Where(kv => kv.Key != "TacResult" && kv.Value == tacResult)
+                                                   .Select(kv => kv.Key).OrderBy(n => n, StringComparer.Ordinal))
+                    yield return "L66 surface-collides: SurfaceIds.TacResult shares id 0x" + tacResult.ToString("X2") +
+                                 " with " + other + " — two families on one surface byte, and SurfaceRouter routes " +
+                                 "on exactly that byte";
+            }
+            var engineType = typeof(Multiplayer.Network.Sync.SyncEngine);
+            bool inboundWired = engineType.GetNestedTypes(AllMembers).Concat(new[] { engineType })
+                .SelectMany(t => t.GetMethods(AllMembers).Cast<MethodBase>().Concat(t.GetConstructors(AllMembers)))
+                .Any(m => CalleeSequence(m).Any(c => c.Name == "HandleInbound" && c.DeclaringType == sync));
+            if (!inboundWired)
+                yield return "L66 inbound-unwired: SyncEngine does not chain TacticalDamageSync.HandleInbound into " +
+                             "the tactical inbound hook — every resolved hit is dropped on arrival";
+            if (!Reaches(ModMethod(mod.GetType("Multiplayer.Tactical.TacLevelEndBarrier"), "Postfix"),
+                         "TacticalDamageSync", "Reset"))
+                yield return "L66 state-leaks-between-battles: the tactical teardown does not reset the damage " +
+                             "family — the next battle would inherit this one's seq cursor and either refuse every " +
+                             "record as stale or report a gap that is not there";
         }
 
         /// <summary>True when a method's IL READS any static field. The purity arm of L65 needs "no static

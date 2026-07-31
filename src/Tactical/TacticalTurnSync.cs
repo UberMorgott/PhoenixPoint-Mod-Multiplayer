@@ -347,6 +347,12 @@ namespace Multiplayer.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return;
+            // A3b: the FIRST turn edge is the one moment every peer is provably looking at the same board —
+            // the client's battle was just built from the host's mid-tactical save, so nobody has moved yet.
+            // TacticalActorKey.BuildBattleKeys is a hard one-shot for exactly that reason (see its doc): after
+            // this, aliens move on the host and never on a client (A2's ClientAiGate), so a later rebuild would
+            // give the two peers different maps and point every alien key at the wrong monster.
+            TacticalActorKey.BuildBattleKeys(nextFaction == null ? null : nextFaction.TacticalLevel);
             if (engine.IsHost) TacticalTurnSync.HostBroadcastTurn(nextFaction);
             else TacticalTurnSync.ClientVerifyTurn(nextFaction);
         }
@@ -396,6 +402,7 @@ namespace Multiplayer.Tactical
             if (prevState != Level.State.Playing) return;
             TacticalTurnSync.Reset();
             TacticalCommandSync.Reset();   // A3a: 0x82 seq + pending settles must not survive into the next battle
+            TacticalDamageSync.Reset();    // A3b: 0x84 seq + the gap cursor + any leaked mirror-apply depth
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return;
             engine.SaveTransfer?.OpenReturnBarrier();

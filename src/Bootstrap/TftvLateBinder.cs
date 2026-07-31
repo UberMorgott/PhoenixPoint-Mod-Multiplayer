@@ -50,6 +50,7 @@ namespace Multiplayer.Harmony
             {
                 _done = true;
                 Debug.Log("[Multiplayer] TFTV already loaded at PatchAll; guard patches bound by PatchAll (no defer).");
+                Multiplayer.Tactical.MirrorApplyGuard.Install(harmony);
                 return;
             }
 
@@ -110,6 +111,17 @@ namespace Multiplayer.Harmony
                 {
                     Debug.LogWarning("[Multiplayer] TFTV patch late-bind FAILED: " + t.Name + " — " + e.Message);
                 }
+            }
+            // A3b's mirror-apply guard is late-bound for the SAME reason and at the SAME moment: it asks
+            // Harmony which foreign patches sit on the four vanilla damage entries, and at PatchAll time TFTV
+            // has installed none of them yet, so an early install would find nothing and bind nothing —
+            // silently, which is this project's dominant bug class. Idempotent, so the startup call is free.
+            try { Multiplayer.Tactical.MirrorApplyGuard.Install(_harmony); }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multiplayer] mirror-apply guard late-install FAILED — foreign ref-DamageResult " +
+                               "patches will mutate the host's already-resolved damage a second time on every " +
+                               "client: " + e.Message);
             }
         }
 

@@ -61,8 +61,19 @@ BEHAVIOR (per-subsystem mirroring).
    set (`TacAbilityTargetCodec`, never reflection — the type holds live refs), the actor key is
    `TacticalActorBase.GeoUnitId` (serialized in `TacActorBaseInstanceData`, so reload- AND
    save-transfer-stable), the acting peer plays its own click SPECULATIVELY and the host's `settle`
-   (final pos + AP + WP, shipped at `ClearPlayingAction`) is the authority. A3b (attacks/damage), A4-A6
-   pending. Shared-seed determinism = still a separate future project.
+   (final pos + AP + WP, shipped at `ClearPlayingAction`) is the authority. **A3b** (law L66) = attacks and
+   their outcomes: shoot/bash join the A3a rider set with the attack fields on the same codec (no new intent
+   surface), and **0x84 TacResult** carries the host's resolved `DamageResult` per receiver — addressed
+   `(actorKey, IDamageReceiver.GetSlotName())`, "" = the actor. NO PEER RECOMPUTES DAMAGE: the client neuter
+   is at `DamageAccumulation.ApplyAddedDamage:550` (+ belts on `TacticalActorBase.ApplyDamage` /
+   `ItemSlot.ApplyDamage` for DoT ticks), and the mirror re-runs the game's own `ApplyDamage` inside a
+   `MirrorApplyScope` that stands every FOREIGN `ref DamageResult` patch down (enumerated from Harmony, not
+   a TFTV class list; late-bound via `TftvLateBinder`). Post-hit hp/ap/wp are overwritten from the host's
+   snapshot and any non-zero correction is logged as a double-apply. Aliens are keyed by a DERIVED battle key
+   (negative ordinal over battle-start position, built once at the first turn edge) — there is NO serialized
+   per-actor identity, and a synthetic `GeoUnitId` is refused (`GeoMission:788-795` errors on it). A4-A6
+   (inventory/loot, spawn/despawn, destructibles) pending. Shared-seed determinism = still a separate future
+   project.
 6. **Canonical diff.** Same state → byte-identical Delta: traversal sorted by stable IDs, fixed
    field order, no nondeterministic dictionary walks. IMPLEMENTATION (recon-bound): diff walks the
    LIVE game graph guided by the save serializer's type metadata (its field discovery = our

@@ -12,6 +12,7 @@ using Multiplayer.Network.Sync;
 using PhoenixPoint.Common.Entities;
 using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.Entities.Abilities;
+using PhoenixPoint.Tactical.Entities.Equipments;
 using PhoenixPoint.Tactical.Levels;
 using UnityEngine;
 
@@ -30,29 +31,140 @@ namespace Multiplayer.Tactical
     /// It is also the game's own cross-layer identity (<c>GeoLevelController.GetTacUnitById</c>, used all over
     /// <c>GeoMission</c>), so a soldier keeps one key from the geoscape roster through the battle and back.
     ///
-    /// NOT universal, deliberately and loudly: an actor that never came from the geoscape (a procedurally
-    /// spawned Pandoran) carries <c>GeoTacUnitId.None</c> == 0, and MANY of them do at once — see
-    /// <c>HavenMissionUtil</c>:46 filtering on exactly that. So 0 is refused outright rather than resolved to
-    /// an arbitrary one of them, and a duplicate is a refusal too. A3a only ever keys PLAYER-faction soldiers,
-    /// which are deployed <c>GeoCharacter</c>s and always carry a real id (<c>TacCharacterData</c>:131
-    /// <c>GeoUnitId = Id</c>); when A3b needs to name an alien TARGET it will need a second, minted key —
-    /// which is exactly why this lives behind two methods instead of being inlined at the call sites.
+    /// NOT universal on its own, and A3b is where that bit: an actor that never came from the geoscape (a
+    /// procedurally spawned Pandoran) carries <c>GeoTacUnitId.None</c> == 0, and MANY of them do at once —
+    /// see <c>HavenMissionUtil</c>:46 filtering on exactly that. A3a refused 0 outright because it only ever
+    /// keyed PLAYER-faction soldiers (deployed <c>GeoCharacter</c>s, always a real id —
+    /// <c>TacCharacterData</c>:131 <c>GeoUnitId = Id</c>). A3b must name the alien on the receiving end of a
+    /// shot, so 0 needs an answer.
+    ///
+    /// THE ANSWER IS A SECOND, *DERIVED* KEY — and the first thing to record is what it is NOT, because two
+    /// obvious candidates were checked against the decompile and both are wrong:
+    ///   • THERE IS NO SERIALIZED PER-ACTOR IDENTITY to reuse. <c>ActorInstanceData</c> carries
+    ///     Pos/Rot/Source/SourceTemplate/TimingData and no id; <c>TacActorBaseInstanceData</c> adds def,
+    ///     faction, participant, <c>GeoUnitId</c> and tags — nothing unique for a spawned Pandoran. The
+    ///     <c>SceneObjectId</c> on <c>ActorComponent</c> is a scene-authoring guid, not a spawn identity.
+    ///   • STAMPING A SYNTHETIC <c>GeoUnitId</c> ON ALIENS (which WOULD ride the save for free) is refused:
+    ///     <c>GeoMission</c>:788-795 skips exactly <c>GeoTacUnitId.None</c> and <c>Debug.LogError</c>s any
+    ///     other id it cannot find in the geoscape, and <c>PhoenixStatisticsManager</c>:814-878 keys soldier
+    ///     stats off the same field. A fake id turns every alien into a mission-completion error.
+    /// So the key is derived from state the peers PROVABLY share: the ORDINAL of the actor in the key-less
+    /// set, ordered canonically by its BATTLE-START POSITION. Built ONCE per battle
+    /// (<see cref="BuildBattleKeys"/>, driven from the first turn edge — <c>TacNewTurnHook</c>, which fires on
+    /// every peer running the native turn machine) and then CACHED per actor object, which is what makes it
+    /// survive the two things that kill an ordinal: an actor leaving play (<c>BaseMap</c>:51 removes it from
+    /// the list, renumbering everything after it) and actors moving. Both peers build from the SAME
+    /// mid-tactical save blob (A1), so the positions they sort by are byte-identical, and tiles are exclusive
+    /// (actors are dynamic nav obstacles), so the sort has no ties to break — a tie is reported LOUDLY rather
+    /// than resolved. Derived keys are NEGATIVE so they can never collide with a real <c>GeoTacUnitId</c>
+    /// (the geoscape mints those from a positive counter), and 0 still means "no shared identity".
+    ///
+    /// KNOWN CEILING, stated rather than hidden: an actor that ENTERS play after the build (reinforcement
+    /// spawn — arc A5) gets no key and every command or result naming it is refused with a sentence. That is
+    /// the correct A3b behaviour: A5 is what makes spawns exist on both peers in the first place.
     /// </summary>
     internal static class TacticalActorKey
     {
-        internal static int Of(TacticalActorBase actor) => actor == null ? 0 : (int)actor.GeoUnitId;
+        private static readonly Dictionary<TacticalActorBase, int> _derived =
+            new Dictionary<TacticalActorBase, int>();
+        private static readonly Dictionary<int, TacticalActorBase> _byDerived = new Dictionary<int, TacticalActorBase>();
+        private static bool _built;
 
-        /// <summary>Null + a human reason on any failure — never a silent "closest match". The scan is over
-        /// EVERY actor on the map (not just the player's) precisely so a collision with a key-less alien is
-        /// detected instead of being invisible.</summary>
+        /// <summary>Whether <see cref="BuildBattleKeys"/> has run for this battle. A command that needs a
+        /// derived key before the map exists is refused with that reason, never resolved by accident.</summary>
+        internal static bool Built => _built;
+
+        internal static void Reset()
+        {
+            _derived.Clear();
+            _byDerived.Clear();
+            _built = false;
+        }
+
+        /// <summary>Build the derived-key map for THIS battle. Idempotent by design — it runs at the FIRST
+        /// turn edge and never again, because after that the peers' alien positions legitimately diverge (the
+        /// AI turn is host-only, A2's <c>ClientAiGate</c>, so aliens never move on a client at all). Rebuilding
+        /// later would therefore produce two different maps and silently point every alien key at the wrong
+        /// monster — which is why this is a hard one-shot and not a lazy "build on first need".</summary>
+        internal static void BuildBattleKeys(TacticalLevelController tlc)
+        {
+            if (_built) return;
+            if (tlc == null || tlc.Map == null) return;
+            var keyless = new List<TacticalActorBase>();
+            foreach (var a in tlc.Map.GetActors<TacticalActorBase>())
+                if ((int)a.GeoUnitId == 0) keyless.Add(a);
+            keyless.Sort(CanonicalOrder);
+            for (int i = 0; i < keyless.Count; i++)
+            {
+                if (i > 0 && CanonicalOrder(keyless[i - 1], keyless[i]) == 0)
+                    Debug.LogError("[Multiplayer][tac] two key-less actors are indistinguishable at battle start (" +
+                                   keyless[i].name + " and " + keyless[i - 1].name + " at " + keyless[i].Pos +
+                                   ") — their derived keys depend on enumeration order and the peers may disagree " +
+                                   "about which is which. Every shot naming either of them is suspect.");
+                int key = -(i + 1);
+                _derived[keyless[i]] = key;
+                _byDerived[key] = keyless[i];
+            }
+            _built = true;
+            Debug.Log("[Multiplayer][tac] derived battle keys for " + keyless.Count + " actor(s) the geoscape " +
+                      "never named (ordinals over battle-start position).");
+        }
+
+        /// <summary>Position first (the peers' save-restored floats are bit-identical, so this is a total
+        /// order in practice), name as the LAST resort so a reported tie is still deterministic rather than
+        /// left to list order.</summary>
+        private static int CanonicalOrder(TacticalActorBase a, TacticalActorBase b)
+        {
+            int c = a.Pos.x.CompareTo(b.Pos.x);
+            if (c != 0) return c;
+            c = a.Pos.z.CompareTo(b.Pos.z);
+            if (c != 0) return c;
+            c = a.Pos.y.CompareTo(b.Pos.y);
+            if (c != 0) return c;
+            return string.CompareOrdinal(a.name, b.name);
+        }
+
+        internal static int Of(TacticalActorBase actor)
+        {
+            if (actor == null) return 0;
+            int geo = (int)actor.GeoUnitId;
+            if (geo != 0) return geo;
+            int derived;
+            return _derived.TryGetValue(actor, out derived) ? derived : 0;
+        }
+
+        /// <summary>Null + a human reason on any failure — never a silent "closest match". The positive scan
+        /// is over EVERY actor on the map (not just the player's) precisely so a collision with a key-less
+        /// alien is detected instead of being invisible.</summary>
         internal static TacticalActorBase Resolve(TacticalLevelController tlc, int key, out string why)
         {
             why = null;
             if (key == 0)
             {
-                why = "actor key 0 is GeoTacUnitId.None — this actor never came from the geoscape, so it has " +
-                      "no identity the peers share and it cannot be commanded across the wire";
+                why = "actor key 0 — this actor carries GeoTacUnitId.None and was not present when this " +
+                      "battle's derived keys were built (a mid-battle spawn, arc A5), so the peers share no " +
+                      "identity for it";
                 return null;
+            }
+            // The DERIVED branch is answered BEFORE the map is consulted, and deliberately: a derived key is
+            // resolved out of this battle's own key map, not by scanning the level, so "there is no map here"
+            // is never the reason a peer gives for failing to find an alien.
+            if (key < 0)
+            {
+                if (!_built)
+                {
+                    why = "derived actor key " + key + " arrived before this peer built its battle key map — " +
+                          "the peers are not at the same point in the battle";
+                    return null;
+                }
+                TacticalActorBase derived;
+                if (!_byDerived.TryGetValue(key, out derived))
+                {
+                    why = "no actor carries derived key " + key + " on this peer — the peers built different " +
+                          "key maps, so every alien named on the wire is suspect";
+                    return null;
+                }
+                return derived;
             }
             if (tlc == null || tlc.Map == null)
             {
@@ -75,6 +187,57 @@ namespace Multiplayer.Tactical
                 return null;
             }
             return found;
+        }
+
+        /// <summary>THE RECEIVER KEY (law L66c): an <c>IDamageReceiver</c> is named by its actor plus
+        /// <c>IDamageReceiver.GetSlotName()</c> — the interface's OWN identity string, not something invented
+        /// here. <c>TacticalActorBase.GetSlotName</c>:764 returns "" (the whole actor),
+        /// <c>ItemSlot.GetSlotName</c>:215 returns <c>ItemSlotDef.SlotName</c> and
+        /// <c>DamageReceiverImplementation.GetSlotName</c>:73 forwards to its slot. It is stable because it is
+        /// a DEF field (identical on every peer by mod parity, law 10), it is UNIQUE per actor because the
+        /// game itself asserts that — <c>TacticalActor.ValidateActor</c>:1178-1186 logs an error for duplicate
+        /// health-slot names — and it ROUND-TRIPS through the game's own resolver,
+        /// <c>CharacterBodyState.GetSlot(string)</c>:152-155.</summary>
+        internal static string SlotOf(IDamageReceiver receiver) => receiver == null ? null : (receiver.GetSlotName() ?? "");
+
+        /// <summary>The other half of the round trip. "" is the actor itself — which is unambiguous because
+        /// <c>ItemSlotDef.SlotName</c> is never empty for a real body part; anything else must resolve to a
+        /// real slot on that actor or it is a loud failure, never a fallback to the actor (which would apply
+        /// arm damage to the torso and hide the drift). The <c>ItemSlot</c> IS the receiver
+        /// (<c>ItemSlot</c>:18 implements <c>IDamageReceiver</c>), so the mirror re-enters the host's exact
+        /// path — <c>ItemSlot.ApplyDamage</c>:120-128, statistics and the zero-health disable included.</summary>
+        internal static IDamageReceiver ResolveReceiver(TacticalActorBase actor, string slotName, out string why)
+        {
+            why = null;
+            // ReferenceEquals, not ==: TacticalActorBase is a MonoBehaviour, and Unity's overloaded == answers
+            // "is this object destroyed" rather than "is this reference null". The question here is the latter
+            // — a destroyed actor never gets this far, because TacticalActorKey.Resolve only ever hands back
+            // actors it just found on the live map.
+            if (ReferenceEquals(actor, null)) { why = "no actor"; return null; }
+            if (string.IsNullOrEmpty(slotName)) return actor;
+            var tacActor = actor as TacticalActor;
+            if (tacActor == null || tacActor.BodyState == null)
+            {
+                why = SafeName(actor) + " has no BodyState, so it cannot own a body part named '" + slotName + "'";
+                return null;
+            }
+            var slot = tacActor.BodyState.GetSlot(slotName);
+            if (slot == null)
+            {
+                why = SafeName(actor) + " has no body-part slot named '" + slotName + "' on this peer — mod parity " +
+                      "should have made that impossible (law 10)";
+                return null;
+            }
+            return slot;
+        }
+
+        /// <summary><c>UnityEngine.Object.name</c> is a native ECall: it is perfectly safe in the game and
+        /// THROWS in the headless harness (RailCheck), which executes these refusal paths for real. A refusal
+        /// message that cannot be built is a refusal that becomes a crash, so the name degrades instead.</summary>
+        private static string SafeName(TacticalActorBase actor)
+        {
+            try { return actor.name; }
+            catch { return actor.GetType().Name; }
         }
     }
 
@@ -100,53 +263,105 @@ namespace Multiplayer.Tactical
     internal static class TacAbilityTargetCodec
     {
         internal const ushort BitPositionToApply = 1 << 0;
+        // ─── A3b: the attack riders. New bits only; no existing bit moved or reused. ───
+        internal const ushort BitActor = 1 << 1;
+        internal const ushort BitShootTargetActor = 1 << 2;
+        internal const ushort BitDamageReceiver = 1 << 3;
+        internal const ushort BitActorGridPosition = 1 << 4;
+        internal const ushort BitShootFromPos = 1 << 5;
+        internal const ushort BitDirection = 1 << 6;
+        internal const ushort BitCone = 1 << 7;
+        internal const ushort BitAttackType = 1 << 8;
+        internal const ushort BitObstructionsCheckRadius = 1 << 9;
+
         /// <summary>Every bit this build can decode. A set bit outside it means the sender declared a field
         /// this reader does not know — the rest of the stream is then misaligned, so it is a THROW, not a
         /// best-effort read. (Mod parity is blocking, law 10, so this can only be a bug, never a version skew.)</summary>
-        internal const ushort KnownBits = BitPositionToApply;
+        internal const ushort KnownBits = BitPositionToApply | BitActor | BitShootTargetActor | BitDamageReceiver |
+                                          BitActorGridPosition | BitShootFromPos | BitDirection | BitCone |
+                                          BitAttackType | BitObstructionsCheckRadius;
 
-        /// <summary>The fields that ACTUALLY ride, in wire order. A3a: movement, and movement needs exactly
-        /// one thing — <c>MoveAbility.Move</c>:105-144 reads <c>target.PositionToApply</c> (:118) and nothing
-        /// else off the payload except the followup pair. Destination-only is therefore sufficient: the path
-        /// is not shipped, it is re-derived per peer by <c>TacticalNavigationComponent.Navigate</c>:937-949
-        /// over an RNG-free A* (<c>Base.Levels.Nav.Tiled.Pathfinder</c>).</summary>
-        internal static readonly string[] Rides = { "PositionToApply" };
+        /// <summary>The fields that ACTUALLY ride, in wire order.
+        /// A3a: movement needed exactly one thing — <c>MoveAbility.Move</c>:105-144 reads
+        /// <c>target.PositionToApply</c> (:118) and nothing else off the payload except the followup pair.
+        /// A3b adds the ATTACK fields, each grounded in a real read inside the shot path rather than assumed:
+        /// <c>AttackType</c> gates overwatch/return-fire branches and the shot COUNT
+        /// (<c>TacticalLevelController.FireWeaponAtTargetCrt</c>:1511/1515/1551/1597/1695/1756 and
+        /// <c>ShootAbility.ShouldApplyCosts</c>:145 — the flag that decides whether the shot costs AP at all);
+        /// <c>ShootFromPos</c> is the stepout decision and the actual navigation destination before firing
+        /// (:1556, :1625, :1633); <c>Actor</c>/<c>ShootTargetActor</c>/<c>DamageReceiver</c> are what
+        /// <c>GetTargetActor</c>:153-164 and :1571/:1858 read to know WHO is being shot;
+        /// <c>ActorGridPosition</c> is the TARGET's tile (<c>TacticalAbilityTarget</c>:64-70 sets it from the
+        /// target actor, NOT from the shooter — A3a's drop reason said "the SOURCE tile" and was WRONG) and is
+        /// the first branch of <c>GetActorPosition</c>:214-226; <c>Direction</c>/<c>Cone</c> shape cone and
+        /// line weapons and <c>Cone.Tip</c> is the last-resort working position (:186-189);
+        /// <c>ObstructionsCheckRadius</c> is a line-of-fire tolerance that defaults to +Inf and would silently
+        /// differ the moment any caller narrows it.</summary>
+        internal static readonly string[] Rides =
+        {
+            "PositionToApply", "Actor", "ShootTargetActor", "DamageReceiver", "ActorGridPosition",
+            "ShootFromPos", "Direction", "Cone", "AttackType", "ObstructionsCheckRadius",
+        };
 
         /// <summary>The fields that deliberately do NOT ride, each with the reason. This list is the other
         /// half of the coverage law — it is what makes a drop a DECISION instead of an omission.</summary>
         internal static readonly Dictionary<string, string> Dropped = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            { "Actor",                "A3b (the target actor of a shot/heal) — needs an actor key that also covers key-less aliens" },
-            { "ShootTargetActor",     "A3b — same key problem as Actor" },
             { "GameObject",           "a live scene object; the peer's own equivalent is reached through the actor key, never shipped" },
-            { "ActorGridPosition",    "the SOURCE tile, which every peer already holds: it is the commanded actor's own Pos" },
-            { "ShootFromPos",         "A3b — a derived firing origin, recomputed per peer from the actor's stance" },
             { "CoverDirection",       "presentation: which way the actor hugs cover on arrival (law 5 names it local-only)" },
-            { "Direction",            "A3b — aim direction for cone/line weapons" },
-            { "Cone",                 "A3b — the cone shape of a spread weapon" },
-            { "AttackType",           "A3b — Regular / OverwatchShot / etc." },
-            { "TacticalItem",         "A3b/A4 — a live item instance; would need an item key, and no rider needs it yet" },
-            { "Equipment",            "A3b — the firing equipment; reached through the actor's own slot on each peer" },
-            { "DamageReceiver",       "A3b — a live interface reference; damage is host-authoritative and rides its own arc" },
+            { "TacticalItem",         "A4 — the body-part item a snap-to-bodyparts shot aimed at; it needs an item key, and the aim point it feeds GetWorkingPosition:181 is already reached through the shipped DamageReceiver's own slot" },
+            { "Equipment",            "the TARGET's equipment (equipment-targeting abilities, not the firing weapon — that is the ability's own Source); no A3b rider targets equipment" },
             { "ItemContainer",        "A4 (inventory) — a live container reference" },
             { "InventoryComponent",   "A4 (inventory) — a live component reference" },
             { "MultiAbilityTargets",  "recursive list; no rider is a multi-target ability, and shipping it would need the whole codec to nest" },
-            { "FollowupAbility",      "a live ability reference. Move+shoot chains are A3b: the followup is a SECOND command and rides as its own intent, not as a passenger on the move" },
+            { "FollowupAbility",      "a live ability reference. Move+shoot chains: the followup is a SECOND command and rides as its own intent, not as a passenger" },
             { "FollowupAbilityTarget","same — the followup's own payload travels with the followup's own command" },
-            { "ObstructionsCheckRadius","A3b — a line-of-fire tuning value, recomputed per peer from the same def" },
-            { "UseShootOriginCache",  "A3b — a per-peer performance hint, never shared state" },
+            { "UseShootOriginCache",  "a per-peer performance hint (a projectile-origin transform cache), never shared state" },
         };
 
         internal static void Write(BinaryWriter w, TacticalAbilityTarget t)
         {
             ushort mask = 0;
-            bool hasPos = t != null && t.HasPositionToApply;
-            if (hasPos) mask |= BitPositionToApply;
+            if (t != null)
+            {
+                if (t.HasPositionToApply) mask |= BitPositionToApply;
+                if (t.Actor != null) mask |= BitActor;
+                if (t.ShootTargetActor != null) mask |= BitShootTargetActor;
+                if (t.DamageReceiver != null) mask |= BitDamageReceiver;
+                if (!t.ActorGridPosition.IsNaN()) mask |= BitActorGridPosition;
+                if (!t.ShootFromPos.IsNaN()) mask |= BitShootFromPos;
+                if (t.Direction != Vector3.zero) mask |= BitDirection;
+                if (t.Cone.Height != 0f || t.Cone.Radius != 0f) mask |= BitCone;
+                if (t.AttackType != AttackType.Regular) mask |= BitAttackType;
+                if (!float.IsPositiveInfinity(t.ObstructionsCheckRadius)) mask |= BitObstructionsCheckRadius;
+            }
             w.Write(mask);
-            if (hasPos) { w.Write(t.PositionToApply.x); w.Write(t.PositionToApply.y); w.Write(t.PositionToApply.z); }
+            if (t == null) return;
+            if ((mask & BitPositionToApply) != 0) WriteVec(w, t.PositionToApply);
+            if ((mask & BitActor) != 0) w.Write(TacticalActorKey.Of(t.Actor));
+            if ((mask & BitShootTargetActor) != 0) w.Write(TacticalActorKey.Of(t.ShootTargetActor));
+            if ((mask & BitDamageReceiver) != 0)
+            {
+                w.Write(TacticalActorKey.Of(t.DamageReceiver.GetActor()));
+                w.Write(TacticalActorKey.SlotOf(t.DamageReceiver));
+            }
+            if ((mask & BitActorGridPosition) != 0) WriteVec(w, t.ActorGridPosition);
+            if ((mask & BitShootFromPos) != 0) WriteVec(w, t.ShootFromPos);
+            if ((mask & BitDirection) != 0) WriteVec(w, t.Direction);
+            if ((mask & BitCone) != 0)
+            {
+                WriteVec(w, t.Cone.Tip); WriteVec(w, t.Cone.Forward);
+                w.Write(t.Cone.Height); w.Write(t.Cone.Radius);
+            }
+            if ((mask & BitAttackType) != 0) w.Write((byte)t.AttackType);
+            if ((mask & BitObstructionsCheckRadius) != 0) w.Write(t.ObstructionsCheckRadius);
         }
 
-        internal static TacticalAbilityTarget Read(BinaryReader r)
+        /// <summary>Decode against the RECEIVING peer's own world: every actor-shaped field is a key that is
+        /// resolved here, and a key that does not resolve is a LOUD null rather than a silently absent target
+        /// (a shot at nobody aims at the map origin). <paramref name="unresolved"/> collects those sentences
+        /// so the caller can refuse the whole command with them instead of half-playing it.</summary>
+        internal static TacticalAbilityTarget Read(BinaryReader r, TacticalLevelController tlc, List<string> unresolved = null)
         {
             ushort mask = r.ReadUInt16();
             if ((mask & ~KnownBits) != 0)
@@ -154,10 +369,46 @@ namespace Multiplayer.Tactical
                                                "this build cannot decode (known 0x" + KnownBits.ToString("X4") + ") — " +
                                                "the payload after it is misaligned and must not be guessed at");
             var t = new TacticalAbilityTarget();
-            if ((mask & BitPositionToApply) != 0)
-                t.PositionToApply = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+            if ((mask & BitPositionToApply) != 0) t.PositionToApply = ReadVec(r);
+            if ((mask & BitActor) != 0) t.Actor = ResolveActor(r.ReadInt32(), "Actor", tlc, unresolved);
+            if ((mask & BitShootTargetActor) != 0) t.ShootTargetActor = ResolveActor(r.ReadInt32(), "ShootTargetActor", tlc, unresolved);
+            if ((mask & BitDamageReceiver) != 0)
+            {
+                int key = r.ReadInt32();
+                string slot = r.ReadString();
+                var owner = ResolveActor(key, "DamageReceiver", tlc, unresolved);
+                string why;
+                var recv = TacticalActorKey.ResolveReceiver(owner, slot, out why);
+                if (recv == null && owner != null && unresolved != null)
+                    unresolved.Add("DamageReceiver slot '" + slot + "': " + why);
+                t.DamageReceiver = recv;
+            }
+            if ((mask & BitActorGridPosition) != 0) t.ActorGridPosition = ReadVec(r);
+            if ((mask & BitShootFromPos) != 0) t.ShootFromPos = ReadVec(r);
+            if ((mask & BitDirection) != 0) t.Direction = ReadVec(r);
+            if ((mask & BitCone) != 0)
+            {
+                var cone = new Cone { Tip = ReadVec(r) };
+                cone.Forward = ReadVec(r);
+                cone.Height = r.ReadSingle();
+                cone.Radius = r.ReadSingle();
+                t.Cone = cone;
+            }
+            if ((mask & BitAttackType) != 0) t.AttackType = (AttackType)r.ReadByte();
+            if ((mask & BitObstructionsCheckRadius) != 0) t.ObstructionsCheckRadius = r.ReadSingle();
             return t;
         }
+
+        private static TacticalActorBase ResolveActor(int key, string field, TacticalLevelController tlc, List<string> unresolved)
+        {
+            string why;
+            var actor = TacticalActorKey.Resolve(tlc, key, out why);
+            if (actor == null && unresolved != null) unresolved.Add(field + " (key " + key + "): " + why);
+            return actor;
+        }
+
+        private static void WriteVec(BinaryWriter w, Vector3 v) { w.Write(v.x); w.Write(v.y); w.Write(v.z); }
+        private static Vector3 ReadVec(BinaryReader r) => new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
     }
 
     /// <summary>
@@ -227,7 +478,8 @@ namespace Multiplayer.Tactical
         /// Everything OUTSIDE the set stays exactly as arc A2 left it — local and unrelayed — and says so once
         /// per ability def, because "my grenade did nothing on the other screen" with no log line is this
         /// project's dominant bug class.</summary>
-        internal static bool IsRider(TacticalAbility ability) => ability is MoveAbility;
+        internal static bool IsRider(TacticalAbility ability) =>
+            ability is MoveAbility || ability is ShootAbility || ability is BashAbility;
 
         /// <summary>HOST: the peer whose intent is currently being replayed natively, so the mirror can skip
         /// the peer that already played it locally. 0 = the host's own gesture (mirror to everyone). Scoped by
@@ -267,11 +519,20 @@ namespace Multiplayer.Tactical
             _saidUncovered.Clear();
             _saidKeyless.Clear();
             _replayOriginPeer = 0;
+            TacticalActorKey.Reset();   // A3b: the derived alien keys belong to ONE battle and to no other
+            FumbleGate.Reset();
         }
 
         internal static void RegisterIntents()
         {
-            var ops = new Dictionary<byte, IntentRail.OpHandler> { [OpIntentActivate] = HandleActivate };
+            var ops = new Dictionary<byte, IntentRail.OpHandler>
+            {
+                [OpIntentActivate] = HandleActivate,
+                // A3b's only client→host message: "I lost a resolved-attack record, resend the battlefield".
+                // It rides THIS family rather than a surface of its own — 0x84 is the one new surface the arc
+                // is allowed, and a recovery request is an intent like any other.
+                [TacticalDamageSync.OpIntentResnap] = TacticalDamageSync.HandleResnapRequest,
+            };
             IntentRail.Register(SurfaceIds.TacCommandIntent, "tac-cmd", ops);
         }
 
@@ -310,39 +571,71 @@ namespace Multiplayer.Tactical
 
             if (!IsRider(ability))
             {
-                // A3a's honest boundary, said out loud exactly once per ability def per battle: a player
+                // The honest boundary, said out loud exactly once per ability def per battle: a player
                 // gesture that reaches no other peer is invisible divergence, which is this project's
                 // dominant bug class.
                 string name = ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name;
                 if (_saidUncovered.Add(name))
-                    Debug.LogWarning("[Multiplayer][tac] '" + name + "' is NOT a declared A3a rider — it ran " +
-                                     "LOCALLY on this peer only and no other peer will see it. A3a carries " +
-                                     "movement; attacks are A3b.");
+                    Debug.LogWarning("[Multiplayer][tac] '" + name + "' is NOT a declared rider — it ran " +
+                                     "LOCALLY on this peer only and no other peer will see it. A3a/A3b carry " +
+                                     "movement, shooting (incl. thrown and melee weapons) and bash.");
                 return;
             }
 
             int key = TacticalActorKey.Of(actor);
             string guid = ability.AbilityDef == null ? null : ability.AbilityDef.Guid;
             var target = parameter as TacticalAbilityTarget;
-            if (key == 0 || string.IsNullOrEmpty(guid) || target == null)
+            // A3b: the payload now names OTHER actors too, and an unkeyable one would ride as key 0 and be
+            // refused on the far side AFTER the order was already accepted — so it is refused HERE, where the
+            // gesture still belongs to somebody, and said out loud.
+            string unkeyable = target == null ? null : FirstUnkeyableTargetField(target);
+            if (key == 0 || string.IsNullOrEmpty(guid) || target == null || unkeyable != null)
             {
                 string who = actor.name + " / " + (ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name);
                 if (_saidKeyless.Add(who))
                     Debug.LogError("[Multiplayer][tac] command NOT relayed for " + who + " — " +
-                                   (key == 0 ? "the actor has no GeoTacUnitId (it never came from the geoscape)"
+                                   (key == 0 ? "the commanded actor has no shared key (no GeoTacUnitId and no derived battle key)"
                                     : string.IsNullOrEmpty(guid) ? "the ability def has no guid"
-                                    : "the activation carried no TacticalAbilityTarget") +
-                                   ". This peer moved alone; no other peer will follow.");
+                                    : target == null ? "the activation carried no TacticalAbilityTarget"
+                                    : "the payload's " + unkeyable + " has no shared key, so no peer could tell " +
+                                      "WHICH actor is being targeted") +
+                                   ". This peer acted alone; no other peer will follow.");
                 return;
             }
 
             if (engine.IsHost)
-                Send(OpActivate, "mirror " + actor.name + " → " + Fmt(target.PositionToApply), _replayOriginPeer,
-                     w => WriteCommand(w, key, guid, target));
+            {
+                // THE FUMBLE PRE-ROLL (law L66d). TacticalAbility.Activate:1109 rolls the fumble INSIDE the
+                // native body — after this prefix — and TacticalAbility.PlayAction:988-993 (and TFTV's
+                // EnqueueAction fumble fix, TFTVVanillaFixes.cs:4003-4033) consume it SYNCHRONOUSLY before
+                // Activate returns. So a fumble shipped after the order would always arrive too late, and a
+                // mirror left to roll its own would play a different shot. Instead the host consumes the ONE
+                // native roll here and memoizes it, so :1109 gets the same value and the bit rides WITH the
+                // order. Clients never roll at all (FumbleCheckGate).
+                bool fumbled = FumbleGate.RollForHost(ability);
+                Send(OpActivate, "mirror " + actor.name + " " + Fmt(target.PositionToApply) + (fumbled ? " FUMBLED" : ""),
+                     _replayOriginPeer, w => { WriteCommand(w, key, guid, target); w.Write(fumbled); });
+            }
             else
                 IntentRail.Send(SurfaceIds.TacCommandIntent, OpIntentActivate,
-                                "command " + actor.name + " → " + Fmt(target.PositionToApply),
+                                "command " + actor.name + " " + Fmt(target.PositionToApply),
                                 w => WriteCommand(w, key, guid, target));
+        }
+
+        /// <summary>Which actor-shaped payload field (if any) this peer cannot name on the wire. Null = all of
+        /// them are keyable. Never "close enough": a 0 key names nothing.</summary>
+        private static string FirstUnkeyableTargetField(TacticalAbilityTarget t)
+        {
+            if (t.Actor != null && TacticalActorKey.Of(t.Actor) == 0) return "Actor '" + t.Actor.name + "'";
+            if (t.ShootTargetActor != null && TacticalActorKey.Of(t.ShootTargetActor) == 0)
+                return "ShootTargetActor '" + t.ShootTargetActor.name + "'";
+            if (t.DamageReceiver != null)
+            {
+                var owner = t.DamageReceiver.GetActor();
+                if (owner == null || TacticalActorKey.Of(owner) == 0)
+                    return "DamageReceiver's owning actor";
+            }
+            return null;
         }
 
         /// <summary>The <c>TacticalAbility.ClearPlayingAction</c> postfix — the host's CLOSER. That method is
@@ -449,7 +742,7 @@ namespace Multiplayer.Tactical
             if (!abilityFound)
                 return "that actor has no ability with the named def guid";
             if (!abilityIsRider)
-                return "that ability is not a declared A3a rider — only movement crosses the wire in this arc";
+                return "that ability is not a declared rider — only movement and the attack abilities cross the wire";
             if (actorBusy)
                 return "that actor is already executing an ability — another peer commanded it first " +
                        "(first-to-act-wins)";
@@ -468,9 +761,19 @@ namespace Multiplayer.Tactical
         {
             int key = r.ReadInt32();
             string guid = r.ReadString();
-            var target = TacAbilityTargetCodec.Read(r);   // a throw here funnels into IntentRail's reject path
-
             var tlc = Tlc();
+            // A throw here funnels into IntentRail's reject path. A key that does not resolve is NOT a throw —
+            // it is a named refusal, so the losing peer is told which actor the host could not find.
+            var unresolved = new List<string>();
+            var target = TacAbilityTargetCodec.Read(r, tlc, unresolved);
+            if (unresolved.Count > 0)
+            {
+                IntentRail.Reject(SurfaceIds.TacCommandIntent, senderPeerId,
+                                  "command for actor " + key + ": the host cannot name the target — " +
+                                  string.Join("; ", unresolved.ToArray()));
+                return;
+            }
+
             string why;
             var actor = TacticalActorKey.Resolve(tlc, key, out why) as TacticalActor;
             var faction = actor == null ? null : actor.TacticalFaction;
@@ -536,7 +839,15 @@ namespace Multiplayer.Tactical
                     uint seq = r.ReadUInt32();
                     byte op = r.ReadByte();
                     if (!Seq.ShouldApply(SurfaceIds.TacCommand, seq)) return true;  // stale re-delivery (law 7)
-                    if (op == OpActivate) ApplyActivate(r.ReadInt32(), r.ReadString(), TacAbilityTargetCodec.Read(r));
+                    if (op == OpActivate)
+                    {
+                        int actorKey = r.ReadInt32();
+                        string abilityGuid = r.ReadString();
+                        var unresolved = new List<string>();
+                        var target = TacAbilityTargetCodec.Read(r, Tlc(), unresolved);
+                        bool fumbled = r.ReadBoolean();
+                        ApplyActivate(actorKey, abilityGuid, target, fumbled, unresolved);
+                    }
                     else if (op == OpSettle) QueueSettle(r.ReadInt32(),
                                                         new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
                                                         r.ReadSingle(), r.ReadSingle());
@@ -559,14 +870,25 @@ namespace Multiplayer.Tactical
 
         /// <summary>Play the host's order with the game's own code, inside an apply scope so the capture
         /// postfix does not echo it straight back as a fresh intent (law 8).</summary>
-        private static void ApplyActivate(int key, string guid, TacticalAbilityTarget target)
+        private static void ApplyActivate(int key, string guid, TacticalAbilityTarget target, bool fumbled,
+                                          List<string> unresolved)
         {
             string why;
             var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
             if (actor == null)
             {
                 Debug.LogError("[Multiplayer][tac] host command for actor " + key + " cannot be played here — " +
-                               why + ". That soldier will stand still on this screen while it moves on the host's.");
+                               why + ". That soldier will stand still on this screen while it acts on the host's.");
+                return;
+            }
+            if (unresolved != null && unresolved.Count > 0)
+            {
+                // Playing a shot whose target this peer could not name would aim it somewhere else entirely
+                // (GetWorkingPosition falls through to the map origin). The DAMAGE still arrives on 0x84 and is
+                // authoritative — only this peer's animation is missing.
+                Debug.LogError("[Multiplayer][tac] host command for " + actor.name + " NOT played here — " +
+                               string.Join("; ", unresolved.ToArray()) + ". The host's damage still applies; " +
+                               "only the animation is missing on this screen.");
                 return;
             }
             var ability = actor.GetAbilityFiltered<TacticalAbility>(a => a.AbilityDef != null && a.AbilityDef.Guid == guid);
@@ -580,9 +902,12 @@ namespace Multiplayer.Tactical
             if (!IsRider(ability))
             {
                 Debug.LogError("[Multiplayer][tac] the host mirrored '" + ability.AbilityDef.name + "', which is " +
-                               "not a declared A3a rider — the two peers disagree about what this arc carries.");
+                               "not a declared rider — the two peers disagree about what this arc carries.");
                 return;
             }
+            // The host's fumble is DECLARED before the native body runs, because Activate:1109 rolls it and
+            // PlayAction:988-993 consumes it inside the same synchronous call — there is no later moment.
+            FumbleGate.Declare(ability, fumbled);
             using (SyncApplyScope.Enter()) ability.Activate(target);
         }
 
@@ -697,5 +1022,91 @@ namespace Multiplayer.Tactical
 
         private static void Postfix(TacticalAbility __instance)
             => TacticalCommandSync.OnAbilityActionEnded(__instance);
+    }
+
+    /// <summary>
+    /// A3b — THE FUMBLE IS THE HOST'S, AND IT RIDES WITH THE ORDER (law L66d).
+    ///
+    /// WHY IT CANNOT BE SHIPPED AFTERWARDS. <c>TacticalAbility.Activate</c>:1109 rolls
+    /// <c>FumbledAction = FumbleActionCheck()</c> off the GLOBAL <c>UnityEngine.Random</c>
+    /// (<c>FumbleActionCheck</c>:1124-1131, <c>Random.Range(0,100) &lt; EquipmentDef.FumblePerc</c>), and the
+    /// value is CONSUMED inside the same synchronous call — <c>PlayAction</c>:988-993 diverts to
+    /// <c>PlayFumbleAction</c>, and with TFTV installed <c>EnqueueAction</c> does too
+    /// (<c>TFTVVanillaFixes</c>:4003-4033, the fix that makes shoot fumbles actually fire; vanilla no-ops
+    /// them). By the time any later message could arrive, the shot has already been queued. So the bit has to
+    /// be IN the order, which means the host has to know it BEFORE the native body runs.
+    ///
+    /// THE MECHANISM, and it is deliberately RNG-neutral: the host's capture prefix consumes the ONE native
+    /// roll early (<see cref="FumbleGate.RollForHost"/> calls the real method through this very patch, which
+    /// finds nothing pending and lets the original run) and MEMOIZES it; the native call at :1109 then finds
+    /// the memo and returns it without a second draw. Exactly one roll per activation, same as vanilla.
+    /// Every non-host peer NEVER rolls: it returns the host's declared bit if the order carried one, and
+    /// false otherwise — a client that rolled its own would fumble on a shot the host landed.
+    /// <c>JetJumpAbility</c>:136-146 is the only override of the check; it is not a rider, so it is left to
+    /// roll natively on the host and to return false on a client like everything else.
+    /// </summary>
+    internal static class FumbleGate
+    {
+        private static readonly Dictionary<TacticalAbility, bool> _pending = new Dictionary<TacticalAbility, bool>();
+        private static MethodInfo _check;
+
+        internal static void Reset() => _pending.Clear();
+
+        /// <summary>HOST: take the native roll NOW and memoize it for <c>Activate</c>:1109.</summary>
+        internal static bool RollForHost(TacticalAbility ability)
+        {
+            if (ability == null) return false;
+            if (_check == null)
+            {
+                _check = AccessTools.Method(typeof(TacticalAbility), "FumbleActionCheck", new Type[0]);
+                if (_check == null)
+                {
+                    Debug.LogError("[Multiplayer][tac] TacticalAbility.FumbleActionCheck did not resolve — the " +
+                                   "fumble cannot be pre-rolled, so it will not ride with the order and every " +
+                                   "peer will roll its own. Shots will differ between screens.");
+                    return false;
+                }
+            }
+            bool rolled;
+            try { rolled = (bool)_check.Invoke(ability, null); }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] fumble pre-roll THREW — the order ships 'not fumbled' and the " +
+                               "host may still fumble: " + ex);
+                return false;
+            }
+            _pending[ability] = rolled;
+            return rolled;
+        }
+
+        /// <summary>MIRROR: the host's answer for the activation that is about to run.</summary>
+        internal static void Declare(TacticalAbility ability, bool fumbled)
+        {
+            if (ability != null) _pending[ability] = fumbled;
+        }
+
+        internal static bool TryConsume(TacticalAbility ability, out bool value)
+        {
+            value = false;
+            if (ability == null || !_pending.TryGetValue(ability, out value)) return false;
+            _pending.Remove(ability);
+            return true;
+        }
+    }
+
+    [HarmonyPatch]
+    internal static class FumbleCheckGate
+    {
+        private static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(TacticalAbility), "FumbleActionCheck", new Type[0]);
+
+        private static bool Prefix(TacticalAbility __instance, ref bool __result)
+        {
+            if (FumbleGate.TryConsume(__instance, out __result)) return false;   // memoized host roll / declared mirror bit
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;   // solo or host: roll natively
+            __result = false;   // a client never draws from the global RNG; the host's bit is authoritative
+            return false;
+        }
     }
 }
