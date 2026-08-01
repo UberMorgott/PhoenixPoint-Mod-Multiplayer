@@ -133,19 +133,26 @@ namespace Multiplayer.Network.Sync
             },
             [typeof(UIStateGeoCutscene)] = new WindowRule
             {
-                Sync = WindowSync.Gap,
-                Why = "story + game-over cinematics (GeoscapeView.ToCutsceneState:673, ToGameOverState:664). " +
-                      "Addressable in principle — a VideoPlaybackSourceDef is a def GUID (law 2) — but the " +
-                      "game-over variant also carries an end-of-playback Action closure that ENDS THE LEVEL, and " +
-                      "the story variant blocks the peer for minutes on content it can reach on its own. It does " +
-                      "NOT fall out of the modal machinery either: different state, different data, different " +
-                      "declaration axis. STILL TERMINAL for the other peers, and the amendment that said " +
-                      "otherwise is WITHDRAWN (2026-08-01, same day): a cutscene holds the queue slot until " +
-                      "OnCancel:92, so on an idle host it stops the campaign for everybody, and 0xB9's non-modal " +
-                      "arm did NOT fix that — it matched on \"is not a modal\", which is true of the host's " +
-                      "cutscene and of every peer's own tutorial alike, so it dismissed unrelated windows and was " +
-                      "removed. It could not have helped here in any case: this window reaches ONE screen, and a " +
-                      "peer cannot close what it does not have. Draining it needs the RAISE half first",
+                Sync = WindowSync.Mirrored,
+                // THE RAISE HALF SHIPPED 2026-08-01 (surface 0xBA, CutsceneMirror), which is what the previous
+                // wording named as the missing piece: "a cutscene holds the queue slot until OnCancel:92, so on
+                // an idle host it stops the campaign for everybody ... draining it needs the RAISE half first".
+                // Live that day a story cinematic played on the host and reached NO other peer at all — not the
+                // screen, not the window history — which is the complaint the Gap verdict was recording.
+                Why = "story cinematics — captured at the ONE funnel GeoscapeView.ToCutsceneState:672 and " +
+                      "shipped as surface 0xBA with the VideoPlaybackSourceDef's GUID (law 2) and the host's own " +
+                      "queue priority. The video is REPLAYED, never shipped: each peer runs the same native " +
+                      "ToCutsceneState off its OWN assets, so nothing about playback crosses and each peer's " +
+                      "queue orders it exactly as the host's did. Every geoscape cinematic reaches that funnel " +
+                      "(research TriggerCutscene GeoscapeView:2114, GeoFactionReward.Cinematic:264 = the " +
+                      "GeoEventChoiceOutcome field, GeoMarketplace:165/:175, the campaign intro " +
+                      "GeoLevelController:743). ToGameOverState:662 is EXCLUDED BY CONSTRUCTION and that is why " +
+                      "the seam is this method and not the UIStateGeoCutscene ctor the two share: game-over " +
+                      "builds its state with an EndFromGameOver callback that ENDS THE LEVEL (:666), a host " +
+                      "outcome which reaches every peer as the native teardown rather than as a video. Each peer " +
+                      "closes its own copy (OnCancel:92) — there is no dismiss message, same contract as 0xB6 " +
+                      "and 0xB7, and 0xB9's withdrawn non-modal arm is not needed to drain it any more now that " +
+                      "every peer holds one",
             },
             [typeof(UIStateAssetDeployment)] = new WindowRule
             {

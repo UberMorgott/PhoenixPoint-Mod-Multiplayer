@@ -852,7 +852,10 @@ namespace Multiplayer.Network.Sync
         /// output. Named, not type-dispatched: the rule is about which values constitute an order.
         /// <c>StartExplorationTime</c> joins the three navigation names for the SECOND derivation on this
         /// actor (see <see cref="ReseedExploration"/>); it is the aircraft's other order, and like them it
-        /// moves only when the host actually issues one — never per tick.</summary>
+        /// moves only when the host actually issues one — never per tick.
+        /// These are TRIGGERS ("re-derive now"), never GATES: what the re-derivation may ask is only what
+        /// the host alone writes — see <see cref="UnderTravelOrder"/> for why <c>Travelling</c> is on this
+        /// list yet must not decide anything.</summary>
         private static bool IsOrderLeaf(string name) =>
             name == "DestinationSites" || name == "Travelling" || name == "CurrentSite" ||
             name == "StartExplorationTime";
@@ -923,7 +926,7 @@ namespace Multiplayer.Network.Sync
             var site = v.CurrentSite;
             var start = (TimeUnit)ExplorationStartField.GetValue(v);
             var end = site == null ? TimeUnit.Zero : start + site.ExplorationTime;
-            bool should = site != null && !v.Travelling && start > TimeUnit.Zero &&
+            bool should = site != null && !UnderTravelOrder(v) && start > TimeUnit.Zero &&
                           site.ExplorationTime != TimeUnit.Zero && timing.Now < end;
             if (should == v.IsExploringSite) return; // the live handle already matches the mirrored order
 
@@ -952,13 +955,47 @@ namespace Multiplayer.Network.Sync
         /// :506/:507 (EndCollecting/EndExplore), :509 (_destinationSites.Clear), :511 (CurrentSite), :512
         /// (SetVisible), :514 (VehicleArrived) and :515 (OnArrivedAtDestination) are all either host outcomes
         /// (law 3) or rail-covered leaves that arrive on their own.</summary>
+        /// <summary>
+        /// THE mirrored "this aircraft is under an order to fly", and deliberately NOT
+        /// <c>GeoVehicle.Travelling</c> — which is a LOCALLY WRITTEN flag on every peer and therefore
+        /// says nothing about the host's order.
+        ///
+        /// <c>Travelling</c> has no gameplay writer at all: the only ones are the client's OWN
+        /// <c>GeoNavComponent.NavigateRoutine</c> (GeoNavComponent.cs:88/:94 true, and :138 FALSE at the end
+        /// of every leg) plus the save DTO (GeoVehicle.cs:1085). <see cref="VehicleArrivalGate"/> blocks
+        /// <c>GeoVehicle.OnArrived</c>, i.e. the <c>Arrived?.Invoke</c> at :139 — it does NOT and cannot
+        /// block the <c>Travelling = false</c> one line above it. So the moment a client's own re-derived
+        /// leg finishes (it runs ahead of or behind the host's, by design — the whole point of the pose
+        /// opt-out), that client's <c>Travelling</c> reads FALSE while the host's aircraft is still in the
+        /// air. The rail cannot correct it: the diff ships CHANGE, and on the host nothing changed.
+        ///
+        /// A MID-FLIGHT REDIRECT then stalls, permanently and SILENTLY (live 2026-08-01, 16:05:35 —
+        /// V#1 → S#550 applied on the host, no `nav re-seed` line on EITHER client, aircraft frozen for
+        /// 45 s until the host's real arrival snapped it): the host re-orders a vehicle that was ALREADY
+        /// travelling, so `Travelling` is not in the delta, only `DestinationSites` is; the old flying arm
+        /// asked the falsified local flag, said "not flying", fell through to the parked arm, found
+        /// `CurrentSite` null (the setter :212-216 nulls it on departure) and did nothing — no motion, no
+        /// log, and the memo cleared on the way past.
+        ///
+        /// <c>DestinationSites</c> is the order and is a PURE mirror on a client: the only writers are
+        /// <c>StartTravel</c>:526-527, <c>TeleportToSite</c>:509 and the pop in <c>OnArrived</c>:340 —
+        /// host-side every one of them, since the client's <c>StartTravel</c> is blocked block-first
+        /// (VehicleSync.CaptureTravel) and its <c>OnArrived</c> is gated. Empty = parked, non-empty = an
+        /// outstanding order, which is exactly what the host's own two arms mean.
+        /// </summary>
+        private static bool UnderTravelOrder(GeoVehicle v)
+        {
+            var dest = v == null ? null : v.DestinationSites;
+            return dest != null && dest.Count > 0;
+        }
+
         private static void ReseedNavigation(GeoVehicle v)
         {
             if (v == null || v.Navigation == null) return;
             var root = IdentityResolver.RootRef(v);
             var dest = v.DestinationSites;
 
-            if (v.Travelling && dest != null && dest.Count > 0)
+            if (UnderTravelOrder(v))
             {
                 var route = new GeoSite[dest.Count];
                 for (int i = 0; i < dest.Count; i++)
@@ -977,7 +1014,7 @@ namespace Multiplayer.Network.Sync
             }
 
             if (root != null) _seededRoute.Remove(root);
-            if (!v.Travelling && v.CurrentSite != null)
+            if (v.CurrentSite != null)
             {
                 // THE ARRIVAL SNAP, and the reason the parked arm is not merely a pose write. The client
                 // flies the leg itself off its OWN start time — it re-seeds when the host's order delta

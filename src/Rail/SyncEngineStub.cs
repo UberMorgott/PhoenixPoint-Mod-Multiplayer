@@ -56,6 +56,7 @@ namespace Multiplayer.Network.Sync
                 ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || EventPopup.HandleInbound(_engine, peer, surfaceId, payload)
                 || GeoModalMirror.HandleInbound(_engine, peer, surfaceId, payload)
+                || CutsceneMirror.HandleInbound(_engine, peer, surfaceId, payload)
                 || IntentRail.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
@@ -120,6 +121,7 @@ namespace Multiplayer.Network.Sync
             GenericApplier.Reset();
             EventPopup.Reset();   // 0xB6 raise seq stream (teardown only — see EventPopup.Reset)
             GeoModalMirror.Reset();  // 0xB7 modal raise seq stream, same teardown-only contract
+            CutsceneMirror.Reset();  // 0xBA cutscene raise seq stream, same teardown-only contract
             Multiplayer.Tactical.TacticalTurnSync.Reset();  // 0x80 seq + the client's turn cursor / mission-over flag
             Multiplayer.Tactical.TacticalCommandSync.Reset();  // 0x82 seq + pending settles + the per-battle "not covered" notices
             Multiplayer.Tactical.TacticalDamageSync.Reset();   // 0x84 seq + gap cursor + the mirror-apply scope depth
