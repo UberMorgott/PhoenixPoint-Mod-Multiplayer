@@ -9107,6 +9107,17 @@ namespace RailCheck
                 if (roots.Count != 2)
                     yield return "L82 pose-primitive-signature: PathProcessorUtils no longer declares both " +
                                  "SetAimParams and SetNullNavParams — the mirror's on/off pair is not there";
+                // The THIRD root closes the one hole the pose pair alone left: ApplyStance also calls
+                // TacActorAnimActions.ActivateShootingClips to bind the aim clips (the game does the same at
+                // FireWeaponAtTargetCrt:1566, one line before it sets these very params). "Only the two
+                // PathProcessorUtils methods are nav-free" would be a proof about the wrong set — every GAME
+                // method the mirror half calls has to be in the closure, or the proof has a door in it.
+                var clips = game.GetType("PhoenixPoint.Tactical.Entities.Animations.TacActorAnimActions")
+                                ?.GetMethod("ActivateShootingClips", AllMembers);
+                if (clips == null)
+                    yield return "L82 clip-bind-gone: TacActorAnimActions.ActivateShootingClips no longer exists — " +
+                                 "the mirror binds the aim clips with it, and an unbound aim state has no animation";
+                else roots.Add(clips);
                 var seen = new HashSet<MethodBase>();
                 var queue = new Queue<MethodBase>(roots);
                 var banned = new SortedSet<string>(StringComparer.Ordinal);

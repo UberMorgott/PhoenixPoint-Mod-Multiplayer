@@ -58,29 +58,13 @@ BEHAVIOR (per-subsystem mirroring).
    `TacticalLevelController.FireWeaponAtTargetCrt`:1645 SKIPS the entire aim-start block
    (`:1649-1683`, a checkpoint wait with a 5 s ceiling) when it is true — so the acting peer fired from a
    pose it already held while every mirror first played the entry-into-aim animation and only then the
-   shot. A built-in desync on EVERY shot, and no camera fix could reach it. It is also SHARED, LAST-WRITER-WINS
-   state per soldier and not a per-window local mode: whoever entered aim last owns it, and a peer switching to
-   that soldier lands DIRECTLY in aim mode off the shared table (the game's own
-   `UIStateCharacterSelected.ActivateAttackAbilityState`:1466-1502, fired on that peer's OWN selection edge — a
-   message never yanks anyone's screen). What crosses is the DISCRETE pair `(actorKey, targetKey)` on its own
-   surface pair **0x85 TacAim / 0x86 TacAimIntent** (`TacticalAimSync`), NOT an op on 0x82: 0x82 carries ORDERS
-   (each played exactly once) while this carries a STANDING VALUE whose whole correctness property is that the
-   latest one wins, and a re-assert on the order stream would read as a second order. THE FIRST ATTEMPT
-   (`3071859`, ops 5/6 on 0x82/0x83) WAS REVERTED BY `0252247` and those two ops are dead tombstones: it fed a
-   `CoverPose` to `IdleAbility.ForceRefresh`, whose consumption path `IdleAbility.IdleAction`:275-290 →
-   `RefreshIdle`:324 → `DoAimOrPeek`:166 → `PathProcessorUtils.GetAimOrPeekPathPoints` →
-   `TacticalNav.ExecutePoints`:185 is a NAV TRAVERSAL — so a relayed aim MOVED mirrored soldiers instead of
-   posing them (a jetpacked one re-flew). `IdleAbility` is now FORBIDDEN to this arc. The mirror instead writes
-   the animator integers `CurrentlyAiming` actually reads, through the game's OWN nav-free aim entry
-   (`PathProcessorUtils.SetAimParams`:81-84 / `SetNullNavParams`:91-94 → `SetParams`:67-74, whose entire body is
-   a loop of `animator.SetInteger` with no other callee — the same pair `FireWeaponAtTargetCrt`:1651/:1712 uses
-   itself); RailCheck L82 walks that closure and turns red if it can ever reach a nav call. The POSE never
-   crosses (law 5). DEDUP IS BY SAMPLING, NOT EDGES — a postfix on `TacticalViewState.Update` reads the live top
-   state once per frame and emits only when it disagrees with the SHARED table, so a transition's intermediate
-   values never exist (3071859 captured edges and both over-emitted 2-3 per repaint AND swallowed genuine
-   changes, because `UIStateShoot` really does alternate target→null→target across `ExitState`:1261 and
-   `SetShootTarget`:277). Per-frame pose STREAMING stays forbidden, and hover/preview targeting stays local
-   (`UIStateFreeCam` is excluded by an exact type test) — this is a discrete state, not a stream.
+   shot. A built-in desync on EVERY shot, and no camera fix could reach it. What crosses is the DISCRETE
+   pair `(actorKey, target)` — ops 5 (0x82 host→all) / 6 (0x83 client→host), no new surface, on the same
+   ordered stream as the shot so the stance can never arrive after it. The POSE never crosses: the far
+   peer runs the game's own two lines (`TacticalPerception.GetBestFaceActorPoseAt`:447 →
+   `IdleAbility.ForceRefresh`:92, exactly what `UIStateShoot.FaceEnemy`:1470-1477 does) against its OWN
+   cover geometry, and repeats are deduped per actor by target key. Per-frame pose STREAMING stays
+   forbidden, and hover/preview targeting stays local — this is a discrete state, not a stream.
    Entry = native save-transfer (law 1, zero surfaces); exit =
    host's native `GameOver` → native teardown on all peers → one authoritative outcome. Shipped:
    A1 `7808c7f`, A2 `285411d`+`90dc585` (0x80 TacTurn / 0x81 TacTurnIntent, laws L63+L64); A3a
