@@ -92,10 +92,13 @@ namespace Multiplayer.Tactical
         private static int _liveActor, _liveTarget;
         private static int _reportedActor, _reportedTarget;
 
-        // R2: the selection edge that still owes an auto-enter into aim mode. 0 = none.
-        private static int _enterAimFor;
-        private static TacticalActor _lastSelected;
-        private static int _verifyEnterFor;
+        // LAYER 2. The trigger is the PAIR (what this peer has selected, what the shared table says about
+        // it) — not the selection alone, which only covered "select a soldier that is already aiming" and
+        // missed "the soldier I am already looking at just started aiming" and "…just stopped".
+        private static int _armedActor, _armedTarget;
+        private static int _enterAimFor;        // owes an auto-enter next frame. 0 = none.
+        private static int _verifyEnterFor;     // owes the did-it-actually-open check next frame.
+        private static int _autoEnteredFor;     // the aim view WE opened is on top. 0 = none.
 
         /// <summary>Actor keys whose stance this peer could NOT apply yet (actor not resolvable, no animator,
         /// still navigating, weapon/target not there). The EMITTER's self-heal cannot cover these: once the
@@ -116,7 +119,7 @@ namespace Multiplayer.Tactical
             _liveActor = _liveTarget = _reportedActor = _reportedTarget = 0;
             _enterAimFor = 0;
             _verifyEnterFor = 0;
-            _lastSelected = null;
+            _armedActor = _armedTarget = _autoEnteredFor = 0;
             _pending.Clear();
             _retryScratch.Clear();
             _loggedFailures.Clear();
@@ -195,10 +198,10 @@ namespace Multiplayer.Tactical
         {
             private static void Postfix(TacticalViewState __instance)
             {
-                if (LiveEngine() == null) { _lastSelected = null; return; }
+                if (LiveEngine() == null) { _armedActor = _armedTarget = _autoEnteredFor = 0; return; }
                 var tlc = Tlc();
                 var view = tlc == null ? null : tlc.View;
-                if (view == null) { _lastSelected = null; return; }
+                if (view == null) { return; }
 
                 Sample(__instance, view);
                 Emit();
@@ -222,6 +225,19 @@ namespace Multiplayer.Tactical
             if (actorKey == 0) return;
             _liveActor = actorKey;
             _liveTarget = targetKey;
+
+            // A LAYER-2 VIEW IS A MIRROR, NOT A COMMAND. While the aim view WE opened off the shared table
+            // still shows exactly that value, this peer must not announce it: on the frame the owner clears
+            // its aim, this window is still in UIStateShoot, and Decide's cleared-shared self-heal would
+            // re-assert the stance the owner just dropped — pinning the soldier in an aim nobody holds and
+            // ping-ponging with every other watcher. The moment this peer RETARGETS in that window the pair
+            // diverges from a non-zero shared value, the view becomes its own, and last-writer-wins resumes.
+            if (_liveActor == _autoEnteredFor)
+            {
+                int shared = Shared(_liveActor);
+                if (_liveTarget == shared || shared == 0) _liveActor = _liveTarget = 0;
+                else _autoEnteredFor = 0;
+            }
         }
 
         private static void Emit()
@@ -425,12 +441,20 @@ namespace Multiplayer.Tactical
 
         private static MethodInfo _activateAttack;
         private static bool _activateAttackLooked;
+        private static MethodInfo _switchToPrevious;
+        private static bool _switchToPreviousLooked;
 
         /// <summary>
-        /// Arms on this peer's OWN selection change and fires one frame later, once the top state has
-        /// actually become the character screen. Edge-triggered on SELECTION and never on state, deliberately:
-        /// re-arming on the state would make Esc unusable — leaving aim pops back to
-        /// <c>UIStateCharacterSelected</c>, which would immediately push aim again.
+        /// LAYER 2 — camera + UI + the rest of the aim presentation, for a peer WATCHING the same soldier.
+        ///
+        /// Armed on a change of the PAIR (this peer's own selection, the shared value for it), which is what
+        /// covers all three edges with one trigger and no timer: selecting a soldier that is already aiming,
+        /// the already-selected soldier STARTING to aim, and it STOPPING. Not armed on the view state, which
+        /// is what would make Esc unusable — leaving aim pops back to <c>UIStateCharacterSelected</c> and a
+        /// state trigger would push it straight back. Esc does not change the pair, so it sticks.
+        ///
+        /// Selection is NOT replicated (law 5): this reacts only to what each peer selected locally, so a
+        /// peer looking at another soldier gets layer 1 (pose + facing) and keeps its own camera and screen.
         /// </summary>
         private static void DriveAutoEnter(TacticalViewState state, PhoenixPoint.Tactical.View.TacticalView view)
         {
@@ -449,13 +473,20 @@ namespace Multiplayer.Tactical
                 _verifyEnterFor = 0;
             }
 
-            var sel = view.SelectedActor;
-            if (!ReferenceEquals(sel, _lastSelected))
+            // The user's own Esc (or any other transition) left the view we opened — it is no longer ours to
+            // close, and popping a UIStateShoot he opened himself is the "stuck in aim" bug from the wrong end.
+            if (_autoEnteredFor != 0 && !(state is UIStateShoot)) _autoEnteredFor = 0;
+
+            int selKey = TacticalActorKey.Of(view.SelectedActor);
+            int want = selKey == 0 ? 0 : Shared(selKey);
+            if (selKey != _armedActor || want != _armedTarget)
             {
-                _lastSelected = sel;
-                int key = TacticalActorKey.Of(sel);
-                _enterAimFor = (key != 0 && key != _liveActor && Shared(key) != 0) ? key : 0;
-                return;
+                _armedActor = selKey;
+                _armedTarget = want;
+                LeaveAutoAim(state);
+                // Already holding exactly this natively = this peer IS the one aiming; nothing to open.
+                _enterAimFor = (want != 0 && !(selKey == _liveActor && want == _liveTarget)) ? selKey : 0;
+                return;     // act one frame later, once the stack has settled
             }
             if (_enterAimFor == 0) return;
             if (state == null || state.GetType().Name != "UIStateCharacterSelected") return;
@@ -490,12 +521,57 @@ namespace Multiplayer.Tactical
             {
                 _activateAttack.Invoke(state, new object[] { false, target });
                 _verifyEnterFor = actorKey;
+                _autoEnteredFor = actorKey;
                 Debug.Log("[Multiplayer][tac] entering SHARED aim mode for actor " + actorKey +
-                          " -> " + targetKey + " on selection");
+                          " -> " + targetKey);
             }
             catch (Exception ex)
             {
                 Debug.LogError("[Multiplayer][tac] entering shared aim mode for actor " + actorKey + " failed: " + ex);
+            }
+        }
+
+        /// <summary>
+        /// THE REVERSE EDGE — a watcher must not be stranded in an aim view whose stance is gone (the owner
+        /// fired or left), and must not be stranded in one at all: "ESC does nothing" already cost a battle.
+        ///
+        /// Leaves through the game's OWN Esc, <c>TacticalViewState.SwitchToPreviousState</c>:169 — literally
+        /// the line <c>TacticalViewState.Update</c>:58-63 runs on a Cancel input, a plain
+        /// <c>StateStack.SwitchToPreviousState</c> pop. Not an Exit+Enter, so the 7933bbe hazard is not in
+        /// reach, and never a second push, so the stack cannot grow the duplicate <c>UIStateShoot</c> that
+        /// made Esc a no-op in 0252247. Only ever fires on a view THIS class opened.
+        ///
+        /// The pop runs <c>UIStateShoot.ExitState</c>:1259-1262 → <c>FaceEnemy(null)</c> →
+        /// <c>IdleAbility.ForceRefresh</c> on this peer's own screen, exactly as a human Esc does. That is the
+        /// one path near this arc that touches <c>IdleAbility</c>, and it cannot navigate here: a null target
+        /// yields <c>GetBestIdleCoverPoseAt</c>, whose <c>LookAtTarget</c> is null (TacticalPerception:362),
+        /// and <c>RefreshIdle</c>:321 gates <c>DoAimOrPeek</c> — the nav traversal — on that being non-null,
+        /// taking the <c>SetNullNavParams</c> arm at :326-341 instead.
+        /// </summary>
+        private static void LeaveAutoAim(TacticalViewState state)
+        {
+            if (_autoEnteredFor == 0) return;
+            _autoEnteredFor = 0;
+            if (!(state is UIStateShoot)) return;
+            if (!_switchToPreviousLooked)
+            {
+                _switchToPreviousLooked = true;
+                _switchToPrevious = AccessTools.Method(typeof(TacticalViewState), "SwitchToPreviousState",
+                                                       new Type[0]);
+                if (_switchToPrevious == null)
+                    Debug.LogError("[Multiplayer][tac] TacticalViewState.SwitchToPreviousState() not found — a " +
+                                   "peer watching a shared aim will be left sitting in the aim view after the " +
+                                   "owner leaves it.");
+            }
+            if (_switchToPrevious == null) return;
+            try
+            {
+                _switchToPrevious.Invoke(state, null);
+                Debug.Log("[Multiplayer][tac] left SHARED aim mode (the stance it mirrored is gone)");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] leaving shared aim mode failed: " + ex);
             }
         }
     }

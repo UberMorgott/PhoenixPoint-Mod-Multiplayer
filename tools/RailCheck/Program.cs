@@ -9304,6 +9304,30 @@ namespace RailCheck
                              "not be applied when they arrived — a mirror that was mid-move when the aim landed " +
                              "never hears about it again, because the emitter is silent once the shared table agrees";
 
+            // ── LAYER 2: the watching peer's view, and the way OUT of it ───
+            // Layer 1 (pose + facing) is unconditional; layer 2 opens the aim view only for a peer that has
+            // that same soldier selected. The reverse edge is the one with a body count: "ESC does nothing"
+            // cost the user a whole battle in 0252247, so a view this class opens must have a way out that
+            // does not depend on the user finding it.
+            var drive = ModMethod(aim, "DriveAutoEnter");
+            if (drive == null || !Reaches(drive, null, "LeaveAutoAim"))
+                yield return "L82 watcher-stranded: DriveAutoEnter does not reach LeaveAutoAim — a peer that " +
+                             "was put into a shared aim view is never taken out of it when the stance clears, " +
+                             "which is the 'ESC does nothing, the soldier is uncontrollable' bug from the other end";
+            var leaveVia = game.GetType("PhoenixPoint.Tactical.View.TacticalViewState")
+                               ?.GetMethods(AllMembers)
+                               .FirstOrDefault(m => m.Name == "SwitchToPreviousState" && m.GetParameters().Length == 0);
+            if (leaveVia == null)
+                yield return "L82 leave-primitive-gone: TacticalViewState.SwitchToPreviousState() no longer " +
+                             "exists — that is the game's own Cancel path (TacticalViewState.Update:58-63) and " +
+                             "the only pop this arc is allowed to make; the binding is reflective, so its " +
+                             "absence would otherwise show up as a warning nobody reads";
+            // The pop is a POP. If it ever became a push or a re-enter it would rebuild the duplicate
+            // UIStateShoot stack that made Esc a no-op, and it would do it on a peer that never clicked.
+            else if (CalleeSequence(leaveVia).Any(c => c.Name == "SwitchToState"))
+                yield return "L82 leave-pushes: TacticalViewState.SwitchToPreviousState now reaches SwitchToState " +
+                             "— leaving a watched aim view would grow the state stack instead of unwinding it";
+
             // ── the premise the whole mechanism rests on ───────────────────
             var actor = game.GetType("PhoenixPoint.Tactical.Entities.TacticalActor");
             var aiming = actor?.GetProperty("CurrentlyAiming", AllMembers)?.GetGetMethod(true);
