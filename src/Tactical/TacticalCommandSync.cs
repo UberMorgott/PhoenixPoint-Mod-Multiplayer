@@ -1665,9 +1665,53 @@ namespace Multiplayer.Tactical
                     stats.ActionPoints.Set(s.Ap);
                     stats.WillPoints.Set(s.Wp);
                 }
+                RefreshVisionTowards(actor);
             }
             Debug.Log("[Multiplayer][tac] CLIENT settled " + actor.name + " @ " + Fmt(s.Pos) +
                       " ap=" + s.Ap.ToString("0.##") + " wp=" + s.Wp.ToString("0.##"));
+        }
+
+        /// <summary>
+        /// RE-RUN THIS PEER'S OWN NATIVE VISION over the settled actor. NOT a vision transfer — no known-state
+        /// crosses the wire in either direction; this calls the game's own LOS test
+        /// (<c>TacticalFactionVision.UpdateVisibilityOfAllTowardsActor</c>:546-560 →
+        /// <c>ReUpdateVisibilityTowardsActorImpl</c>:651-662 → the physics cast) on the replicated board, at the
+        /// authoritative position the settle just wrote, with the SAME base range the native movement path uses
+        /// (<c>OnActorMoved</c>:298 passes <c>TacticalLevelControllerDef.DetectionRange</c>). It can therefore
+        /// never reveal anything this peer's own line of sight does not already support.
+        ///
+        /// THE INPUT IT REPAIRS. Native vision is sampled ONLY on <c>ActorMovedEvent</c>, which
+        /// <c>TacticalActorBase.SetTransform</c>:665-673 raises once per navigation sample
+        /// (<c>TacticalNavigationComponent.UpdateActorTransformFromPathSample</c>:679 →
+        /// <c>SetPositionIfDelta</c>:521) — and only when the position actually CHANGED
+        /// (<c>TacticalLevelController.ActorMoved</c>:1157-1163 tests <c>Utl.Equals(actor.Pos, prevPos)</c>
+        /// first). Two things make that sampling thinner on a peer than on the host, both of them one-sided:
+        ///  • an actor this peer has not revealed carries <c>TimingScale 4f</c>
+        ///    (<c>TacticalActorViewBase.RefreshTimeScale</c>:423-437, added for every non-Revealed/non-Located
+        ///    actor), so its mirrored walk consumes ~4x fewer frames and its path is LOS-tested ~4x more
+        ///    coarsely — the reveal window the host caught mid-walk can fall entirely between two samples here;
+        ///  • a settle that lands on the position this peer already computed raises NO event at all, so the
+        ///    host's final word for that actor was never put to a vision test.
+        /// Once a mid-walk reveal is missed nothing re-tests it until the next faction-turn edge
+        /// (<c>OnFactionStartTurn</c>:154-175 is the only full recompute), so a peer stays dark for a whole
+        /// turn — and every peer misses it the same way, which is why the two clients agree with each other and
+        /// not with the host. Being dark is not cosmetic: <c>SetShownModeInternal</c>:363 disables every
+        /// renderer of a non-Revealed actor (<c>RefreshAddonRenderers</c>:453-472) and the health bar shares the
+        /// gate (<c>ShouldRenderUI</c>:395-403), so the same miss is the invisible enemy and the missing HP bar.
+        ///
+        /// Idempotent by construction: <c>KnownCounters.IncrementCounterTo</c>:55-67 only ever raises a counter
+        /// to a maximum, so re-running this over an already-revealed actor changes nothing. Every faction but
+        /// the actor's own, in the shape <c>ShootAbility.Activate</c>:157-163 uses — the reveal is a property of
+        /// the board, not of who is currently playing.
+        /// </summary>
+        private static void RefreshVisionTowards(TacticalActorBase actor)
+        {
+            var tlc = actor == null ? null : actor.TacticalLevel;
+            if (tlc == null || tlc.TacticalLevelControllerDef == null) return;
+            float range = tlc.TacticalLevelControllerDef.DetectionRange;
+            foreach (var faction in tlc.Factions)
+                if (faction != actor.TacticalFaction && faction.Vision != null)
+                    faction.Vision.UpdateVisibilityOfAllTowardsActor(actor, range, notifyChange: true);
         }
     }
 
