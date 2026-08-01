@@ -737,18 +737,16 @@ namespace Multiplayer.Tactical
         /// <c>TacticalAbility.Activate</c> can never see the click. Ops 3 (host→all) / 4 (client→host) on the
         /// families that already exist; NO new surface.</summary>
         private const byte OpSelectEquipment = 3;
-        /// <summary>A8 — THE AIM STANCE, and it is NOT cosmetics (law 5 amended in the same commit). Entering
-        /// manual aim leaves the soldier in the aim loop, which sets <c>TravelType.Aim</c> on the animator;
-        /// <c>TacticalActor.CurrentlyAiming</c>:228-236 reads exactly that, and
-        /// <c>TacticalLevelController.FireWeaponAtTargetCrt</c>:1645 SKIPS the whole aim-start block when it is
-        /// true. So the acting peer fires from a pose it already holds while every mirror first plays the
-        /// entry-into-aim animation and waits it out (:1649-1683, a checkpoint wait with a 5 s ceiling) — a
-        /// built-in, per-shot desync that no camera fix could ever have reached. Ops 5 (host→all) / 6
-        /// (client→host) on the families that already exist; NO new surface.</summary>
-        private const byte OpAim = 5;
+        // A8 (op 5 host→all / op 6 client→host) RELAYED THE MANUAL-AIM STANCE AND IS REVERTED — 2026-08-01,
+        // one build after it shipped. Ops 5 and 6 are left UNUSED rather than reassigned: a peer running the
+        // A8 build must not have its aim messages decoded as something else. See the revert commit for the RCA;
+        // the short form is that IdleAbility.ForceRefresh is NOT the pose setter it looks like — the pose is
+        // consumed by IdleAbility.RefreshIdle:324 → DoAimOrPeek:166-185, which runs
+        // TacticalNav.ExecutePoints and PHYSICALLY NAV-MOVES the actor. Relaying an aim therefore made every
+        // mirror walk (and a jetpack soldier FLY) on someone else's screen. Any future attempt at this must
+        // reproduce CurrentlyAiming without going through the idle ability's nav path.
         internal const byte OpIntentActivate = 1;
         internal const byte OpIntentSelectEquipment = 4;
-        internal const byte OpIntentAim = 6;
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
 
@@ -944,15 +942,6 @@ namespace Multiplayer.Tactical
             return ability != null && _mirrorSkipsCameraWait.Remove(ability);
         }
 
-        /// <summary>A8 — THE THING THAT KEEPS THE AIM RIDER DISCRETE. Law 5 forbids streaming a per-frame
-        /// pose, and the capture point is a view-state call that fires whenever the shoot state rebuilds its
-        /// target — including <c>UIStateFreeCam</c>:708/714, which re-targets as the crosshair sweeps. Keyed
-        /// by actor, holding the last TARGET ACTOR key that crossed (0 = "aiming at nothing"): re-aiming at
-        /// the same soldier sends nothing at all, so the wire carries one message per actual target CHANGE
-        /// however many times the UI recomputes it. The pose itself is never on the wire — the far peer
-        /// re-derives it from its own cover geometry with the game's own call.</summary>
-        private static readonly Dictionary<int, int> _lastAim = new Dictionary<int, int>();
-
         // ~2 s at 60 fps. Not a deadline: a held settle is CORRECT while the actor is still moving, so the
         // hold keeps waiting and only says so periodically — but a hold nobody can see is the bug class.
         private const int SettleWarnFrames = 120;
@@ -971,7 +960,6 @@ namespace Multiplayer.Tactical
             _pending.Clear();
             _saidUncovered.Clear();
             _mirrorSkipsCameraWait.Clear();   // live ability refs: never let them outlive the battle
-            _lastAim.Clear();
             _saidKeyless.Clear();
             _replayOriginPeer = 0;
             TacticalActorKey.Reset();   // A3b: the derived alien keys belong to ONE battle and to no other
@@ -993,9 +981,6 @@ namespace Multiplayer.Tactical
                 [TacticalInventorySync.OpIntentInventory] = TacticalInventorySync.HandleInventoryIntent,
                 // A7: "I switched this soldier's weapon". Same family for the same reason as the batch above.
                 [OpIntentSelectEquipment] = HandleSelectEquipment,
-                // A8: "this soldier is now aiming at that one". THE SAME FAMILY IS THE POINT, not thrift:
-                // one ordered stream means the aim can never arrive after the shot it is supposed to precede.
-                [OpIntentAim] = HandleAim,
             };
             IntentRail.Register(SurfaceIds.TacCommandIntent, "tac-cmd", ops);
         }
@@ -1232,153 +1217,6 @@ namespace Multiplayer.Tactical
             using (SyncApplyScope.Enter()) comp.SetSelectedEquipment(eq);
             Debug.Log("[Multiplayer][tac] CLIENT weapon switch applied — " + actor.name + " -> " +
                       EqName(eq));
-        }
-
-        // ─── A8: THE AIM STANCE — a DISCRETE state, not a pose stream ──────
-
-        /// <summary>THE AIM SEAM. Manual aim is not an ability, so <see cref="AbilityActivateCapture"/> can no
-        /// more see it than it could see a weapon switch (A7). The model funnel is
-        /// <c>UIStateShoot.FaceEnemy</c>:1470-1477, whose whole body is two lines — pick a cover pose that
-        /// looks at the target (<c>TacticalPerception.GetBestFaceActorPoseAt</c>:447) and hand it to
-        /// <c>IdleAbility.ForceRefresh</c>:92 — and it is reached from every gesture that decides WHO this
-        /// soldier is pointed at: state entry (<c>InitAbilityTargetActor</c>:495), every target change
-        /// (<c>SetShootTarget</c>:277, which <c>EnemySelected</c>:677 drives when the player cycles enemies)
-        /// and both exits (:803 squad switch, :1261 state leave, both <c>FaceEnemy(null)</c>).
-        ///
-        /// CAPTURED ONE LEVEL DOWN, at <c>ForceRefresh</c> rather than at <c>FaceEnemy</c>: the ability
-        /// instance names its own actor (<c>TacticalAbility.TacticalActor</c>) and the pose carries the
-        /// target, so nothing here has to reach into the view state's protected <c>SelectedActor</c>. The
-        /// pose-less overload is the game's own derived refresh (<c>TacticalActor</c>:1201, raised per-peer
-        /// off replicated state) and is skipped by the <c>HasValue</c> test — which is exactly what makes this
-        /// seam the manual-aim gesture and nothing else.
-        ///
-        /// WHAT CROSSES IS THE TARGET, NEVER THE POSE. A <c>CoverPose</c> is local geometry (cover hit, face
-        /// direction, the weapon reference), so the far peer runs the SAME two native lines against its own
-        /// map instead — <see cref="ApplyAimPose"/>. That keeps law 5's per-frame-pose ban intact: the wire
-        /// carries "who", the peer computes "how".
-        ///
-        /// NON-BLOCKING, A7's posture: the acting peer poses immediately and the host's echo is the authority.
-        /// There is nothing to arbitrate — aiming spends no AP and changes no authoritative state — so a
-        /// block-first seam would only add latency to a stance.</summary>
-        internal static void OnAimPoseForced(IdleAbility idle, CoverPose? pose)
-        {
-            var engine = LiveEngine();
-            if (engine == null) return;
-            if (SyncApplyScope.Active) return;                       // law 8: this IS a mirror being applied
-            if (!pose.HasValue) return;                              // the game's own derived refresh, not a gesture
-            var actor = idle == null ? null : idle.TacticalActor;
-            if (actor == null) return;
-            var faction = actor.TacticalFaction;
-            // The AI aims its own units off the same replicated board on every peer; relaying that would be
-            // A5's autonomy hazard in a second form.
-            if (faction == null || !faction.IsControlledByPlayer) return;
-            int key = TacticalActorKey.Of(actor);
-            if (key == 0)
-            {
-                if (_saidKeyless.Add("aim:" + SafeActorName(actor)))
-                    Debug.LogError("[Multiplayer][tac] the aim stance of " + SafeActorName(actor) + " cannot be " +
-                                   "relayed — that actor has no shared key. Every other peer will play the " +
-                                   "entry-into-aim animation when the shot arrives and fire late.");
-                return;
-            }
-
-            var target = pose.Value.LookAtTarget;
-            var targetActor = target == null ? null
-                            : (target.Actor ?? (target.DamageReceiver == null ? null : target.DamageReceiver.GetActor()));
-            int targetKey = targetActor == null ? 0 : TacticalActorKey.Of(targetActor);
-            int last;
-            if (_lastAim.TryGetValue(key, out last) && last == targetKey) return;   // same stance: nothing changed
-            _lastAim[key] = targetKey;
-
-            string what = "aim " + actor.name + " -> " + (target == null ? "<none>" : Where(target));
-            if (engine.IsHost)
-                Send(OpAim, what, _replayOriginPeer, w => WriteAim(w, key, target));
-            else
-                IntentRail.Send(SurfaceIds.TacCommandIntent, OpIntentAim, what, w => WriteAim(w, key, target));
-        }
-
-        /// <summary>The target rides through the arc's ONE declared target codec, for the field this pose
-        /// actually needs beyond the actor: <c>ShootFromPos</c>. <c>CoverPose.WillStepout</c>
-        /// (<c>CoverPose</c>:26-36) compares it against the shooter's own position and
-        /// <c>GetBestFaceActorPoseAt</c>:465 then derives <c>FaceDir</c> from it — so a re-minted
-        /// <c>new TacticalAbilityTarget(actor)</c> would leave it at its NaN default, report a stepout that is
-        /// not happening and face the soldier at a NaN direction.</summary>
-        private static void WriteAim(BinaryWriter w, int actorKey, TacticalAbilityTarget target)
-        {
-            w.Write(actorKey);
-            w.Write(target != null);
-            if (target != null) TacAbilityTargetCodec.Write(w, target);
-        }
-
-        private static void HandleAim(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
-        {
-            int key = r.ReadInt32();
-            var unresolved = new List<string>();
-            var target = ReadCommandTarget(r, unresolved);
-            string why;
-            var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
-            var faction = actor == null ? null : actor.TacticalFaction;
-
-            string refusal = actor == null ? why
-                           : !actor.IsAlive ? "that actor is dead — a corpse takes no aim"
-                           : faction == null || !faction.IsControlledByPlayer
-                             ? "that actor's faction is not player-controlled — a peer aims the shared player " +
-                               "team, never the AI's units"
-                           : unresolved.Count > 0 ? string.Join("; ", unresolved.ToArray())
-                           : null;
-            if (refusal != null)
-            {
-                IntentRail.Reject(SurfaceIds.TacCommandIntent, senderPeerId, "aim for actor " + key + ": " + refusal);
-                return;
-            }
-            // Native, and the capture above turns it into the host→all mirror for every OTHER peer.
-            _replayOriginPeer = senderPeerId;
-            try { ApplyAimPose(actor, target, mirror: false); }
-            finally { _replayOriginPeer = 0; }
-        }
-
-        private static void ApplyAim(int key, TacticalAbilityTarget target, List<string> unresolved)
-        {
-            string why;
-            var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
-            if (actor == null)
-            {
-                Debug.LogError("[Multiplayer][tac] the host's aim stance for actor " + key + " cannot be applied " +
-                               "here — " + why + ". That soldier will play its aim-in animation when the shot " +
-                               "arrives and fire late on this screen.");
-                return;
-            }
-            if (unresolved != null && unresolved.Count > 0)
-            {
-                Debug.LogError("[Multiplayer][tac] the host's aim stance for " + actor.name + " names a target this " +
-                               "peer cannot resolve — " + string.Join("; ", unresolved.ToArray()) +
-                               ". The stance is dropped; the shot itself still arrives on 0x82.");
-                return;
-            }
-            ApplyAimPose(actor, target, mirror: true);
-        }
-
-        /// <summary>The two lines <c>UIStateShoot.FaceEnemy</c>:1474-1475 runs, against THIS peer's own cover
-        /// geometry. Reusing the game's own pair is what makes the stance identical without any of it on the
-        /// wire; the weapon is the actor's selected one, which A7 already keeps in step.</summary>
-        private static void ApplyAimPose(TacticalActor actor, TacticalAbilityTarget target, bool mirror)
-        {
-            var perception = actor.TacticalPerception;
-            var idle = actor.IdleAbility;
-            if (perception == null || idle == null)
-            {
-                Debug.LogError("[Multiplayer][tac] " + SafeActorName(actor) + " has no perception or idle ability " +
-                               "on this peer, so it cannot hold the aim stance the acting peer holds.");
-                return;
-            }
-            var weapon = actor.Equipments == null ? null : actor.Equipments.SelectedWeapon;
-            var pose = target != null
-                     ? perception.GetBestFaceActorPoseAt(actor.Pos, target, weapon)
-                     : perception.GetBestIdleCoverPoseAt(actor.Pos);
-            if (mirror) { using (SyncApplyScope.Enter()) idle.ForceRefresh(false, pose); }
-            else idle.ForceRefresh(false, pose);
-            Debug.Log("[Multiplayer][tac] " + (mirror ? "CLIENT" : "HOST") + " aim stance — " + actor.name +
-                      " -> " + (target == null ? "<none>" : Where(target)));
         }
 
         /// <summary><c>UnityEngine.Object.name</c> is a native ECall that throws headless; a refusal message
@@ -1700,12 +1538,6 @@ namespace Multiplayer.Tactical
                                                         new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
                                                         r.ReadSingle(), r.ReadSingle(), r.ReadBoolean());
                     else if (op == OpSelectEquipment) ApplySelectEquipment(r.ReadInt32(), r.ReadString());
-                    else if (op == OpAim)
-                    {
-                        int actorKey = r.ReadInt32();
-                        var unresolved = new List<string>();
-                        ApplyAim(actorKey, ReadCommandTarget(r, unresolved), unresolved);
-                    }
                     else
                     {
                         Debug.LogError("[Multiplayer][tac] unknown host→all command op " + op + " (seq=" + seq +
@@ -2011,32 +1843,6 @@ namespace Multiplayer.Tactical
     {
         private static void Prefix(EquipmentComponent __instance, Equipment equipment)
             => TacticalCommandSync.OnEquipmentSelected(__instance, equipment);
-    }
-
-    /// <summary>
-    /// A8 — THE AIM STANCE (law 5, amended). <c>IdleAbility.ForceRefresh</c> is where
-    /// <c>UIStateShoot.FaceEnemy</c>:1475 commits a soldier to pointing at a target, and the pose it hands over
-    /// is what puts the animator into <c>TravelType.Aim</c> — the state
-    /// <c>TacticalLevelController.FireWeaponAtTargetCrt</c>:1645 reads to decide whether a shot must first play
-    /// the aim-in animation. Un-relayed, every peer but the shooter paid that animation on every single shot.
-    ///
-    /// A PREFIX, like A7's <see cref="EquipmentSelectCapture"/> and for the law that made that one a prefix:
-    /// RailCheck L19 counts an intent sent from AFTER a model write as a result-ship. Nothing is lost by
-    /// running early — <c>ForceRefresh</c>:92-99 only parks the pose in <c>_pendingParams</c> for
-    /// <c>IdleAction</c>:275-290 to consume later, and what ships is the ARGUMENT, which the native body never
-    /// touches. It returns void and never blocks, for the reasons argued at
-    /// <see cref="TacticalCommandSync.OnAimPoseForced"/>.
-    ///
-    /// Not caught by RailCheck L76's funnel sweep and not a gap in it: <c>IdleAbility</c> IS a
-    /// <c>TacticalAbility</c>, and the sweep excludes those because <c>TacticalAbility.Activate</c> is meant to
-    /// cover them — which is true of the ability's ACTIVATION and false of this setter, the one place a view
-    /// state writes ability state without activating anything.
-    /// </summary>
-    [HarmonyPatch(typeof(IdleAbility), nameof(IdleAbility.ForceRefresh))]
-    internal static class AimPoseCapture
-    {
-        private static void Prefix(IdleAbility __instance, CoverPose? pose)
-            => TacticalCommandSync.OnAimPoseForced(__instance, pose);
     }
 
     /// <summary>
