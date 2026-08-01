@@ -920,6 +920,15 @@ namespace Multiplayer.Tactical
         private static readonly HashSet<string> _saidUncovered = new HashSet<string>(StringComparer.Ordinal);
         private static readonly HashSet<string> _saidKeyless = new HashSet<string>(StringComparer.Ordinal);
 
+        /// <summary>One-shot tokens: abilities whose NEXT <c>WaitForCameraChase</c> is a mirrored play and must
+        /// not block on this peer's camera. Consumed by the first read, so nothing has to clean it up.</summary>
+        private static readonly HashSet<TacticalAbility> _mirrorSkipsCameraWait = new HashSet<TacticalAbility>();
+
+        internal static bool ConsumeCameraWaitSkip(TacticalAbility ability)
+        {
+            return ability != null && _mirrorSkipsCameraWait.Remove(ability);
+        }
+
         // ~2 s at 60 fps. Not a deadline: a held settle is CORRECT while the actor is still moving, so the
         // hold keeps waiting and only says so periodically — but a hold nobody can see is the bug class.
         private const int SettleWarnFrames = 120;
@@ -937,6 +946,7 @@ namespace Multiplayer.Tactical
             Seq.Reset();
             _pending.Clear();
             _saidUncovered.Clear();
+            _mirrorSkipsCameraWait.Clear();   // live ability refs: never let them outlive the battle
             _saidKeyless.Clear();
             _replayOriginPeer = 0;
             TacticalActorKey.Reset();   // A3b: the derived alien keys belong to ONE battle and to no other
@@ -1536,6 +1546,11 @@ namespace Multiplayer.Tactical
             // The host's fumble is DECLARED before the native body runs, because Activate:1109 rolls it and
             // PlayAction:988-993 consumes it inside the same synchronous call — there is no later moment.
             FumbleGate.Declare(ability, fumbled);
+            // A MIRROR NEVER WAITS FOR THIS PEER'S CAMERA (law 5: camera is local-only, never relayed — so it
+            // must not decide WHEN a replicated action starts). Armed only when TrackWithCamera is true,
+            // because that is exactly the arm that reaches WaitForCameraChase (TacticalAbility:971), so the
+            // token is always consumed and never goes stale.
+            if (ability.TrackWithCamera) _mirrorSkipsCameraWait.Add(ability);
             using (SyncApplyScope.Enter()) ability.Activate(target);
             // DID IT START, OR ONLY GET IN LINE? PlayingAction.SetState(Playing) calls StartPlayingAction
             // SYNCHRONOUSLY (PlayingAction:47-53 -> TacticalActorBase.AddExecutingAbility:709), so the moment
@@ -1914,5 +1929,36 @@ namespace Multiplayer.Tactical
         {
             if (!__result && SyncApplyScope.Active) __result = true;
         }
+    }
+
+    /// <summary>
+    /// THE MIRRORED ORDER THAT WAITED FOR THE WRONG PEER'S CAMERA. <c>MirroredPlayMatchesHostPacing</c> above
+    /// only decides PlayAction vs EnqueueAction — but BOTH paths wrap the action in
+    /// <c>CreateWaitingForCameraBlendingAction</c>, and <c>WaitingForCameraBlendingAction</c>:969-974 then
+    /// spins in <c>WaitForCameraChase</c>:952-966 while <c>CameraDirector.Chasing</c>, for every ability with
+    /// <c>TrackWithCamera</c>. So no choice between those two branches could ever have fixed it.
+    ///
+    /// That wait is the wrong gate for a mirror, for a reason that does not depend on any bug report:
+    /// <c>Chasing</c> is <c>PlanarScrollCamera.IsDoingChase</c>:256 — ONE GLOBAL camera state per peer, not
+    /// per actor — so a replicated action's start time was being decided by where THIS peer's camera happens
+    /// to be pointing. Law 5 names camera local-only and never relayed; a local-only thing must not decide
+    /// WHEN a shared action begins. It is also the only mechanism in this arc that can make two receivers of
+    /// the SAME order start at different times, which a per-actor action queue cannot.
+    ///
+    /// Skipping it costs nothing but the camera blend: the coroutine is a pure wait, so the mirrored action
+    /// simply starts now. The acting peer's own click is untouched — it never routes through
+    /// <c>ApplyActivate</c>, so it still waits for its camera exactly as in single player.
+    /// </summary>
+    [HarmonyPatch(typeof(TacticalAbility), "WaitForCameraChase")]
+    internal static class MirroredPlayDoesNotWaitForThisPeersCamera
+    {
+        private static bool Prefix(TacticalAbility __instance, ref IEnumerator<NextUpdate> __result)
+        {
+            if (!TacticalCommandSync.ConsumeCameraWaitSkip(__instance)) return true;
+            __result = NoWait();
+            return false;
+        }
+
+        private static IEnumerator<NextUpdate> NoWait() { yield break; }
     }
 }
