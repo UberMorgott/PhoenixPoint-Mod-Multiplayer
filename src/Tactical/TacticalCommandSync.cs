@@ -843,11 +843,10 @@ namespace Multiplayer.Tactical
         internal static bool IsRider(TacticalAbility ability) => LocalReason(ability) == null;
 
         /// <summary>
-        /// AN AUTONOMOUS ACTIVATION — one the GAME raised off replicated board state, not one a peer ordered.
-        /// It must never cross the wire in EITHER direction: the host must not mirror it (the receiving peer's
-        /// own machinery is about to raise the same one, so it would fire twice) and a client must not emit it
-        /// as an intent (the host already raised its own, so it would fire twice THERE — the double-shot A5
-        /// would otherwise introduce the moment enemies start moving on a client).
+        /// AN AUTONOMOUS ACTIVATION — one the GAME raised off board state, not one a peer ordered. It is the
+        /// HOST'S, exactly like an AI action: the host mirrors it on 0x82 like any other rider and every other
+        /// peer is BLOCKED from raising its own (<see cref="BlockAutonomousReaction"/>). A client still never
+        /// emits one as an intent — nobody ordered it, so there is nothing to ask for.
         ///
         /// THE MARKER IS THE GAME'S OWN: <c>TacticalAbilityTarget.AttackType</c>. Overwatch
         /// (<c>TacticalLevelController.ExecuteOverwatch</c>:1375 builds its target with
@@ -859,14 +858,29 @@ namespace Multiplayer.Tactical
         /// from (<c>TacticalLevelController.GetReturnFireAbilities</c>:1401). So "not Regular" is not a
         /// heuristic — it is the engine's own word for "nobody ordered this".
         ///
-        /// WHY LOCAL AND NOT BLOCKED ON THE CLIENT: every input these six triggers read is already replicated
-        /// (position by the 0x82 mirror + settle, damage by 0x84, the map by both), so both peers raise the
-        /// same reaction off the same board; and the only AUTHORITATIVE consequence — the damage — is already
-        /// neutered on a client (<c>DamageAccumulation.ApplyAddedDamage</c>, law L66a) and arrives resolved on
-        /// 0x84. Blocking them instead would also have to block <c>IdleAbility</c>, which law 5 names as
-        /// local-only presentation, and would strand the native coroutines that unapply the overwatch status
-        /// after the shot. KNOWN CEILING: a reaction that fires on one peer and not the other leaves that
-        /// peer's AP/status different until the host's next settle for that actor or a resnapshot.
+        /// A5 ORIGINALLY PINNED THESE LOCAL on the premise that "every peer raises its own off the same
+        /// replicated board". THE PREMISE IS FALSE, MEASURED (law L83, 2026-08-01): a bandit's RETURN FIRE
+        /// fired on the host and on NEITHER client. Both clients ran the same
+        /// <c>FireWeaponAtTargetCrt</c>:1877-1880 for the mirrored shot and entered
+        /// <c>TacticalLevelController.ReturnFire</c>:1458 — and left it three frames later
+        /// (<c>wait while [RETURN_FIRE]</c> → <c>wait ended</c>, i2 frames 25228→25231, i3 25087→25092, vs the
+        /// host's 25630→25876), i.e. <c>GetReturnFireAbilities</c>:1398 found NOTHING while the host found one.
+        /// The damage still crossed on 0x84 and was applied verbatim (Soldier_3 238→225→210 on all three), so
+        /// what the user saw was a soldier losing 28 hp with nobody shooting at him. THAT is the whole failure
+        /// mode of "every peer decides for itself": the reaction's inputs are not one replicated number but the
+        /// whole targeting/vision/equipment closure <c>GetReturnFireAbilities</c> walks, and it only has to
+        /// disagree ONCE. So the premise is retired rather than repaired — the host decides, like it already
+        /// does for the AI's target (<c>AIFaction.SelectTarget</c>:395), and for the same reason.
+        ///
+        /// WHAT MAKES ONE GATE ENOUGH: all four raisers hand the reaction to the ability through the two
+        /// NON-VIRTUAL wrappers <c>TacticalAbility.Execute</c>:1158 / <c>ExecuteAndWait</c>:1168 — return fire
+        /// at <c>TacticalLevelController.ReturnFire</c>:1498, overwatch at <c>ExecuteOverwatch</c>:1385, zone
+        /// of control at <c>TriggerAbilityZoneOfControlStatus.ExecuteAbility</c>:129, synced fire at
+        /// <c>MassShootTargetActorEffect.FaceAndShootAtTarget</c>:77 — so blocking THERE stops the whole
+        /// activation. Blocking at <c>Activate</c> would not: it is VIRTUAL, and skipping the base body still
+        /// lets <c>ShootAbility.Activate</c>:165-174 run its own <c>PlayAction(Shoot)</c>. The surrounding
+        /// native coroutine still runs on the blocked peer, so the overwatch status is still unapplied
+        /// (<c>ExecuteOverwatch</c>:1387) — nothing is stranded.
         /// </summary>
         internal static bool IsAutonomous(TacticalAbilityTarget target) =>
             target != null && target.AttackType != AttackType.Regular;
@@ -892,10 +906,30 @@ namespace Multiplayer.Tactical
         internal static string RelayDecision(bool isHost, bool factionIsPlayerControlled, bool abilityIsRider,
                                              bool activationIsAutonomous)
         {
-            if (activationIsAutonomous) return RelayLocalAutonomous;
             if (!abilityIsRider) return RelayLocalDeclared;
-            if (isHost) return RelayMirror;                       // A5: EVERY faction, the AI's included
+            if (isHost) return RelayMirror;                       // A5: EVERY faction; L83: reactions too
+            if (activationIsAutonomous) return RelayLocalAutonomous;   // nobody ordered it: nothing to ask for
             return factionIsPlayerControlled ? RelayIntent : RelayClientRanAi;
+        }
+
+        /// <summary>THE OTHER HALF OF L83, and the only place a peer is stopped from acting: a NON-HOST peer
+        /// does not raise its own autonomous reaction, because the host's is already on its way. Returns true
+        /// to SKIP the native activation. See <see cref="IsAutonomous"/> for why this sits on the two
+        /// <c>Execute</c> wrappers and not on <c>Activate</c>, and for the measurement that retired "every peer
+        /// raises its own". The <see cref="SyncApplyScope"/> arm is what lets the host's relayed copy through —
+        /// the mirror plays it inside that scope (<see cref="ApplyActivate"/>).</summary>
+        internal static bool BlockAutonomousReaction(object parameter)
+        {
+            var engine = LiveEngine();
+            if (engine == null || engine.IsHost) return false;   // solo or host: this peer IS the authority
+            if (SyncApplyScope.Active) return false;             // this IS the host's reaction being played
+            var target = parameter as TacticalAbilityTarget;
+            if (!IsAutonomous(target)) return false;
+            if (_saidUncovered.Add("block:" + target.AttackType))
+                Debug.Log("[Multiplayer][tac] a local " + target.AttackType + " reaction was BLOCKED here — " +
+                          "reactions are the host's and arrive on 0x82 like every other action (law L83). " +
+                          "Raising this peer's own would be a second shot from the same actor.");
+            return true;
         }
 
         /// <summary>HOST: the peer whose intent is currently being replayed natively, so the mirror can skip
@@ -1051,12 +1085,15 @@ namespace Multiplayer.Tactical
 
             if (relay == RelayLocalAutonomous)
             {
-                // Said once, at Log level: this is a DECISION, not a gap. Every peer raises the same reaction
-                // off the same replicated board and the damage is the host's on 0x84.
+                // A CLIENT reaching here with an autonomous target means BlockAutonomousReaction did not see
+                // it — a raiser that bypasses both Execute wrappers. Loud: the host is mirroring its own copy,
+                // so this peer is about to show the same actor shooting twice.
                 if (_saidUncovered.Add("auto:" + name))
-                    Debug.Log("[Multiplayer][tac] '" + name + "' activated as " + target.AttackType + " — an " +
-                              "autonomous reaction, so it stays LOCAL on every peer (each raises its own off the " +
-                              "same replicated board; only its damage crosses, on 0x84).");
+                    Debug.LogError("[Multiplayer][tac] this CLIENT raised its own " + target.AttackType +
+                                   " with '" + name + "' on " + actor.name + " — reactions are the host's and " +
+                                   "arrive on 0x82 (law L83), so this actor will shoot TWICE here. The raiser " +
+                                   "reached Activate without passing TacticalAbility.Execute/ExecuteAndWait, " +
+                                   "which is the one place the block lives.");
                 return;
             }
             if (relay == RelayLocalDeclared)
@@ -1116,7 +1153,8 @@ namespace Multiplayer.Tactical
                 // its origin (0 = the host), so the ownership the hold in HandleActivate consults is written at
                 // the one point that cannot drift out of step with what is actually executing.
                 _cmdOwner[key] = _replayOriginPeer;
-                Send(OpActivate, "mirror " + actor.name + " " + name + " " + Where(target) + (fumbled ? " FUMBLED" : ""),
+                Send(OpActivate, "mirror " + actor.name + " " + name + " " + Where(target) +
+                     (IsAutonomous(target) ? " [" + target.AttackType + "]" : "") + (fumbled ? " FUMBLED" : ""),
                      _replayOriginPeer, w => { WriteCommand(w, key, guid, target); w.Write(fumbled); });
             }
             else
@@ -1964,6 +2002,46 @@ namespace Multiplayer.Tactical
     {
         private static void Prefix(TacticalAbility __instance, object parameter)
             => TacticalCommandSync.OnAbilityActivated(__instance, parameter);
+    }
+
+    /// <summary>
+    /// L83 — THE REACTION GATE. A non-host peer does not raise its own overwatch / return fire /
+    /// zone-of-control / synced shot: the host raises all four and mirrors them on 0x82 like any other action,
+    /// so a locally-raised one would be a second shot from the same actor. See
+    /// <see cref="TacticalCommandSync.IsAutonomous"/> for the measurement that made the host the authority
+    /// here, and for why the block sits on these two NON-VIRTUAL wrappers rather than on the virtual
+    /// <c>Activate</c> the capture uses (skipping a virtual's base body leaves the override's own
+    /// <c>PlayAction</c> running).
+    ///
+    /// Two patch classes and not one <c>TargetMethods</c>: the wrappers return different types, so each skip
+    /// has to hand Harmony a different <c>__result</c> — an empty enumerator for the coroutine form (every
+    /// caller wraps it in <c>Timing.Call</c>, which completes immediately) and <c>NextUpdate.ThisFrame</c> for
+    /// the immediate form, which is exactly what the native body returns when nothing began (:1170).
+    /// </summary>
+    [HarmonyPatch(typeof(TacticalAbility), nameof(TacticalAbility.Execute), new[] { typeof(object) })]
+    internal static class AutonomousReactionExecuteGate
+    {
+        private static IEnumerator<NextUpdate> Nothing() { yield break; }
+
+        private static bool Prefix(object parameter, ref IEnumerator<NextUpdate> __result)
+        {
+            if (!TacticalCommandSync.BlockAutonomousReaction(parameter)) return true;
+            __result = Nothing();
+            return false;
+        }
+    }
+
+    /// <summary>The immediate half of <see cref="AutonomousReactionExecuteGate"/> —
+    /// <c>MassShootTargetActorEffect.FaceAndShootAtTarget</c>:77 is the one raiser that uses it.</summary>
+    [HarmonyPatch(typeof(TacticalAbility), nameof(TacticalAbility.ExecuteAndWait), new[] { typeof(object) })]
+    internal static class AutonomousReactionExecuteAndWaitGate
+    {
+        private static bool Prefix(object parameter, ref NextUpdate __result)
+        {
+            if (!TacticalCommandSync.BlockAutonomousReaction(parameter)) return true;
+            __result = NextUpdate.ThisFrame;
+            return false;
+        }
     }
 
     /// <summary>

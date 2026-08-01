@@ -7649,10 +7649,13 @@ namespace RailCheck
         ///   (b) EVERY ENEMY ACTION A PEER SEES CAME FROM THE HOST'S STREAM. The host mirrors EVERY faction,
         ///       and the premise that makes one seam enough is asserted rather than assumed: the AI's whole
         ///       action vocabulary funnels through <c>ExecuteAndWait</c> → <c>Activate</c>.
-        ///   (c) AUTONOMOUS REACTIONS NEVER CROSS, IN EITHER DIRECTION. Overwatch, return fire, zone-of-control
-        ///       and synced fire are raised per-peer off replicated state; mirroring one (or emitting one as an
-        ///       intent) fires it TWICE. The declared-local ability set is complete, reasoned, and matches by
-        ///       assignability rather than exact type.
+        ///   (c) AN AUTONOMOUS REACTION IS THE HOST'S TOO (law L83). Overwatch, return fire, zone-of-control and
+        ///       synced fire are MIRRORED like every other action, and every non-host peer is BLOCKED from
+        ///       raising its own at the two <c>TacticalAbility.Execute</c> wrappers all four raisers enter
+        ///       through — mirrored-plus-locally-raised is the same actor shooting twice, and per-peer-only was
+        ///       measured to fire on the host and on neither client. A client still never emits one as an
+        ///       intent. The declared-local ability set is complete, reasoned, and matches by assignability
+        ///       rather than exact type.
         ///   (d) THE MIRROR'S EXEMPTION IS NOT A HOLE. A mirrored activation is exempt from the capture seam
         ///       (<c>SyncApplyScope</c>) and from NOTHING ELSE — in particular it must NOT enter
         ///       <c>MirrorApplyScope</c>, which would stand down the damage neuter and every foreign-patch
