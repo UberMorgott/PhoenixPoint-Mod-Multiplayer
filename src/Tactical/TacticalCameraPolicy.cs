@@ -29,12 +29,23 @@ namespace Multiplayer.Tactical
     ///    Each peer tests its OWN selection, which is exactly "both of us watching the same soldier both get
     ///    the cinematic" — two peers on one soldier both pass, and nobody has to publish a selection.
     ///
-    /// NARROWED BY THE PARAM TYPE, deliberately. <c>CameraDirector</c> is shared with the geoscape
-    /// (<c>GeoscapeView</c>:1109), and only an ABILITY cinematic carries <see cref="TacAbilityDirectorParams"/>
-    /// (<c>TacAbilityDirectorParams</c>:24-28, <c>.ActorBase</c> = the acting actor). Actor reveals
-    /// (<c>TacticalView</c>:908) and selection chases (<c>TacticalActorViewBase.DoCameraChase</c>:486) ride
-    /// plain <c>TacCamDirectorParams</c> / the chase path and are untouched — local selection and the
-    /// mission-start intro keep working.
+    /// NARROWED BY THE HINT, not by the param type. The first cut of this filter tested
+    /// <c>param is TacAbilityDirectorParams</c> and that is why the complaint SURVIVED it: an ability's own
+    /// <c>AbilityActivated</c> push is only the FIRST of four action-camera hints, and the three that yank
+    /// hardest — a shot — carry <see cref="TacOrbitCamDirectorParams"/> instead, a SIBLING subclass the type
+    /// test could never match. <c>TacticalLevelController.FireWeaponAtTargetCrt</c> pushes
+    /// <c>Shoot</c>:1600/1617, <c>ShootingStarted</c>:1806 and <c>Weapon.SpawnProjectile</c>:460 pushes
+    /// <c>ProjectileFired</c> — all with <c>Actor = </c> the shooter, so all four name their actor through the
+    /// common base <see cref="TacCamDirectorParams"/>:9 (<c>.ActorBase</c>).
+    ///
+    /// The four ARE the family and nothing else is. Everything the earlier narrowing protected stays
+    /// protected, now by name rather than by type: <c>ActorReveal</c> (<c>TacticalView</c>:908),
+    /// <c>Die</c> (<c>RagdollDieAbility</c>:73), <c>EnterPlay</c> (<c>EnterPlayAbility</c>:72),
+    /// <c>Aim</c>/<c>ManualAim</c> (<c>UIStateShoot</c>:514-524) and every <c>Geoscape*</c> hint on the shared
+    /// <c>CameraDirector</c> (<c>GeoscapeView</c>:1109) are NOT in the set and pass untouched — so local
+    /// selection, the death cam and the mission-start intro keep working. Selection chases never reach this
+    /// method at all (<c>TacticalActorViewBase.DoCameraChase</c>:486 rides <c>CameraHint.ChaseTarget</c>, the
+    /// unrelated :167 overload).
     ///
     /// NOT <c>CameraDirector.Silenced</c>: it is vestigial. Nothing in <c>CameraDirector</c> or
     /// <c>CameraManager</c> reads it — the only readers are <c>TacConsoleGameplay</c>:531/568 (the
@@ -53,18 +64,26 @@ namespace Multiplayer.Tactical
         internal static bool Allow(bool playerTurn, object actorBase, object selectedActor)
             => !playerTurn || ReferenceEquals(actorBase, selectedActor);
 
-        /// <summary>THE NARROWING, split out for the same reason: it is the single thing keeping this filter
-        /// off the geoscape and off every non-ability tactical hint, and it is one word wide. Only an ABILITY
-        /// cinematic carries <see cref="TacAbilityDirectorParams"/>; reveals and selection chases carry the
-        /// plain <c>TacCamDirectorParams</c> base. RailCheck L75 holds all three answers.</summary>
-        internal static bool IsAbilityCinematic(CameraDirectorParams param) => param is TacAbilityDirectorParams;
+        /// <summary>THE ACTION-CAMERA FAMILY — the four hints an ACTION pushes, and the whole width of this
+        /// filter. Named explicitly rather than derived from the param type, because the shot hints are a
+        /// sibling subclass (<see cref="TacOrbitCamDirectorParams"/>) of the ability one and a type test
+        /// silently missed them. Everything outside this set is somebody's LOCAL camera and passes.</summary>
+        internal static bool IsActionHint(CameraDirectorHint hint)
+            => hint == CameraDirectorHint.AbilityActivated || hint == CameraDirectorHint.Shoot ||
+               hint == CameraDirectorHint.ShootingStarted   || hint == CameraDirectorHint.ProjectileFired;
 
-        /// <summary>Prefix verdict for the ability-cinematic hint. Anything that is not an ability cinematic,
-        /// and every solo session, returns true unchanged.</summary>
+        /// <summary>THE NARROWING, split out for the same reason: it is the single thing keeping this filter
+        /// off the geoscape and off every non-action tactical hint. An action hint whose params cannot name an
+        /// actor is not filterable and passes. RailCheck L75 holds every answer.</summary>
+        internal static bool IsAbilityCinematic(CameraDirectorHint hint, CameraDirectorParams param)
+            => IsActionHint(hint) && param is TacCamDirectorParams;
+
+        /// <summary>Prefix verdict for an action-camera hint. Anything outside the family, and every solo
+        /// session, returns true unchanged.</summary>
         internal static bool AllowAbilityHint(CameraDirectorHint hint, CameraDirectorParams param)
         {
-            if (!IsAbilityCinematic(param)) return true;         // geoscape + every non-ability hint
-            var abilityParams = (TacAbilityDirectorParams)param;
+            if (!IsAbilityCinematic(hint, param)) return true;   // geoscape + every non-action hint
+            var abilityParams = (TacCamDirectorParams)param;
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true;   // solo play stays fully native
 
@@ -87,8 +106,10 @@ namespace Multiplayer.Tactical
             return false;
         }
 
-        /// <summary>Companion guard. <c>TacticalAbility.OnPlayingActionEnd</c>:1067-1069 pops
-        /// <c>AbilityActivated</c> unconditionally, so a suppressed push still gets its pop. The pop itself
+        /// <summary>Companion guard, over the same family. <c>TacticalAbility.OnPlayingActionEnd</c>:1067-1069
+        /// pops <c>AbilityActivated</c> unconditionally, and <c>FireWeaponAtTargetCrt</c>:1592/1731 pops
+        /// <c>Shoot</c> off a <c>stepoutHint</c> flag it sets whether or not the push survived — so a
+        /// suppressed push still gets its pop, on both. The pop itself
         /// is harmless (<c>CameraDirectorState.Pop</c> no-ops on an empty match) but <c>RemoveHint</c>:129
         /// then runs <c>Evaluate()</c>, which re-matches the director tree and re-instantiates a
         /// non-persistent <c>ActionCamDef</c> (<c>CameraDirector</c>:213-219) — a visible jolt on a peer that
@@ -101,7 +122,7 @@ namespace Multiplayer.Tactical
         /// pop through a prefix on <c>TacticalAbility.OnPlayingActionEnd</c>.</summary>
         internal static bool AllowRemoveHint(CameraDirector director, CameraDirectorHint hint)
         {
-            if (hint != CameraDirectorHint.AbilityActivated) return true;
+            if (!IsActionHint(hint)) return true;
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true;
             return director.DirectorState.Contains(hint);

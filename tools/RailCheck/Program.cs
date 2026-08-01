@@ -8526,23 +8526,56 @@ namespace RailCheck
                              "soldier's cinematic";
 
             // ── arm B: the narrowing, called for real. NOT asserted through AllowAbilityHint: headless there
-            // is no NetworkEngine, so that method answers "solo, run native" before it ever reaches the type
-            // test and the arm would be vacuously green whatever the width. The ability param is built
-            // WITHOUT its constructor (it wants a live TacticalAbility); it is a plain class, so an
+            // is no NetworkEngine, so that method answers "solo, run native" before it ever reaches the test
+            // and the arm would be vacuously green whatever the width. The params are built WITHOUT their
+            // constructors (they want a live TacticalAbility / Weapon); they are plain classes, so an
             // uninitialized instance is a perfectly good answer to "what type is this".
-            if (Multiplayer.Tactical.TacticalCameraPolicy.IsAbilityCinematic(
-                    new PhoenixPoint.Tactical.Cameras.TacCamDirectorParams()))
-                yield return "L75 filter-too-wide: a plain TacCamDirectorParams counts as an ability cinematic. Only " +
-                             "TacAbilityDirectorParams is one; this width also swallows actor reveals, selection " +
-                             "chases and every GEOSCAPE hint on the shared CameraDirector";
-            if (Multiplayer.Tactical.TacticalCameraPolicy.IsAbilityCinematic(null))
-                yield return "L75 filter-eats-null: a hint with no params at all counts as an ability cinematic";
-            if (!Multiplayer.Tactical.TacticalCameraPolicy.IsAbilityCinematic(
-                    (Base.Cameras.CameraDirectorParams)System.Runtime.Serialization.FormatterServices
-                        .GetUninitializedObject(typeof(PhoenixPoint.Tactical.Cameras.TacAbilityDirectorParams))))
-                yield return "L75 filter-too-narrow: a real TacAbilityDirectorParams is NOT recognised as an ability " +
-                             "cinematic — the gate then passes everything and every peer's camera is back to being " +
-                             "yanked onto whichever soldier someone else just moved";
+            //
+            // WIDTH IS NOW A HINT SET, and the arm's job changed with it. The first cut tested
+            // `param is TacAbilityDirectorParams` and shipped a filter that missed the whole SHOT family
+            // (Shoot/ShootingStarted/ProjectileFired carry TacOrbitCamDirectorParams, a SIBLING subclass) —
+            // the camera kept being yanked and nothing was red. So the arm now nails the family from BOTH
+            // sides: every hint an action pushes is in, every hint a peer pushes for itself is out.
+            var abilityParams = (Base.Cameras.CameraDirectorParams)System.Runtime.Serialization.FormatterServices
+                .GetUninitializedObject(typeof(PhoenixPoint.Tactical.Cameras.TacAbilityDirectorParams));
+            var orbitParams = (Base.Cameras.CameraDirectorParams)System.Runtime.Serialization.FormatterServices
+                .GetUninitializedObject(typeof(PhoenixPoint.Tactical.Cameras.TacOrbitCamDirectorParams));
+            var plainParams = new PhoenixPoint.Tactical.Cameras.TacCamDirectorParams();
+
+            foreach (var (hint, param, what) in new (Base.Cameras.CameraDirectorHint H, Base.Cameras.CameraDirectorParams P, string What)[]
+            {
+                (Base.Cameras.CameraDirectorHint.AbilityActivated, abilityParams,
+                 "an ability activation (TacticalAbility:1104)"),
+                (Base.Cameras.CameraDirectorHint.Shoot, orbitParams,
+                 "the shot camera (TacticalLevelController:1600/1617) — the exact hint the type-only narrowing missed"),
+                (Base.Cameras.CameraDirectorHint.ShootingStarted, orbitParams,
+                 "the burst camera (TacticalLevelController:1806)"),
+                (Base.Cameras.CameraDirectorHint.ProjectileFired, orbitParams,
+                 "the projectile camera (Weapon:460)"),
+            })
+                if (!Multiplayer.Tactical.TacticalCameraPolicy.IsAbilityCinematic(hint, param))
+                    yield return "L75 filter-too-narrow: " + what + " is NOT recognised as an action cinematic, so " +
+                                 "the gate passes it and every peer's camera is yanked onto whichever soldier " +
+                                 "someone else is playing";
+
+            foreach (var (hint, param, what) in new (Base.Cameras.CameraDirectorHint H, Base.Cameras.CameraDirectorParams P, string What)[]
+            {
+                (Base.Cameras.CameraDirectorHint.ActorReveal, plainParams,
+                 "an actor reveal (TacticalView:908) — each peer reveals off its OWN vision"),
+                (Base.Cameras.CameraDirectorHint.Die, plainParams,
+                 "the death cam (RagdollDieAbility:73), which every peer is meant to see"),
+                (Base.Cameras.CameraDirectorHint.EnterPlay, plainParams,
+                 "the deployment cam (EnterPlayAbility:72)"),
+                (Base.Cameras.CameraDirectorHint.ManualAim, plainParams,
+                 "this peer's own aiming camera (UIStateShoot:514-524)"),
+                (Base.Cameras.CameraDirectorHint.GeoscapeFocus, plainParams,
+                 "a GEOSCAPE hint on the shared CameraDirector (GeoscapeView:1109)"),
+                (Base.Cameras.CameraDirectorHint.AbilityActivated, null,
+                 "an action hint carrying no params at all, which can name no actor to test"),
+            })
+                if (Multiplayer.Tactical.TacticalCameraPolicy.IsAbilityCinematic(hint, param))
+                    yield return "L75 filter-too-wide: " + what + " counts as an action cinematic and can now be " +
+                                 "suppressed — a camera that stops obeying looks nothing like a tactical change";
 
             // ── arm C: both prefixes really bind, to the right overload, and still SKIP.
             foreach (var (gate, target, ps) in new (string Gate, string Target, Type[] Params)[]
