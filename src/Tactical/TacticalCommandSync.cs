@@ -1826,4 +1826,33 @@ namespace Multiplayer.Tactical
             return false;
         }
     }
+
+    /// <summary>
+    /// THE MIRRORED SHOT THAT WAITED ITS TURN (law L78). <c>ShootAbility.Activate</c>:167 chooses between
+    /// <c>PlayAction</c> (now) and <c>EnqueueAction(soloAfterCurrent: true)</c> (after whatever is already
+    /// playing, and alone), and one arm of that condition is
+    /// <c>TacticalLevelController.AnyAIEvaluationAbilityExecuting</c>:259 —
+    /// <c>_aiEvaluationUpdateable != null</c>. On the HOST a mirrored order runs inside its own AI turn, so
+    /// the flag is TRUE and the shot plays immediately. On a CLIENT the AI turn is held (A5's
+    /// <c>ClientAiGate</c>), that field is null, and the SAME order takes the queue instead — which is
+    /// exactly the reported "the other screens only start playing it once my animation has finished, and
+    /// then everything at once". The peers never disagreed about the order; they disagreed about this getter.
+    ///
+    /// So answer it the way the host would, and ONLY while a mirrored activation is genuinely on the stack:
+    /// <c>SyncApplyScope</c> is entered at the single mirror call site (<c>PlayMirroredCommand</c>, the
+    /// <c>using</c> around <c>ability.Activate</c>) and closes with that synchronous call. Scoped that
+    /// tightly, the flag's two other readers cannot observe the lie — <c>ExecuteAIEvaluationAbilities</c>:1236
+    /// and <c>AnyGlobalEffectExecuting</c>:267 are reached from coroutine drivers, never from inside one
+    /// synchronous <c>Activate</c>. A postfix, not a prefix: when the client legitimately has an evaluation
+    /// running the native answer is already TRUE and must survive.
+    /// </summary>
+    [HarmonyPatch(typeof(TacticalLevelController),
+                  nameof(TacticalLevelController.AnyAIEvaluationAbilityExecuting), MethodType.Getter)]
+    internal static class MirroredPlayMatchesHostPacing
+    {
+        private static void Postfix(ref bool __result)
+        {
+            if (!__result && SyncApplyScope.Active) __result = true;
+        }
+    }
 }
