@@ -47,24 +47,86 @@ BEHAVIOR (per-subsystem mirroring).
    `TacticalAbilityTarget` for move/shoot/grenade/heal/overwatch/melee/jetjump — never v1's 36
    bespoke surfaces. Conflict = PURE validator shaped like `EventSync.Validate`
    (`src/Rail/EventSync.cs:63-72`): host executes in arrival order, first spends TU/AP, second
-   re-validates against post-first state and fails → `IntentRail.Reject` + nudge. The TU/AP check IS
+   re-validates against post-first state and fails → `IntentRail.Reject` + nudge. BUT BUSY IS NOT A
+   CONFLICT WHEN THE HOST IS BUSY WITH THAT SAME PEER'S OWN ORDER (`4293f53`): the acting peer plays its
+   click SPECULATIVELY, so it finishes an order while the host is still ANIMATING it, and its follow-up
+   for that soldier lands on a host legitimately busy ON THAT PEER'S BEHALF — melee always, because a
+   melee order is the one that arrives during the move it followed (`MoveAbility
+   .TryToExecuteFollowupAbility`:146-156 fires it the instant the walk ends). Such an order is HELD and
+   RE-DISPATCHED through `HandleActivate` itself, oldest first, only onto a free soldier (so arrival
+   order survives, law 7), with a 10 s ceiling after which it is refused OUT LOUD — never refused on
+   arrival, and never activated immediately either (`BashAbility.Activate`:190 → `TacticalAbility
+   .PlayAction`:998 passes `cancelCurrent:true`, which would cancel the host's in-flight move mid-walk
+   and settle every peer onto a position the order never reached). Ownership of the running order is
+   `TacticalCommandSync._cmdOwner[actorKey] = _replayOriginPeer`, written at the one point every
+   accepted order passes (`OnAbilityActivated`'s host branch; 0 = the host's own click), and busy from a
+   DIFFERENT peer still falls through to first-to-act-wins — `Validate` is unchanged and still pure
+   (RailCheck L65 arbiter-double-commands green). The TU/AP check IS
    the arbiter — NO ownership table, NO rewind engine (local play was view-only; rollback = the
    authoritative delta); `0x40/0x41 PermissionUpdate/SoldierAssignment` stay dead tombstones.
    Tactical surfaces live in 0x80-0x9F ONLY (`src/Rail/SurfaceIds.cs:5`), NEVER 0xA0-0xBF (law L62).
    Local-only, never relayed: idle animation, cover-hug on arrival, camera, selection highlight,
-   hover/preview aiming, per-frame pose — with ONE carve-out, **A8** (law L81): the COMMITTED manual-aim
+   hover/preview aiming, per-frame pose — with ONE carve-out, **A8** (laws L81+L82): the COMMITTED manual-aim
    stance. It was mis-classed as cosmetics. Entering manual aim leaves the soldier in the aim loop, which
    sets `TravelType.Aim` on the animator; `TacticalActor.CurrentlyAiming`:228-236 reads exactly that, and
    `TacticalLevelController.FireWeaponAtTargetCrt`:1645 SKIPS the entire aim-start block
    (`:1649-1683`, a checkpoint wait with a 5 s ceiling) when it is true — so the acting peer fired from a
    pose it already held while every mirror first played the entry-into-aim animation and only then the
-   shot. A built-in desync on EVERY shot, and no camera fix could reach it. What crosses is the DISCRETE
-   pair `(actorKey, target)` — ops 5 (0x82 host→all) / 6 (0x83 client→host), no new surface, on the same
-   ordered stream as the shot so the stance can never arrive after it. The POSE never crosses: the far
-   peer runs the game's own two lines (`TacticalPerception.GetBestFaceActorPoseAt`:447 →
-   `IdleAbility.ForceRefresh`:92, exactly what `UIStateShoot.FaceEnemy`:1470-1477 does) against its OWN
-   cover geometry, and repeats are deduped per actor by target key. Per-frame pose STREAMING stays
-   forbidden, and hover/preview targeting stays local — this is a discrete state, not a stream.
+   shot. A built-in desync on EVERY shot, and no camera fix could reach it. The stance is also
+   SHARED, LAST-WRITER-WINS state per soldier, not a per-window local mode: whoever entered aim last
+   owns it, and a peer switching to that soldier lands DIRECTLY in aim mode off the shared table via
+   the game's own `UIStateCharacterSelected.ActivateAttackAbilityState`:1466-1502, fired on that
+   peer's OWN selection edge — an arriving message NEVER yanks anyone's screen (the A6
+   `InventoryAbility` lesson). What crosses is the DISCRETE pair `(actorKey, targetKey)` on its own
+   surface pair **0x85 TacAim / 0x86 TacAimIntent** (`src/Tactical/TacticalAimSync.cs`), NOT an op on
+   0x82: 0x82 carries ORDERS (discrete, each played exactly once) while this carries a STANDING VALUE
+   whose whole correctness property is that the latest wins, so a re-assert on the order stream would
+   read as a second order. THE FIRST ATTEMPT (`3071859`, ops 5/6 on 0x82/0x83) WAS REVERTED BY
+   `0252247` and those two ops stay dead tombstones: it fed a `CoverPose` to
+   `IdleAbility.ForceRefresh`, whose consumption path `IdleAbility.IdleAction`:275-290 →
+   `RefreshIdle`:324 → `DoAimOrPeek`:166-185 → `TacticalNav.ExecutePoints` is a NAV TRAVERSAL — so a
+   relayed aim MOVED mirrored soldiers instead of posing them (a jetpacked one re-flew, and while it
+   ran the actor reported `HasExecutingAbility()` so its A3a settle was held to the 10 s ceiling).
+   **`IdleAbility` and every nav-reaching path are now FORBIDDEN to this arc**, and the ban is
+   MECHANICAL, not a convention: RailCheck L82 walks the transitive IL closure of every game method
+   the mirror half calls and turns red if it can reach `IdleAbility` /
+   `TacticalNavigationComponent` / `ExecutePoints` / `GetAimOrPeekPathPoints` /
+   `NavigateAndWaitUntilFinished`. What the mirror does instead is write the animator integers
+   `CurrentlyAiming` actually reads, through the game's OWN nav-free aim entry —
+   `PathProcessorUtils.SetAimParams`:81-84 / `SetNullNavParams`:91-94 → `SetParams`:67-74, whose
+   entire body is a loop of `animator.SetInteger` with no other callee, the same pair
+   `FireWeaponAtTargetCrt`:1651/:1712 uses on itself. The POSE never crosses (law 5): cover geometry
+   stays local on every peer. DEDUP IS BY SAMPLING, NOT EDGES — a postfix on
+   `TacticalViewState.Update` reads the live top state once per frame and emits only when it
+   disagrees with the SHARED table, so a transition's intermediate values never exist as a sample
+   (3071859 captured edges and failed BOTH ways at once: 2-3 messages per repaint, because
+   `UIStateShoot` genuinely alternates target→null→target across `ExitState`:1261 and
+   `SetShootTarget`:277, AND swallowed changes a third peer then never learned). Arbitration is the
+   pure `TacticalAimSync.Decide`: the host holds the one `actorKey→targetKey` table and is its only
+   writer, a client announces on 0x86 and the host echoes to ALL peers on 0x85, "last writer" = last
+   to reach the host — the rail's standing arrival-order rule, no ownership table. A peer re-asserts
+   when the shared value was CLEARED under it, and never contests a different non-zero target
+   another peer wrote (that suppression is what stops an unbounded ping-pong between two peers aiming
+   one soldier at two enemies). STILL FORBIDDEN, unchanged: per-frame pose STREAMING, hover/preview
+   aiming (`UIStateFreeCam` is excluded by an exact type test, since its crosshair re-targets as it
+   sweeps), and any path that can reach a nav traversal on a mirror.
+   **RailCheck L82** is that ban made mechanical AND the seam's own proof, and it walks THREE roots —
+   the two `PathProcessorUtils` entries plus `TacActorAnimActions.ActivateShootingClips`, the clip bind
+   `FireWeaponAtTargetCrt`:1566 does one line before setting those very params: a closure over only the
+   first two is a proof about the WRONG SET, since EVERY game method the mirror half calls has to be
+   inside it (`0a66988`). Its arms: the transitive IL walk over those three roots inside
+   `Assembly-CSharp` (red on anything declared by `IdleAbility` / `TacticalNavigationComponent` or named
+   `ExecutePoints` / `GetAimOrPeekPathPoints` / `NavigateAndWaitUntilFinished`); `ApplyStance` may not
+   call `IdleAbility` at one level; the pure `TacticalAimSync.Decide` is EXECUTED on seven cases (fresh
+   aim, steady-state silence, a genuine target change never swallowed, cleared-shared self-heal, a
+   leaving peer clearing its own stance but NOT a newer writer's, and no contest of another peer's
+   different non-zero target); the table is reset in `TacticalTurnSync.Reset` (keys are re-derived per
+   battle — a carried-over table would pose the NEXT battle's actors from a dead one); and a PREMISE
+   arm, `L82 premise-changed`, fires if `TacticalActor.CurrentlyAiming` ever stops calling
+   `Animator.GetInteger` (a game patch backing it with a model field) — the integers would then mean
+   nothing and every mirrored shot would silently replay the aim-in animation again, so the law says so
+   instead of letting the premise rot. Falsified both ways: substituting `IdleAbility.ForceRefresh` for
+   the `SetAimParams` call yields `L82 mirror-applier-navigates` + `L82 mirror-applier-inert`.
    Entry = native save-transfer (law 1, zero surfaces); exit =
    host's native `GameOver` → native teardown on all peers → one authoritative outcome. Shipped:
    A1 `7808c7f`, A2 `285411d`+`90dc585` (0x80 TacTurn / 0x81 TacTurnIntent, laws L63+L64); A3a
@@ -175,6 +237,20 @@ BEHAVIOR (per-subsystem mirroring).
    with no null test at all. A settle now carries `[forced:u8]`: one sent because the host REFUSED an order is
    applied immediately rather than held behind the refused peer's stuck speculative ability, and the ordinary
    hold gained a 10 s ceiling — a correction that waits forever is a swallowed correction.
+   A FORCED SETTLE MUST CANCEL THE ACTOR'S LOCAL NAVIGATION BEFORE IT WRITES THE HOST'S POSITION
+   (`d061b0a`): skipping the hold means the refused peer's speculative ability is still NAVIGATING, and
+   navigation wins — `TacticalNavigationComponent.UpdateActorTransformFromPathSample`:679 →
+   `SetPositionIfDelta`:521 rewrites the transform on the very next path sample with no log line, while AP
+   and WP (plain stat writes nothing re-samples) survive, so the mirror shows the COST and not the MOVE
+   (measured: a refused JetJump left one peer 4 MINUTES out of position, the same order later activating
+   from two different places). The cancel is the game's OWN teardown
+   `NavigationComponent.CancelNavigation`:156-160 — it cancels the navigation ACTION and zeroes the speed,
+   never moves the actor, and ends the ability's `WaitUntilFinished`:172-176 so its `OnPlayingActionEnd`
+   still runs. It lives in `ApplySettle`, the ONE place every settle applies (reject path and 10 s ceiling
+   path both covered), and fires only while an ability is executing — an ordinary settle has nothing to
+   cancel, and `HasExecutingAbility` ignores `IdleAbility` (`TacticalActorBase`:695-704) so the cover hug
+   on arrival is never cancelled. Generic to EVERY forced settle; jetpack is only where it SHOWS (JetJump
+   has a per-turn charge, so a second click is the one order the host reliably refuses mid-flight).
    Shared-seed determinism = still a separate future project.
 6. **Canonical diff.** Same state → byte-identical Delta: traversal sorted by stable IDs, fixed
    field order, no nondeterministic dictionary walks. IMPLEMENTATION (recon-bound): diff walks the
@@ -202,6 +278,28 @@ BEHAVIOR (per-subsystem mirroring).
 11. **Reactivity is law #1 (user mandate).** A delta arriving while ANY UI is open repaints that UI
     instantly — fire the native event the view already listens to (GeoscapeView is push-model).
     Never lazy-refresh on next open. Multi-client: everyone sees each other's effects immediately.
+    EVERY MIRRORED MODEL CHANGE MARKS THE SCREEN DIRTY, not only an ability executing
+    (`85fb79d`+`5091a10`): `TacticalUiRepaint.MarkDirty` is called at the FAMILY DISPATCH —
+    `TacticalDamageSync.HandleInbound` after the 0x84 op dispatch (damage, resnapshot, spawn, death,
+    inventory, destructible), the end of `TacticalInventorySync.ApplyLayout` (the single funnel both
+    mirror paths pass, so drops/hand-offs/crates/corpses ride one line) and
+    `TacticalCommandSync.ApplySelectEquipment` (A7's weapon switch). A mirrored batch executes NO
+    ability, so the `AbilityExecuted` postfix (`TacticalUiRepaint.cs:175`) never fired for it and
+    `UIModuleAbilities.SetAbilities` is baked once per `EnterState` — model fresh + view stale is
+    indistinguishable from "the change never crossed", this repo's dominant bug shape. `MarkDirty` only
+    sets a flag (`TacticalUiRepaint.cs:102`; the flush is that class's own `TacticalViewState.Update`
+    postfix), so it is safe inside `SyncApplyScope`. AND A REPAINT MAY NOT Exit+Enter A SCREEN WHOSE
+    `EnterState` TRANSITIONS (law L63, `7933bbe`): `UIStateShoot` is OUT of
+    `TacticalUiRepaint.AbilityBarStates` — its `EnterState`:348 `EnterFpsCamera()` pushes
+    `UIStateFreeCam` and :352 calls `SwitchToPreviousState()`, which pops and THEN runs Exit, so
+    `ExitState`:1244 executes TWICE on one instance when the repaint already ran Exit one line earlier
+    (`UIStateFreeCam : UIStateShoot` rides out with it — the allow list walks the base chain). RailCheck
+    L63 resolves every allow-listed name in `PhoenixPoint.Tactical.View.ViewStates` and walks its
+    `EnterState` for `SwitchToState` / `SwitchToPreviousState` / `EnterFpsCamera`; the siblings
+    `UIStateCharacterSelected`:313, `UIStateAbilitySelected`:132 and
+    `UIStateOverwatchAbilitySelected`:66 reach no stack move and stay. COST accepted, stated plainly: a
+    peer sitting in aim mode keeps a stale ability bar and a dead target's crosshair until its own next
+    transition (`UIStateShoot._selectedValidShoots` is a constructor snapshot, :193).
 12. **Minimal code.** No speculative abstraction, no config for constants, no defensive checks
     without a known failure they guard. Old repo died of boilerplate — don't rebuild it.
 
