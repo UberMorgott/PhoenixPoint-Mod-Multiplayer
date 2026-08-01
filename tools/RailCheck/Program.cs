@@ -1373,7 +1373,8 @@ namespace RailCheck
             foreach (var sid in new[] { SurfaceIds.GeoResearchIntent, SurfaceIds.GeoManufactureIntent,
                                         SurfaceIds.GeoPersonnelIntent, SurfaceIds.GeoTimeIntent,
                                         SurfaceIds.GeoBaseIntent, SurfaceIds.GeoEquipIntent,
-                                        SurfaceIds.GeoEventIntent, SurfaceIds.GeoVehicleIntent })
+                                        SurfaceIds.GeoEventIntent, SurfaceIds.GeoVehicleIntent,
+                                        SurfaceIds.GeoMissionIntent })
             {
                 byte[] inner;
                 using (var ims = new MemoryStream())

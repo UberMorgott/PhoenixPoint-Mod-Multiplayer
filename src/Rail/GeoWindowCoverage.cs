@@ -86,19 +86,19 @@ namespace Multiplayer.Network.Sync
             [typeof(UIStateRosterDeployment)] = new WindowRule
             {
                 Sync = WindowSync.LocalOnly,
-                // REASON REPLACED 2026-08-01: the old one cited "law 5 quarantine", and law 5 RETIRED the
-                // quarantine on 2026-07-31 (MANDATE-v2 §9, commit f3b01c2). The VERDICT survives the
-                // retirement — but on an entry-mechanism fact, not on a quarantine that no longer exists,
-                // and a stale citation is how nobody noticed. Law L72 now fails the build for one.
-                Why = "deployment is HOST-ONLY because tactical ENTRY is (law 5, entry clause): the battle is " +
-                      "built once on the host and shipped to every peer as a mid-tactical save " +
-                      "(TacticalEntry.TacLaunchGate + SaveTransferCoordinator), so the host is the only peer " +
-                      "whose squad pick can ever be committed — GeoscapeView.LaunchMission:1043-1050 opens " +
-                      "this screen and the Deploy button ends in GeoLevelController.LaunchTacticalGame, which " +
-                      "TacLaunchGate BLOCKS on a client by construction. Mirroring the screen without a squad " +
-                      "intent would hand a client a live Deploy button that silently does nothing — the exact " +
-                      "hazard the mission-BRIEF gap below refuses to ship. Shared deployment (all peers pick " +
-                      "from one roster, host commits) is a real arc and is NOT this declaration's to assume",
+                // VERDICT UNCHANGED, GROUND REPLACED 2026-08-01 (second time today): the squad INTENT the
+                // previous wording named as the missing arc SHIPPED as MissionSync (0xB8), so "a client's
+                // squad pick has nowhere to be committed" is no longer true and may not be the reason.
+                // The screen stays LocalOnly on the ordinary per-peer-navigation ground instead.
+                Why = "each peer opens its OWN deployment screen by its OWN click, so there is nothing to " +
+                      "mirror: the screen is local navigation over a roster both peers already hold, exactly " +
+                      "like UIStateGeoRoster. What it COMMITS is what crosses — the Deploy button ends in " +
+                      "GeoMission.Launch(GeoSquad):226, captured block-first as the 0xB8 launch intent " +
+                      "(MissionSync), and the host's launch then pulls EVERY peer into the battle through the " +
+                      "native save transfer (TacticalEntry + SaveTransferCoordinator), which is why no peer " +
+                      "needs the other's screen. The Back button's GeoMission.Cancel is gated on a client " +
+                      "(MissionCancelGate) so backing out stays navigation and never deletes a shared mission. " +
+                      "Mirroring the screen itself would drag a peer into a squad pick it did not ask for",
             },
             [typeof(UIStateGeoscapeTutorial)] = new WindowRule
             {
@@ -212,10 +212,16 @@ namespace Multiplayer.Network.Sync
                 "already there: the mission is site.ActiveMission and the rail structurally creates it on the " +
                 "client (docs/rail-baseline.txt, GeoSite twin table `Descend ActiveMission`). The BUTTONS are what " +
                 "is missing — ModalResultCallback:798 maps Confirm to LaunchMission and Cancel to mission.Cancel(), " +
-                "both host-authoritative — and behind them a decision this rail has NOT made. REASON RESTATED " +
-                "2026-08-01 (the previous wording rested on the tactical containment law 5 RETIRED on " +
-                "2026-07-31, MANDATE-v2 §9 — see git blame; law L72 now fails the build for a reason that " +
-                "cites a retired law). The blocker was never that law and survives its retirement intact: " +
+                "both host-authoritative — and behind them a decision this rail has NOW made, but only half of. " +
+                "NARROWED 2026-08-01: the squad INTENT the previous wording named as this entry's prerequisite " +
+                "SHIPPED as MissionSync (surface 0xB8), so Confirm no longer has an undefined meaning — " +
+                "GeoMission.Launch is captured block-first on a client and the host commits it, and Cancel is " +
+                "gated (MissionCancelGate). What is still missing is only this WINDOW's own two halves: the " +
+                "modal intent op that carries the clicked ModalResult back, and the host→all hide keyed on " +
+                "GeoscapeView.ModalClosed:793 so one peer's answer dismisses the other's copy. Until both " +
+                "exist the brief reaches one screen only — a client can start the mission from the site and " +
+                "aircraft UI, just not from a brief it never receives. Superseded reasoning, kept for the " +
+                "record: " +
                 "Confirm → LaunchMission:1043-1050 walks straight into the DEPLOYMENT screen, and " +
                 "deployment is host-only for an entry-mechanism reason law 5's rewrite did not touch: the host " +
                 "builds the battle and ships it as a save, so a client's squad pick has nowhere to be committed. " +

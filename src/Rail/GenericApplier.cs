@@ -979,6 +979,22 @@ namespace Multiplayer.Network.Sync
             if (root != null) _seededRoute.Remove(root);
             if (!v.Travelling && v.CurrentSite != null)
             {
+                // THE ARRIVAL SNAP, and the reason the parked arm is not merely a pose write. The client
+                // flies the leg itself off its OWN start time — it re-seeds when the host's order delta
+                // LANDS, so it departs a rail round-trip late and stays that far behind for the whole
+                // flight (game-time lag = that latency x Timing.Scale, which at geoscape speed is
+                // minutes). The host therefore ARRIVES FIRST, and its arrival pauses the shared clock for
+                // the site interaction (GeoscapeView.SetGamePauseState -> the "T" leaves) — at which point
+                // NavigateRoutine's num = totalTime.Ratio01(startTime, Timing.Now) stops advancing
+                // (GeoNavComponent.cs:104) and the client's aircraft hangs in mid-air, permanently, having
+                // "never reached the site". Worse, that still-running coroutine rewrites
+                // PivotTransform.localRotation from its own Slerp EVERY FRAME (:111), so the two placement
+                // lines below were overwritten the very next frame and this arm did nothing at all.
+                // Cancelling is the game's own move at the same point: TeleportToSite:508 cancels the
+                // navigation before it writes the pose, for exactly this reason. Guarded on IsNavigating
+                // (NavigationComponent.cs:35) so the ordinary parked re-seed — a create's placement seed,
+                // a baseline — does not poke ActionComponent.CancelAction with a null action.
+                if (v.Navigation.IsNavigating) v.Navigation.CancelNavigation();               // TeleportToSite:508
                 v.PivotTransform.localRotation = v.CurrentSite.PivotTransform.localRotation; // TeleportToSite:510
                 if (v.Animator != null) v.Animator.SetInteger("State", 0);                   // :513 — the landing
                                                                                              // half of the pose the
