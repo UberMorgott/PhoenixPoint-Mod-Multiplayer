@@ -928,6 +928,33 @@ namespace Multiplayer.Tactical
             public bool Forced;
         }
 
+        /// <summary>HOST: which peer's order started the ability an actor is currently executing — 0 = the
+        /// host's own click. Keyed by actor key, written in <see cref="OnAbilityActivated"/>'s host branch.</summary>
+        private static readonly Dictionary<int, ulong> _cmdOwner = new Dictionary<int, ulong>();
+
+        /// <summary>HOST: orders HELD because the SAME peer's previous order for that soldier is still playing
+        /// here. See the hold in <see cref="HandleActivate"/> for why that is lag and not a conflict. Ordered:
+        /// oldest first, released only onto a free soldier, so the arrival order survives (law 7).</summary>
+        private static readonly List<DeferredCommand> _deferred = new List<DeferredCommand>();
+
+        /// <summary>A held order, kept as the RAW body bytes it arrived as: the release re-enters the same
+        /// decoder, so there is exactly one place that knows the payload layout and the target's live refs are
+        /// re-resolved fresh at the moment it actually runs.</summary>
+        private struct DeferredCommand
+        {
+            public ulong Peer;
+            public uint Nonce;
+            public byte Op;
+            public int Key;
+            public byte[] Body;
+            public float Since;
+        }
+
+        /// <summary>How long a held order waits for that soldier to finish the same peer's previous one. A
+        /// mirrored cross-map move is a few seconds; past this the ability is not slow, it is stuck — and a
+        /// correction that waits forever is a swallowed correction (A7's settle ceiling, same reasoning).</summary>
+        private const float DeferCeilingSeconds = 10f;
+
         /// <summary>Log-once sets for the two "A3a knowingly does not cover this" notices. Per BATTLE, so the
         /// next mission reports its own gaps instead of inheriting a silence.</summary>
         private static readonly HashSet<string> _saidUncovered = new HashSet<string>(StringComparer.Ordinal);
@@ -958,6 +985,8 @@ namespace Multiplayer.Tactical
         {
             Seq.Reset();
             _pending.Clear();
+            _cmdOwner.Clear();
+            _deferred.Clear();   // a held order belongs to ONE battle; releasing it into the next is a ghost order
             _saidUncovered.Clear();
             _mirrorSkipsCameraWait.Clear();   // live ability refs: never let them outlive the battle
             _saidKeyless.Clear();
@@ -1082,6 +1111,11 @@ namespace Multiplayer.Tactical
                 // native roll here and memoizes it, so :1109 gets the same value and the bit rides WITH the
                 // order. Clients never roll at all (FumbleCheckGate).
                 bool fumbled = FumbleGate.RollForHost(ability);
+                // WHOSE ORDER IS NOW RUNNING ON THIS SOLDIER. Every accepted order — the host's own click and
+                // every replay of a peer's intent — passes through here with _replayOriginPeer already naming
+                // its origin (0 = the host), so the ownership the hold in HandleActivate consults is written at
+                // the one point that cannot drift out of step with what is actually executing.
+                _cmdOwner[key] = _replayOriginPeer;
                 Send(OpActivate, "mirror " + actor.name + " " + name + " " + Where(target) + (fumbled ? " FUMBLED" : ""),
                      _replayOriginPeer, w => { WriteCommand(w, key, guid, target); w.Write(fumbled); });
             }
@@ -1438,6 +1472,7 @@ namespace Multiplayer.Tactical
 
         private static void HandleActivate(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
+            long bodyStart = r.BaseStream.Position;
             int key = r.ReadInt32();
             string guid = r.ReadString();
             var tlc = Tlc();
@@ -1450,6 +1485,38 @@ namespace Multiplayer.Tactical
                 IntentRail.Reject(SurfaceIds.TacCommandIntent, senderPeerId,
                                   "command for actor " + key + ": the host cannot name the target — " +
                                   string.Join("; ", unresolved.ToArray()));
+                return;
+            }
+
+            // PIPELINE LAG IS NOT A CONFLICT (2026-08-01 RCA, law 5). The acting peer plays its own click
+            // SPECULATIVELY, so it FINISHES an order while the host is still animating that very same order;
+            // its next order for that soldier then lands on a host that is legitimately busy — and Validate's
+            // actorBusy arm called that "another peer commanded it first" and refused it. Measured, not argued:
+            // the host started peer 2's mirrored Move at frame 38580, refused peer 2's follow-up BashStrike at
+            // 38672, and the move ended at 38673 — ONE FRAME late. That is the whole "melee deals no damage"
+            // report: melee is the one attack that must walk up first, so its order is always the one that
+            // arrives during the move it followed; refused, it never reaches the host, no 0x84 damage record is
+            // ever resolved, and the acting client (whose own damage is neutered) plays a full swing that hurts
+            // nobody. It "works next round" because a turn edge leaves every soldier idle.
+            //
+            // First-to-act-wins is about a DIFFERENT peer; the same peer queuing behind its OWN order is simply
+            // ahead of our presentation, so the order is HELD and re-dispatched when that soldier goes idle.
+            // Running it now instead would be worse than refusing: BashAbility.Activate:190 -> PlayAction:998
+            // passes cancelCurrent:true (ActionComponent:57), which would CANCEL the host's in-flight move
+            // mid-walk and settle every peer onto a position the order never reached.
+            if (BusyWithOwnOrder(key, senderPeerId))
+            {
+                long bodyEnd = r.BaseStream.Position;
+                r.BaseStream.Position = bodyStart;
+                _deferred.Add(new DeferredCommand
+                {
+                    Peer = senderPeerId,
+                    Nonce = nonce,
+                    Op = op,
+                    Key = key,
+                    Body = r.ReadBytes((int)(bodyEnd - bodyStart)),
+                    Since = Time.realtimeSinceStartup,
+                });
                 return;
             }
 
@@ -1506,6 +1573,59 @@ namespace Multiplayer.Tactical
             Debug.Log("[Multiplayer][tac] HOST command from peer=" + senderPeerId + " ACCEPTED — " + actor.name +
                       " " + (ability.AbilityDef == null ? "?" : ability.AbilityDef.name) + " → " +
                       Where(target) + " nonce=" + nonce);
+        }
+
+        /// <summary>HOST: is this soldier busy with an ability THIS peer's own previous order started? Every
+        /// other answer — idle, or busy with an order that came from somewhere else — falls straight through to
+        /// the ordinary arbitration, so first-to-act-wins is untouched. <c>HasExecutingAbility</c> already
+        /// ignores <c>IdleAbility</c> (<c>TacticalActorBase</c>:695-704), so the cover hug never holds an
+        /// order.</summary>
+        private static bool BusyWithOwnOrder(int key, ulong peer)
+        {
+            var actor = TacticalActorKey.Resolve(Tlc(), key, out _) as TacticalActor;
+            ulong owner;
+            return actor != null && actor.HasExecutingAbility() &&
+                   _cmdOwner.TryGetValue(key, out owner) && owner == peer;
+        }
+
+        /// <summary>HOST: release the orders held behind their own peer's previous one, oldest first and only
+        /// onto a free soldier — so two held orders for one soldier still run in the order they arrived.
+        /// The release re-enters <see cref="HandleActivate"/> with the bytes as they came, which is what keeps
+        /// the arbitration, the reject and the mirror in exactly one place.</summary>
+        internal static void HostTick(NetworkEngine engine)
+        {
+            if (_deferred.Count == 0) return;
+            if (engine == null || !engine.IsHost) { _deferred.Clear(); return; }
+            for (int i = 0; i < _deferred.Count; )
+            {
+                var d = _deferred[i];
+                if (BusyWithOwnOrder(d.Key, d.Peer))
+                {
+                    if (Time.realtimeSinceStartup - d.Since < DeferCeilingSeconds) { i++; continue; }
+                    _deferred.RemoveAt(i);
+                    // A hold nobody can see is this repo's dominant bug class. Say it, refuse it, and let the
+                    // reject nudge snap that peer's speculative play back.
+                    Debug.LogError("[Multiplayer][tac] a held order for actor " + d.Key + " from peer=" + d.Peer +
+                                   " gave up after " + DeferCeilingSeconds + "s — that soldier never finished the " +
+                                   "SAME peer's previous order, so an ability is stuck on the host, not merely slow.");
+                    IntentRail.Reject(SurfaceIds.TacCommandIntent, d.Peer,
+                                      "command for actor " + d.Key + ": that soldier is still executing this same " +
+                                      "peer's previous order after " + DeferCeilingSeconds + "s");
+                    continue;
+                }
+                _deferred.RemoveAt(i);
+                try
+                {
+                    using (var ms = new MemoryStream(d.Body))
+                    using (var r = new BinaryReader(ms, Encoding.UTF8))
+                        HandleActivate(engine, d.Peer, d.Nonce, d.Op, r);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError("[Multiplayer][tac] a held order for actor " + d.Key + " from peer=" + d.Peer +
+                                   " threw when it was released: " + ex);
+                }
+            }
         }
 
         // ─── CLIENT: apply ─────────────────────────────────────────────────

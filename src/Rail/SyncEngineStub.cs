@@ -88,6 +88,10 @@ namespace Multiplayer.Network.Sync
             // one-shot at arrival — a settle that lands while this peer is still playing the mirrored move
             // would be overwritten by that move's own navigation and vanish with no log line.
             Multiplayer.Tactical.TacticalCommandSync.ClientTick(_engine);
+            // host-only inside: release an order HELD because the same peer's previous order for that soldier
+            // was still animating here. The acting peer plays speculatively and is therefore always a whole
+            // animation ahead of us; refusing that follow-up is what made melee deal no damage (2026-08-01).
+            Multiplayer.Tactical.TacticalCommandSync.HostTick(_engine);
             Multiplayer.Tactical.TacticalDamageSync.ClientTick(_engine);   // A3b: emit an armed 0x84-gap resnapshot request
             // host-only inside: A4 ships a death no damage record carried (a status kill, a scripted one, a
             // mod's). Deferred by one frame ON PURPOSE — inline it could overtake the damage stream it must
