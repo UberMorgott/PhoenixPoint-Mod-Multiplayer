@@ -664,12 +664,25 @@ namespace Multiplayer.Tactical
     /// <c>TFTVTactical.RecordTacticalInstanceData</c>:438-439 writes <c>HumanEnemiesAndTactics</c> (the tactic
     /// roll) and <c>HumanEnemiesGangNames</c>, restored at :300-301. The actors carry their tier/faction tags
     /// and their rolled names in the save too. So the client holds every input; it is missing only the def
-    /// built from them. We re-run TFTV's own builder rather than re-implementing its strings — and on a client
-    /// that builder mutates NOTHING: every <c>GetGangerReady</c> call in
-    /// <c>AssignHumanEnemiesTags</c>:753-808 is guarded by <c>HasGameTag(humanEnemyTagDef)</c> (the leader by
-    /// <c>HumanEnemyTier1GameTag</c>), all of which arrived set, and <c>RollTactic</c>:404 keeps the host's
-    /// roll because the key is already in the dict. What is left is pure def construction. Law 4c
-    /// (presentation seam), zero wire bytes, no new surface.
+    /// built from them. We re-run TFTV's own builder rather than re-implementing its strings, and
+    /// <c>RollTactic</c>:404 keeps the host's roll because the key is already in the dict.
+    ///
+    /// "THE BUILDER MUTATES NOTHING ON A CLIENT" WAS FALSE, AND IT COST A MODAL ERROR DIALOG ON EVERY CLIENT
+    /// (measured 2026-08-01 14:50:49, both clients' <c>TFTV.log</c>: "Trying to add tag that is already present
+    /// in the list HumanEnemy_GameTagDef" out of <c>GetGangerReady</c> → <c>TFTVLogger.Error</c>:62
+    /// <c>ShowSimplePrompt</c>). The tier2/3/4 loops ARE guarded by <c>HasGameTag(humanEnemyTagDef)</c>, but
+    /// the LEADER arm (<c>AssignHumanEnemiesTags</c>:754-757) is guarded by
+    /// <c>!leader.GameTags.Contains(HumanEnemyTier1GameTag)</c> — a DIFFERENT tag — and the leader is re-picked
+    /// as <c>orderedListOfHumanEnemies[0]</c> off the CURRENTLY <c>InPlay</c> squad. Mid-battle that is not the
+    /// original tier-1 leader, so an actor that already carries <c>humanEnemyTagDef</c> (but not tier 1) enters
+    /// <c>GetGangerReady</c>:658 and its second line, a plain <c>GameTags.Add</c>, throws. It also renames the
+    /// actor and re-runs <c>AdjustStatsAndSkills</c> — a silent stat divergence from the host on top of the popup.
+    ///
+    /// SO THE NON-MUTATION IS ENFORCED, NOT ASSUMED: <c>GetGangerReady</c> is stood down for the duration of the
+    /// one rebuild call, exactly like the gang-name prefix below and in the same scoped window. It is the whole
+    /// mutating half of the builder — tags, name, stats, healthbar icon — and every one of those already arrived
+    /// on the save. What is left is what this class actually wants: pure def construction. Law 4c (presentation
+    /// seam), zero wire bytes, no new surface.
     ///
     /// THE ONE THING THE SAVE CANNOT REPRODUCE is the gang NAME: <c>GenerateGangName</c>:423 re-seeds
     /// <c>UnityEngine.Random</c> from <c>Stopwatch.GetTimestamp()</c>, so it is a different name on every peer
@@ -696,11 +709,14 @@ namespace Multiplayer.Tactical
                                                new[] { typeof(TacticalLevelController) });
             var generateName = AccessTools.Method(humanEnemies, "GenerateGangName",
                                                   new[] { typeof(TacticalFaction) });
-            if (implement == null || generateName == null)
+            // Name-only lookup: there is exactly one GetGangerReady and its last parameter is optional, so an
+            // exact Type[] match is a needless way to resolve null and silently stop standing it down.
+            var gangerReady = AccessTools.Method(humanEnemies, "GetGangerReady");
+            if (implement == null || generateName == null || gangerReady == null)
             {
                 Debug.LogError("[Multiplayer][tac] TFTV is loaded but its human-enemy hint builder did not " +
-                               "resolve (ImplementHumanEnemies/GenerateGangName renamed?) — this peer gets no " +
-                               "gang/elite intro panel at all.");
+                               "resolve (ImplementHumanEnemies/GenerateGangName/GetGangerReady renamed?) — this " +
+                               "peer gets no gang/elite intro panel at all.");
                 return;
             }
 
@@ -714,6 +730,9 @@ namespace Multiplayer.Tactical
                 harmony.Patch(generateName,
                               prefix: new HarmonyMethod(AccessTools.Method(typeof(TftvMissionHints),
                                                                           nameof(HostGangName))));
+                harmony.Patch(gangerReady,
+                              prefix: new HarmonyMethod(AccessTools.Method(typeof(TftvMissionHints),
+                                                                          nameof(SkipMutatingHalf))));
                 implement.Invoke(null, new object[] { tlc });
                 Debug.Log("[Multiplayer][tac] TFTV mission hint def(s) rebuilt on this client from the host's " +
                           "transferred gang/tactic data (" + carried + " gang name(s) carried) — the intro " +
@@ -739,5 +758,11 @@ namespace Multiplayer.Tactical
             __result = _hostGangNames.Dequeue();
             return false;
         }
+
+        // GetGangerReady is the builder's whole mutating half — tags, actor name, AdjustStatsAndSkills, the
+        // healthbar icon. Every one of those crossed on the save, its leader arm re-fires on a re-picked leader
+        // and throws (see the class doc), and the def this class came for is built by GenerateHumanEnemyUnit,
+        // which does not go through here. Live ONLY inside the one scoped rebuild call.
+        private static bool SkipMutatingHalf() => false;
     }
 }
