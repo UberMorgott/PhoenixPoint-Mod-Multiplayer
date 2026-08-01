@@ -1249,6 +1249,11 @@ namespace Multiplayer.Tactical
                 return;
             }
             using (SyncApplyScope.Enter()) comp.SetSelectedEquipment(eq);
+            // A weapon switch is not an ability, so the AbilityExecuted postfix that drives the tactical
+            // repaint never fires for it — the model changes and every observer's weapon panel keeps the old
+            // one, which reads exactly like "the switch never crossed" (law 11). MarkDirty only sets a flag;
+            // the flush is TacticalUiRepaint's own Update postfix, so this is safe inside the apply scope.
+            TacticalUiRepaint.MarkDirty();
             Debug.Log("[Multiplayer][tac] CLIENT weapon switch applied — " + actor.name + " -> " +
                       EqName(eq));
         }

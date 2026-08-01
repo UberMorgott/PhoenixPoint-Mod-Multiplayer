@@ -555,6 +555,12 @@ namespace Multiplayer.Tactical
                                        ") — this peer can no longer follow the shared battle.");
                         return true;
                     }
+                    // ONE mark for the whole 0x84 family (law 11). TacticalUiRepaint's only other driver is
+                    // the AbilityExecuted postfix, so every model change that is NOT an ability executing —
+                    // a resolved hit, a spawn, a death, a resnapshot, a destroyed cover — left the model fresh
+                    // and the observer's screen stale, which is indistinguishable from "it never crossed".
+                    // MarkDirty only sets a flag; the flush is that class's own Update postfix.
+                    TacticalUiRepaint.MarkDirty();
                     Seq.Mark(SurfaceIds.TacResult, seq);
                     _lastContiguous = seq;
                 }
