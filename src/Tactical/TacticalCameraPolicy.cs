@@ -1,5 +1,6 @@
 using System.Reflection;
 using Base.Cameras;
+using Base.Cameras.CameraNodes;
 using HarmonyLib;
 using Multiplayer.Network;
 using PhoenixPoint.Tactical.Cameras;
@@ -106,6 +107,63 @@ namespace Multiplayer.Tactical
             return false;
         }
 
+        /// <summary>THE CAMERA MUST ARRIVE AT THE SAME MOMENT ON EVERY PEER, because the game makes the
+        /// ACTION wait for it. <c>WaitingForCameraBlendingAction</c>:969-974 holds the ability's whole action
+        /// body until <c>WaitForCameraChase</c>:962 stops spinning on <c>CameraDirector.Chasing</c>, and that
+        /// is <c>PlanarScrollCamera.IsDoingChase</c>:256 — "is my camera still more than 0.2 away from where
+        /// this chase is heading". It is the ONLY distance-dependent camera wait in the assembly (nothing else
+        /// reads <c>Chasing</c>), and the flight it waits out lasts <c>distance/CameraChaseSpeed</c>
+        /// (<c>PlanarScrollCamera</c>:717-721) — so the moment a shot begins was being set by where THAT peer's
+        /// camera happened to be pointing. Two screens, two distances, two start times.
+        ///
+        /// The fix is to remove the DISTANCE, not the wait. Before the director issues its real chase we run
+        /// the game's OWN instant-reposition recipe at the same destination —
+        /// <c>CameraChaseParams.Instant</c> + <c>EndChaseIfInstant</c>, exactly the pair
+        /// <c>PlanarCamDef.GetChaseParams</c>:69-70 sets for itself when the previous node was not a planar cam
+        /// (<c>ChaseImpl</c>:816-822 → <c>UpdateCameraChase</c>:687-698 → <c>_target.Set</c>, a cut, that frame).
+        /// The real chase then starts from zero distance on every peer: <c>IsDoingChase</c> is false on its
+        /// first evaluation, the action begins NOW everywhere, and the chase itself stays live and native, so a
+        /// walking soldier is still followed with the game's own damping. A far camera cuts; a camera already
+        /// on the subject sets its target to where it already is and nothing moves. The `LockCamera` that
+        /// follows (<c>CameraDirector</c>:178) is a DURATION, identical on all peers, so it never diverged.
+        ///
+        /// SCOPED BY THE PARAM TYPE, and it is exact here: <see cref="TacAbilityDirectorParams"/> is
+        /// constructed in exactly two places — <c>TacticalAbility.Activate</c>:1104 and
+        /// <c>SpawnActorAbility</c>:142 — and both push <c>AbilityActivated</c>. So this cannot reach a
+        /// selection chase (<c>DoCameraChaseParam</c>:491 builds its own params and never calls
+        /// <c>GetChaseParams</c>) nor the geoscape. The shot hints need nothing: they carry
+        /// <see cref="TacOrbitCamDirectorParams"/> onto the ORBIT behaviour, and <c>Chasing</c> is false
+        /// whenever the current behaviour is not the planar camera (<c>CameraDirector</c>:39-44).
+        ///
+        /// Copies <c>ChaseOnlyOutsideFrame</c> deliberately: with it the game only moves at all when the
+        /// subject is off screen (<c>UpdateCameraChase</c>:689), and a peer that already has it framed must
+        /// keep its view — that peer's wait is zero either way, which is all this is for.</summary>
+        internal static void SnapToAbilitySubject(CameraDirectorParams directorParams, CameraChaseParams chase)
+        {
+            if (chase == null || chase.Instant) return;   // the game is already cutting — PlanarCamDef:69-70
+            if (!(directorParams is TacAbilityDirectorParams abilityParams)) return;
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return;   // solo play stays fully native
+
+            TacticalActorBase actor = abilityParams.ActorBase;
+            if (ReferenceEquals(actor, null)) return;
+            var director = actor.CameraDirector;
+            if (ReferenceEquals(director, null)) return;
+            // SwitchToBehavior ran synchronously two lines up (CameraManager.SetCamera:167-175), so this is
+            // the planar camera in every real case; if it somehow is not, there is no chase to shorten.
+            if (!(director.Manager.CurrentBehavior is PlanarScrollCamera)) return;
+
+            director.Hint(CameraHint.ChaseTarget, new CameraChaseParams
+            {
+                ChaseTransform = chase.ChaseTransform,
+                ChaseVector = chase.ChaseVector,
+                SnapToFloorHeight = chase.SnapToFloorHeight,
+                ChaseOnlyOutsideFrame = chase.ChaseOnlyOutsideFrame,
+                Instant = true,
+                EndChaseIfInstant = true,
+            });
+        }
+
         /// <summary>Companion guard, over the same family. <c>TacticalAbility.OnPlayingActionEnd</c>:1067-1069
         /// pops <c>AbilityActivated</c> unconditionally, and <c>FireWeaponAtTargetCrt</c>:1592/1731 pops
         /// <c>Shoot</c> off a <c>stepoutHint</c> flag it sets whether or not the push survived — so a
@@ -142,6 +200,18 @@ namespace Multiplayer.Tactical
 
         private static bool Prefix(CameraDirectorHint hint, CameraDirectorParams param)
             => TacticalCameraPolicy.AllowAbilityHint(hint, param);
+    }
+
+    /// <summary>Presentation seam (law 4c) on the chase the director is about to issue for an ability's
+    /// camera — see <see cref="TacticalCameraPolicy.SnapToAbilitySubject"/>. The override
+    /// <c>MovementChasingPlanarCamDef.GetChaseParams</c>:12 is NOT patched and does not need to be: it calls
+    /// through to this base body, so patching the base covers both. No wire bytes, no surface — this only
+    /// changes how fast THIS peer's own camera gets where it was already going (law 5).</summary>
+    [HarmonyPatch(typeof(PlanarCamDef), nameof(PlanarCamDef.GetChaseParams))]
+    internal static class AbilityCameraArrivesAtOnce
+    {
+        private static void Postfix(CameraDirectorParams directorParams, CameraChaseParams __result)
+            => TacticalCameraPolicy.SnapToAbilitySubject(directorParams, __result);
     }
 
     /// <summary>The pop half — see <see cref="TacticalCameraPolicy.AllowRemoveHint"/>.</summary>
