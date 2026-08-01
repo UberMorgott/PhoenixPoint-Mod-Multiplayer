@@ -60,6 +60,7 @@ namespace Multiplayer.Tactical
         // Wire ops on SurfaceIds.TacTurn (host→all) and SurfaceIds.TacTurnIntent (client→host).
         private const byte OpTurn = 1;
         private const byte OpEnd = 2;
+        private const byte OpLeave = 3;
         internal const byte OpEndTurn = 1;
         internal const byte OpLeaveBattle = 2;
 
@@ -154,6 +155,21 @@ namespace Multiplayer.Tactical
             Send(SurfaceIds.TacTurn, OpEnd, "mission END outcome=" + (TacFactionState)state, w => w.Write(state));
         }
 
+        /// <summary>The host is LEAVING the finished battle — carry every other peer out with it. Sent from
+        /// the ONE point the host's own native exit passes (<see cref="OnLocalLeaveBattle"/>), so the host's
+        /// own Continue click and a client's accepted <see cref="OpLeaveBattle"/> ask emit the SAME message:
+        /// <see cref="HandleLeaveBattle"/> reaches <c>GoToGeoscape</c> by INVOKING it, which re-enters that
+        /// prefix. Rides 0x80 next to <c>OpEnd</c> for the reason that surface exists at all — one ordered
+        /// stream is what makes it impossible for the leave to overtake the mission end it follows.</summary>
+        private static void HostBroadcastLeave()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            var coord = engine.SaveTransfer;
+            if (coord == null || !coord.SessionStarted) return;
+            Send(SurfaceIds.TacTurn, OpLeave, "battle LEFT — every peer follows", w => { });
+        }
+
         private static void Send(byte surfaceId, byte op, string what, Action<BinaryWriter> writeBody)
         {
             var engine = NetworkEngine.Instance;
@@ -200,6 +216,7 @@ namespace Multiplayer.Tactical
                     if (!Seq.ShouldApply(SurfaceIds.TacTurn, seq)) return true; // stale re-delivery (law 7)
                     if (op == OpTurn) ApplyTurn(r.ReadString(), r.ReadInt32());
                     else if (op == OpEnd) ApplyEnd((TacFactionState)r.ReadByte());
+                    else if (op == OpLeave) ApplyLeave();
                     else
                     {
                         Debug.LogError("[Multiplayer][tac] unknown host→all tactical op " + op + " (seq=" + seq +
@@ -254,6 +271,46 @@ namespace Multiplayer.Tactical
             using (SyncApplyScope.Enter()) tlc.GameOver();
             Debug.Log("[Multiplayer][tac] CLIENT applied host mission END outcome=" + playerState +
                       " — native teardown → battle summary → geoscape.");
+        }
+
+        /// <summary>SOMEBODY pressed Continue and the host left the battle — so does this peer. Without it,
+        /// only the clicking peer and the host returned and everyone else sat on their own battle summary
+        /// until a human clicked it there too (live 2026-08-01: peer=1 left at 18:23:23, peer=2 was still in
+        /// tactical 28 s later and MISSED both post-mission event windows — <c>EventPopup</c> could only drop
+        /// a raise a peer has no geoscape to show it in). The mission is over and its outcome is already the
+        /// host's, so there is nothing left for a lingering peer to decide; a battle summary is not a
+        /// decision, it is a page.
+        ///
+        /// Runs the peer's OWN native exit, the same private <c>GoToGeoscape</c> its own Continue button
+        /// runs — nothing about the result crosses (law 5) and this peer's <c>GeoMission.Complete</c> stays
+        /// gated. Inside a <see cref="SyncApplyScope"/> so the capture prefix does not send the ask back to
+        /// the host as a second leave (law 8, direct echo loop). A peer that already clicked Continue itself
+        /// (<see cref="LeftBattle"/>) or has no level any more is a NO-OP, not an error: that is the ordinary
+        /// race of peers clicking at their own pace, and it is what makes the op idempotent (law 7).
+        ///
+        /// COST, stated plainly: a mission with a win/lose cutscene exits BattleSummary → cutscene →
+        /// GoToGeoscape (<c>GetLevelFinishedViewState</c>:1105-1109), and a peer carried out this way skips
+        /// its own cinematic. That is the price of "one peer's Continue takes everyone", which is what the
+        /// user asked for.</summary>
+        private static void ApplyLeave()
+        {
+            var tlc = Tlc();
+            if (tlc == null || LeftBattle)
+            {
+                Debug.Log("[Multiplayer][tac] CLIENT host-left-battle: nothing to do — this peer " +
+                          (LeftBattle ? "already left on its own click" : "holds no tactical level"));
+                return;
+            }
+            if (GoToGeoscapeMethod == null)
+            {
+                Debug.LogError("[Multiplayer][tac] CLIENT host-left-battle CANNOT run — TacticalView.GoToGeoscape " +
+                               "did not resolve, so this peer stays stranded on its battle summary while every " +
+                               "other peer is back on the geoscape.");
+                return;
+            }
+            using (SyncApplyScope.Enter()) GoToGeoscapeMethod.Invoke(tlc.View, null);
+            Debug.Log("[Multiplayer][tac] CLIENT host-left-battle APPLIED — running this peer's own " +
+                      "GoToGeoscape → FinishLevel → geoscape.");
         }
 
         /// <summary>The client entered a faction's turn: the mirror's VERIFY half. Silent when the two peers
@@ -421,9 +478,18 @@ namespace Multiplayer.Tactical
         /// the block-first law governs STATE mutations and there is none here. What crosses is the ASK.</summary>
         internal static void OnLocalLeaveBattle()
         {
+            bool first = !LeftBattle;
             LeftBattle = true;
-            if (IntentRail.ShouldRunNative()) return; // host, solo, or inside an apply: nobody to ask
-            IntentRail.Send(SurfaceIds.TacTurnIntent, OpLeaveBattle, "leave battle");
+            if (!IntentRail.ShouldRunNative())
+            {
+                IntentRail.Send(SurfaceIds.TacTurnIntent, OpLeaveBattle, "leave battle");
+                return;
+            }
+            // Host, solo, or inside an apply — this peer really is leaving now. THE HOST tells everyone
+            // else, once: HandleLeaveBattle reaches GoToGeoscape by invoking it, so an accepted client ask
+            // arrives here too and the broadcast has exactly one emission point. HostBroadcastLeave is
+            // self-gated on IsHost, so a client re-entering from ApplyLeave's own apply scope sends nothing.
+            if (first) HostBroadcastLeave();
         }
     }
 
@@ -540,15 +606,28 @@ namespace Multiplayer.Tactical
     /// result that peer's own <c>TacticalView.GoToGeoscape</c> built out of its own (unreplicated) actors.
     /// Blocked block-first: the host applies the real one, and its consequences reach the client as ordinary
     /// save-graph state on the value rail — no tactical message carries them.
+    ///
+    /// BUT THE BLAST RADIUS WAS TOO WIDE, and it cost the client EVERY post-mission screen (user report
+    /// 2026-08-01 items 3a+3b). <c>Complete</c>:267-276 does two things a projector must not do — apply the
+    /// results and grant the reward — and two that are pure bookkeeping: <c>Result = result</c> on its first
+    /// line and <c>IsCompleted = true</c> at :275. Both of the latter are exactly what the arrival branch
+    /// <c>UIStateInitial.EnterState</c>:101 tests, and that ONE branch is what raises the outcome modal
+    /// (:105-112) AND the resupply screen (:124-127). Blocking the method whole therefore left the branch
+    /// permanently false on every client and silently deleted both panels. So the client now takes the GAME'S
+    /// OWN half-measure instead — <c>CompleteSilently</c>:284-287, whose entire body is
+    /// <c>IsCompleted = true</c> — and gets the host's reward numbers off 0xBB to draw with
+    /// (<see cref="MissionOutcomeMirror.StampMirroredOutcome"/>). <c>Result</c> stays UNSET: it is the host's
+    /// authoritative mission result (law 3) and the branch's <c>||</c> never needed it.
     /// </summary>
     [HarmonyPatch(typeof(PhoenixPoint.Geoscape.Entities.GeoMission), "Complete")]
     internal static class ClientMissionResultGate
     {
-        private static bool Prefix()
+        private static bool Prefix(PhoenixPoint.Geoscape.Entities.GeoMission __instance)
         {
             if (IntentRail.ShouldRunNative()) return true;
             Debug.LogWarning("[Multiplayer][tac] client-local GeoMission.Complete BLOCKED — the mission outcome is " +
                              "the host's, and its geoscape consequences arrive on the value rail as ordinary state.");
+            MissionOutcomeMirror.StampMirroredOutcome(__instance);
             return false;
         }
     }

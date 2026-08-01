@@ -176,7 +176,15 @@ namespace Multiplayer.Network.Sync
                 Sync = WindowSync.LocalOnly,
                 Why = "the post-mission replenish screen, raised by the RETURNING peer's own UIStateInitial:127 as " +
                       "it comes back from tactical — per-peer arrival UI over an aircraft that peer just flew; the " +
-                      "restocking it performs rides the value rail like any other",
+                      "restocking it performs rides the value rail like any other. VERDICT UNCHANGED, PREMISE " +
+                      "REPAIRED 2026-08-01 (user report item 3b: the resupply panel appeared on the host only): " +
+                      "\"the RETURNING peer's own\" describes what the game does, not what this mod did. " +
+                      "QueueReplenishState sits INSIDE the same UIStateInitial:101 branch as the mission-outcome " +
+                      "modal, and ClientMissionResultGate's whole-method block on GeoMission.Complete kept that " +
+                      "branch false on every client, so no client ever raised it. Nothing here needs the wire — " +
+                      "its gate is this peer's own GeoPhoenixFaction.GetMissingItems() over its own aircraft and " +
+                      "its own storage, all mirrored — it only needed the completion flag the block had taken " +
+                      "away; the client now sets it with the game's own CompleteSilently:284",
             },
         };
 
@@ -279,11 +287,23 @@ namespace Multiplayer.Network.Sync
             Modal(d, WindowSync.Gap,
                 "mission OUTCOME — TWO raisers with OPPOSITE verdicts under one ModalType, which is why this stays " +
                 "a declared hole instead of a half-answer. UIStateInitial.cs:112 raises it on the peer RETURNING " +
-                "from tactical off its own _params.LastMission — per-peer arrival UI that fires natively on every " +
-                "peer that played the mission, so mirroring THAT would show the window twice (the reason " +
-                "UIStateReplenish is LocalOnly). But GeoscapeView.OnSiteMissionCancelled:1930 raises the " +
-                "base-defence / ancient-site variants off a HOST sim event alone, which no client ever fires — a " +
-                "real hole. Splitting them needs a RAISER-aware seam; a per-ModalType verdict cannot express it",
+                "from tactical off its own _params.LastMission — per-peer arrival UI, so mirroring THAT would show " +
+                "the window twice. FALSE PREMISE CORRECTED 2026-08-01 (measured, user report item 3a): the words " +
+                "\"fires natively on every peer that played the mission\" were never true in this repo, and this " +
+                "entry rested on them. It fires on the HOST only, because ClientMissionResultGate blocked " +
+                "GeoMission.Complete WHOLE and Complete:267/:275 is the sole writer of both flags the raising " +
+                "branch tests (UIStateInitial:101 `IsCompleted || GetMissionOutcomeState() != Playing`) — so on a " +
+                "client the branch was permanently false and the panel simply never existed. The client now calls " +
+                "the game's own CompleteSilently:284 instead (see ClientMissionResultGate) and the raise is " +
+                "genuinely per-peer, as this verdict always claimed; the CONTENT the panel draws — " +
+                "reward.ApplyResult, which every one of the eleven outcome data binds reaches through the same " +
+                "RewardsController.SetReward(mission.Reward) call — rides 0xBB MissionOutcomeMirror, since it is " +
+                "host-computed and on no other rail. STILL A GAP, and now for ONE reason only: " +
+                "GeoscapeView.OnSiteMissionCancelled:1930 raises the base-defence / ancient-site variants off a " +
+                "HOST sim event alone, which no client ever fires. Splitting the two raisers needs a RAISER-aware " +
+                "seam; a per-ModalType verdict cannot express it. 0xBB's declared remainder rides here too: it " +
+                "carries Resources + Items, not SetReward's stolen-aircraft / stolen-research / new-unit / " +
+                "captured-alien rows (:104-114)",
                 ModalType.GeoHavenAttackOutcome, ModalType.GeoAlienBaseOutcome, ModalType.GeoScavengeOutcome,
                 ModalType.GeoPhoenixBaseDefenseOutcome, ModalType.GeoAmbushOutcome, ModalType.HavenInfiltrateOutcome,
                 ModalType.GeoPhoenixBaseInfestationOutcome, ModalType.AncientSiteAttackOutcome,

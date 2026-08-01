@@ -62,6 +62,7 @@ namespace Multiplayer.Network.Sync
                 || EventPopup.HandleInbound(_engine, peer, surfaceId, payload)
                 || GeoModalMirror.HandleInbound(_engine, peer, surfaceId, payload)
                 || CutsceneMirror.HandleInbound(_engine, peer, surfaceId, payload)
+                || MissionOutcomeMirror.HandleInbound(_engine, peer, surfaceId, payload)
                 || IntentRail.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
@@ -103,6 +104,10 @@ namespace Multiplayer.Network.Sync
             // stay behind, and a death whose corpse manifest arrives before the corpse is a silent drop.
             Multiplayer.Tactical.TacticalActorLifecycle.HostTick(_engine);
             t = RailCost.Charge("tac", t);
+            // client-only inside: replay one raise that arrived while this peer had no GeoscapeView to put it
+            // in (still in tactical, mid-load). Not a pump over the mirrored records — the 1 Hz record scan
+            // deleted 2026-07-30 is not coming back; this drains only raises 0xB6 actually DELIVERED here.
+            EventPopup.DrainHeldRaises(_engine);
             GenericApplier.ClientCrcTick(_engine); // client-only inside: law-7 drift backstop, one root per second
             // (it charges itself per ROOT — the name in the log says which root cost the frame)
             // (No event pump: an event WINDOW is a live host→client 0xB6 raise, not a derivation over the
@@ -131,6 +136,7 @@ namespace Multiplayer.Network.Sync
             EventPopup.Reset();   // 0xB6 raise seq stream (teardown only — see EventPopup.Reset)
             GeoModalMirror.Reset();  // 0xB7 modal raise seq stream, same teardown-only contract
             CutsceneMirror.Reset();  // 0xBA cutscene raise seq stream, same teardown-only contract
+            MissionOutcomeMirror.Reset();  // 0xBB reward raise seq stream + any un-consumed stash
             Multiplayer.Tactical.TacticalTurnSync.Reset();  // 0x80 seq + the client's turn cursor / mission-over flag
             Multiplayer.Tactical.TacticalCommandSync.Reset();  // 0x82 seq + pending settles + the per-battle "not covered" notices
             Multiplayer.Tactical.TacticalDamageSync.Reset();   // 0x84 seq + gap cursor + the mirror-apply scope depth

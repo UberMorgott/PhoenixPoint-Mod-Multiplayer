@@ -87,6 +87,7 @@ namespace RailCheck
             laws.AddRange(FragmentLaw());
             laws.AddRange(ReadOnlyFacadeLaw());
             laws.AddRange(EventRaiseLaw());
+            laws.AddRange(MissionOutcomeLaw());
             laws.AddRange(PreAnsweredEventLaw());
             laws.AddRange(ReplayVisualsLaw());
             laws.AddRange(DisplayOrderLaw());
@@ -3286,6 +3287,132 @@ namespace RailCheck
         /// Plus the wire itself (a dropped payload field is failure (a) one layer down: the window is built
         /// against the WRONG context), the deploy-prompt exclusion (a host-local arrival decision mirrored as
         /// a second window the other peer can never close), and the surface id's own uniqueness.</summary>
+        /// <summary>L83 — THE POST-MISSION SCREENS EXIST ON EVERY PEER (user report 2026-08-01, items 3a+3b).
+        /// Four arms, because this defect had four independent ways to be silent — and three of them look
+        /// exactly like "the mission simply granted nothing", which no player can tell apart from a bug:
+        ///   (a) THE GATE. <c>ClientMissionResultGate</c> must still block <c>GeoMission.Complete</c> (the
+        ///       campaign write is the host's) but must ALSO leave the game's own <c>CompleteSilently</c>
+        ///       behind, or <c>UIStateInitial:101</c> stays false and the outcome modal AND the resupply
+        ///       screen both vanish from every client — which is precisely what shipped.
+        ///   (b) THE CAPTURE is a POSTFIX on <c>GeoFaction.OnMissionRewardApplied</c>. A prefix there would
+        ///       read the <c>ApplyResult</c> before <c>reward.Apply</c>:801 built it and ship an empty panel.
+        ///   (c) THE STAMP writes the mission's private <c>Reward</c> setter. A drifted handle leaves the
+        ///       whole family compiling, logging and rendering nothing.
+        ///   (d) THE CODEC round-trips, EXECUTED. Items need a live DefRepository and stay harness-invisible
+        ///       (same honest gap as DefRef), so the executed case is the resource list plus the empty-item
+        ///       framing — which is what the two u16 counts are for.</summary>
+        private static IEnumerable<string> MissionOutcomeLaw()
+        {
+            var mirror = typeof(MissionOutcomeMirror);
+            var gate = typeof(IntentRail).Assembly.GetType("Multiplayer.Tactical.ClientMissionResultGate");
+
+            // ── (a) the gate leaves the game's own bookkeeping behind ──────
+            var gatePrefix = ModMethod(gate, "Prefix");
+            if (gatePrefix == null)
+                yield return "L83 outcome-gate-gone: ClientMissionResultGate.Prefix no longer exists — a client " +
+                             "would run the host's mission results against its own campaign";
+            else if (!Reaches(gatePrefix, "MissionOutcomeMirror", "StampMirroredOutcome"))
+                yield return "L83 outcome-gate-strips-the-flag: the GeoMission.Complete gate does not reach " +
+                             "StampMirroredOutcome — Complete:267/:275 is the SOLE writer of both flags " +
+                             "UIStateInitial:101 tests, so blocking it whole leaves that branch permanently false " +
+                             "and DELETES the outcome modal and the resupply screen from every client at once";
+
+            var stamp = ModMethod(mirror, "StampMirroredOutcome");
+            if (stamp == null)
+                yield return "L83 outcome-stamp-gone: MissionOutcomeMirror.StampMirroredOutcome no longer exists";
+            else
+            {
+                if (!Reaches(stamp, "GeoMission", "CompleteSilently"))
+                    yield return "L83 outcome-flag-hand-rolled: StampMirroredOutcome does not call the game's own " +
+                                 "GeoMission.CompleteSilently:284 — that method exists for exactly this case " +
+                                 "(record the completion, apply nothing) and anything else re-implements it";
+                if (Reaches(stamp, "GeoMission", "Complete"))
+                    yield return "L83 outcome-stamp-applies: StampMirroredOutcome reaches GeoMission.Complete — the " +
+                                 "client would grant itself the reward, destroy sites and apply casualties, which " +
+                                 "is the entire reason the gate exists (law 3)";
+                // (c) the private setter really resolves
+                var setter = mirror.GetField("RewardSetter", AllMembers)?.GetValue(null) as MethodBase;
+                var real = HarmonyLib.AccessTools.PropertySetter(typeof(PhoenixPoint.Geoscape.Entities.GeoMission), "Reward");
+                if (real != null && (setter == null || setter.MetadataToken != real.MetadataToken))
+                    yield return "L83 outcome-reward-unsettable: MissionOutcomeMirror's GeoMission.Reward setter " +
+                                 "handle does not resolve (got " + (setter == null ? "<null>" : setter.Name) +
+                                 ") — every peer's outcome panel opens and draws nothing, with nothing broken enough " +
+                                 "to log";
+            }
+
+            // ── (b) the capture is a postfix on the applied-reward funnel ──
+            var capture = typeof(IntentRail).Assembly.GetType("Multiplayer.Network.Sync.MissionRewardBroadcast");
+            var funnel = HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Geoscape.Levels.GeoFaction), "OnMissionRewardApplied");
+            if (funnel == null)
+                yield return "L83 outcome-funnel-gone: GeoFaction.OnMissionRewardApplied no longer resolves — the " +
+                             "one place the GRANTED reward is visible (GeoSite:798-805 calls it one line after " +
+                             "reward.Apply:801) is gone and the capture points at nothing";
+            if (capture == null)
+                yield return "L83 outcome-uncaptured: MissionRewardBroadcast no longer exists — the host draws its " +
+                             "own panel and no other peer is told what the battle gave";
+            else
+            {
+                if (capture.GetMethod("Prefix", AllMembers) != null)
+                    yield return "L83 outcome-captured-early: MissionRewardBroadcast has a Prefix — read before " +
+                                 "reward.Apply:801 the ApplyResult is not built yet, so every mirrored panel would " +
+                                 "render an empty reward while the host's showed the real one";
+                if (!Reaches(ModMethod(capture, "Postfix"), "MissionOutcomeMirror", "HostBroadcast"))
+                    yield return "L83 outcome-capture-mute: the OnMissionRewardApplied postfix does not reach " +
+                                 "HostBroadcast — it binds and does nothing, this repo's dominant failure shape";
+            }
+
+            // ── (d) the codec, EXECUTED ────────────────────────────────────
+            var sent = new PhoenixPoint.Common.Core.ResourcePack();
+            sent.Add(new PhoenixPoint.Common.Core.ResourceUnit(PhoenixPoint.Common.Core.ResourceType.Materials, 137f));
+            sent.Add(new PhoenixPoint.Common.Core.ResourceUnit(PhoenixPoint.Common.Core.ResourceType.Tech, 42f));
+            byte[] wire;
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            { MissionOutcomeMirror.Encode(w, sent, null); wire = ms.ToArray(); }
+
+            PhoenixPoint.Common.Core.ResourcePack back = null;
+            PhoenixPoint.Geoscape.Entities.ItemStorage backItems = null;
+            long tail = -1;
+            string threw = null;
+            // CAUGHT, not allowed to escape: a reader/writer disagreement runs off the end of the stream, and
+            // an unhandled EndOfStreamException aborts the WHOLE harness — so the one law that would have
+            // named the bug never reports and every later law goes unrun too.
+            try
+            {
+                using (var ms = new MemoryStream(wire))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                { MissionOutcomeMirror.Decode(r, out back, out backItems); tail = ms.Length - ms.Position; }
+            }
+            catch (Exception ex) { threw = ex.GetType().Name + ": " + ex.Message; }
+
+            if (threw != null)
+                yield return "L83 outcome-codec-throws: decoding the reward payload the encoder just produced " +
+                             "THREW (" + threw + ") — the two halves disagree about the wire, so on a real peer " +
+                             "the inbound handler swallows it in its catch and the panel opens empty";
+            else if (tail != 0)
+                yield return "L83 outcome-codec-misaligned: the reward round-trip left " + tail + " byte(s) unread " +
+                             "— the reader and the writer disagree, so the item list that follows the resources " +
+                             "is parsed off a shifted stream";
+            if (back == null || back.Values.Count != sent.Values.Count)
+                yield return "L83 outcome-codec-drops-resources: " + (back == null ? "null" : back.Values.Count.ToString()) +
+                             " resource row(s) came back out of " + sent.Values.Count + " — the panel would show a " +
+                             "battle that granted less than it did, which reads as a game balance bug, not a sync one";
+            else
+            {
+                if (back.ByResourceType(PhoenixPoint.Common.Core.ResourceType.Materials).Value != 137f ||
+                    back.ByResourceType(PhoenixPoint.Common.Core.ResourceType.Tech).Value != 42f)
+                    yield return "L83 outcome-codec-corrupts-resources: the round-tripped amounts are not the ones " +
+                                 "sent (materials=" + back.ByResourceType(PhoenixPoint.Common.Core.ResourceType.Materials).Value +
+                                 " tech=" + back.ByResourceType(PhoenixPoint.Common.Core.ResourceType.Tech).Value + ")";
+            }
+            if (backItems == null || backItems.ToList().Count != 0)
+                yield return "L83 outcome-codec-invents-items: an EMPTY item list did not survive the round trip — " +
+                             "the two u16 counts are the only framing this payload has";
+
+            // (The 0xA0-0xBF band and the id's uniqueness are SurfaceBandLaw's job, generically over every
+            //  constant on SurfaceIds — repeating it here would be a compile-time tautology, not a law.)
+        }
+
         private static IEnumerable<string> EventRaiseLaw()
         {
             // ── (a) context validity ──────────────────────────────────────

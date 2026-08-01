@@ -928,7 +928,30 @@ namespace Multiplayer.Network.Sync
             var end = site == null ? TimeUnit.Zero : start + site.ExplorationTime;
             bool should = site != null && !UnderTravelOrder(v) && start > TimeUnit.Zero &&
                           site.ExplorationTime != TimeUnit.Zero && timing.Now < end;
-            if (should == v.IsExploringSite) return; // the live handle already matches the mirrored order
+            if (should == v.IsExploringSite)
+            {
+                // SILENT AGREEMENT IS THE ONE CASE THIS SEAM COULD NOT EXPLAIN (user report 2026-08-01 item 4:
+                // "the exploration progress bar advances only on the host"). The whole session's logs held NOT
+                // ONE exploration line — neither the re-seed nor a failure — because both the act and the
+                // refusal are silent here, and "no line" is exactly as consistent with "nobody explored" as
+                // with "the order never arrived". So the INTERESTING disagreement now says which clause
+                // decided it: this peer is PARKED at a site that is explorable and not yet inspected — i.e.
+                // the player is looking at a spinner — and the mirrored order still says "not exploring".
+                // Log-once per (vehicle, reason): exploration is a per-site event, not a per-frame one.
+                if (!should && site != null && site.ExplorationTime != TimeUnit.Zero &&
+                    v.Owner != null && !site.GetInspected(v.Owner))
+                {
+                    string why = UnderTravelOrder(v) ? "the mirrored order still holds a destination (in flight)"
+                               : start <= TimeUnit.Zero ? "StartExplorationTime is still zero — no host delta has " +
+                                                          "named an exploration start for this aircraft"
+                               : "the mirrored start " + start + " + the site's def-fixed ExplorationTime ends at " +
+                                 end + ", which the clock (" + timing.Now + ") is already past — a STALE start, so " +
+                                 "the host's newer one has not arrived";
+                    LogMissOnce("exploration NOT re-seeded for " + (IdentityResolver.RootRef(v) ?? "V#?") +
+                                " parked at " + (IdentityResolver.RootRef(site) ?? "S#?") + " — " + why);
+                }
+                return; // the live handle already matches the mirrored order
+            }
 
             var root = IdentityResolver.RootRef(v) ?? "V#?";
             if (should)

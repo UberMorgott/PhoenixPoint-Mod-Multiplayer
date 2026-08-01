@@ -80,7 +80,18 @@ namespace Multiplayer.Network.Sync
         /// monotonic stream and a client last-writer guard, so it must NOT be touched at a mid-session
         /// reload boundary (rca-3 contract: a host counter that restarts mid-session makes every following
         /// raise look stale to a client that kept its own high-water mark, and the windows vanish silently).</summary>
-        public static void Reset() => Seq.Reset();
+        public static void Reset() { Seq.Reset(); _held.Clear(); }
+
+        /// <summary>Raises that ARRIVED but had nowhere to go yet, oldest first. See
+        /// <see cref="ClientTick"/> for why this exists and why it is bounded.</summary>
+        private static readonly List<KeyValuePair<uint, Raise>> _held = new List<KeyValuePair<uint, Raise>>();
+
+        /// <summary>The bound. A peer that is loading a geoscape holds windows for SECONDS, not minutes, so
+        /// this is a wide margin over a legitimate burst (the host raised two the frame after a mission ended
+        /// on 2026-08-01); past it the peer is not "loading", it is somewhere this seam does not understand,
+        /// and an unbounded list would then grow for the rest of the session. Same posture as
+        /// <c>GeoWindowCoverage.TrimQueue</c>'s 64: drop LOUDLY rather than leak.</summary>
+        private const int MaxHeld = 32;
 
         // ─── THE PAYLOAD (host→all, surface 0xB6) ──────────────────────────
 
@@ -353,6 +364,44 @@ namespace Multiplayer.Network.Sync
             return true;
         }
 
+        /// <summary>
+        /// Replay every raise that arrived while this peer had no geoscape, in the HOST's own arrival order.
+        /// Driven from <c>SyncEngine.Tick</c> (client-only inside), because there is no single native edge
+        /// that means "this peer now has a live GeoscapeView": the view is rebuilt by a whole level load, and
+        /// the seam that used to DROP here was reached from the network callback, i.e. always at the one
+        /// moment the answer was "not yet".
+        ///
+        /// This is item 2 of the 2026-08-01 report and it is the SAME defect as the late leave-battle
+        /// (<c>TacticalTurnSync.ApplyLeave</c>), one layer down: fixing the leave makes every peer return
+        /// together so the window normally lands on a live view — but "normally" is a race, and the raise is
+        /// the ONLY carrier a window has (a mirrored <c>GeoscapeEventRecord</c> holds no site and no context,
+        /// which is why 0xB6 ships the raise at all). A held raise costs nothing and closes the race for
+        /// good; a dropped one is a window that exists on some screens and not others, forever.
+        ///
+        /// A replay that fails for a REAL reason (unknown def, unresolvable ref) drops the entry exactly as a
+        /// live raise would — <see cref="RaiseMirrored"/> says why in both cases. One per frame is deliberate:
+        /// each raise inserts into the game's own priority queue, and draining them one at a time keeps that
+        /// queue's insert order identical to the host's.
+        /// </summary>
+        internal static void DrainHeldRaises(NetworkEngine engine)
+        {
+            if (_held.Count == 0) return;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) { _held.Clear(); return; }
+            var view = GeoLevel()?.View;
+            if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery)) return;
+
+            var entry = _held[0];
+            _held.RemoveAt(0);
+            try
+            {
+                Debug.Log("[MP][events] replaying HELD raise of '" + entry.Value.EventId + "' seq=" + entry.Key +
+                          " — this peer has a live GeoscapeView again (" + _held.Count + " still waiting)");
+                RaiseMirrored(entry.Value, entry.Key);
+            }
+            catch (Exception ex)
+            { Debug.LogError("[MP][events] held raise replay failed for '" + entry.Value.EventId + "': " + ex); }
+        }
+
         /// <summary>Rebuild the host's window here: resolve the shipped refs, build the REAL context, apply
         /// the wire texts to a PRIVATE copy of the event data, and push the NATIVE view state through the
         /// game's own switch query — the same call the host's <c>OnGeoscapeEventRaised</c> makes.
@@ -363,11 +412,25 @@ namespace Multiplayer.Network.Sync
             var view = geo?.View;
             if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery q))
             {
-                // Not "later": this peer has no geoscape to put a window in (tactical mission, mid-load), and
-                // there is no history to replay it from. Dropped, loudly — a v1 client behaved the same way.
-                Debug.LogWarning("[MP][events] raise of '" + p.EventId + "' DROPPED — this peer has no live " +
-                                 "GeoscapeView to show it in, and windows are not replayed after the fact");
-                return false;
+                // HELD, not dropped (2026-08-01). "This peer has no geoscape yet" is a TIMING fact, not a
+                // verdict about the window: measured live, a peer still on its battle summary when the host
+                // raised the two post-mission events got NEITHER of them, and once it returned there was
+                // nothing left to show — the seq had been consumed and the raise is the only carrier (the
+                // mirrored record cannot rebuild a window, which is why 0xB6 exists at all). The peer is
+                // seconds away from a geoscape, so the raise waits for it; ClientTick replays it in arrival
+                // order the moment the view is live. Still bounded and still loud.
+                if (_held.Count >= MaxHeld)
+                {
+                    Debug.LogError("[MP][events] raise of '" + p.EventId + "' DROPPED — this peer has no live " +
+                                   "GeoscapeView and " + MaxHeld + " raises are already waiting for one; it is " +
+                                   "not loading a geoscape, so the oldest are no longer worth holding");
+                    return true; // consumed: the seq must still advance or every later raise is refused
+                }
+                _held.Add(new KeyValuePair<uint, Raise>(seq, p));
+                Debug.LogWarning("[MP][events] raise of '" + p.EventId + "' HELD — this peer has no live " +
+                                 "GeoscapeView yet (tactical, mid-load); it will be replayed when one exists " +
+                                 "(" + _held.Count + " waiting)");
+                return true;
             }
 
             var es = geo.EventSystem;
