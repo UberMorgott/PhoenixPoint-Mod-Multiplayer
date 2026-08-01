@@ -4,6 +4,7 @@ using System.IO;
 using System.Reflection;
 using System.Text;
 using Base.Core;
+using Base.Entities;
 using Base.Utils.Maths;
 using HarmonyLib;
 using Multiplayer.Network;
@@ -1916,12 +1917,31 @@ namespace Multiplayer.Tactical
         /// ability's <c>WaitUntilFinished</c>:172-176 and lets its own <c>OnPlayingActionEnd</c> clean up
         /// (<c>JetJumpAbility</c>:119-133 removes its extra landing nav areas there). An idling actor is never
         /// touched: <c>HasExecutingAbility</c> ignores <c>IdleAbility</c> (<c>TacticalActorBase</c>:695-704), so
-        /// the cover hug on arrival keeps running.</summary>
+        /// the cover hug on arrival keeps running.
+        ///
+        /// AND THE ACTOR IS HANDED BACK. Cancelling navigation only ends a NAVIGATING ability; a refused
+        /// stance/status/overwatch order navigates nothing, so d061b0a left it in
+        /// <c>ExecutingAbilities</c> — and <c>HasExecutingAbility</c> is what the UI reads to decide the
+        /// soldier can be commanded, so an order the host refused could leave that soldier dead to input for
+        /// the rest of the battle with the settle's own position and AP applied on top. The channel cancel is
+        /// the general case of the same teardown: <c>ActionComponent.CancelActions(ActorActions)</c>:134-146
+        /// sets every action in the actor's own channel to <c>Cancelled</c>, which runs the ability's
+        /// <c>ClearPlayingAction</c>:1039-1058 — the SAME exit a completed action takes, including
+        /// <c>RemoveExecutingAbility</c>:1049, <c>OnPlayingActionEnd</c> and <c>AbilityExecuted</c>. It also
+        /// drops an ENQUEUED follow-up, which is right: the host refused the order, its follow-up was never
+        /// authorised either. Only reachable on a FORCED settle — the ordinary path holds while
+        /// <c>HasExecutingAbility</c> is true (<see cref="ClientTick"/>) — and the idle is not a victim: the
+        /// same guard means a real ability is running, and an ability starting already cancels the idle
+        /// underneath it (<c>TacticalAbility.PlayAction</c>:998 passes <c>cancelCurrent: true</c>).</summary>
         private static void ApplySettle(TacticalActor actor, PendingSettle s)
         {
             using (SyncApplyScope.Enter())
             {
-                if (actor.HasExecutingAbility() && actor.TacticalNav != null) actor.TacticalNav.CancelNavigation();
+                if (actor.HasExecutingAbility())
+                {
+                    if (actor.TacticalNav != null) actor.TacticalNav.CancelNavigation();
+                    if (actor.ActionComponent != null) actor.ActionComponent.CancelActions(ActionChannel.ActorActions);
+                }
                 actor.SetTransform(s.Pos, actor.Rot);
                 var stats = actor.CharacterStats;
                 if (stats != null)

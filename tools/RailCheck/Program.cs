@@ -6314,6 +6314,38 @@ namespace RailCheck
             if (Multiplayer.Tactical.TacticalTurnSync.ValidateLeave(true, true, false, true) == null)
                 yield return "L64 leave-double-completes: the host accepts a SECOND leave while already leaving — " +
                              "two peers clicking Continue would run FinishLevel, and so GeoMission.Complete, twice";
+
+            // (h) THE LEAVE REACHES EVERY PEER (2026-08-01). Arms (a)-(g) let ANY peer end the battle; they
+            // did not carry the OTHERS out of it. Live that day: peer=1 clicked Continue at 18:23:23, the host
+            // accepted and returned — and peer=2 sat on its own battle summary 28 s longer and MISSED both
+            // post-mission event windows the host raised meanwhile. So the host→all half is its own law.
+            var applyLeave = ModMethod(sync, "ApplyLeave");
+            var hostLeave = ModMethod(sync, "HostBroadcastLeave");
+            if (applyLeave == null || hostLeave == null)
+                yield return "L64 leave-not-broadcast: TacticalTurnSync.ApplyLeave / HostBroadcastLeave no longer " +
+                             "exist — one peer's Continue takes only itself and the host out of a finished battle, " +
+                             "and every other peer sits on a statistics screen until a human clicks it there too";
+            else
+            {
+                if (!Reaches(leaveLocal, "TacticalTurnSync", "HostBroadcastLeave"))
+                    yield return "L64 leave-broadcast-mute: OnLocalLeaveBattle does not reach HostBroadcastLeave — " +
+                                 "it is the ONE point both the host's own click and an accepted client ask pass " +
+                                 "(HandleLeaveBattle reaches GoToGeoscape by INVOKING it, which re-enters that " +
+                                 "prefix), so nowhere else can emit the op and no peer is ever carried out";
+                if (!Reaches(ModMethod(sync, "HandleInbound"), "TacticalTurnSync", "ApplyLeave"))
+                    yield return "L64 leave-op-undispatched: the 0x80 inbound never reaches ApplyLeave — the op is " +
+                                 "sent and silently falls through to the unknown-op arm on every client";
+                if (!Reaches(applyLeave, "SyncApplyScope", "Enter"))
+                    yield return "L64 leave-apply-echoes: ApplyLeave runs the native GoToGeoscape OUTSIDE a " +
+                                 "SyncApplyScope, so its own capture prefix sends the ask straight back to the host " +
+                                 "as a second leave (law 8, direct echo loop)";
+                // The apply must run the GAME's exit, exactly as the host's handler does — a hand-rolled
+                // FinishLevel would build a TacticalGameResult this peer has no business building (law 5).
+                if (!Reaches(applyLeave, "MethodBase", "Invoke") && !Reaches(applyLeave, "MethodInfo", "Invoke"))
+                    yield return "L64 leave-apply-hand-rolled: ApplyLeave does not invoke the native GoToGeoscape " +
+                                 "handle — a peer carried out of the battle by any other route computes its own " +
+                                 "mission result instead of riding the host's";
+            }
         }
 
         /// <summary>L65 — THE PER-SOLDIER COMMAND SEAM IS GENERIC, ARBITRATED AND CONTAINED (tactical arc A3a).
@@ -6562,6 +6594,20 @@ namespace RailCheck
                                  "state would silently stay at the pre-settle tile";
                 if (!Reaches(applySettle, "SyncApplyScope", "Enter"))
                     yield return "L65 settle-unscoped: ApplySettle writes the model OUTSIDE a SyncApplyScope";
+                // A FORCED settle overrules a play that is still running, so it must END that play — both
+                // halves. Navigation alone is not enough: an ability that navigates nothing (a stance, a
+                // status, an overwatch) stays in ExecutingAbilities, which is what the UI reads to decide the
+                // soldier can be commanded at all.
+                if (!Reaches(applySettle, "NavigationComponent", "CancelNavigation"))
+                    yield return "L65 settle-loses-to-navigation: ApplySettle writes the host's position without " +
+                                 "cancelling the local navigation first — UpdateActorTransformFromPathSample:679 " +
+                                 "rewrites the transform on the next path sample with no log line, so the mirror " +
+                                 "shows the COST and not the MOVE (d061b0a: 4 minutes of position desync)";
+                if (!Reaches(applySettle, "ActionComponent", "CancelActions"))
+                    yield return "L65 settle-strands-the-actor: ApplySettle does not cancel the actor's own action " +
+                                 "channel, so a refused order that navigated nothing leaves the ability in " +
+                                 "ExecutingAbilities — HasExecutingAbility stays true and that soldier takes no " +
+                                 "further input for the rest of the battle";
             }
             var clientTick = ModMethod(sync, "ClientTick");
             if (clientTick == null || !Reaches(clientTick, "TacticalActorBase", "HasExecutingAbility"))
