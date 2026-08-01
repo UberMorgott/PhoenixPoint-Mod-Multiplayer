@@ -116,7 +116,10 @@ namespace Multiplayer.Network.Sync
                       "OpenModalPersistent:848 and shipped as surface 0xB7 by GeoModalMirror, which describes the " +
                       "`object modalData` by its RUNTIME shape (rail root ref + the game's own string ids) and " +
                       "drops the DialogCallback closure entirely — the client's copy is built with a null handler, " +
-                      "so no button on it can run game logic",
+                      "so no button on it can run game logic. What a button on that copy DOES do since 2026-08-01 " +
+                      "is emit the 0xB9 advance intent (WindowQueueSync), which makes the HOST run its own " +
+                      "FinishDialog:82 for the same window — the answer crosses as one byte and the logic stays " +
+                      "host-side, which is the only reading of law 3 under which a peer can resolve anything at all",
             },
             [typeof(UIStateGeoCutscene)] = new WindowRule
             {
@@ -126,7 +129,10 @@ namespace Multiplayer.Network.Sync
                       "game-over variant also carries an end-of-playback Action closure that ENDS THE LEVEL, and " +
                       "the story variant blocks the peer for minutes on content it can reach on its own. It does " +
                       "NOT fall out of the modal machinery either: different state, different data, different " +
-                      "declaration axis. Still deferred, now on its own",
+                      "declaration axis. Still deferred, now on its own — but no longer TERMINAL for the other " +
+                      "peers (amended 2026-08-01): a cutscene holds the queue slot until OnCancel:92, so on an " +
+                      "idle host it stopped the campaign for everybody, and 0xB9's advance op now dismisses it " +
+                      "host-side on the non-modal arm. Skipping the host's cinematic is not showing it",
             },
             [typeof(UIStateAssetDeployment)] = new WindowRule
             {
@@ -134,7 +140,13 @@ namespace Multiplayer.Network.Sync
                 Why = "\"where does this newly manufactured vehicle / recruited soldier go\" (GeoscapeView" +
                       ".PrepareDeployAsset:1308, self-gated to faction == ViewerFaction). It is a HOST decision on " +
                       "host-owned assets; the placement it produces reaches the client as ordinary value/structural " +
-                      "deltas, so mirroring the prompt would ask the client to decide something it cannot apply",
+                      "deltas, so mirroring the prompt would ask the client to decide something it cannot apply. " +
+                      "AMENDED 2026-08-01: LocalOnly used to imply the window was also HARMLESS to the other peer, " +
+                      "and it is not — this state sets no answer of its own but it does hold the queue slot " +
+                      "(ExitState:66 is its only way out), so left up on an idle host it blocks every later window " +
+                      "and pauses the shared clock. It is not mirrored and still should not be; what changed is that " +
+                      "another peer can now DISMISS it host-side through 0xB9's advance op, which lands on the " +
+                      "plain GeoscapeView.FinishQueriedState:2164 arm because the state is not a modal",
             },
             [typeof(UIStateReplenish)] = new WindowRule
             {
@@ -216,12 +228,19 @@ namespace Multiplayer.Network.Sync
                 "NARROWED 2026-08-01: the squad INTENT the previous wording named as this entry's prerequisite " +
                 "SHIPPED as MissionSync (surface 0xB8), so Confirm no longer has an undefined meaning — " +
                 "GeoMission.Launch is captured block-first on a client and the host commits it, and Cancel is " +
-                "gated (MissionCancelGate). What is still missing is only this WINDOW's own two halves: the " +
-                "modal intent op that carries the clicked ModalResult back, and the host→all hide keyed on " +
-                "GeoscapeView.ModalClosed:793 so one peer's answer dismisses the other's copy. Until both " +
-                "exist the brief reaches one screen only — a client can start the mission from the site and " +
-                "aircraft UI, just not from a brief it never receives. Superseded reasoning, kept for the " +
-                "record: " +
+                "gated (MissionCancelGate). NARROWED AGAIN 2026-08-01: the ANSWER half named next also " +
+                "shipped — WindowQueueSync's 0xB9 advance op carries the clicked ModalResult back and the " +
+                "host runs UIStateGeoModal.FinishDialog:82, so the host's own DialogCallback resolves " +
+                "Confirm→LaunchMission / Cancel→mission.Cancel natively, and one peer's answer DOES dismiss " +
+                "the host's copy (the hide this entry wanted, done as an answer rather than as a broadcast). " +
+                "What is left is the RAISE: a client can only answer a window it has, and the brief still " +
+                "reaches one screen only, because GeoModalMirror describes only three notification shapes " +
+                "and a brief's modalData is a live GeoMission. So the remaining hole is exactly one thing — " +
+                "a DataShape for the mission brief on 0xB7 — and until it exists a client starts the mission " +
+                "from the site and aircraft UI instead. Superseded reasoning, kept for the record: " +
+                "\"what is still missing is only this WINDOW's own two halves: the modal intent op that " +
+                "carries the clicked ModalResult back, and the host→all hide keyed on " +
+                "GeoscapeView.ModalClosed:793\"; and before that: " +
                 "Confirm → LaunchMission:1043-1050 walks straight into the DEPLOYMENT screen, and " +
                 "deployment is host-only for an entry-mechanism reason law 5's rewrite did not touch: the host " +
                 "builds the battle and ships it as a save, so a client's squad pick has nowhere to be committed. " +
@@ -255,7 +274,11 @@ namespace Multiplayer.Network.Sync
                 "rail ref, and the brief sets DisableCancel (InterceptionBriefDataBind.cs:83) which " +
                 "UIStateGeoModal.OnCancel:96 honours, so a mirrored copy could not even be closed; Confirm reads a " +
                 "TOGGLE off the host's own prefab and calls LaunchInterceptionGame. The outcome's GeoAirMission has " +
-                "no rail identity at all. Air combat needs its own replication before its windows can mean anything",
+                "no rail identity at all. Air combat needs its own replication before its windows can mean anything. " +
+                "AMENDED 2026-08-01: \"a mirrored copy could not even be closed\" is no longer the end of it — a " +
+                "brief that DisableCancel has wedged on an idle host wedges its whole queue and the shared clock " +
+                "with it, and 0xB9's advance op is what any other peer uses to resolve it host-side without a " +
+                "mirrored copy existing at all. The verdict stays Gap: answering a window is not seeing it",
                 ModalType.InterceptionBrief, ModalType.InterceptionOutcome);
             Modal(d, WindowSync.Gap,
                 "alien intelligence brief — AlienIntelligenceBriefData carries its OWN DialogCallback (invoked at " +
@@ -265,8 +288,11 @@ namespace Multiplayer.Network.Sync
                 ModalType.AlienResearchBrief);
             Modal(d, WindowSync.Gap,
                 "a faction soldier offers to join — HavenMissionUtil.cs:59, Confirm→reward.Apply(faction, site, " +
-                "aircraft), a host-authoritative GRANT. Needs the same intent the brief family does; once the host " +
-                "accepts, the soldier itself already reaches the other peer as a structural create",
+                "aircraft), a host-authoritative GRANT. NARROWED 2026-08-01: \"needs the same intent the brief " +
+                "family does\" is answered — 0xB9's advance op makes the host run its OWN DialogCallback, so the " +
+                "grant stays host-side exactly as it must; what this shares with the brief family now is the " +
+                "missing RAISE (a 0xB7 DataShape for its modalData), not the intent. Once the host accepts, the " +
+                "soldier itself already reaches the other peer as a structural create",
                 ModalType.FactionSoldierJoin);
             Modal(d, WindowSync.Gap,
                 "NO caller anywhere in the shipped assembly (full sweep 2026-07-31) — declared so this table stays " +
@@ -362,15 +388,77 @@ namespace Multiplayer.Network.Sync
                                  "peer does not get it: " + rule.Why);
         }
 
+        // ─── The BOUND: a queue nobody drains must not grow without limit ───
+
+        /// <summary>How many pending windows the queue may hold. The game shows ONE at a time and a player
+        /// clears a handful a minute, so anything past this is the runaway, not a backlog.</summary>
+        private const int QueueCap = 64;
+
+        private static readonly System.Reflection.FieldInfo RequestsField =
+            HarmonyLib.AccessTools.Field(typeof(GeoscapeViewSwitchQuery), "_viewStateSwitchRequests"); // :15
+
+        private static int _dropped;
+
+        /// <summary>
+        /// Cap the pending-window list, because on this rail an UNDRAINED queue is the normal state, not a
+        /// pathology: <c>ProcessQueriedStateSwitch</c>:58-63 dequeues only while
+        /// <c>_currentStateSwitchRequest == null</c> and only a peer's click clears that
+        /// (<c>FinishCurrentStateSwitch</c>:116), so an idle host accumulates every window its sim raises for
+        /// as long as it stays idle. <see cref="WindowQueueSync"/> gives the other peers a way to drain it;
+        /// this is what keeps the game alive while nobody does.
+        ///
+        /// Unbounded growth is not merely memory. <c>QueryStateSwitch</c>:77-82 does an O(n)
+        /// <c>FindIndex</c> plus an O(n) <c>Insert</c> per push — O(n²) over a session — and
+        /// <c>GetRestorableData</c>:25-37 walks the WHOLE list on every save, so every queued
+        /// <c>UIStateGeoModal</c> (it IS an <c>IGeoscapeRestorableViewState</c>) rides into every autosave
+        /// and, since join and reconnect ARE a native save transfer (law 1), into every join. Capping n is
+        /// the one fix for all three: the scan, the insert and the save payload all stop growing.
+        ///
+        /// The TAIL is what goes. The list is priority-DESCENDING by construction (insert before the first
+        /// strictly-lower priority) and <c>GetNextQueriedStateSwitch</c>:111-113 always takes index 0, so the
+        /// tail is by the game's own ordering the least important thing pending.
+        ///
+        /// LOUD, never silent — a dropped window is a window a player will never be asked about, and a cap
+        /// nobody can see in the log is indistinguishable from the bug it prevents. The first drop and every
+        /// 32nd after it are errors (a runaway pushes thousands; one line each would cost more than it tells).
+        /// </summary>
+        internal static void TrimQueue(GeoscapeViewSwitchQuery query)
+        {
+            var list = RequestsField?.GetValue(query) as System.Collections.IList;
+            while (list != null && list.Count > QueueCap)
+            {
+                int last = list.Count - 1;
+                var dropped = (list[last] as GeoscapeViewStateSwitchRequest)?.State;
+                list.RemoveAt(last);
+                _dropped++;
+                if (_dropped == 1 || _dropped % 32 == 0)
+                    Debug.LogError("[MP][windows] window queue OVERFLOW — dropped the lowest-priority pending " +
+                                   "window '" + (dropped == null ? "<null>" : dropped.GetType().Name) + "' to hold " +
+                                   "the queue at " + QueueCap + " (" + _dropped + " dropped this session). The queue " +
+                                   "only drains when a peer answers the current window (ProcessQueriedStateSwitch:60), " +
+                                   "so this peer has not answered one in a very long time — every window past the cap " +
+                                   "is LOST, and the uncapped list is also an O(n²) insert and a payload in every " +
+                                   "save and every join transfer");
+            }
+        }
+
         /// <summary>Full session teardown: a rejoin should re-announce, so a gap is visible in the log of the
         /// session it actually happened in.</summary>
-        public static void Reset() { _announced.Clear(); _announcedModals.Clear(); }
+        public static void Reset() { _announced.Clear(); _announcedModals.Clear(); _dropped = 0; }
     }
 
     /// <summary>
     /// The coverage gate itself (law 4c, presentation): a POSTFIX on the one queue every PUSHED geoscape
-    /// window passes through. It changes nothing — it only makes the answer to "does the other peer see
-    /// this?" exist for every window kind, including ones that do not exist yet.
+    /// window passes through. Two jobs, both of them about the queue as a whole and neither of them about
+    /// any single window kind — it makes the answer to "does the other peer see this?" exist for every kind
+    /// including ones that do not exist yet (<see cref="GeoWindowCoverage.Announce"/>), and it holds the
+    /// pending list to its bound (<see cref="GeoWindowCoverage.TrimQueue"/>).
+    ///
+    /// AMENDED 2026-08-01: this used to say "it changes nothing", and the trim makes that false, so the
+    /// claim is replaced rather than left standing. What survives is the part that was load-bearing — the
+    /// gate never SUPPRESSES a window and never changes which one is shown next: the trim only ever removes
+    /// from the TAIL, i.e. below everything the queue would reach first, and only once the list is past a
+    /// bound no live game reaches.
     ///
     /// A postfix, and never a prefix: the window must queue exactly as it always did on both peers whatever
     /// the verdict is. Suppressing an un-mirrored window on the host would hide the host's own game from it
@@ -379,10 +467,16 @@ namespace Multiplayer.Network.Sync
     [HarmonyPatch(typeof(GeoscapeViewSwitchQuery), nameof(GeoscapeViewSwitchQuery.QueryStateSwitch))]
     internal static class GeoWindowCoverageGate
     {
-        private static void Postfix(GeoscapeViewStateSwitchRequest request)
+        private static void Postfix(GeoscapeViewSwitchQuery __instance, GeoscapeViewStateSwitchRequest request)
         {
             if (!EventPopup.InSession) return;   // solo: there is no other peer to be out of sync with
-            try { GeoWindowCoverage.Announce(request?.State?.GetType()); }
+            try
+            {
+                GeoWindowCoverage.Announce(request?.State?.GetType());
+                // Same postfix, same chokepoint, and the same reason it is a postfix: the native insert must
+                // happen exactly as it always did, and only THEN is the list trimmed back to its bound.
+                GeoWindowCoverage.TrimQueue(__instance);
+            }
             catch (Exception ex) { Debug.LogError("[MP][windows] coverage gate threw: " + ex); }
         }
     }

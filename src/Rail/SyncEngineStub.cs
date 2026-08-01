@@ -28,6 +28,9 @@ namespace Multiplayer.Network.Sync
             EventSync.RegisterIntents();
             VehicleSync.RegisterIntents();
             MissionSync.RegisterIntents();
+            // 0xB9 window queue — peer autonomy over the host's pushed-window queue, which only ever
+            // drains on a click (GeoscapeViewSwitchQuery.ProcessQueriedStateSwitch:60).
+            WindowQueueSync.RegisterIntents();
             // Tactical arc A2's end-turn (0x81) is an ordinary intent family — same engine, same envelope.
             Multiplayer.Tactical.TacticalTurnSync.RegisterIntents();
             // Arc A3a's per-soldier COMMAND (0x83) — likewise ordinary: ONE op carrying

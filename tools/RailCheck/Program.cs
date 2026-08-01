@@ -93,6 +93,7 @@ namespace RailCheck
             laws.AddRange(OwnAnswerLaw());
             laws.AddRange(WindowCoverageLaw(game));
             laws.AddRange(ModalCoverageLaw());
+            laws.AddRange(WindowAutonomyLaw());
             laws.AddRange(AnswerValidatorLaw());
             laws.AddRange(FunnelCoverageLaw(game));
             laws.AddRange(EventTokenDerefLaw());
@@ -4241,6 +4242,136 @@ namespace RailCheck
                 yield return "L57 reject-scope: EncounterRecords rides as " + recF.Class + " (one blob at the OWNER's " +
                              "path, no element paths), but EventSync.RecordScope is '" + EventSync.RecordScope +
                              "' — that prefix matches ZERO covered paths and a rejected answer never converges";
+        }
+
+        /// <summary>L82 — PEER AUTONOMY OVER THE WINDOW QUEUE, and its two silent failure modes.
+        ///
+        /// The queue drains ONLY on a click: <c>ProcessQueriedStateSwitch</c>:58-63 dequeues while
+        /// <c>_currentStateSwitchRequest == null</c> and the sole writer that clears it is
+        /// <c>FinishCurrentStateSwitch</c>:116. So (a) an idle host wedges every peer's campaign behind one
+        /// window — <see cref="WindowQueueSync"/> is the way out, and it is worthless unless it really funnels
+        /// into the game's OWN two exits and really refuses an answer aimed at a different window; and (b) the
+        /// pending list grows forever, which is an O(n²) insert (<c>QueryStateSwitch</c>:77-82), a walk of the
+        /// whole list on every save (<c>GetRestorableData</c>:25-37) and therefore a payload in every join
+        /// transfer. Neither failure logs anything on its own: a mis-addressed advance silently answers the
+        /// WRONG window (a tutorial dismissal confirming a mission brief), and an unbounded queue merely gets
+        /// slower. Both arms below are EXECUTED, not inspected — the arbiter is run on its real cases and the
+        /// bound is run on a real <c>GeoscapeViewSwitchQuery</c>.</summary>
+        private static IEnumerable<string> WindowAutonomyLaw()
+        {
+            // ── (1) the arbiter, EXECUTED on the cases that actually happen ──
+            const string modalState = "PhoenixPoint.Geoscape.View.ViewStates.UIStateGeoModal";
+            const string otherState = "PhoenixPoint.Geoscape.View.ViewStates.UIStateGeoscapeTutorial";
+            int brief = (int)ModalType.GeoHavenAttackBrief, research = (int)ModalType.GeoResearchComplete;
+            byte confirm = (byte)ModalResult.Confirm;
+
+            if (WindowQueueSync.Validate(true, modalState, brief, modalState, brief, confirm) != null)
+                yield return "L82 arbiter-refuses-the-legal-case: the host refuses an answer that names the very " +
+                             "window it has up, with a real ModalResult — no peer could ever resolve anything and " +
+                             "an idle host stops the campaign permanently";
+            if (WindowQueueSync.Validate(true, otherState, WindowQueueSync.NotAModal,
+                                         otherState, WindowQueueSync.NotAModal, WindowQueueSync.ResultNone) != null)
+                yield return "L82 arbiter-refuses-the-plain-dismissal: a non-modal window (cutscene, asset " +
+                             "deployment, replenish) carries no answer BY CONSTRUCTION, so demanding one refuses " +
+                             "exactly the kinds that only ever block";
+            if (WindowQueueSync.Validate(false, "", WindowQueueSync.NotAModal, modalState, brief, confirm) == null)
+                yield return "L82 arbiter-advances-nothing: the host accepts an advance while it has NO window up — " +
+                             "FinishQueriedState then pops a state the queue never pushed";
+            if (WindowQueueSync.Validate(true, otherState, WindowQueueSync.NotAModal, modalState, brief, confirm) == null)
+                yield return "L82 arbiter-ignores-the-type: an answer naming " + modalState + " is accepted while the " +
+                             "host is on " + otherState + " — a peer closing a window of its own then dismisses " +
+                             "whatever the host happens to be looking at";
+            if (WindowQueueSync.Validate(true, modalState, research, modalState, brief, confirm) == null)
+                yield return "L82 arbiter-ignores-the-modal: 43 ModalTypes ride the one UIStateGeoModal, so an " +
+                             "answer matched on the TYPE alone lets a research-complete acknowledgement run the " +
+                             "mission brief's DialogCallback — i.e. Confirm → LaunchMission on a window nobody saw";
+            if (WindowQueueSync.Validate(true, modalState, brief, modalState, brief, WindowQueueSync.ResultNone) == null)
+                yield return "L82 arbiter-answers-blind: a modal is accepted with result=" +
+                             WindowQueueSync.ResultNone + ", which is not a ModalResult — the host's own " +
+                             "DialogCallback would then branch on an undefined value";
+
+            // ── (2) the seams really are the game's own funnels ─────────────
+            var handle = ModMethod(typeof(WindowQueueSync), "HandleAdvance");
+            if (handle == null)
+                yield return "L82 handler-gone: WindowQueueSync.HandleAdvance no longer exists — nothing checked";
+            else
+            {
+                if (!Reaches(handle, "UIStateGeoModal", "FinishDialog"))
+                    yield return "L82 decision-unfunnelled: HandleAdvance does not reach " +
+                                 "UIStateGeoModal.FinishDialog:82 — that call is the ONLY thing that runs the host's " +
+                                 "own DialogCallback, so without it a brief's Confirm never becomes LaunchMission and " +
+                                 "a soldier-join never becomes reward.Apply; the window would close having decided " +
+                                 "nothing";
+                if (!Reaches(handle, "GeoscapeView", "FinishQueriedState"))
+                    yield return "L82 dismissal-unfunnelled: HandleAdvance does not reach " +
+                                 "GeoscapeView.FinishQueriedState:2164 — the non-modal arm (asset deployment, " +
+                                 "cutscene, tutorial, replenish) then has no way to clear the queue slot at all";
+            }
+            // Law 3: the answer crosses as a byte and the host runs its OWN callback. A handler that reached
+            // an authoritative method directly would be the client driving host logic by proxy.
+            foreach (var forbidden in new[] { "Launch", "Cancel", "Apply" })
+                if (handle != null && Reaches(handle, "GeoMission", forbidden))
+                    yield return "L82 handler-runs-domain-logic: HandleAdvance calls GeoMission." + forbidden +
+                                 " directly — the whole point of funnelling through FinishDialog is that the HOST's " +
+                                 "own closure decides what an answer means (ModalResultCallback:799), not this file";
+
+            var capture = typeof(WindowQueueSync).GetNestedType("FinishQueriedStateCapture", AllMembers);
+            var answer = typeof(WindowQueueSync).GetNestedType("FinishDialogAnswer", AllMembers);
+            if (capture == null || answer == null)
+                yield return "L82 capture-gone: WindowQueueSync's client seams (FinishDialogAnswer / " +
+                             "FinishQueriedStateCapture) no longer exist, so no peer can ever ask the host to advance";
+            else
+            {
+                var pre = capture.GetMethod("Prefix", AllMembers);
+                if (pre != null && pre.ReturnType == typeof(bool))
+                    yield return "L82 capture-blocks: FinishQueriedStateCapture.Prefix returns bool — closing one's " +
+                                 "OWN window is presentation and must never be gated; a blocking prefix here would " +
+                                 "wedge the very queue this family exists to drain, on every peer including the host";
+                if (!Reaches(pre, null, "SendAdvance"))
+                    yield return "L82 capture-mute: the FinishQueriedState prefix does not reach SendAdvance — the " +
+                                 "seam is attached to the chokepoint and emits nothing, which looks covered and is not";
+                var ans = answer.GetMethod("Prefix", AllMembers);
+                if (ans == null || !ans.GetParameters().Any(p => p.ParameterType == typeof(ModalResult)))
+                    yield return "L82 answer-gone: the UIStateGeoModal.FinishDialog seam does not take the " +
+                                 "ModalResult, so the clicked answer is unobservable — FinishDialog:83 calls " +
+                                 "FinishQueriedState BEFORE it invokes the handler, and by the send site the result " +
+                                 "is gone. Every answer would degrade to a bare dismissal";
+            }
+
+            // ── (3) the BOUND, executed on a real queue object ──────────────
+            var q = new GeoscapeViewSwitchQuery(null, null);
+            var f = AccessTools.Field(typeof(GeoscapeViewSwitchQuery), "_viewStateSwitchRequests");
+            var trim = ModMethod(typeof(GeoWindowCoverage), "TrimQueue");
+            if (f == null || trim == null)
+            {
+                yield return "L82 bound-unmoored: GeoscapeViewSwitchQuery._viewStateSwitchRequests or " +
+                             "GeoWindowCoverage.TrimQueue did not resolve — the queue bound checked nothing, and an " +
+                             "unbounded queue is an O(n²) insert plus a payload in every save and every join transfer";
+                yield break;
+            }
+            var live = (System.Collections.IList)f.GetValue(q);
+            for (int i = 0; i < 4096; i++)
+                live.Add(new GeoscapeViewStateSwitchRequest(null, 4096 - i));
+            int before = live.Count;
+            trim.Invoke(null, new object[] { q });
+            int after = live.Count;
+            if (after >= before)
+                yield return "L82 bound-absent: TrimQueue left " + after + " of " + before + " pending windows — " +
+                             "nothing caps the list, so a peer that stops answering degrades every later push " +
+                             "(FindIndex+Insert per window) and drags the whole backlog into every save";
+            else if (after > 256)
+                yield return "L82 bound-loose: TrimQueue capped at " + after + " pending windows, which is not a " +
+                             "bound a human queue ever reaches — the cap has stopped being a guard and become a limit";
+            else if (((GeoscapeViewStateSwitchRequest)live[0]).Priority != 4096)
+                yield return "L82 bound-drops-the-head: TrimQueue removed from the FRONT — the list is " +
+                             "priority-descending and GetNextQueriedStateSwitch:111 always takes index 0, so trimming " +
+                             "there throws away the window the peer is about to be shown and keeps the least " +
+                             "important ones";
+
+            var gatePost = typeof(GeoWindowCoverageGate).GetMethod("Postfix", AllMembers);
+            if (!Reaches(gatePost, null, "TrimQueue"))
+                yield return "L82 bound-unwired: GeoWindowCoverageGate.Postfix does not call TrimQueue — the bound " +
+                             "exists as a method nothing runs, and the live queue grows exactly as before";
         }
 
         /// <summary>L27 — the event-answer arbiter, which is what makes "the first choice is frozen for
