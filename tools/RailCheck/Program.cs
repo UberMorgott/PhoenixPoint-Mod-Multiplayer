@@ -6036,6 +6036,39 @@ namespace RailCheck
             // under A5 it opens on ALL peers, and native closes it only for the one that clicks
             // (MessageBoxPromptController.Invoke:255-260). Both failure shapes below leave a modal on screen
             // with no log line at all, which is this repo's dominant bug class.
+            // ─── a repainted screen's EnterState must be a pure RE-READ, never a transition ───
+            // The repaint is Exit+Enter on one instance. If that EnterState moves the state stack, the
+            // instance gets a SECOND ExitState from StateStack.SwitchToPreviousState:96-98 (which pops, THEN
+            // exits) or an unexpected push from EnterFpsCamera — and the screen the player is looking at now
+            // has two copies of itself on the stack, so one ESC does not leave it. That is UIStateShoot
+            // (:348 EnterFpsCamera, :352 SwitchToPreviousState), observed in-game 2026-08-01 as stuck aim.
+            var repaint = mod.GetType("Multiplayer.Tactical.TacticalUiRepaint");
+            var allowList = repaint?.GetField("AbilityBarStates", AllMembers)?.GetValue(null) as IEnumerable<string>;
+            if (allowList == null)
+                yield return "L63 repaint-allowlist-unreadable: TacticalUiRepaint.AbilityBarStates could not be " +
+                             "read, so NOTHING about which tactical screens get Exit+Enter'd was checked";
+            else foreach (var name in allowList)
+            {
+                var st = typeof(PhoenixPoint.Tactical.View.TacticalView).Assembly
+                    .GetType("PhoenixPoint.Tactical.View.ViewStates." + name);
+                var enter = st?.GetMethod("EnterState", AllMembers);
+                if (enter == null)
+                {
+                    yield return "L63 repaint-state-gone: the allow list names " + name + ", which has no " +
+                                 "EnterState in this build — the repaint would never fire for it and the " +
+                                 "screen it stands for silently stops repainting";
+                    continue;
+                }
+                var mover = CalleeSequence(enter)
+                    .FirstOrDefault(c => c.Name == "SwitchToPreviousState" || c.Name == "SwitchToState" ||
+                                         c.Name == "EnterFpsCamera");
+                if (mover != null)
+                    yield return "L63 repaint-state-transitions: " + name + ".EnterState reaches " + mover.Name +
+                                 " — Exit+Enter on it is not a repaint but a transition, and the ExitState this " +
+                                 "seam already ran is then run AGAIN by the stack (SwitchToPreviousState:96-98). " +
+                                 "Drop it from AbilityBarStates";
+            }
+
             var promptEdge = mod.GetType("Multiplayer.Tactical.TacticalUiRepaint+PromptTurnEdgeTeardown");
             var promptFunnel = HarmonyLib.AccessTools.Method(
                 typeof(PhoenixPoint.Tactical.View.TacticalView), "OnViewerFactionEndedTurn");

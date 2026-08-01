@@ -39,15 +39,15 @@ namespace Multiplayer.Tactical
     /// THE REPAINT IS THE STATE'S OWN <c>Enter</c>, not a hand-picked module call. Every screen that paints
     /// ability availability rebuilds itself in <c>EnterState</c>, so <c>Exit</c>+<c>Enter</c> on the SAME
     /// state instance is the native path, and it is the same last-resort recipe the geoscape seam uses
-    /// (<c>OpenUiRepaint.Repaint</c>). It also fixes the dead-target defect for free and for the same
-    /// reason: the corpse's crosshair survives because <c>UIStateShoot._selectedValidShoots</c> is a
-    /// CONSTRUCTOR SNAPSHOT (:193) taken before the kill arrived, and re-entering runs
-    /// <c>InitAbilityTargetActor</c>:434 → <c>GetDefaultTarget</c>:454-461, whose first statement drops
-    /// every dead actor from that very list; on the character screen the same re-enter re-runs
-    /// <c>UpdateValidShootTargets</c>/<c>UpdateHealingTargetIcons</c> (:261-264).
+    /// (<c>OpenUiRepaint.Repaint</c>). On the character screen it also fixes the dead-target defect for
+    /// free, by re-running <c>UpdateValidShootTargets</c>/<c>UpdateHealingTargetIcons</c> (:261-264). It no
+    /// longer does so for the AIM screen: 3d8e308 also listed <c>UIStateShoot</c>, whose
+    /// <c>_selectedValidShoots</c> is a constructor snapshot (:193) that a re-enter would refilter — but
+    /// that state's <c>EnterState</c> moves the state stack, which a repaint must never do. See
+    /// <see cref="TacticalUiRepaint.AbilityBarStates"/>.
     ///
-    /// WHICH SCREENS. Only the four states that call <c>UIModuleAbilities.SetAbilities</c> — i.e. exactly
-    /// the ones that can show a stale ability bar. This is an ALLOW list rather than the drop list A5
+    /// WHICH SCREENS. Only states that call <c>UIModuleAbilities.SetAbilities</c> AND whose
+    /// <c>EnterState</c> is a pure re-read. This is an ALLOW list rather than the drop list A5
     /// prefers, because here the unknown case is DANGEROUS, not merely unmirrored:
     /// <c>UIStateInventory.ExitState</c>:428-453 is not a teardown at all — it COMMITS the staged batch
     /// (<c>ApplyInventoryActions</c>:443) and calls <c>ActorSpawner.DestroyActor</c> (:451). An
@@ -56,14 +56,33 @@ namespace Multiplayer.Tactical
     /// </summary>
     internal static class TacticalUiRepaint
     {
-        /// <summary>The four <c>TacticalViewState</c>s whose <c>EnterState</c> reaches
-        /// <c>UIModuleAbilities.SetAbilities</c> (UIStateCharacterSelected:247, UIStateShoot:450,
-        /// UIStateAbilitySelected:189, UIStateOverwatchAbilitySelected:79). Matched by NAME up the base
-        /// chain, not by <c>is</c>: <c>UIStateCharacterSelected</c> is <c>internal</c> to Assembly-CSharp,
-        /// and walking the chain lets subclasses ride free (<c>UIStateFreeCam : UIStateShoot</c>).</summary>
+        /// <summary>The <c>TacticalViewState</c>s whose <c>EnterState</c> reaches
+        /// <c>UIModuleAbilities.SetAbilities</c> (UIStateCharacterSelected:247, UIStateAbilitySelected:189,
+        /// UIStateOverwatchAbilitySelected:79) AND whose <c>EnterState</c> cannot move the state stack.
+        /// Matched by NAME up the base chain, not by <c>is</c>: <c>UIStateCharacterSelected</c> is
+        /// <c>internal</c> to Assembly-CSharp, and walking the chain lets subclasses ride free.
+        ///
+        /// <c>UIStateShoot</c> IS EXCLUDED, and with it <c>UIStateFreeCam : UIStateShoot</c>. Exit+Enter is
+        /// only a repaint for a state whose <c>EnterState</c> is a pure re-read; <c>UIStateShoot</c>'s is not
+        /// — it TRANSITIONS, twice over: <c>:348</c> <c>EnterFpsCamera()</c> pushes UIStateFreeCam, and
+        /// <c>:352</c> calls <c>SwitchToPreviousState()</c> when the re-read leaves no valid shot. 3d8e308
+        /// called that second one a feature ("leaves aim mode when the shot is gone"); it is the hazard.
+        /// <c>StateStack.SwitchToPreviousState</c>:96-98 pops the state and then runs <c>Exit</c> +
+        /// <c>Pop</c> on it — but this repaint has ALREADY run <c>Exit</c> one line earlier, so
+        /// <c>UIStateShoot.ExitState</c>:1244 executes TWICE on one instance (its <c>FaceEnemy</c>, its
+        /// scene-element teardown, its module unsubscribes) and the stack is left one entry short of what
+        /// the repaint believed it had. The observable cost of excluding it: a peer sitting in aim mode
+        /// keeps a stale ability bar and a dead target's crosshair until its own next transition. That is a
+        /// stale pixel; the alternative is a corrupted state stack, and this repo's own rule is that
+        /// playability outweighs a feature.
+        ///
+        /// ponytail: the exclusion is by NAME, not by a static "does EnterState move the stack" test — no
+        /// such test exists at runtime. RailCheck L63 holds the invariant mechanically instead, so a future
+        /// re-add of UIStateShoot (or of any state whose EnterState reaches SwitchToState) turns the harness
+        /// red rather than shipping the double-exit again.</summary>
         private static readonly HashSet<string> AbilityBarStates = new HashSet<string>
         {
-            "UIStateCharacterSelected", "UIStateShoot", "UIStateAbilitySelected", "UIStateOverwatchAbilitySelected"
+            "UIStateCharacterSelected", "UIStateAbilitySelected", "UIStateOverwatchAbilitySelected"
         };
 
         private static readonly FieldInfo StateStackField =
@@ -247,9 +266,11 @@ namespace Multiplayer.Tactical
         /// on <c>EquipmentComponent.SetSelectedEquipment</c>. <c>SyncApplyScope</c> is what stops a repaint
         /// from echoing an order back to the host.
         ///
-        /// The state may legitimately NOT be current afterwards, and that is a fix rather than a fault:
-        /// <c>UIStateShoot.EnterState</c>:352 leaves aim mode when the re-read leaves no valid shot — which
-        /// is exactly the screen-B case, a soldier still aiming with the AP already spent elsewhere.</summary>
+        /// The state MUST still be current afterwards. 3d8e308 claimed the opposite ("legitimately not
+        /// current, a fix rather than a fault", pointing at <c>UIStateShoot.EnterState</c>:352 leaving aim
+        /// mode) — that was wrong, and it is why <c>UIStateShoot</c> left the allow list: a state whose
+        /// <c>EnterState</c> pops or pushes gets its <c>ExitState</c> run a SECOND time by
+        /// <c>StateStack.SwitchToPreviousState</c>:96-98, on top of the one this method already ran.</summary>
         private static void Repaint(TacticalViewState state)
         {
             var stack = StateStackField == null ? null : StateStackField.GetValue(state) as StateStack<TacticalViewContext>;
