@@ -52,7 +52,20 @@ BEHAVIOR (per-subsystem mirroring).
    authoritative delta); `0x40/0x41 PermissionUpdate/SoldierAssignment` stay dead tombstones.
    Tactical surfaces live in 0x80-0x9F ONLY (`src/Rail/SurfaceIds.cs:5`), NEVER 0xA0-0xBF (law L62).
    Local-only, never relayed: idle animation, cover-hug on arrival, camera, selection highlight,
-   hover/preview aiming, per-frame pose. Entry = native save-transfer (law 1, zero surfaces); exit =
+   hover/preview aiming, per-frame pose — with ONE carve-out, **A8** (law L81): the COMMITTED manual-aim
+   stance. It was mis-classed as cosmetics. Entering manual aim leaves the soldier in the aim loop, which
+   sets `TravelType.Aim` on the animator; `TacticalActor.CurrentlyAiming`:228-236 reads exactly that, and
+   `TacticalLevelController.FireWeaponAtTargetCrt`:1645 SKIPS the entire aim-start block
+   (`:1649-1683`, a checkpoint wait with a 5 s ceiling) when it is true — so the acting peer fired from a
+   pose it already held while every mirror first played the entry-into-aim animation and only then the
+   shot. A built-in desync on EVERY shot, and no camera fix could reach it. What crosses is the DISCRETE
+   pair `(actorKey, target)` — ops 5 (0x82 host→all) / 6 (0x83 client→host), no new surface, on the same
+   ordered stream as the shot so the stance can never arrive after it. The POSE never crosses: the far
+   peer runs the game's own two lines (`TacticalPerception.GetBestFaceActorPoseAt`:447 →
+   `IdleAbility.ForceRefresh`:92, exactly what `UIStateShoot.FaceEnemy`:1470-1477 does) against its OWN
+   cover geometry, and repeats are deduped per actor by target key. Per-frame pose STREAMING stays
+   forbidden, and hover/preview targeting stays local — this is a discrete state, not a stream.
+   Entry = native save-transfer (law 1, zero surfaces); exit =
    host's native `GameOver` → native teardown on all peers → one authoritative outcome. Shipped:
    A1 `7808c7f`, A2 `285411d`+`90dc585` (0x80 TacTurn / 0x81 TacTurnIntent, laws L63+L64); A3a
    (0x82 TacCommand / 0x83 TacCommandIntent, law L65) = the generic per-soldier COMMAND seam with

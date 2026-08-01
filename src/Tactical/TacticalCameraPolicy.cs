@@ -127,13 +127,21 @@ namespace Multiplayer.Tactical
         /// on the subject sets its target to where it already is and nothing moves. The `LockCamera` that
         /// follows (<c>CameraDirector</c>:178) is a DURATION, identical on all peers, so it never diverged.
         ///
-        /// SCOPED BY THE PARAM TYPE, and it is exact here: <see cref="TacAbilityDirectorParams"/> is
-        /// constructed in exactly two places — <c>TacticalAbility.Activate</c>:1104 and
-        /// <c>SpawnActorAbility</c>:142 — and both push <c>AbilityActivated</c>. So this cannot reach a
-        /// selection chase (<c>DoCameraChaseParam</c>:491 builds its own params and never calls
-        /// <c>GetChaseParams</c>) nor the geoscape. The shot hints need nothing: they carry
-        /// <see cref="TacOrbitCamDirectorParams"/> onto the ORBIT behaviour, and <c>Chasing</c> is false
-        /// whenever the current behaviour is not the planar camera (<c>CameraDirector</c>:39-44).
+        /// SCOPED BY <see cref="IAbilityParams"/> — THE GAME'S OWN NAME FOR THE ACTION-CAMERA FAMILY, and the
+        /// same correction <see cref="IsActionHint"/> already had to make. The first cut tested
+        /// <see cref="TacAbilityDirectorParams"/>, which is only what <c>AbilityActivated</c> carries
+        /// (<c>TacticalAbility.Activate</c>:1104, <c>SpawnActorAbility</c>:142); the three SHOT hints carry
+        /// <see cref="TacOrbitCamDirectorParams"/>, a SIBLING subclass that test could never match, so a shot
+        /// that evaluated to a planar node kept its full flight and kept setting the moment the action began.
+        /// <c>IAbilityParams</c> is implemented by exactly those two types and by nothing else in the assembly,
+        /// so it names the four action hints precisely — a wider <c>TacCamDirectorParams</c> would also have
+        /// swallowed the <c>ActorReveal</c> pan, which is each peer's own spotting cinematic and gates nothing
+        /// shared. Both types name their actor through <see cref="TacCamDirectorParams"/>.<c>ActorBase</c>.
+        ///
+        /// Still cannot reach a selection chase (<c>DoCameraChaseParam</c>:491 builds its own params and never
+        /// calls <c>GetChaseParams</c>) nor the geoscape (<c>GeoscapeCamDef</c> is not a <c>PlanarCamDef</c>).
+        /// When a shot hint evaluates to the ORBIT behaviour instead this is simply not called — which is why
+        /// widening it costs nothing and closes the case where it is.
         ///
         /// Copies <c>ChaseOnlyOutsideFrame</c> deliberately: with it the game only moves at all when the
         /// subject is off screen (<c>UpdateCameraChase</c>:689), and a peer that already has it framed must
@@ -141,7 +149,8 @@ namespace Multiplayer.Tactical
         internal static void SnapToAbilitySubject(CameraDirectorParams directorParams, CameraChaseParams chase)
         {
             if (chase == null || chase.Instant) return;   // the game is already cutting — PlanarCamDef:69-70
-            if (!(directorParams is TacAbilityDirectorParams abilityParams)) return;
+            if (!(directorParams is IAbilityParams)) return;
+            if (!(directorParams is TacCamDirectorParams abilityParams)) return;   // the arm that names an actor
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return;   // solo play stays fully native
 
