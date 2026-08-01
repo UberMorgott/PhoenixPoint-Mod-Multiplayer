@@ -452,6 +452,15 @@ namespace Multiplayer.Tactical
             if (moved > 0)
                 Debug.Log("[Multiplayer][tac] applied an inventory batch: " + moved + " item(s) moved across " +
                           slots.Count + " container(s).");
+            // LAW 11, and it is the whole reason the 2026-08-01 run looked dead (RCA below). This is the ONE
+            // funnel every mirrored batch passes through — the host validating a client's intent and every peer
+            // applying the settle — and it is reached with NO ability executed, so
+            // TacticalUiRepaint's only other dirty source (its AbilityExecuted postfix, TacticalUiRepaint:175)
+            // never fires for an inventory move. Model fresh, view stale: the observer's open
+            // UIStateCharacterSelected kept painting the pre-drop kit and the pre-swap weapon, which is
+            // indistinguishable from "nothing crossed". Unconditional on `moved`: a charge-only closing batch
+            // moves nothing and still changes the AP the ability bar's affordability is baked from.
+            TacticalUiRepaint.MarkDirty();
             return null;
         }
 
