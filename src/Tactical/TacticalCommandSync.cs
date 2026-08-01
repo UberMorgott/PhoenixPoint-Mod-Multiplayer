@@ -1860,11 +1860,30 @@ namespace Multiplayer.Tactical
         /// <summary>Overwrite with the host's truth through the NATIVE writers — <c>SetTransform</c> is what
         /// raises <c>ActorMoved</c>/<c>ActorMovedInNewTile</c> (<c>TacticalActorBase</c>:665-685), which is how
         /// vision and voxel state stay consistent; a reflection poke at the transform would skip all of it.
-        /// The actor's own rotation is kept: facing is presentation and law 5 names it local-only.</summary>
+        /// The actor's own rotation is kept: facing is presentation and law 5 names it local-only.
+        ///
+        /// THE LOCAL PLAY DIES BEFORE THE HOST'S POSITION IS WRITTEN (2026-08-01 RCA). Reaching here with an
+        /// ability still running only ever happens for a FORCED settle — the host refused that order, or the
+        /// 10 s ceiling fired — and there a bare <c>SetTransform</c> LOSES to that ability's own navigation:
+        /// <c>TacticalNavigationComponent.UpdateActorTransformFromPathSample</c>:679 →
+        /// <c>SetPositionIfDelta</c>:521 rewrites the transform on the very next path sample, with no log line.
+        /// Measured, three instances: a JetJump the host refused ("cannot be used again this turn") was
+        /// force-settled back onto the roof at 17:40:16.394 and the speculative jump carried that peer's actor
+        /// on to (-17.5, 0, 4.5) anyway — its next Move activated from there four minutes later while the host
+        /// and the other mirror both activated the SAME order from (-12.5, 3.7, -8.5). Position was the only
+        /// thing lost: AP and WP are plain stat writes nothing re-samples, which is exactly the "the mirror
+        /// applied the cost but not the movement" report.
+        /// Cancelling is the game's own teardown, not a poke: <c>NavigationComponent.CancelNavigation</c>:156-160
+        /// cancels the navigation ACTION and zeroes the speed — it never moves the actor — which ends the
+        /// ability's <c>WaitUntilFinished</c>:172-176 and lets its own <c>OnPlayingActionEnd</c> clean up
+        /// (<c>JetJumpAbility</c>:119-133 removes its extra landing nav areas there). An idling actor is never
+        /// touched: <c>HasExecutingAbility</c> ignores <c>IdleAbility</c> (<c>TacticalActorBase</c>:695-704), so
+        /// the cover hug on arrival keeps running.</summary>
         private static void ApplySettle(TacticalActor actor, PendingSettle s)
         {
             using (SyncApplyScope.Enter())
             {
+                if (actor.HasExecutingAbility() && actor.TacticalNav != null) actor.TacticalNav.CancelNavigation();
                 actor.SetTransform(s.Pos, actor.Rot);
                 var stats = actor.CharacterStats;
                 if (stats != null)
