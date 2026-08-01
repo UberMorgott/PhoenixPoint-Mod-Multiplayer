@@ -10,7 +10,10 @@ using Base.Utils.Maths;
 using HarmonyLib;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
+using PhoenixPoint.Common.Entities;
 using PhoenixPoint.Common.Entities.Items;
+using PhoenixPoint.Common.View.ViewControllers.Inventory;
+using PhoenixPoint.Common.View.ViewModules;
 using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.Entities.Abilities;
 using PhoenixPoint.Tactical.Entities.Equipments;
@@ -497,6 +500,56 @@ namespace Multiplayer.Tactical
         internal static bool HasPendingCharge => _charged;
 
         private static MethodInfo _attemptMove, _applyActions;
+        private static PropertyInfo _equipModule;
+        private static FieldInfo _listInitial;
+
+        /// <summary>THE SECOND HALF OF A MID-SESSION DRAIN, and leaving it out is what walled the screen after one
+        /// gesture (2026-08-01). The inventory screen keeps TWO baselines and the game takes them at the SAME
+        /// instant, one line apart in <c>EnterState</c>: <c>ResetInventoryQueries</c>:312 baselines every
+        /// <c>InventoryQuery</c> against the model, and <c>InitInventory</c>:330 →
+        /// <c>UIInventoryList.Init</c>:443 baselines every UI list's <c>_initialItems</c> against the same
+        /// arrangement. <c>AttemptMoveItems</c>:741-751 then stages the DIFFERENCE between them —
+        /// <c>GetAddedItems</c>/<c>GetRemovedItems</c>:462-470 are <c>UnfilteredItems.Except(_initialItems)</c>,
+        /// measured against the SESSION START.
+        ///
+        /// Our per-gesture flush advances only ONE of the two: <c>SyncItems</c>:61 re-<c>Reset</c>s every query to
+        /// the freshly committed model, while <c>_initialItems</c> still describes the session start. The
+        /// baselines drift apart by one gesture at every flush, and the moment a gesture RESTORES a session-start
+        /// membership — putting a dropped item back in the pack, the second half of every drop/pick-up test — the
+        /// UI delta is EMPTY. Nothing is staged, <c>WillModifyInventory</c> answers false on every query, the
+        /// commit seam ships nothing (measured: <c>willModify=0</c> at 9798 s / 10374 s, no intent emitted, no
+        /// host refusal), and the model keeps the item on the ground while that screen paints it in the pack —
+        /// a divergence that survives the screen's own <c>ExitState</c> and is only cleared by REOPENING, which
+        /// re-runs <c>Init</c>. Exactly the reported wall.
+        ///
+        /// So re-baseline the lists at the instant we commit, which is the invariant the game itself keeps: its
+        /// OWN mid-session drain is a TWO-step sequence, <c>OnSelectedSecondarySoldier</c>:765-772 =
+        /// <c>AttemptMoveItems()</c> followed by <c>InitInventory()</c>. We ran the drain and skipped the
+        /// re-baseline. This writes <c>_initialItems</c> only (<c>Init</c> would also <c>SetItems</c>:447 and
+        /// rebuild every slot mid-drag); it walks <c>CurrentInventoryLists</c>, the SAME collection
+        /// <c>AttemptMoveItems</c> iterates, so the next gesture's delta is exactly that gesture. A COPY, never
+        /// the live list — aliasing <c>UnfilteredItems</c> would make every future delta empty.</summary>
+        private static void Rebaseline(UIStateInventory state)
+        {
+            if (_equipModule == null)
+            {
+                _equipModule = AccessTools.Property(typeof(UIStateInventory), "_soldierEquipModule");
+                _listInitial = AccessTools.Field(typeof(UIInventoryList), "_initialItems");
+                if (_equipModule == null || _listInitial == null)
+                {
+                    SayOnce("rebaseline-members",
+                        "[Multiplayer][tac] UIStateInventory._soldierEquipModule / UIInventoryList._initialItems did " +
+                        "not resolve, so the inventory screen's two baselines cannot be kept together — only the " +
+                        "FIRST gesture of each inventory session will reach the other peers.");
+                    return;
+                }
+            }
+            var module = _equipModule.GetValue(state, null) as UIModuleSoldierEquip;
+            if (module == null) return;
+            foreach (var list in module.CurrentInventoryLists)
+                if (list != null && list.UnfilteredItems != null)
+                    _listInitial.SetValue(list, new List<ICommonItem>(list.UnfilteredItems));
+        }
 
         /// <summary>PER-GESTURE COMMIT (law L69, 2026-08-01 — the batch is still the batch, it is just drained
         /// every gesture instead of once at close). The game stages a drag in the UI LISTS, not even in the query:
@@ -514,16 +567,12 @@ namespace Multiplayer.Tactical
         /// the whole session, so the swap gate answers the same thing on the last gesture as on the first, and
         /// the charge crosses the wire in the closing batch.
         ///
-        /// Replaying the same UI delta after a flush is a no-op AGAINST THE MODEL, which is what makes flushing
-        /// repeatedly safe: <c>SyncItems</c>:61 resets each query to the model, and
-        /// <c>SyncAddedItems</c>/<c>SyncRemovedItems</c>:76/:89 diff with <c>Except</c> — a re-added item already
-        /// in the model falls out of the set difference, and a re-removed one is no longer in the list to remove.
-        /// It is NOT a no-op against the QUERY, and reading it as one was the 2026-08-01 regression: the replayed
-        /// <c>AddItem</c> does append, so <c>_currentItems</c> holds the item TWICE and the batch we ship must be
-        /// deduped to match what <c>Except</c> will actually commit (see the distinct pass in
-        /// <see cref="OnBatchCommitting"/>). The ground list re-resolves its container
-        /// through <c>item.InventoryComponent</c> (<c>InitListUpdateDictionary</c>:735), so its replayed removal
-        /// follows the item to wherever the previous flush put it and cancels that gesture's own re-add.</summary>
+        /// THE DRAIN IS TWO STEPS, NOT THREE-MINUS-ONE. Draining without re-baselining the UI lists leaves the
+        /// screen measuring every later gesture against the SESSION START while the queries already sit on the
+        /// committed model — see <see cref="Rebaseline"/> for why that walls the screen after one gesture, and
+        /// why it also retires the earlier "replay every past gesture" behaviour rather than compensating for
+        /// it: with the baselines together again, <c>AttemptMoveItems</c> stages THIS gesture and nothing
+        /// else.</summary>
         internal static void FlushGesture(UIStateInventory state)
         {
             if (state == null || TacticalDamageSync.LiveEngine() == null) return;
@@ -541,6 +590,7 @@ namespace Multiplayer.Tactical
             }
             _attemptMove.Invoke(state, null);
             _applyActions.Invoke(state, null);
+            Rebaseline(state);
         }
 
         /// <summary>The batch is ABOUT to be committed to the model on THIS peer, and the staged queries
@@ -560,7 +610,6 @@ namespace Multiplayer.Tactical
             _charged = false;
 
             var slots = new List<Slot>();
-            var seen = new List<Item>();   // per-container scratch for the distinct pass below
             bool partial = false;
             foreach (var q in queries)
             {
@@ -600,26 +649,14 @@ namespace Multiplayer.Tactical
                         "rest of the batch still crosses.");
                     continue;
                 }
-                // DISTINCT, and it is not a defensive nicety (2026-08-01 regression). The per-gesture flush
-                // replays EVERY earlier gesture, because AttemptMoveItems:741-751 reads the UI lists' whole
-                // accumulated delta and nothing ever clears it — so a query that received an item in an earlier
-                // flush gets `AddItem` for it AGAIN and holds it TWICE in `_currentItems`. The MODEL does not
-                // double it: SyncItems drains through `Except` (:76/:89), whose set semantics collapse the
-                // repeat, so the contents it commits are exactly the DISTINCT `_currentItems`
-                // ((initial ∩ current) ∪ (current \ initial) = set(current), since each query was Reset to the
-                // model by the previous flush). Shipping the RAW list instead said "two of this rifle", and the
-                // host's multiset check — correctly — refused every batch after the first with "item def '…'
-                // appears from nowhere", which is why only the first gesture of a session ever crossed.
-                // By REFERENCE: two identical grenades are two distinct Items sharing one def guid.
-                foreach (var item in q.Items)
-                {
-                    bool already = false;
-                    for (int k = 0; k < seen.Count; k++) if (ReferenceEquals(seen[k], item)) { already = true; break; }
-                    if (already) continue;
-                    seen.Add(item);
-                    slot.ItemDefs.Add(DefGuid(item));
-                }
-                seen.Clear();
+                // The staged list VERBATIM. dc8944f deduped it here instead, because the flush used to replay every
+                // earlier gesture (`AddItem` for an item the query already held, so `_currentItems` carried it
+                // twice and the host's multiset check refused the batch). That replay is gone at its source —
+                // Rebaseline puts the UI lists back on the model at the instant we commit, over the very
+                // collection AttemptMoveItems iterates, so a query can no longer receive the same item twice. A
+                // dedup kept past that point would only hide a REAL double, which is exactly what the multiset
+                // check exists to refuse out loud (law 12).
+                foreach (var item in q.Items) slot.ItemDefs.Add(DefGuid(item));
                 slots.Add(slot);
             }
             // A ground address names EVERY pile at (def, pos), so two queries CAN share one: UIStateInventory:513-522
