@@ -1536,25 +1536,23 @@ namespace Multiplayer.Tactical
             // The host's fumble is DECLARED before the native body runs, because Activate:1109 rolls it and
             // PlayAction:988-993 consumes it inside the same synchronous call — there is no later moment.
             FumbleGate.Declare(ability, fumbled);
-            using (SyncApplyScope.Enter())
-            {
-                // FALSIFY THE PACING PATCH (law L78), because its failure mode is silent and looks exactly
-                // like a network delay. MirroredPlayMatchesHostPacing makes
-                // AnyAIEvaluationAbilityExecuting answer the host's way for the length of this scope; if it
-                // never BOUND — the Harmony failure this project keeps hitting — the getter stays false,
-                // ShootAbility.Activate:167 takes EnqueueAction(soloAfterCurrent: true) instead of
-                // PlayAction, and every mirrored order waits for whatever is already playing on that actor.
-                // Nothing else in the log distinguishes that from a slow wire: the arrival delta printed by
-                // MirrorTelemetry is measured BEFORE this call and stays ~0ms either way. So say it here.
-                var level = Tlc();
-                if (level != null && !level.AnyAIEvaluationAbilityExecuting && _saidUncovered.Add("pacing"))
-                    Debug.LogError("[Multiplayer][tac] MirroredPlayMatchesHostPacing is NOT answering — " +
-                                   "AnyAIEvaluationAbilityExecuting is false inside a mirror scope, so that " +
-                                   "patch did not bind. Every mirrored order on this peer will QUEUE behind " +
-                                   "the actor's current action instead of playing now (law L78) — the " +
-                                   "'other screens only start once my animation finished' report.");
-                ability.Activate(target);
-            }
+            using (SyncApplyScope.Enter()) ability.Activate(target);
+            // DID IT START, OR ONLY GET IN LINE? PlayingAction.SetState(Playing) calls StartPlayingAction
+            // SYNCHRONOUSLY (PlayingAction:47-53 -> TacticalActorBase.AddExecutingAbility:709), so the moment
+            // Activate returns a PLAYED order is in ExecutingAbilities and an ENQUEUED one is not —
+            // ActionComponent.CheckForActionToPlay:120-128 starts only the FIRST action in the channel.
+            // This is the "the other screens only start once my animation finished" report, measured rather
+            // than argued: EnqueueAction(soloAfterCurrent: true) at ShootAbility.Activate:167 is
+            // INDISTINGUISHABLE from PlayAction on an idle actor, so it bites only when the mirror lands on a
+            // busy one — which is why a run of six orders on idle soldiers showed nothing. Deliberately NOT
+            // deduplicated: how OFTEN this fires is the measurement, and it costs one line only when broken.
+            if (!actor.ExecutingAbilities.Contains(ability))
+                Debug.LogError("[Multiplayer][tac] MIRROR QUEUED, not played — " + actor.name + " " +
+                               (ability.AbilityDef == null ? "?" : ability.AbilityDef.name) + " is waiting behind " +
+                               (actor.ExecutingAbilities.Count == 0
+                                    ? "<nothing — it never started at all>"
+                                    : actor.ExecutingAbilities[0].GetType().Name) +
+                               " and will begin only when that ends (law L78).");
         }
 
         /// <summary>ONE line, measured at the moment a mirrored order is about to play, answering the three
