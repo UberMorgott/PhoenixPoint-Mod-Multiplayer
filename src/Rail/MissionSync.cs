@@ -7,7 +7,9 @@ using Base.Core;
 using HarmonyLib;
 using PhoenixPoint.Common.Core;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Events;
 using PhoenixPoint.Geoscape.Levels;
+using PhoenixPoint.Geoscape.View.ViewModules;
 using UnityEngine;
 
 namespace Multiplayer.Network.Sync
@@ -212,6 +214,85 @@ namespace Multiplayer.Network.Sync
                           " nonce=" + nonce + " peer=" + senderPeerId);
             }
             catch (Exception ex) { Reject(senderPeerId, siteRef, "launch (throw) " + ex.Message); }
+        }
+    }
+
+    /// <summary>
+    /// PRESENTATION seam (law 4c) at the encounter that STARTS a mission — the piece without which
+    /// <see cref="MissionSync"/> was unreachable on a client, and the reason the 0xB8 family never once
+    /// fired in the 2026-08-01 run: the client never got as far as a deployment screen, so nothing ever
+    /// called <c>GeoMission.Launch</c> for the capture to see.
+    ///
+    /// The native route from "answer the mission encounter" to the deployment screen is ONE call inside
+    /// <c>UIModuleSiteEncounters.SelectChoice</c>:598-613 — <c>ev.CompleteEvent(...)</c>, then
+    /// <c>ChoiceReward.ApplyResult.StartMission</c>, then <c>FinishEncounter()</c> +
+    /// <c>Context.View.LaunchMission(startMission, _geoEvent.Context.Vehicle)</c>:612. On a CLIENT the
+    /// whole method is unreachable: <c>EventPopup.EventChoiceClientLock</c> blocks
+    /// <c>OnChoiceSelected</c> and turns the click into a 0xB4 answer intent, and even if it did run,
+    /// <c>EventSync.EventCompleteArbiter</c> skips <c>CompleteEvent</c> and hands back the empty
+    /// <c>ChoiceReward</c> stub, so <c>StartMission</c> is null and <c>SelectChoice</c> returns false.
+    /// The client therefore fell into the :586-596 arm — result page, OK, back to the plain geoscape —
+    /// which is exactly the reported symptom: no briefing, no soldier assignment, host-only launches.
+    ///
+    /// That lost call is pure LOCAL NAVIGATION, not game logic: <c>LaunchMission</c> either opens
+    /// <c>UIStateRosterDeployment</c> (declared LocalOnly in <see cref="GeoWindowCoverage"/> — every peer
+    /// navigates its own) or, in the SkipDeploymentSelection arm, calls <c>mission.Launch</c>, which is
+    /// the capture above. So the client may simply re-issue it, and every peer holding the window gets the
+    /// same screen the host gets. Two peers may deploy the same mission at once; the first 0xB8 to reach
+    /// the host wins and the second is refused by <see cref="Validate"/>'s "no runnable mission any more"
+    /// arm — law 5's first-to-act-wins, no ownership table.
+    ///
+    /// Hooked at <c>FinishEncounter</c> (:618) rather than at the click, because that is the one point
+    /// BOTH native arms reach and, more importantly, the point by which the host's answer has come back:
+    /// the client's result page is drawn from the arriving record delta (<c>EventPopup</c>'s "resolved by
+    /// THIS peer's own click"), and the mission rides in as the <c>ActiveMission</c> structural create in
+    /// that same stream. The mission is read off the SITE, never off the reward — the client's reward is
+    /// the stub — and the choice is read from the HOST's record index, since <c>GeoscapeEvent
+    /// .SelectedChoice</c> is only written inside the <c>CompleteEvent</c> the client skipped.
+    /// </summary>
+    [HarmonyPatch(typeof(UIModuleSiteEncounters), "FinishEncounter")]
+    internal static class MissionEncounterNav
+    {
+        private static readonly FieldInfo GeoEventField = AccessTools.Field(typeof(UIModuleSiteEncounters), "_geoEvent");
+
+        private static void Postfix(UIModuleSiteEncounters __instance)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return; // solo/host ran SelectChoice natively
+            try
+            {
+                var ev = GeoEventField?.GetValue(__instance) as GeoscapeEvent;
+                var choices = ev?.EventData?.Choices;
+                int idx = ev?.Record == null ? -1 : ev.Record.SelectedChoice;
+                if (choices == null || idx < 0 || idx >= choices.Count) return;
+                // Unity default-constructs an EMPTY OutcomeStartMission, so non-null is not the signal —
+                // MissionTypeDef is (GeoEventChoiceOutcome:315, same test EventPopup.StartsMission uses).
+                if (choices[idx].Outcome?.StartMission?.MissionTypeDef == null) return;
+
+                var site = ev.Context?.Site;
+                var mission = site?.ActiveMission;
+                if (mission == null || !mission.IsRunnable)
+                {
+                    // Never silent: the choice DID start a mission, so a missing one means the structural
+                    // create has not landed yet and this peer is about to sit on a geoscape with no screen.
+                    Debug.LogWarning("[MP][mission] CLIENT deployment for '" + ev.EventID + "' at " +
+                                     (IdentityResolver.RootRef(site) ?? "S#?") + " NOT opened — the host's mission " +
+                                     "has not arrived on this peer yet (ActiveMission " +
+                                     (mission == null ? "missing" : "not runnable") + "); reach it from the " +
+                                     "aircraft's Launch button once it lands");
+                    return;
+                }
+
+                __instance.Context.View.LaunchMission(mission, ev.Context.Vehicle);
+                Debug.Log("[MP][mission] CLIENT deployment screen opened for '" + ev.EventID + "' at " +
+                          (IdentityResolver.RootRef(site) ?? "S#?") + " — re-issuing the LaunchMission call " +
+                          "SelectChoice:612 could not make here; the squad picked rides out as a 0xB8 launch intent");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MP][mission] CLIENT deployment navigation failed — this peer stays on the " +
+                               "geoscape and can still reach the mission from the aircraft's Launch button: " + ex);
+            }
         }
     }
 
