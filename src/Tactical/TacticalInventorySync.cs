@@ -15,6 +15,7 @@ using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.Entities.Abilities;
 using PhoenixPoint.Tactical.Entities.Equipments;
 using PhoenixPoint.Tactical.Levels;
+using PhoenixPoint.Tactical.View.ViewStates;
 using UnityEngine;
 
 namespace Multiplayer.Tactical
@@ -481,6 +482,54 @@ namespace Multiplayer.Tactical
             _charged = true;
         }
 
+        /// <summary>True once the game has charged the inventory action but no batch has carried that charge yet.
+        /// The commit seam needs it because per-gesture flushing leaves the CLOSING commit with nothing left to
+        /// move: every item already went, and the only thing the last batch has to say is "this cost a point".</summary>
+        internal static bool HasPendingCharge => _charged;
+
+        private static MethodInfo _attemptMove, _applyActions;
+
+        /// <summary>PER-GESTURE COMMIT (law L69, 2026-08-01 — the batch is still the batch, it is just drained
+        /// every gesture instead of once at close). The game stages a drag in the UI LISTS, not even in the query:
+        /// <c>UIStateInventory.AttemptMoveItems</c>:739-751 (UI lists → queries) and
+        /// <c>ApplyInventoryActions</c>:898-903 (queries → model) both run only from <c>ExitState</c>:442-443, so
+        /// until the screen closes NOTHING has moved and there is nothing to replicate — which is exactly what
+        /// every other peer saw. This runs the game's OWN two steps after every swap, so the model moves when the
+        /// hand moves and the existing commit seam ships the batch it already knows how to ship. It is not a new
+        /// mechanism: <c>OnSelectedSecondarySoldier</c>:758-773 already drains mid-session for the same reason.
+        ///
+        /// AP IS NOT TOUCHED — deliberately, and it is the whole reason this is safe. v1 (`6617846`) charged per
+        /// gesture, so <c>AllowItemSwapHandler</c>:815 → <c>ActionPointRequirementSatisfied</c> then refused every
+        /// further drag and the screen locked. Here <c>ApplyCostsCommand</c> is left exactly where the game puts
+        /// it (<c>ExitState</c>:440, at most once per session via <c>_alreadyPaidAbility</c>): AP is CONSTANT for
+        /// the whole session, so the swap gate answers the same thing on the last gesture as on the first, and
+        /// the charge crosses the wire in the closing batch.
+        ///
+        /// Replaying the same UI delta after a flush is a NO-OP, which is what makes flushing repeatedly safe:
+        /// <c>SyncItems</c>:61 resets each query to the model, and <c>SyncAddedItems</c>/<c>SyncRemovedItems</c>
+        /// :76/:89 diff with <c>Except</c> — a re-added item already in the model falls out of the set difference,
+        /// and a re-removed one is no longer in the list to remove. The ground list re-resolves its container
+        /// through <c>item.InventoryComponent</c> (<c>InitListUpdateDictionary</c>:735), so its replayed removal
+        /// follows the item to wherever the previous flush put it and cancels that gesture's own re-add.</summary>
+        internal static void FlushGesture(UIStateInventory state)
+        {
+            if (state == null || TacticalDamageSync.LiveEngine() == null) return;
+            if (_attemptMove == null)
+            {
+                _attemptMove = AccessTools.Method(typeof(UIStateInventory), "AttemptMoveItems");
+                _applyActions = AccessTools.Method(typeof(UIStateInventory), "ApplyInventoryActions");
+                if (_attemptMove == null || _applyActions == null)
+                {
+                    SayOnce("flush-methods",
+                        "[Multiplayer][tac] UIStateInventory.AttemptMoveItems/ApplyInventoryActions did not resolve — " +
+                        "inventory changes fall back to crossing only when the screen is closed.");
+                    return;
+                }
+            }
+            _attemptMove.Invoke(state, null);
+            _applyActions.Invoke(state, null);
+        }
+
         /// <summary>The batch is ABOUT to be committed to the model on THIS peer, and the staged queries
         /// already hold exactly what it will commit (<c>InventoryQuery.Items</c> IS <c>_currentItems</c>, the
         /// staged list <c>SyncItems</c> is about to drain). Captured BEFORE the native write and never after:
@@ -696,10 +745,32 @@ namespace Multiplayer.Tactical
                     total++;
                     if (q != null && q.WillModifyInventory()) willModify++;
                 }
+            // `|| HasPendingCharge`: with the per-gesture flush the CLOSING commit has nothing left to move —
+            // every item went at the gesture that moved it — but it is the first commit that runs after
+            // ExitState:440 charged the action, and that charge still has to reach the other peers.
+            bool charge = TacticalInventorySync.HasPendingCharge;
             Debug.Log("[Multiplayer][tac] inventory commit seam fired, queries=" + total +
-                      " willModify=" + willModify + (willModify == 0 ? " (nothing was moved — nothing to ship)" : ""));
-            if (willModify > 0) TacticalInventorySync.OnBatchCommitting(queries);
+                      " willModify=" + willModify + (charge ? " charge-pending" : "") +
+                      (willModify == 0 && !charge ? " (nothing was moved — nothing to ship)" : ""));
+            if (willModify > 0 || charge) TacticalInventorySync.OnBatchCommitting(queries);
         }
+    }
+
+    /// <summary>
+    /// THE PER-GESTURE SEAM — presentation side (law 4c), and it adds no wire surface at all: it makes the model
+    /// move when the hand moves, so the commit seam above fires per gesture instead of once at close.
+    /// <c>UIStateInventory.RefreshUI</c> is the game's own per-swap callback (subscribed to
+    /// <c>UIModuleSoldierEquip.OnItemsSwapped</c> at <c>EnterState</c>:332, raised at
+    /// <c>UIModuleSoldierEquip</c>:1103/1122 for both the drag and the double-click path) and it has exactly one
+    /// other caller, the tail of <c>UndoInventoryActions</c>:917 — where flushing is equally right, because an
+    /// undo has to reach the peers that already saw the move.
+    /// </summary>
+    [HarmonyPatch]
+    internal static class InventoryGestureSeam
+    {
+        private static MethodBase TargetMethod() => AccessTools.Method(typeof(UIStateInventory), "RefreshUI");
+
+        private static void Postfix(UIStateInventory __instance) => TacticalInventorySync.FlushGesture(__instance);
     }
 
     /// <summary>
