@@ -505,10 +505,14 @@ namespace Multiplayer.Tactical
         /// the whole session, so the swap gate answers the same thing on the last gesture as on the first, and
         /// the charge crosses the wire in the closing batch.
         ///
-        /// Replaying the same UI delta after a flush is a NO-OP, which is what makes flushing repeatedly safe:
-        /// <c>SyncItems</c>:61 resets each query to the model, and <c>SyncAddedItems</c>/<c>SyncRemovedItems</c>
-        /// :76/:89 diff with <c>Except</c> — a re-added item already in the model falls out of the set difference,
-        /// and a re-removed one is no longer in the list to remove. The ground list re-resolves its container
+        /// Replaying the same UI delta after a flush is a no-op AGAINST THE MODEL, which is what makes flushing
+        /// repeatedly safe: <c>SyncItems</c>:61 resets each query to the model, and
+        /// <c>SyncAddedItems</c>/<c>SyncRemovedItems</c>:76/:89 diff with <c>Except</c> — a re-added item already
+        /// in the model falls out of the set difference, and a re-removed one is no longer in the list to remove.
+        /// It is NOT a no-op against the QUERY, and reading it as one was the 2026-08-01 regression: the replayed
+        /// <c>AddItem</c> does append, so <c>_currentItems</c> holds the item TWICE and the batch we ship must be
+        /// deduped to match what <c>Except</c> will actually commit (see the distinct pass in
+        /// <see cref="OnBatchCommitting"/>). The ground list re-resolves its container
         /// through <c>item.InventoryComponent</c> (<c>InitListUpdateDictionary</c>:735), so its replayed removal
         /// follows the item to wherever the previous flush put it and cancels that gesture's own re-add.</summary>
         internal static void FlushGesture(UIStateInventory state)
@@ -547,6 +551,7 @@ namespace Multiplayer.Tactical
             _charged = false;
 
             var slots = new List<Slot>();
+            var seen = new List<Item>();   // per-container scratch for the distinct pass below
             bool partial = false;
             foreach (var q in queries)
             {
@@ -586,7 +591,26 @@ namespace Multiplayer.Tactical
                         "rest of the batch still crosses.");
                     continue;
                 }
-                foreach (var item in q.Items) slot.ItemDefs.Add(DefGuid(item));
+                // DISTINCT, and it is not a defensive nicety (2026-08-01 regression). The per-gesture flush
+                // replays EVERY earlier gesture, because AttemptMoveItems:741-751 reads the UI lists' whole
+                // accumulated delta and nothing ever clears it — so a query that received an item in an earlier
+                // flush gets `AddItem` for it AGAIN and holds it TWICE in `_currentItems`. The MODEL does not
+                // double it: SyncItems drains through `Except` (:76/:89), whose set semantics collapse the
+                // repeat, so the contents it commits are exactly the DISTINCT `_currentItems`
+                // ((initial ∩ current) ∪ (current \ initial) = set(current), since each query was Reset to the
+                // model by the previous flush). Shipping the RAW list instead said "two of this rifle", and the
+                // host's multiset check — correctly — refused every batch after the first with "item def '…'
+                // appears from nowhere", which is why only the first gesture of a session ever crossed.
+                // By REFERENCE: two identical grenades are two distinct Items sharing one def guid.
+                foreach (var item in q.Items)
+                {
+                    bool already = false;
+                    for (int k = 0; k < seen.Count; k++) if (ReferenceEquals(seen[k], item)) { already = true; break; }
+                    if (already) continue;
+                    seen.Add(item);
+                    slot.ItemDefs.Add(DefGuid(item));
+                }
+                seen.Clear();
                 slots.Add(slot);
             }
             // A ground address names EVERY pile at (def, pos), so two queries CAN share one: UIStateInventory:513-522
