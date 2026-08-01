@@ -9,6 +9,7 @@ using Multiplayer.Network.Sync;
 using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.Entities.Abilities;
 using PhoenixPoint.Tactical.Levels;
+using PhoenixPoint.Tactical.Prompts;
 using PhoenixPoint.Tactical.View;
 using UnityEngine;
 
@@ -173,6 +174,59 @@ namespace Multiplayer.Tactical
             private static void Postfix(TacticalAbility ability)
             {
                 if (!(ability is IdleAbility) && !(ability is AIEvaluationAbility)) MarkDirty();
+            }
+        }
+
+        /// <summary>
+        /// LAW 11, TEARDOWN HALF: a tactical prompt asks a question that is now answered GLOBALLY, so it must
+        /// die on every peer the moment the turn really ends — not only on the peer whose click ended it.
+        ///
+        /// The prompt system is a purely LOCAL decision UI. <c>TacticalView.OnAbilityExecuted</c>:575-577 asks
+        /// <c>ViewerFaction.ShouldAutoEndTurn()</c> after EVERY non-idle ability of the viewer faction, and
+        /// under A5 every peer executes every mirrored order — so when the squad runs dry the "end turn?"
+        /// prompt opens on ALL THREE screens and each further mirrored ability queues ANOTHER copy
+        /// (<c>TacticalPromptsManager.ShowPrompt</c>:72-77 tests <c>Contains</c> on a freshly allocated
+        /// <c>TacticalPrompt</c>, so the reference compare never matches and the pending list only grows).
+        ///
+        /// Nothing native tears a SHOWN prompt down. <c>MessageBoxPromptController.Invoke</c>:255-260 does
+        /// close the box before the callback, so the peer that clicks Yes is not left holding the box it
+        /// clicked — but its manager immediately shows the NEXT queued copy from the very next
+        /// <c>Update</c>:21-27 (still a valid state: the local turn has not ended yet, because a client's
+        /// <c>RequestEndTurn</c> is converted to an intent and the real end arrives with the host's cursor a
+        /// few frames later). Identical box, identical position, mouse still on the button — indistinguishable
+        /// from "the window never closed", which is exactly how it was reported. On the peers that did NOT
+        /// click, the ORIGINAL box simply survives the turn edge with its <c>InputConsumer</c> active
+        /// (<c>MessageBox</c>:162), and answering it during the alien turn would call
+        /// <c>ViewerFaction.RequestEndTurn()</c> (<c>EndTurnPromptActionDef</c>:13) and pre-end the squad's
+        /// NEXT turn. <c>TacticalView.OnNewTurn</c>:1151 calls <c>PromptsManager.Cleanup</c>, but that only
+        /// drops PENDING entries — the open <c>MessageBox</c> and <c>_currentPrompt</c> are untouched.
+        ///
+        /// The seam is the game's own "the viewer's turn just ended" edge, <c>TacticalView</c>:1140-1146
+        /// (<c>FactionEndedTurnEvent</c>, raised on every peer running the native turn machine), and it fires
+        /// BEFORE <c>OnNewTurn</c>. <c>ForceCloseAllPrompts</c>:182-192 is the native teardown, but it does
+        /// NOT run the callback — so <c>_currentPrompt</c> must be nulled by hand or the manager is wedged for
+        /// the rest of the battle and no interact/evac prompt ever shows again.
+        /// </summary>
+        [HarmonyPatch(typeof(TacticalView), "OnViewerFactionEndedTurn")]
+        internal static class PromptTurnEdgeTeardown
+        {
+            private static readonly FieldInfo CurrentPromptField =
+                AccessTools.Field(typeof(TacticalPromptsManager), "_currentPrompt");
+
+            private static void Postfix(TacticalView __instance, TacticalFaction prevFaction)
+            {
+                if (LiveEngine() == null) return;                       // solo play keeps native behaviour
+                if (prevFaction == null || !prevFaction.IsViewerFaction) return;
+                var prompts = __instance == null ? null : __instance.PromptsManager;
+                if (prompts == null || CurrentPromptField == null) return;
+
+                prompts.ClearPending();   // the co-op pile-up: one queued copy per mirrored order
+                if (CurrentPromptField.GetValue(prompts) == null) return;
+
+                GameUtl.GetMessageBox()?.ForceCloseAllPrompts();
+                CurrentPromptField.SetValue(prompts, null);
+                Debug.Log("[Multiplayer][tac] tactical prompt closed at the turn edge — the turn ended for " +
+                          "every peer, so a prompt still asking about it is stale on this one.");
             }
         }
 

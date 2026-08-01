@@ -6029,6 +6029,34 @@ namespace RailCheck
             if (!Reaches(hookPostfix, "TacticalTurnSync", "ClientVerifyTurn"))
                 yield return "L63 drift-unwatched: the TacMission.OnNewTurn postfix does not reach ClientVerifyTurn — " +
                              "a client on a different turn than the host would say nothing about it";
+
+            // ─── the turn edge TEARS DOWN the tactical prompt (the stuck "end turn?" modal) ───
+            // The prompt is a LOCAL decision UI for a decision that is now GLOBAL: TacticalView
+            // .OnAbilityExecuted:575-577 asks ShouldAutoEndTurn after every non-idle viewer-faction ability, so
+            // under A5 it opens on ALL peers, and native closes it only for the one that clicks
+            // (MessageBoxPromptController.Invoke:255-260). Both failure shapes below leave a modal on screen
+            // with no log line at all, which is this repo's dominant bug class.
+            var promptEdge = mod.GetType("Multiplayer.Tactical.TacticalUiRepaint+PromptTurnEdgeTeardown");
+            var promptFunnel = HarmonyLib.AccessTools.Method(
+                typeof(PhoenixPoint.Tactical.View.TacticalView), "OnViewerFactionEndedTurn");
+            if (promptEdge == null || promptFunnel == null)
+                yield return "L63 prompt-teardown-missing: PromptTurnEdgeTeardown or the native edge " +
+                             "TacticalView.OnViewerFactionEndedTurn no longer resolves — a peer that did not click " +
+                             "keeps a live prompt (and its input-eating InputConsumer) over the alien turn, and " +
+                             "answering it later pre-ends the squad's NEXT turn via EndTurnPromptActionDef:13";
+            else
+            {
+                var edgePostfix = ModMethod(promptEdge, "Postfix");
+                if (!Reaches(edgePostfix, "MessageBox", "ForceCloseAllPrompts"))
+                    yield return "L63 prompt-teardown-mute: the OnViewerFactionEndedTurn postfix never reaches " +
+                                 "MessageBox.ForceCloseAllPrompts — the seam binds and closes nothing";
+                if (HarmonyLib.AccessTools.Field(typeof(PhoenixPoint.Tactical.Prompts.TacticalPromptsManager),
+                                                 "_currentPrompt") == null)
+                    yield return "L63 prompt-handle-unbound: TacticalPromptsManager._currentPrompt no longer " +
+                                 "resolves — the teardown returns silently, and ForceCloseAllPrompts does not run " +
+                                 "the callback, so the field would stay set and NO prompt ever shows again in that " +
+                                 "battle";
+            }
         }
 
         /// <summary>L64 — MISSION END REACHES EVERY PEER, AND NO PEER IS LEFT STRANDED IN TACTICAL (arc A2).
