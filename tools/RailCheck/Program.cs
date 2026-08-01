@@ -7733,11 +7733,64 @@ namespace RailCheck
                                  "overwatch, return fire and zone-of-control — all of which enter through Execute";
             }
 
-            // ─── (c) AUTONOMOUS REACTIONS ARE LOCAL, BOTH WAYS ───
-            if (decide(true, false, true, true) != Multiplayer.Tactical.TacticalCommandSync.RelayLocalAutonomous)
-                yield return "L68 reaction-mirrored: the host MIRRORS an autonomous reaction (got '" +
-                             decide(true, false, true, true) + "'). The receiving peer raises its own from the same " +
-                             "replicated board, so the mirrored copy is a SECOND overwatch shot on that screen";
+            // ─── (c) A REACTION IS THE HOST'S, AND EVERY OTHER PEER IS BLOCKED FROM RAISING ITS OWN (L83) ───
+            if (decide(true, false, true, true) != Multiplayer.Tactical.TacticalCommandSync.RelayMirror)
+                yield return "L68 reaction-unmirrored: the host does NOT mirror an autonomous reaction (got '" +
+                             decide(true, false, true, true) + "'). A5 pinned these local on the premise that every " +
+                             "peer raises its own off the same replicated board; L83 measured that false — a return " +
+                             "fire fired on the host and on NEITHER client, which saw the damage land with nobody " +
+                             "shooting. The host decides reactions now, exactly as it decides the AI's target";
+            // The block is the other half: mirrored + locally raised = the same actor shooting twice.
+            var execGate = mod.GetType("Multiplayer.Tactical.AutonomousReactionExecuteGate");
+            var waitGate = mod.GetType("Multiplayer.Tactical.AutonomousReactionExecuteAndWaitGate");
+            var blocker = ModMethod(sync, "BlockAutonomousReaction");
+            if (execGate == null || waitGate == null || blocker == null)
+                yield return "L68 reaction-ungated: the autonomous-reaction block is gone, so a client raises its " +
+                             "own reaction AND plays the host's mirrored one — the same actor shoots twice";
+            else
+            {
+                foreach (var g in new[] { execGate, waitGate })
+                {
+                    var attr = g.GetCustomAttributes(typeof(HarmonyLib.HarmonyPatch), false)
+                                .Cast<HarmonyLib.HarmonyPatch>().Select(a => a.info).FirstOrDefault();
+                    string want = g == execGate ? "Execute" : "ExecuteAndWait";
+                    if (attr?.declaringType != typeof(PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility) ||
+                        attr.methodName != want ||
+                        HarmonyLib.AccessTools.Method(typeof(PhoenixPoint.Tactical.Entities.Abilities.TacticalAbility),
+                                                      want, new[] { typeof(object) }) == null)
+                        yield return "L68 reaction-gate-mistargeted: " + g.Name + " no longer prefixes " +
+                                     "TacticalAbility." + want + "(object) (target=" +
+                                     (attr?.declaringType?.Name ?? "<none>") + "." + (attr?.methodName ?? "<none>") +
+                                     ") — an unresolved target is one swallowed PatchAll warning and the gate is dead";
+                    if (!Reaches(ModMethod(g, "Prefix"), "TacticalCommandSync", "BlockAutonomousReaction"))
+                        yield return "L68 reaction-gate-inert: " + g.Name + "'s prefix never asks " +
+                                     "BlockAutonomousReaction, so it blocks nothing";
+                }
+                // THE PREMISE: all four raisers really do enter through those two wrappers. Blocking Activate
+                // instead would not work — it is virtual, and ShootAbility.Activate:165-174 runs its own
+                // PlayAction after the base call.
+                var raisers = new (Type owner, string name)[]
+                {
+                    (typeof(PhoenixPoint.Tactical.Levels.TacticalLevelController), "ReturnFire"),
+                    (typeof(PhoenixPoint.Tactical.Levels.TacticalLevelController), "ExecuteOverwatch"),
+                    (game.GetType("PhoenixPoint.Tactical.Entities.Statuses.TriggerAbilityZoneOfControlStatus"), "ExecuteAbility"),
+                    (game.GetType("PhoenixPoint.Tactical.Entities.Effects.MassShootTargetActorEffect"), "FaceAndShootAtTarget"),
+                };
+                foreach (var r in raisers)
+                {
+                    var owner = r.owner;
+                    if (owner == null) { yield return "L68 reaction-raiser-gone: a raiser type for " + r.name + " no longer exists"; continue; }
+                    // Coroutines: the calls live in the compiler-generated state machine, not in the stub.
+                    bool reaches = owner.GetNestedTypes(AllMembers).Concat(new[] { owner })
+                        .SelectMany(t => t.GetMethods(AllMembers).Cast<MethodBase>())
+                        .Where(m => m.Name.Contains(r.name) || (m.DeclaringType != owner && m.DeclaringType.Name.Contains(r.name)))
+                        .Any(m => Reaches(m, null, "Execute") || Reaches(m, null, "ExecuteAndWait"));
+                    if (!reaches)
+                        yield return "L68 reaction-raiser-drifted: " + owner.Name + "." + r.name + " no longer hands " +
+                                     "its reaction to TacticalAbility.Execute/ExecuteAndWait, so the L83 gate cannot " +
+                                     "see it and that peer will raise its own on top of the host's mirrored one";
+                }
+            }
             if (decide(false, true, true, true) != Multiplayer.Tactical.TacticalCommandSync.RelayLocalAutonomous)
                 yield return "L68 reaction-intended: a CLIENT emits an autonomous reaction as an intent (got '" +
                              decide(false, true, true, true) + "') — the host already fired its own, so the peer's " +
@@ -9118,6 +9171,29 @@ namespace RailCheck
                     yield return "L82 clip-bind-gone: TacActorAnimActions.ActivateShootingClips no longer exists — " +
                                  "the mirror binds the aim clips with it, and an unbound aim state has no animation";
                 else roots.Add(clips);
+                // The FOURTH root, and the same "every game method the mirror half calls has to be inside the
+                // closure" rule that made ActivateShootingClips a root (0a66988). The mirror now TURNS the actor
+                // as well as posing it, and it turns through the game's own ActorComponent.SetForward → the
+                // virtual chain the callvirt actually lands on at runtime (TacticalActor.SetForward:2118 →
+                // TacticalActorBase.SetTransform:665), all three rooted explicitly because an IL walk follows
+                // declared methods, not overrides.
+                foreach (var pair in new[]
+                         {
+                             new { T = "Base.Entities.ActorComponent",                      M = "SetForward",   N = 1 },
+                             new { T = "PhoenixPoint.Tactical.Entities.TacticalActor",      M = "SetForward",   N = 2 },
+                             new { T = "PhoenixPoint.Tactical.Entities.TacticalActorBase",  M = "SetTransform", N = 2 },
+                         })
+                {
+                    var m = (MethodBase)game.GetType(pair.T)?.GetMethods(AllMembers)
+                        .FirstOrDefault(x => x.Name == pair.M && x.GetParameters().Length == pair.N &&
+                                             x.DeclaringType?.FullName == pair.T);
+                    if (m == null)
+                        yield return "L82 facing-primitive-gone: " + pair.T + "." + pair.M + " with " + pair.N +
+                                     " params no longer exists — the mirror faces a soldier at its shared target " +
+                                     "through it, and without a turn the animator integers alone leave every " +
+                                     "target switch after the first invisible";
+                    else roots.Add(m);
+                }
                 var seen = new HashSet<MethodBase>();
                 var queue = new Queue<MethodBase>(roots);
                 var banned = new SortedSet<string>(StringComparer.Ordinal);
@@ -9161,7 +9237,23 @@ namespace RailCheck
                     !Reaches(applyStance, "PathProcessorUtils", "SetNullNavParams"))
                     yield return "L82 mirror-applier-inert: ApplyStance no longer sets AND clears the animator aim " +
                                  "params, so a relayed stance either never arrives or never ends";
+                // MEASURED 2026-08-01: the seam fired for every target switch (host seq=5..10, actor 1 alternating
+                // -39/-95 under TAB) and no mirror turned, because the animator integers carry no direction. The
+                // pose alone is a stance nobody can see change.
+                if (!Reaches(applyStance, null, "SetForward"))
+                    yield return "L82 mirror-applier-faceless: ApplyStance poses the mirrored actor but never turns " +
+                                 "it at the shared target, so only the FIRST aim of a soldier is visible on any " +
+                                 "other peer and every later target switch is a silent no-op";
             }
+            // A stance that could not be applied ON ARRIVAL (the actor was still walking, or had not resolved
+            // yet) is the one case the EMITTER's self-heal cannot cover: it compares against the shared table,
+            // which by then already carries the value, so it goes silent forever. Dropping it there is a
+            // permanent per-peer swallow — the "то целится, то не целится" the user measured.
+            var postfix = aim.GetNestedType("AimStatePatch", AllMembers)?.GetMethod("Postfix", AllMembers);
+            if (postfix == null || !Reaches(postfix, null, "RetryPending"))
+                yield return "L82 mirror-drops-the-stance: the frame sampler does not retry stances that could " +
+                             "not be applied when they arrived — a mirror that was mid-move when the aim landed " +
+                             "never hears about it again, because the emitter is silent once the shared table agrees";
 
             // ── the premise the whole mechanism rests on ───────────────────
             var actor = game.GetType("PhoenixPoint.Tactical.Entities.TacticalActor");

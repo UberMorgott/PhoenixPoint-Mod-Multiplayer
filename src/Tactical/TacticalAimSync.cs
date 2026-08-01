@@ -95,6 +95,15 @@ namespace Multiplayer.Tactical
         // R2: the selection edge that still owes an auto-enter into aim mode. 0 = none.
         private static int _enterAimFor;
         private static TacticalActor _lastSelected;
+        private static int _verifyEnterFor;
+
+        /// <summary>Actor keys whose stance this peer could NOT apply yet (actor not resolvable, no animator,
+        /// still navigating, weapon/target not there). The EMITTER's self-heal cannot cover these: once the
+        /// shared table agrees with the aiming peer's own screen it goes silent forever, so a mirror that
+        /// dropped the message on arrival never hears it again. Retried from the frame postfix until it lands.
+        /// </summary>
+        private static readonly HashSet<int> _pending = new HashSet<int>();
+        private static readonly List<int> _retryScratch = new List<int>();
 
         private static readonly HashSet<string> _loggedFailures = new HashSet<string>();
 
@@ -106,7 +115,10 @@ namespace Multiplayer.Tactical
             _aim.Clear();
             _liveActor = _liveTarget = _reportedActor = _reportedTarget = 0;
             _enterAimFor = 0;
+            _verifyEnterFor = 0;
             _lastSelected = null;
+            _pending.Clear();
+            _retryScratch.Clear();
             _loggedFailures.Clear();
         }
 
@@ -190,6 +202,7 @@ namespace Multiplayer.Tactical
 
                 Sample(__instance, view);
                 Emit();
+                RetryPending();
                 DriveAutoEnter(__instance, view);
             }
         }
@@ -324,42 +337,88 @@ namespace Multiplayer.Tactical
         }
 
         /// <summary>
-        /// THE MIRROR HALF — nine <c>Animator.SetInteger</c> calls and nothing else. See the class comment
-        /// for the proof that this cannot reach a nav traversal.
+        /// THE MIRROR HALF — the animator integers, plus a FACING SNAP, and nothing else. See the class
+        /// comment for the proof that this cannot reach a nav traversal.
+        ///
+        /// FACING IS PART OF THE STANCE, not a cosmetic extra (measured in-game 2026-08-01): the animator
+        /// integers carry NO direction, so a second aim message for a soldier already in the pose changed
+        /// nothing visible. The host emitted seq=5..10 alternating targets -39/-95 for actor 1 while the user
+        /// cycled with TAB, every mirror applied all six, and not one of them turned — so only the FIRST aim
+        /// of a soldier ever looked like it crossed, and every peer still had to re-aim before its shot.
+        /// The turn is <c>ActorComponent.SetForward</c>:280 → <c>SetRotation</c>:294 →
+        /// <c>SetTransform</c>:299, the exact primitive the game's own facing loop drives per frame
+        /// (<c>TacticalNavigationComponent.NoAnimsFace</c>:1046/:1050 — we take the endpoint instead of the
+        /// lerp, because the lerp is a coroutine on the nav component and this arc may not touch it). It is
+        /// nav-free AND event-free at rest: <c>TacticalActorBase.SetTransform</c>:665-684 raises
+        /// <c>TacticalLevel.ActorMoved</c> only inside <c>if (!Utl.Equals(actor.Pos, prevPos))</c>
+        /// (<c>TacticalLevelController</c>:1157-1163) and <c>ActorMovedInNewTile</c> only when the VOXEL
+        /// changes — a rotation-only write changes neither.
         ///
         /// Skipped when this peer is the one holding the stance natively (its own <c>UIStateShoot</c> already
-        /// ran the game's real aim path, and stomping the integers mid-transition would fight it), and while
-        /// the actor is NAVIGATING — a moving soldier's travel params belong to its own movement, and a
-        /// soldier that is moving is not holding an aim stance anyway; the next sample re-asserts it.
+        /// ran the game's real aim path, and stomping the integers mid-transition would fight it). Every
+        /// OTHER reason to skip is TRANSIENT and goes on <see cref="_pending"/> instead of being dropped:
+        /// the emitter's self-heal compares against the SHARED table, which already carries the value, so it
+        /// falls silent the moment the host echoes and a mirror that dropped the message on arrival would
+        /// never hear it again (a soldier still walking when the aim lands is the ordinary case).
         /// </summary>
         private static void ApplyStance(int actorKey, int targetKey)
         {
-            if (actorKey == _liveActor && targetKey == _liveTarget) return;
+            if (actorKey == _liveActor && targetKey == _liveTarget) { _pending.Remove(actorKey); return; }
             string why;
             var actor = TacticalActorKey.Resolve(Tlc(), actorKey, out why) as TacticalActor;
-            if (actor == null)
+            var animator = actor == null ? null : actor.Animator;
+            if (animator == null)
             {
-                if (why != null && _loggedFailures.Add(why))
+                if (actor == null && why != null && _loggedFailures.Add(why))
                     Debug.LogWarning("[Multiplayer][tac] aim stance for actor key " + actorKey +
-                                     " not applied: " + why);
+                                     " not applied yet: " + why);
+                // A stance we cannot clear on an actor that is not there is moot; a stance we cannot SET is
+                // owed to that actor the moment it exists.
+                if (targetKey == 0) _pending.Remove(actorKey); else _pending.Add(actorKey);
                 return;
             }
-            var animator = actor.Animator;
-            if (animator == null) return;
             var nav = actor.TacticalNav;
-            if (nav != null && nav.IsNavigating) return;
+            if (nav != null && nav.IsNavigating) { _pending.Add(actorKey); return; }
 
-            if (targetKey == 0) { PathProcessorUtils.SetNullNavParams(animator); return; }
+            if (targetKey == 0)
+            {
+                PathProcessorUtils.SetNullNavParams(animator);
+                _pending.Remove(actorKey);
+                return;
+            }
 
             // Bind the aim clips exactly as the game does one line before it sets these same params
             // (FireWeaponAtTargetCrt:1566 → :1651). Without the override the aim state has no clip.
+            var target = TacticalActorKey.Resolve(Tlc(), targetKey, out why);
             var weapon = actor.Equipments == null ? null : actor.Equipments.SelectedWeapon;
             var anims = actor.ActorAnimActions;
-            if (weapon == null || anims == null) return;
+            if (target == null || weapon == null || anims == null) { _pending.Add(actorKey); return; }
             var shootAnim = anims.ActivateShootingClips(weapon);
-            // The game's own test for "this weapon can aim at all" (GetAimOrPeekPathPoints:549).
-            if (shootAnim == null || shootAnim.Aim == null || !shootAnim.Aim.HasAllAnimations) return;
+            // The game's own test for "this weapon can aim at all" (GetAimOrPeekPathPoints:549). A weapon
+            // with no aim animation is a settled answer, not a transient one — nothing to retry.
+            if (shootAnim == null || shootAnim.Aim == null || !shootAnim.Aim.HasAllAnimations)
+            {
+                _pending.Remove(actorKey);
+                return;
+            }
             PathProcessorUtils.SetAimParams(animator, AimSegmentType.AimLoop);
+
+            // Flattened like the game's own aim facing (IdleAbility:208 passes ignoreY:true, and
+            // NoAnimsFace zeroes y on the same vector); the up axis stays the actor's own.
+            var dir = target.Pos - actor.Pos;
+            dir.y = 0f;
+            if (dir.sqrMagnitude > 0.0001f) actor.SetForward(dir.normalized);
+            _pending.Remove(actorKey);
+        }
+
+        /// <summary>Re-applies the stances that could not land when they arrived. Bounded by the number of
+        /// soldiers actually aiming, cleared per battle, and silent when empty.</summary>
+        private static void RetryPending()
+        {
+            if (_pending.Count == 0) return;
+            _retryScratch.Clear();
+            _retryScratch.AddRange(_pending);
+            foreach (var key in _retryScratch) ApplyStance(key, Shared(key));
         }
 
         // ─── R2: a peer switching to the soldier lands IN aim mode ─────────
@@ -375,6 +434,21 @@ namespace Multiplayer.Tactical
         /// </summary>
         private static void DriveAutoEnter(TacticalViewState state, PhoenixPoint.Tactical.View.TacticalView view)
         {
+            // ActivateAttackAbilityState:1466-1502 has THREE silent early-returns (no default shoot ability,
+            // an equipment-group weapon, a disabled ability, no valid target) and swallows all of them. One
+            // frame later the top state tells us whether it actually pushed aim — this repo's dominant bug
+            // shape is a seam that "fired" and changed nothing.
+            if (_verifyEnterFor != 0)
+            {
+                if (!(state is UIStateShoot))
+                    Debug.LogWarning("[Multiplayer][tac] shared aim mode did NOT open for actor " + _verifyEnterFor +
+                                     ": the game's ActivateAttackAbilityState refused it (no default shoot " +
+                                     "ability for the selected weapon, the ability is disabled, or the shared " +
+                                     "target is not a valid target on this peer). Top state is " +
+                                     (state == null ? "<none>" : state.GetType().Name));
+                _verifyEnterFor = 0;
+            }
+
             var sel = view.SelectedActor;
             if (!ReferenceEquals(sel, _lastSelected))
             {
@@ -415,7 +489,8 @@ namespace Multiplayer.Tactical
             try
             {
                 _activateAttack.Invoke(state, new object[] { false, target });
-                Debug.Log("[Multiplayer][tac] entered SHARED aim mode for actor " + actorKey +
+                _verifyEnterFor = actorKey;
+                Debug.Log("[Multiplayer][tac] entering SHARED aim mode for actor " + actorKey +
                           " -> " + targetKey + " on selection");
             }
             catch (Exception ex)
