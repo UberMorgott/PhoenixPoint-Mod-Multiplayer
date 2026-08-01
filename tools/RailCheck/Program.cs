@@ -6141,6 +6141,93 @@ namespace RailCheck
                 yield return "L64 outcome-gate-open: the GeoMission.Complete gate does not consult " +
                              "IntentRail.ShouldRunNative — the client applies the result its own unreplicated actors " +
                              "produced instead of mirroring the host's";
+
+            // (g) PEER AUTONOMY over the mission end. (a)-(f) get every peer OUT of the battle once the HOST
+            // clicks Continue; nothing here made the host's click optional. Un-clicked, GeoMission.Complete
+            // never runs, the host never leaves the tactical level, DiffEngine.HostTick finds no
+            // GeoLevelController and EVERY peer's rail goes silent — one idle human ends the session. The way
+            // out is a client-originated leave on the existing 0x81 family whose HOST-SIDE half runs the
+            // host's own native TacticalView.GoToGeoscape.
+            var leaveCapture = mod.GetType("Multiplayer.Tactical.TacLeaveBattleCapture");
+            var leaveHandler = ModMethod(sync, "HandleLeaveBattle");
+            var leaveLocal = ModMethod(sync, "OnLocalLeaveBattle");
+            var leaveFunnel = HarmonyLib.AccessTools.Method(
+                typeof(PhoenixPoint.Tactical.View.TacticalView), "GoToGeoscape");
+            if (leaveFunnel == null)
+                yield return "L64 leave-funnel-gone: TacticalView.GoToGeoscape no longer resolves — the door a " +
+                             "finished battle leaves by (GetLevelFinishedViewState:1109 → UIStateBattleSummary:46) " +
+                             "is gone, and both halves of the leave family point at nothing";
+            if (leaveCapture == null || leaveHandler == null || leaveLocal == null)
+                yield return "L64 leave-seam-missing: TacLeaveBattleCapture / HandleLeaveBattle / " +
+                             "OnLocalLeaveBattle no longer exist — only a human ON THE HOST can end a finished " +
+                             "battle, and an AFK host silences every peer's rail for the rest of the session";
+            else
+            {
+                if (leaveFunnel != null && !OurPrefixTargets().Contains(leaveFunnel.MetadataToken))
+                    yield return "L64 leave-uncaptured: no prefix of ours binds TacticalView.GoToGeoscape — a " +
+                                 "remaining peer's Continue click never becomes an intent and dies on its own screen";
+                var leavePrefix = ModMethod(leaveCapture, "Prefix");
+                if (!Reaches(leavePrefix, "TacticalTurnSync", "OnLocalLeaveBattle"))
+                    yield return "L64 leave-capture-mute: the GoToGeoscape prefix does not reach OnLocalLeaveBattle " +
+                                 "— the seam binds and does nothing, which is this repo's dominant failure shape";
+                if ((leavePrefix as MethodInfo)?.ReturnType == typeof(bool))
+                    yield return "L64 leave-capture-blocks: the GoToGeoscape prefix returns bool. Leaving one's OWN " +
+                                 "finished battle is presentation (the campaign write is already gated at " +
+                                 "GeoMission.Complete) — blocking it strands the clicking peer in the summary";
+                if (!Reaches(leaveLocal, "IntentRail", "ShouldRunNative"))
+                    yield return "L64 leave-echoes: OnLocalLeaveBattle does not ask ShouldRunNative — the host would " +
+                                 "send itself the intent its own click already ran, and a client leaving from inside " +
+                                 "an apply would echo (law 8)";
+                if (!Reaches(leaveLocal, "IntentRail", "Send"))
+                    yield return "L64 leave-unsent: OnLocalLeaveBattle never reaches IntentRail.Send — the click " +
+                                 "stays local and the host is still the only peer that can end the battle";
+                // EXECUTED, not read off the IL: the op table is built by a collection initializer, and what
+                // matters is the byte the dispatch will look up — not that some ldftn names the handler.
+                Multiplayer.Tactical.TacticalTurnSync.RegisterIntents();
+                var families = typeof(Multiplayer.Network.Sync.IntentRail)
+                    .GetField("_families", AllMembers)?.GetValue(null) as System.Collections.IDictionary;
+                var family = families == null ? null : families[Multiplayer.Network.Sync.SurfaceIds.TacTurnIntent];
+                var opTable = family?.GetType().GetField("Ops", AllMembers)?.GetValue(family)
+                              as System.Collections.IDictionary;
+                if (opTable == null)
+                    yield return "L64 leave-registry-unreadable: IntentRail's op table for 0x81 could not be read " +
+                                 "after RegisterIntents, so the registration arm checked nothing";
+                else if (!opTable.Contains(Multiplayer.Tactical.TacticalTurnSync.OpLeaveBattle))
+                    yield return "L64 leave-unregistered: the 0x81 op table does not carry op " +
+                                 Multiplayer.Tactical.TacticalTurnSync.OpLeaveBattle + " — every leave intent lands " +
+                                 "on IntentRail's unknown-op reject instead of ending the battle";
+                if (!Reaches(leaveHandler, "TacticalTurnSync", "ValidateLeave"))
+                    yield return "L64 leave-unvalidated: HandleLeaveBattle does not call ValidateLeave — the host " +
+                                 "would leave on a peer's say-so, which is a trust-the-sender path";
+                if (!Reaches(leaveHandler, "IntentRail", "Reject"))
+                    yield return "L64 leave-silent-refusal: HandleLeaveBattle never reaches IntentRail.Reject — a " +
+                                 "peer asking to end a battle that is still running is refused with no reason at all";
+                // The host must run the GAME'S OWN exit, and that method is private: a reflection handle that
+                // silently stopped resolving would leave the whole family compiling, registering and logging
+                // "accepted" while nothing ever happens.
+                var handle = sync.GetField("GoToGeoscapeMethod", AllMembers)?.GetValue(null) as MethodBase;
+                if (leaveFunnel != null && (handle == null || handle.MetadataToken != leaveFunnel.MetadataToken))
+                    yield return "L64 leave-not-native: TacticalTurnSync's GoToGeoscape handle does not resolve to " +
+                                 "TacticalView.GoToGeoscape (got " + (handle == null ? "<null>" : handle.Name) +
+                                 ") — an accepted leave runs nothing and the host stays in the battle";
+            }
+
+            // the leave ARBITER, executed — an unrun validator is a comment (same posture as L63's)
+            if (Multiplayer.Tactical.TacticalTurnSync.ValidateLeave(true, true, false, false) != null)
+                yield return "L64 leave-refuses-the-legal-case: the host refuses to leave a FINISHED, non-final " +
+                             "battle it has not already left — no remaining peer could ever end a mission";
+            if (Multiplayer.Tactical.TacticalTurnSync.ValidateLeave(true, false, false, false) == null)
+                yield return "L64 leave-abandons-a-live-battle: the host accepts a leave while the battle is still " +
+                             "being fought — a peer could FinishLevel out of a mission nobody has won or lost";
+            if (Multiplayer.Tactical.TacticalTurnSync.ValidateLeave(false, true, false, false) == null)
+                yield return "L64 leave-without-a-level: the host accepts a leave while it holds no tactical level " +
+                             "at all, so GoToGeoscape would be invoked on a null view";
+            if (Multiplayer.Tactical.TacticalTurnSync.ValidateLeave(true, true, true, false) == null)
+                yield return "L64 leave-skips-the-game-summary: the host accepts a leave on the FINAL mission, whose " +
+                             "native exit is GoToGameSummary (GetLevelFinishedViewState:1093-1099), not the geoscape";
+            if (Multiplayer.Tactical.TacticalTurnSync.ValidateLeave(true, true, false, true) == null)
+                yield return "L64 leave-double-completes: the host accepts a SECOND leave while already leaving — " +
+                             "two peers clicking Continue would run FinishLevel, and so GeoMission.Complete, twice";
         }
 
         /// <summary>L65 — THE PER-SOLDIER COMMAND SEAM IS GENERIC, ARBITRATED AND CONTAINED (tactical arc A3a).

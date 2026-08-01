@@ -61,6 +61,7 @@ namespace Multiplayer.Tactical
         private const byte OpTurn = 1;
         private const byte OpEnd = 2;
         internal const byte OpEndTurn = 1;
+        internal const byte OpLeaveBattle = 2;
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
 
@@ -82,12 +83,17 @@ namespace Multiplayer.Tactical
             HostFactionGuid = null;
             HostTurnNumber = 0;
             HostMissionOver = false;
+            LeftBattle = false;
             ClientMissionStartHints.Reset();   // the next battle gets its own mission-start replay
         }
 
         internal static void RegisterIntents()
         {
-            var ops = new Dictionary<byte, IntentRail.OpHandler> { [OpEndTurn] = HandleEndTurn };
+            var ops = new Dictionary<byte, IntentRail.OpHandler>
+            {
+                [OpEndTurn] = HandleEndTurn,
+                [OpLeaveBattle] = HandleLeaveBattle,
+            };
             IntentRail.Register(SurfaceIds.TacTurnIntent, "tac-turn", ops);
         }
 
@@ -334,6 +340,120 @@ namespace Multiplayer.Tactical
             Debug.Log("[Multiplayer][tac] HOST end-turn intent from peer=" + senderPeerId + " ACCEPTED for '" +
                       Name(cur) + "' turn " + cur.TurnNumber);
         }
+
+        // ─── THE LEAVE-BATTLE INTENT: peer autonomy over the mission END ────
+
+        /// <summary>The host's OWN <c>TacticalView.GoToGeoscape</c> — the callback the Continue button on the
+        /// battle summary invokes (<c>GetLevelFinishedViewState</c>:1109 hands it to
+        /// <c>UIStateBattleSummary</c>, whose <c>ExitTactical</c>:46-49 is what the button runs). It is
+        /// private, which is the only reason <c>AccessTools</c> appears here; everything else is public.</summary>
+        private static readonly System.Reflection.MethodInfo GoToGeoscapeMethod =
+            AccessTools.Method(typeof(PhoenixPoint.Tactical.View.TacticalView), "GoToGeoscape");
+
+        /// <summary>This peer has already started leaving the battle. On the HOST it is the idempotence guard
+        /// (law 7): <c>GoToGeoscape</c> → <c>FinishLevel</c> is what eventually reaches
+        /// <c>GeoLevelController</c>'s <c>_missionToComplete.Complete()</c>, so two peers both clicking
+        /// Continue must not run it twice. Per-BATTLE — dropped by <see cref="Reset"/> at teardown, after
+        /// which <see cref="Tlc"/> is null and the validator refuses on that instead.</summary>
+        internal static bool LeftBattle;
+
+        /// <summary>May a remaining peer's Continue click end the battle FOR THE HOST? PURE — plain facts off
+        /// the HOST's own level only (law 3), so the arbitration is falsifiable headless (RailCheck L64):
+        /// "any peer may end any battle" is the same hole the turn arbiter above exists to close.
+        /// null = accept, otherwise the human reason.</summary>
+        internal static string ValidateLeave(bool hasLevel, bool isGameOver, bool isFinalMission, bool alreadyLeaving)
+        {
+            if (!hasLevel)
+                return "this host holds no tactical level — the battle was already left";
+            if (alreadyLeaving)
+                return "this host is already leaving the battle — a second FinishLevel would apply the mission " +
+                       "outcome twice";
+            if (!isGameOver)
+                return "the battle is NOT over on the host — leaving now would abandon a mission that is still " +
+                       "being fought and complete it on an outcome nobody reached";
+            if (isFinalMission)
+                return "the FINAL mission exits into the game summary, not the geoscape " +
+                       "(TacticalView.GetLevelFinishedViewState:1093-1099 branches to GoToGameSummary) — " +
+                       "GoToGeoscape would finish the level with the wrong result";
+            return null;
+        }
+
+        private static void HandleLeaveBattle(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
+        {
+            var tlc = Tlc();
+            bool over = tlc != null && tlc.IsGameOver;
+            string why = ValidateLeave(tlc != null, over,
+                                       tlc != null && tlc.TacMission != null && tlc.TacMission.IsFinalMission,
+                                       LeftBattle);
+            if (why != null)
+            {
+                // A LIVE, UNFINISHED battle is the ONE arm where the sender ran ahead of host state, and only
+                // that is worth a reject + its forced re-emit. "No level any more" and "already leaving" are
+                // the ORDINARY race of every peer clicking Continue at its own pace — rejecting those would
+                // fire a full-graph resend on the exact frame the host is loading its geoscape.
+                if (tlc != null && !over) IntentRail.Reject(SurfaceIds.TacTurnIntent, senderPeerId, why);
+                else Debug.Log("[Multiplayer][tac] leave-battle from peer=" + senderPeerId + " nonce=" + nonce +
+                               " did NOT apply — " + why);
+                return;
+            }
+            if (GoToGeoscapeMethod == null)
+            {
+                Debug.LogError("[Multiplayer][tac] leave-battle from peer=" + senderPeerId + " CANNOT run — " +
+                               "TacticalView.GoToGeoscape did not resolve, so an idle host still holds every peer " +
+                               "in a finished battle and the whole session's rail stays silent.");
+                return;
+            }
+            // The host executes the native exit ITSELF and stays the sole authority for the outcome (law 3 /
+            // law 5): GoToGeoscape builds the TacticalGameResult from the HOST's own actors and FinishLevel
+            // carries it into GeoMission.Complete. The client contributed the ask, nothing else — its own
+            // local Complete is still blocked by ClientMissionResultGate.
+            GoToGeoscapeMethod.Invoke(tlc.View, null);
+            Debug.Log("[Multiplayer][tac] HOST leave-battle intent from peer=" + senderPeerId + " nonce=" + nonce +
+                      " ACCEPTED — running the host's own GoToGeoscape → FinishLevel → geoscape.");
+        }
+
+        /// <summary>Every peer's Continue click, on the one native funnel the button reaches. NON-BLOCKING on
+        /// purpose: leaving one's OWN finished battle is presentation plus a local geoscape load, and the
+        /// campaign write it would otherwise cause is already gated (<see cref="ClientMissionResultGate"/>) —
+        /// the block-first law governs STATE mutations and there is none here. What crosses is the ASK.</summary>
+        internal static void OnLocalLeaveBattle()
+        {
+            LeftBattle = true;
+            if (IntentRail.ShouldRunNative()) return; // host, solo, or inside an apply: nobody to ask
+            IntentRail.Send(SurfaceIds.TacTurnIntent, OpLeaveBattle, "leave battle");
+        }
+    }
+
+    /// <summary>
+    /// PEER AUTONOMY OVER THE MISSION END (user mandate: "if the host is AFK for an hour the remaining players
+    /// must still do EVERYTHING; if one player is left, they can play for everyone").
+    ///
+    /// THE BLOCK, from the game's own code. A finished battle leaves the tactical level through exactly one
+    /// door: <c>TacticalView.GetLevelFinishedViewState</c>:1109 hands <c>GoToGeoscape</c> to
+    /// <c>UIStateBattleSummary</c>, whose Continue button runs it (:46-49) → <c>PhoenixGame.FinishLevel</c>:262
+    /// → the geoscape load → <c>GeoLevelController</c>:703 <c>_missionToComplete.Complete()</c>. Un-clicked ON
+    /// THE HOST, none of that happens: the outcome is never applied and the host stays inside the tactical
+    /// level, so <c>DiffEngine.HostTick</c> finds no <c>GeoLevelController</c> and EVERY peer's rail goes
+    /// silent. One idle human ends the session for everyone — the same failure shape
+    /// <see cref="Multiplayer.Network.Sync.WindowQueueSync"/> closed for the geoscape window queue, one level up.
+    ///
+    /// THE SEAM IS THAT SAME DOOR, on every peer, as a NON-BLOCKING prefix (law 4a intent capture): the
+    /// clicking peer keeps leaving its own level natively — that is presentation, and its
+    /// <c>GeoMission.Complete</c> is already gated — while the ask crosses as op 2 on the EXISTING 0x81
+    /// tactical intent family. No new surface: this is the same client→host tactical family the end-turn
+    /// intent rides, and it is the same question one step further on ("I am done with this turn" → "we are
+    /// done with this battle").
+    ///
+    /// THE HOST RUNS THE NATIVE PATH ITSELF and stays the ONE authority for the outcome (law 5): it invokes
+    /// its OWN <c>GoToGeoscape</c>, which reads the host's own <c>ViewerFaction</c> and
+    /// <c>TacticalLevel.GetMissionResult()</c>. Nothing about the result crosses the wire in either direction;
+    /// its geoscape consequences reach the clients as ordinary value-rail state, exactly as they do when the
+    /// host clicks the button itself. That normal case is untouched — the prefix only records and returns.
+    /// </summary>
+    [HarmonyPatch(typeof(PhoenixPoint.Tactical.View.TacticalView), "GoToGeoscape")]
+    internal static class TacLeaveBattleCapture
+    {
+        private static void Prefix() => TacticalTurnSync.OnLocalLeaveBattle();
     }
 
     /// <summary>
