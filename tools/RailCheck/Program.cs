@@ -134,6 +134,7 @@ namespace RailCheck
             laws.AddRange(CameraOwnershipLaw());
             laws.AddRange(TacticalPayloadUseLaw(game));
             laws.AddRange(TacticalFunnelLaw(game));
+            laws.AddRange(SharedAimLaw(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -9023,6 +9024,181 @@ namespace RailCheck
                         if (seen.Add(nm)) queue.Enqueue(nm);
                 }
             }
+        }
+
+        /// <summary>L82 — THE SHARED AIM STANCE POSES A MIRROR, IT NEVER MOVES ONE (tactical arc A8, rebuilt).
+        /// Three arms, and the first is the one that got A8's first attempt reverted a build after it shipped.
+        ///
+        /// • NO NAV. 3071859 relayed the stance through <c>IdleAbility.ForceRefresh</c>, whose consumption
+        ///   path (<c>IdleAction</c>:275-290 → <c>RefreshIdle</c>:324 → <c>DoAimOrPeek</c>:166 →
+        ///   <c>TacticalNav.ExecutePoints</c>:185) is a NAV TRAVERSAL, so a relayed aim MOVED mirrored
+        ///   soldiers — a jetpacked one re-flew. The rebuilt mechanism writes the animator integers directly
+        ///   (<c>PathProcessorUtils.SetAimParams</c> / <c>SetNullNavParams</c>), and this arm walks the
+        ///   TRANSITIVE closure of those two inside Assembly-CSharp to prove the closure contains nothing that
+        ///   can navigate. It is a real proof, not a comment: the closure is tiny and closed
+        ///   (<c>SetParams</c>'s whole body is a loop of <c>Animator.SetInteger</c>), so a future game patch
+        ///   that routes it through anything else turns this red instead of shipping the flight again.
+        ///   The mirror applier is checked the same way at one level: it must not call <c>IdleAbility</c>.
+        ///
+        /// • THE PREMISE. <c>TacticalActor.CurrentlyAiming</c> is the whole reason the mechanism works —
+        ///   <c>FireWeaponAtTargetCrt</c>:1645 skips the aim-in block when it is true. It reads ANIMATOR
+        ///   PARAMETERS (<c>Animator.GetInteger</c>) and nothing else. If the game ever backs it with a model
+        ///   field instead, setting the integers stops meaning anything and the desync returns silently.
+        ///
+        /// • THE ARBITER. <see cref="Multiplayer.Tactical.TacticalAimSync.Decide"/> executed on the five cases
+        ///   that matter, because A8's first dedup failed in BOTH directions at once (2-3 messages per repaint
+        ///   AND genuine changes swallowed so a third peer never learned). Falsify by deleting either
+        ///   suppression arm or either emission arm.</summary>
+        private static IEnumerable<string> SharedAimLaw(Assembly game)
+        {
+            var aim = typeof(Multiplayer.Tactical.TacticalAimSync);
+
+            // ── the arbiter, on the five cases ─────────────────────────────
+            // (liveActor, liveTarget, reportedActor, reportedTarget, sharedForReported, sharedForLive)
+            //  → expected (clear, assert), and WHY each one is load-bearing.
+            var cases = new[]
+            {
+                new { L = 7, T = 20, RA = 0,  RT = 0,  SR = 0,  SL = 0,  C = false, A = true,
+                      Why = "a FRESH aim was not announced — no peer would ever learn a soldier is aiming" },
+                new { L = 7, T = 20, RA = 7,  RT = 20, SR = 20, SL = 20, C = false, A = false,
+                      Why = "a stance that is ALREADY the shared value was re-announced — this is the arm that " +
+                            "makes a peer sitting in aim mode cost zero wire, and without it every frame emits" },
+                new { L = 7, T = 21, RA = 7,  RT = 20, SR = 20, SL = 20, C = false, A = true,
+                      Why = "a GENUINE target change (20→21) was swallowed — the exact second failure mode of " +
+                            "3071859, where a suppressed change was never re-derivable and a third peer never " +
+                            "learned about it" },
+                new { L = 7, T = 20, RA = 7,  RT = 20, SR = 0,  SL = 0,  C = false, A = true,
+                      Why = "the shared value was CLEARED by another peer while this one still holds the stance " +
+                            "and it did not re-assert — the self-heal that makes a swallowed message impossible " +
+                            "to lose permanently" },
+                new { L = 7, T = 20, RA = 7,  RT = 20, SR = 20, SL = 22, C = false, A = false,
+                      Why = "this peer CONTESTED a different, newer target another peer wrote — two peers aiming " +
+                            "one soldier at two enemies is ordinary under the no-ownership shared battle, and " +
+                            "re-asserting over it is an unbounded ping-pong storm" },
+                new { L = 0, T = 0,  RA = 7,  RT = 20, SR = 20, SL = 0,  C = true,  A = false,
+                      Why = "a peer that LEFT aim did not drop the stance it announced — the soldier would hold " +
+                            "an aim nobody is aiming for the rest of the battle" },
+                new { L = 0, T = 0,  RA = 7,  RT = 20, SR = 22, SL = 0,  C = false, A = false,
+                      Why = "a peer leaving aim cancelled a stance a NEWER writer owns — merely visiting a " +
+                            "soldier would end another peer's live aim on the way out" },
+            };
+            var decide = aim.GetMethod("Decide", AllMembers);
+            if (decide == null)
+                yield return "L82 arbiter-gone: TacticalAimSync.Decide no longer exists, so last-writer-wins is " +
+                             "decided by nothing this harness can execute";
+            else
+                foreach (var c in cases)
+                {
+                    var args = new object[] { c.L, c.T, c.RA, c.RT, c.SR, c.SL, false, false };
+                    decide.Invoke(null, args);
+                    if ((bool)args[6] != c.C || (bool)args[7] != c.A)
+                        yield return "L82 arbiter-wrong: " + c.Why;
+                }
+
+            // ── the no-nav proof ───────────────────────────────────────────
+            var ppu = game.GetType("PhoenixPoint.Tactical.Levels.PathProcessors.PathProcessorUtils");
+            if (ppu == null)
+                yield return "L82 pose-primitive-gone: PathProcessorUtils no longer exists — the nav-free aim " +
+                             "entry the mirror uses is the game's own, and it is gone";
+            else
+            {
+                var roots = new[] { "SetAimParams", "SetNullNavParams" }
+                    .Select(n => (MethodBase)ppu.GetMethod(n, AllMembers)).Where(m => m != null).ToList();
+                if (roots.Count != 2)
+                    yield return "L82 pose-primitive-signature: PathProcessorUtils no longer declares both " +
+                                 "SetAimParams and SetNullNavParams — the mirror's on/off pair is not there";
+                var seen = new HashSet<MethodBase>();
+                var queue = new Queue<MethodBase>(roots);
+                var banned = new SortedSet<string>(StringComparer.Ordinal);
+                while (queue.Count > 0)
+                {
+                    var m = queue.Dequeue();
+                    if (!seen.Add(m)) continue;
+                    foreach (var c in CalleeSequence(m))
+                    {
+                        string owner = c.DeclaringType == null ? "" : c.DeclaringType.Name;
+                        if (owner == "TacticalNavigationComponent" || owner == "IdleAbility" ||
+                            owner == "TacticalNav" || c.Name == "ExecutePoints" ||
+                            c.Name == "GetAimOrPeekPathPoints" || c.Name == "NavigateAndWaitUntilFinished")
+                            banned.Add(m.DeclaringType?.Name + "." + m.Name + " → " + owner + "." + c.Name);
+                        // Stay inside the game assembly: Unity's Animator/Array/List internals are not
+                        // reachable code for this question and walking them would never terminate usefully.
+                        if (c.DeclaringType != null && c.DeclaringType.Assembly == game && !c.IsAbstract)
+                            queue.Enqueue(c);
+                    }
+                }
+                foreach (var b in banned)
+                    yield return "L82 pose-can-navigate: the animator-param pose primitive reaches " + b + " — " +
+                                 "that is the nav traversal that made a relayed aim FLY a jetpacked mirror " +
+                                 "(0252247). The stance must pose a mirror, never move one";
+            }
+
+            var applyStance = ModMethod(aim, "ApplyStance");
+            if (applyStance == null)
+                yield return "L82 mirror-applier-gone: TacticalAimSync.ApplyStance no longer exists";
+            else
+            {
+                foreach (var c in CalleeSequence(applyStance)
+                                  .Where(c => c.DeclaringType != null &&
+                                              (c.DeclaringType.Name == "IdleAbility" ||
+                                               c.DeclaringType.Name == "TacticalNavigationComponent"))
+                                  .Select(c => c.DeclaringType.Name + "." + c.Name)
+                                  .Distinct().OrderBy(n => n, StringComparer.Ordinal))
+                    yield return "L82 mirror-applier-navigates: ApplyStance calls " + c + " — the mirror half is " +
+                                 "allowed to write animator integers and nothing else";
+                if (!Reaches(applyStance, "PathProcessorUtils", "SetAimParams") ||
+                    !Reaches(applyStance, "PathProcessorUtils", "SetNullNavParams"))
+                    yield return "L82 mirror-applier-inert: ApplyStance no longer sets AND clears the animator aim " +
+                                 "params, so a relayed stance either never arrives or never ends";
+            }
+
+            // ── the premise the whole mechanism rests on ───────────────────
+            var actor = game.GetType("PhoenixPoint.Tactical.Entities.TacticalActor");
+            var aiming = actor?.GetProperty("CurrentlyAiming", AllMembers)?.GetGetMethod(true);
+            if (aiming == null)
+                yield return "L82 premise-gone: TacticalActor.CurrentlyAiming no longer exists — it is what " +
+                             "FireWeaponAtTargetCrt:1645 branches on, and without it the stance buys nothing";
+            else if (!CalleeSequence(aiming).Any(c => c.Name == "GetInteger"))
+                yield return "L82 premise-changed: TacticalActor.CurrentlyAiming no longer reads animator " +
+                             "integers, so writing them no longer makes a mirror count as aiming and every " +
+                             "mirrored shot silently replays the aim-in animation again";
+
+            // ── wiring and teardown ───────────────────────────────────────
+            var surfaceConsts = typeof(Multiplayer.Network.Sync.SurfaceIds)
+                .GetFields(BindingFlags.Public | BindingFlags.Static)
+                .Where(f => f.IsLiteral && f.FieldType == typeof(byte))
+                .ToDictionary(f => f.Name, f => (byte)f.GetRawConstantValue());
+            foreach (var name in new[] { "TacAim", "TacAimIntent" })
+            {
+                byte id;
+                if (!surfaceConsts.TryGetValue(name, out id))
+                {
+                    yield return "L82 surface-gone: SurfaceIds no longer declares " + name;
+                    continue;
+                }
+                if (id < 0x80 || id > 0x9F)
+                    yield return "L82 surface-out-of-band: " + name + " = 0x" + id.ToString("X2") + " is outside " +
+                                 "the tactical band 0x80-0x9F (law L62 — the tactical hook is consulted FIRST)";
+                foreach (var other in surfaceConsts.Where(kv => kv.Key != name && kv.Value == id)
+                                                   .Select(kv => kv.Key).OrderBy(n => n, StringComparer.Ordinal))
+                    yield return "L82 surface-collides: SurfaceIds." + name + " shares id 0x" + id.ToString("X2") +
+                                 " with " + other + " — SurfaceRouter routes on exactly that byte";
+            }
+            var register = ModMethod(aim, "RegisterIntents");
+            if (register == null || !Reaches(register, "IntentRail", "Register"))
+                yield return "L82 intent-unregistered: the 0x86 aim intent family registers no op table, so a " +
+                             "CLIENT entering aim is rejected as an unknown op and only the host's aim ever shares";
+            var engineType = typeof(Multiplayer.Network.Sync.SyncEngine);
+            bool inboundWired = engineType.GetNestedTypes(AllMembers).Concat(new[] { engineType })
+                .SelectMany(t => t.GetMethods(AllMembers).Cast<MethodBase>().Concat(t.GetConstructors(AllMembers)))
+                .Any(m => CalleeSequence(m).Any(c => c.Name == "HandleInbound" && c.DeclaringType == aim));
+            if (!inboundWired)
+                yield return "L82 inbound-unwired: SyncEngine does not chain TacticalAimSync.HandleInbound into the " +
+                             "tactical inbound hook — every shared stance is dropped on arrival";
+            if (!Reaches(ModMethod(typeof(Multiplayer.Tactical.TacticalTurnSync), "Reset"), "TacticalAimSync", "Reset"))
+                yield return "L82 state-leaks-between-battles: the tactical teardown does not reset the aim family — " +
+                             "actor keys are re-derived per battle, so the carried-over table poses the NEXT " +
+                             "battle's actors from a dead one";
         }
 
         /// <summary>L76b — A TACTICAL MODEL FUNNEL THE UI CAN CLICK MUST BE SEAMED OR DECLARED LOCAL. L42 is
