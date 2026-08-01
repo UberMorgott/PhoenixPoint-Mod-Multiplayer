@@ -560,17 +560,17 @@ namespace Multiplayer.Tactical
     /// <c>DoCameraChase()</c>. TFTV only registers <c>ContextHelpHintDef</c>s on that trigger
     /// (<c>TFTVHints.cs</c>:400-410).
     ///
-    /// ROOT CAUSE — NOT A SIM-GATE OF OURS, AND NOT HOST-ONLY GENERATION. The 2026-08-01 probe on this exact
-    /// method confirmed its hypothesis. The mission-start replay lives in
-    /// <c>TacContextHelpManager.OnStartTurn</c>:244-262 behind <c>nextFaction == _tacLevel.FirstFaction &amp;&amp;
-    /// nextFaction.TurnNumber == 1</c>, and it is the only thing that walks <c>Vision.KnownActors</c>
-    /// re-firing <c>OnActorSeen</c> for everything already visible at deployment. The host crosses that edge
-    /// natively. The client's battle is BUILT FROM THE HOST'S MID-TACTICAL SAVE, captured at
-    /// <c>HasAnyTurnStarted</c> — i.e. AFTER <c>PlayTurnCrt</c>:390-391 already did its unconditional
-    /// <c>TurnNumber = TurnNumber + 1</c> — so the client resumes holding turn 1 and its own first
-    /// <c>PlayTurnCrt</c> makes it 2. The gate is false, the replay never runs, and the pending-hint list is
-    /// NOT part of what crosses either: <c>ContextHelpManager.RecordInstanceData</c>:93-99 serialises only
-    /// <c>_shownHints</c>, never <c>_hintsPendingDisplay</c>.
+    /// THE TURN-EDGE REPLAY (below) IS NECESSARY BUT WAS NOT SUFFICIENT — 2026-08-01, measured. The
+    /// mission-start replay lives in <c>TacContextHelpManager.OnStartTurn</c>:244-262 behind
+    /// <c>nextFaction == _tacLevel.FirstFaction &amp;&amp; nextFaction.TurnNumber == 1</c>, and it is the only
+    /// thing that walks <c>Vision.KnownActors</c> re-firing <c>OnActorSeen</c> for everything already visible
+    /// at deployment. The host crosses that edge natively; the client's battle is BUILT FROM THE HOST'S
+    /// MID-TACTICAL SAVE, captured at <c>HasAnyTurnStarted</c> — i.e. AFTER <c>PlayTurnCrt</c>:390-391 already
+    /// did its unconditional <c>TurnNumber = TurnNumber + 1</c> — so the gate is false and the replay never
+    /// runs. The pending-hint list does not cross either: <c>ContextHelpManager.RecordInstanceData</c>:93-99
+    /// serialises only <c>_shownHints</c>. All of that is true, the postfix shipped, it RAN — and the clients
+    /// still got nothing, because the hint it was replaying DOES NOT EXIST on a client. See
+    /// <see cref="TftvMissionHints"/> for that half; this class only re-fires the trigger.
     ///
     /// THE FIX = RUN THE NATIVE REPLAY THE GATE SKIPPED, once, on the peers the gate skipped it on.
     /// A POSTFIX (law 4c presentation seam), no wire bytes and no surface — hints are per-peer presentation,
@@ -614,6 +614,9 @@ namespace Multiplayer.Tactical
             if (tlc == null || nextFaction.Vision == null) return;
             _replayed = true;
 
+            // A trigger can only register a hint that EXISTS. On a client it does not — rebuild it first.
+            TftvMissionHints.RebuildForThisClient(tlc);
+
             // The native body verbatim (TacContextHelpManager:246-259), minus the turn-number gate this peer
             // can never satisfy. The viewer is the same "first actor of the faction" the game uses — the
             // hints are about what was SEEN, not about who saw it.
@@ -637,6 +640,104 @@ namespace Multiplayer.Tactical
             Debug.Log("[Multiplayer][tac] mission-start context hints replayed for this client over " + seen +
                       " already-visible actor(s) — the host got them at its own turn-1 edge, which a battle " +
                       "resumed from the host's save is always past.");
+        }
+    }
+
+    /// <summary>
+    /// THE ELITE/GANG INTRO PANEL IS HOST-ONLY BECAUSE ITS HINT DEF IS. Measured 2026-08-01: the host's panel
+    /// is the native <c>UIStateTacticalContextHelp</c> showing the hint "Sneaky Monkeys" (host Player.log,
+    /// frame 8235) — a TFTV **runtime-created** <c>ContextHelpHintDef</c>
+    /// (<c>TFTVHints.DynamicallyCreatedHints.CreateNewTacticalHintForHumanEnemies</c>:171-198, trigger
+    /// <c>ActorSeen</c>, conditions = the actor's <c>HumanEnemyFaction_&lt;short&gt;_GameTagDef</c> +
+    /// <c>HumanEnemy_GameTagDef</c>), minted once per mission with a fresh <c>Guid</c>.
+    ///
+    /// A SAVE CARRIES DEF REFERENCES, NOT DEFS. The only thing that mints it is
+    /// <c>TFTVTactical.OnNewTurn(0)</c> → <c>TFTVHumanEnemies.ImplementHumanEnemies</c> (TFTVTactical.cs:505-508),
+    /// and turn-0 is raised from exactly one place: <c>TacticalLevelController.OnLevelStart</c>:674, inside
+    /// <c>if (!IsLoadingSavedGame)</c> (:657). NextTurnCrt's other call (:710) is guarded by
+    /// <c>turn != CurrentFaction.TurnNumber</c> and can never pass 0. A client's battle IS a loaded save, so
+    /// that callback never fires, the def is never created, and no amount of re-firing <c>ActorSeen</c> can
+    /// register a hint that does not exist. That — not the turn-number gate — is why the shipped replay
+    /// changed nothing.
+    ///
+    /// WHY THIS IS A REBUILD AND NOT A RELAY. Everything the panel says already crossed on the save:
+    /// <c>TFTVTactical.RecordTacticalInstanceData</c>:438-439 writes <c>HumanEnemiesAndTactics</c> (the tactic
+    /// roll) and <c>HumanEnemiesGangNames</c>, restored at :300-301. The actors carry their tier/faction tags
+    /// and their rolled names in the save too. So the client holds every input; it is missing only the def
+    /// built from them. We re-run TFTV's own builder rather than re-implementing its strings — and on a client
+    /// that builder mutates NOTHING: every <c>GetGangerReady</c> call in
+    /// <c>AssignHumanEnemiesTags</c>:753-808 is guarded by <c>HasGameTag(humanEnemyTagDef)</c> (the leader by
+    /// <c>HumanEnemyTier1GameTag</c>), all of which arrived set, and <c>RollTactic</c>:404 keeps the host's
+    /// roll because the key is already in the dict. What is left is pure def construction. Law 4c
+    /// (presentation seam), zero wire bytes, no new surface.
+    ///
+    /// THE ONE THING THE SAVE CANNOT REPRODUCE is the gang NAME: <c>GenerateGangName</c>:423 re-seeds
+    /// <c>UnityEngine.Random</c> from <c>Stopwatch.GetTimestamp()</c>, so it is a different name on every peer
+    /// and no shared seed can reach it. The host's names DID cross (<c>HumanEnemiesGangNames</c>), so a
+    /// scoped prefix hands them back in call order and every peer's panel reads identically. The patch is
+    /// installed and removed around the one call — it is never live during normal play, and it is applied
+    /// here rather than through <c>TftvLateBinder</c> because this runs mid-battle, long after TFTV loaded.
+    ///
+    /// No TFTV reference: resolved by reflection, and absent TFTV this is a no-op.
+    /// </summary>
+    internal static class TftvMissionHints
+    {
+        private const string HarmonyId = "Morgott.Multiplayer.tftv-gang-name";
+
+        // Non-null ONLY for the duration of the one ImplementHumanEnemies call below.
+        private static Queue<string> _hostGangNames;
+
+        internal static void RebuildForThisClient(TacticalLevelController tlc)
+        {
+            var humanEnemies = AccessTools.TypeByName("TFTV.TFTVHumanEnemies");
+            if (humanEnemies == null) return; // no TFTV — nothing mints defs mid-mission
+
+            var implement = AccessTools.Method(humanEnemies, "ImplementHumanEnemies",
+                                               new[] { typeof(TacticalLevelController) });
+            var generateName = AccessTools.Method(humanEnemies, "GenerateGangName",
+                                                  new[] { typeof(TacticalFaction) });
+            if (implement == null || generateName == null)
+            {
+                Debug.LogError("[Multiplayer][tac] TFTV is loaded but its human-enemy hint builder did not " +
+                               "resolve (ImplementHumanEnemies/GenerateGangName renamed?) — this peer gets no " +
+                               "gang/elite intro panel at all.");
+                return;
+            }
+
+            var names = AccessTools.Field(humanEnemies, "HumanEnemiesGangNames")?.GetValue(null) as List<string>;
+            _hostGangNames = new Queue<string>(names ?? new List<string>());
+            int carried = _hostGangNames.Count;
+
+            var harmony = new HarmonyLib.Harmony(HarmonyId);
+            try
+            {
+                harmony.Patch(generateName,
+                              prefix: new HarmonyMethod(AccessTools.Method(typeof(TftvMissionHints),
+                                                                          nameof(HostGangName))));
+                implement.Invoke(null, new object[] { tlc });
+                Debug.Log("[Multiplayer][tac] TFTV mission hint def(s) rebuilt on this client from the host's " +
+                          "transferred gang/tactic data (" + carried + " gang name(s) carried) — the intro " +
+                          "panel the host got is now registrable here.");
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multiplayer][tac] TFTV mission hint rebuild FAILED — no gang/elite intro on " +
+                               "this peer: " + e);
+            }
+            finally
+            {
+                harmony.UnpatchAll(HarmonyId);
+                _hostGangNames = null;
+            }
+        }
+
+        // Hands back the host's name instead of re-rolling. Empty queue → native behaviour (a re-roll is
+        // still better than no panel), which is also what every non-client call gets: the queue is null then.
+        private static bool HostGangName(ref string __result)
+        {
+            if (_hostGangNames == null || _hostGangNames.Count == 0) return true;
+            __result = _hostGangNames.Dequeue();
+            return false;
         }
     }
 }
