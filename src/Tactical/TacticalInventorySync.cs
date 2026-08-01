@@ -181,14 +181,23 @@ namespace Multiplayer.Tactical
             return tac == null ? null : tac.Equipments;
         }
 
-        /// <summary>A pile on the ground, addressed the way the GAME addresses it. Returns null when there is no
-        /// such pile here and <paramref name="create"/> is false (a slot that ends EMPTY names a pile only so its
-        /// items can be moved OUT of it — spawning one for that would litter every peer's map with the empty
-        /// container <c>UIStateInventory</c> makes and unmakes on every single inventory open).</summary>
-        private static InventoryComponent GroundContainer(TacticalLevelController tlc, string setGuid, Vector3 pos,
-                                                          bool create)
+        /// <summary>EVERY pile at this address, because <c>(ComponentSetDef guid, Pos)</c> names a SET and not a
+        /// singleton — the game itself puts more than one pile on a tile. <c>UIStateInventory</c>:513-522 spawns a
+        /// fresh container under the primary soldier on EVERY inventory open WITHOUT the find-or-create
+        /// <c>TacticalItem.GetOrCreateItemContainer</c>:676-684 does, so a soldier who opens his kit while standing
+        /// on the pile he dropped last time leaves two; and that same find is skipped outright for a
+        /// <c>TacticalItemDef.IndividualContainerWhenDropped</c> item. Returning only the first was the 2026-08-01
+        /// failure: two slots resolved onto ONE container, its contents were counted twice, and the multiset check
+        /// then refused (or misapplied) every batch made after the first ground drop.
+        ///
+        /// Empty when there is no such pile and <paramref name="create"/> is false — a slot that ends EMPTY names a
+        /// pile only so its items can be moved OUT of it, and spawning one for that would litter every peer's map
+        /// with the container <c>UIStateInventory</c> makes and unmakes on every single inventory open.</summary>
+        private static List<InventoryComponent> GroundPiles(TacticalLevelController tlc, string setGuid, Vector3 pos,
+                                                            bool create)
         {
-            if (tlc == null || tlc.Map == null) return null;
+            var found = new List<InventoryComponent>();
+            if (tlc == null || tlc.Map == null) return found;
             var repo = GameUtl.GameComponent<DefRepository>();
             var setDef = string.IsNullOrEmpty(setGuid) || repo == null ? null : repo.GetDef(setGuid) as ComponentSetDef;
             var containerDef = setDef == null ? null : setDef.Components.OfType<ItemContainerDef>().FirstOrDefault();
@@ -197,12 +206,12 @@ namespace Multiplayer.Tactical
                 SayOnce("ground-def-" + setGuid,
                     "[Multiplayer][tac] the container def '" + setGuid + "' a dropped-item pile is made of does not " +
                     "resolve on this peer, so every item dropped onto bare ground stays in its owner's pack here.");
-                return null;
+                return found;
             }
-            // The game's own lookup, verbatim (TacticalItem.GetOrCreateItemContainer:676-684).
+            // The game's own lookup, verbatim (TacticalItem.GetOrCreateItemContainer:676-684) — but exhaustive.
             foreach (var c in tlc.Map.GetActors<ItemContainer>())
-                if (Utl.Equals(c.Pos, pos) && c.ActorDef == containerDef) return c.Inventory;
-            if (!create) return null;
+                if (Utl.Equals(c.Pos, pos) && c.ActorDef == containerDef) found.Add(c.Inventory);
+            if (found.Count > 0 || !create) return found;
             // ...and the game's own spawn recipe when there is none (:685-690, UIStateInventory:516-521).
             var data = containerDef.CreateInstanceData();
             data.OverrideTransform = true;
@@ -215,10 +224,11 @@ namespace Multiplayer.Tactical
                 SayOnce("ground-spawn-" + setGuid,
                     "[Multiplayer][tac] the game's own spawner returned nothing for a dropped-item pile at " + pos +
                     " — the items the host dropped there stay in their owner's pack on this screen.");
-                return null;
+                return found;
             }
             Debug.Log("[Multiplayer][tac] mirrored a pile of dropped items at " + pos + ".");
-            return spawned.Inventory;
+            found.Add(spawned.Inventory);
+            return found;
         }
 
         /// <summary>The acting peer's half of the same address: an <c>ItemContainer</c> with no shared key is a
@@ -350,37 +360,39 @@ namespace Multiplayer.Tactical
         {
             var tlc = TacticalDamageSync.Tlc();
             var targets = new List<InventoryComponent>(slots.Count);
+            // Every container a slot POOLS from. It is not `targets`: a ground slot pools from all the piles at its
+            // address and adds to the first of them (see GroundPiles).
+            var pooled = new List<InventoryComponent>(slots.Count);
             string firstUnresolved = null;
 
             foreach (var s in slots)
             {
-                InventoryComponent component;
                 if (s.Kind == KindGround)
                 {
                     // An empty ground slot is "take everything OUT of that pile" — it must FIND one, never make one.
-                    component = GroundContainer(tlc, s.SetGuid, s.Pos, create: s.ItemDefs.Count > 0);
-                    if (component == null && firstUnresolved == null && s.ItemDefs.Count > 0)
+                    var piles = GroundPiles(tlc, s.SetGuid, s.Pos, create: s.ItemDefs.Count > 0);
+                    if (piles.Count == 0 && firstUnresolved == null && s.ItemDefs.Count > 0)
                         firstUnresolved = "the pile of dropped items at " + s.Pos +
                                           " (this peer can neither find nor build one)";
+                    targets.Add(piles.Count == 0 ? null : piles[0]);
+                    pooled.AddRange(piles);
+                    continue;
                 }
-                else
-                {
-                    string why;
-                    var actor = TacticalActorKey.Resolve(tlc, s.ActorKey, out why);
-                    component = ContainerOf(actor, s.Kind);
-                    if (component == null && firstUnresolved == null)
-                        firstUnresolved = (s.Kind == KindEquipments ? "the equipment slots" : "the backpack") +
-                                          " of actor " + s.ActorKey + " (" + (actor == null ? why : "that actor has no such container") + ")";
-                }
+                string why;
+                var actor = TacticalActorKey.Resolve(tlc, s.ActorKey, out why);
+                var component = ContainerOf(actor, s.Kind);
+                if (component == null && firstUnresolved == null)
+                    firstUnresolved = (s.Kind == KindEquipments ? "the equipment slots" : "the backpack") +
+                                      " of actor " + s.ActorKey + " (" + (actor == null ? why : "that actor has no such container") + ")";
                 targets.Add(component);
+                if (component != null) pooled.Add(component);
             }
 
             // The pool is every item currently sitting in the named containers, with where it sits now.
             var pool = new List<KeyValuePair<Item, InventoryComponent>>();
             var before = new List<string>();
-            foreach (var c in targets)
+            foreach (var c in pooled)
             {
-                if (c == null) continue;
                 foreach (var item in c.Items)
                 {
                     pool.Add(new KeyValuePair<Item, InventoryComponent>(item, c));
@@ -527,6 +539,23 @@ namespace Multiplayer.Tactical
                 }
                 foreach (var item in q.Items) slot.ItemDefs.Add(DefGuid(item));
                 slots.Add(slot);
+            }
+            // A ground address names EVERY pile at (def, pos), so two queries CAN share one: UIStateInventory:513-522
+            // spawns a second pile under a soldier who opens his kit standing on the one he dropped last time. Two
+            // slots with one address made the receiver resolve both onto its single pile and count its contents
+            // twice, which refused (or silently mis-applied) every batch after the first ground drop — so the
+            // sender merges them into the one container the receiver will see.
+            for (int i = slots.Count - 1; i > 0; i--)
+            {
+                if (slots[i].Kind != KindGround) continue;
+                for (int j = 0; j < i; j++)
+                {
+                    if (slots[j].Kind != KindGround || !string.Equals(slots[j].SetGuid, slots[i].SetGuid, StringComparison.Ordinal) ||
+                        !Utl.Equals(slots[j].Pos, slots[i].Pos)) continue;
+                    slots[j].ItemDefs.AddRange(slots[i].ItemDefs);
+                    slots.RemoveAt(i);
+                    break;
+                }
             }
             if (slots.Count == 0)
             {
