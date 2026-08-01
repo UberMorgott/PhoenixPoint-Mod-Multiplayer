@@ -1,7 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
+using Base.Core;
+using Base.Defs;
+using Base.Entities;
+using Base.Utils.Maths;
 using HarmonyLib;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
@@ -9,6 +14,7 @@ using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.Entities.Abilities;
 using PhoenixPoint.Tactical.Entities.Equipments;
+using PhoenixPoint.Tactical.Levels;
 using UnityEngine;
 
 namespace Multiplayer.Tactical
@@ -60,7 +66,9 @@ namespace Multiplayer.Tactical
     /// only MOVES what is already in the corpse; it never asks what should be in it.
     ///
     /// WHAT THE PAYLOAD IS. Per container: <c>(actorKey, kind)</c> where kind names the actor's own
-    /// <c>Inventory</c> or <c>Equipments</c> — plus the ordered item DEF GUIDS in it. Items carry no shared
+    /// <c>Inventory</c> or <c>Equipments</c>, or <see cref="KindGround"/> — a pile of dropped items, addressed
+    /// by the GAME'S OWN container identity <c>(ComponentSetDef guid, Pos)</c> because such a pile has no actor
+    /// key to carry and never could have one (see the constant) — plus the ordered item DEF GUIDS in it. Items carry no shared
     /// identity (A4 had to solve the same problem for the corpse manifest and reached the same answer), and
     /// they do not need one here: a committed batch only ever MOVES items between the containers it names, so
     /// the multiset of defs across those containers is invariant, and the host CHECKS that invariant before
@@ -79,6 +87,18 @@ namespace Multiplayer.Tactical
 
         private const byte KindInventory = 0;
         private const byte KindEquipments = 1;
+        /// <summary>A6's CLOSED CEILING — a pile of items lying on the ground. It gets a kind of its own rather
+        /// than an actor key because the container has no shared identity to key: it is created LOCALLY, by
+        /// whichever peer's screen dropped into it (<c>UIStateInventory.CreateGroundInventory</c>:513-522, run on
+        /// EVERY inventory open) or by a death every peer mirrors separately (<c>DieAbility.DropItems</c>:181 →
+        /// <c>TacticalItem.Drop</c>:506-537). No host-assigned key could name the one a CLIENT made, and A4's
+        /// spawn record could not either — the client's screen needs the pile the instant it drops, long before
+        /// any host round trip. The address is instead THE GAME'S OWN:
+        /// <c>TacticalItem.GetOrCreateItemContainer</c>:668-690 finds a dropped-item container by
+        /// <c>Utl.Equals(actor.Pos, pos) &amp;&amp; actor.ActorDef == def</c> and spawns one with exactly that
+        /// recipe when there is none. So a pile is named by where it lies and what it is — stable, symmetric,
+        /// nothing to assign and nothing to adopt.</summary>
+        private const byte KindGround = 2;
 
         /// <summary>The acting peer's observed native charge, waiting for the batch it belongs to. Set by the
         /// <see cref="InventoryCostSeam"/> postfix, consumed by the commit. Never a deduction of our own.</summary>
@@ -107,6 +127,10 @@ namespace Multiplayer.Tactical
         {
             internal int ActorKey;
             internal byte Kind;
+            /// <summary><see cref="KindGround"/> only: the container's own <c>ComponentSetDef</c> guid and the
+            /// position it lies at — the game's own container identity, in place of an actor key.</summary>
+            internal string SetGuid;
+            internal Vector3 Pos;
             internal List<string> ItemDefs = new List<string>();
         }
 
@@ -157,6 +181,65 @@ namespace Multiplayer.Tactical
             return tac == null ? null : tac.Equipments;
         }
 
+        /// <summary>A pile on the ground, addressed the way the GAME addresses it. Returns null when there is no
+        /// such pile here and <paramref name="create"/> is false (a slot that ends EMPTY names a pile only so its
+        /// items can be moved OUT of it — spawning one for that would litter every peer's map with the empty
+        /// container <c>UIStateInventory</c> makes and unmakes on every single inventory open).</summary>
+        private static InventoryComponent GroundContainer(TacticalLevelController tlc, string setGuid, Vector3 pos,
+                                                          bool create)
+        {
+            if (tlc == null || tlc.Map == null) return null;
+            var repo = GameUtl.GameComponent<DefRepository>();
+            var setDef = string.IsNullOrEmpty(setGuid) || repo == null ? null : repo.GetDef(setGuid) as ComponentSetDef;
+            var containerDef = setDef == null ? null : setDef.Components.OfType<ItemContainerDef>().FirstOrDefault();
+            if (containerDef == null)
+            {
+                SayOnce("ground-def-" + setGuid,
+                    "[Multiplayer][tac] the container def '" + setGuid + "' a dropped-item pile is made of does not " +
+                    "resolve on this peer, so every item dropped onto bare ground stays in its owner's pack here.");
+                return null;
+            }
+            // The game's own lookup, verbatim (TacticalItem.GetOrCreateItemContainer:676-684).
+            foreach (var c in tlc.Map.GetActors<ItemContainer>())
+                if (Utl.Equals(c.Pos, pos) && c.ActorDef == containerDef) return c.Inventory;
+            if (!create) return null;
+            // ...and the game's own spawn recipe when there is none (:685-690, UIStateInventory:516-521).
+            var data = containerDef.CreateInstanceData();
+            data.OverrideTransform = true;
+            data.Pos = pos;
+            data.Rot = Quaternion.identity;
+            data.Source = setDef;
+            var spawned = ActorSpawner.SpawnActor<ItemContainer>(setDef, data);
+            if (spawned == null)
+            {
+                SayOnce("ground-spawn-" + setGuid,
+                    "[Multiplayer][tac] the game's own spawner returned nothing for a dropped-item pile at " + pos +
+                    " — the items the host dropped there stay in their owner's pack on this screen.");
+                return null;
+            }
+            Debug.Log("[Multiplayer][tac] mirrored a pile of dropped items at " + pos + ".");
+            return spawned.Inventory;
+        }
+
+        /// <summary>The acting peer's half of the same address: an <c>ItemContainer</c> with no shared key is a
+        /// pile somebody dropped, and it is named by its def and its position instead of being dropped from the
+        /// batch (which is what made a ground drop invisible everywhere but the screen that made it).</summary>
+        private static bool GroundSlot(InventoryComponent component, out Slot slot)
+        {
+            slot = null;
+            var container = component == null ? null : component.Actor as ItemContainer;
+            if (container == null || !ReferenceEquals(component, container.Inventory)) return false;
+            var setDef = container.Source as ComponentSetDef;
+            if (setDef == null)
+            {
+                var set = container.GetComponent<ComponentSet>();
+                setDef = set == null ? null : set.SetDef;
+            }
+            if (setDef == null) return false;
+            slot = new Slot { ActorKey = 0, Kind = KindGround, SetGuid = setDef.Guid, Pos = container.Pos };
+            return true;
+        }
+
         // ─── CODEC ─────────────────────────────────────────────────────────
 
         internal static void WriteLayout(BinaryWriter w, List<Slot> slots, int payerKey, float payerAp, bool charged,
@@ -171,6 +254,11 @@ namespace Multiplayer.Tactical
             {
                 w.Write(s.ActorKey);
                 w.Write(s.Kind);
+                if (s.Kind == KindGround)
+                {
+                    w.Write(s.SetGuid ?? "");
+                    w.Write(s.Pos.x); w.Write(s.Pos.y); w.Write(s.Pos.z);
+                }
                 w.Write(s.ItemDefs.Count);
                 foreach (var g in s.ItemDefs) w.Write(g ?? "");
             }
@@ -188,6 +276,11 @@ namespace Multiplayer.Tactical
             for (int i = 0; i < n; i++)
             {
                 var s = new Slot { ActorKey = r.ReadInt32(), Kind = r.ReadByte() };
+                if (s.Kind == KindGround)
+                {
+                    s.SetGuid = r.ReadString();
+                    s.Pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                }
                 int items = r.ReadInt32();
                 for (int j = 0; j < items; j++) s.ItemDefs.Add(r.ReadString());
                 slots.Add(s);
@@ -261,12 +354,24 @@ namespace Multiplayer.Tactical
 
             foreach (var s in slots)
             {
-                string why;
-                var actor = TacticalActorKey.Resolve(tlc, s.ActorKey, out why);
-                var component = ContainerOf(actor, s.Kind);
-                if (component == null && firstUnresolved == null)
-                    firstUnresolved = (s.Kind == KindEquipments ? "the equipment slots" : "the backpack") +
-                                      " of actor " + s.ActorKey + " (" + (actor == null ? why : "that actor has no such container") + ")";
+                InventoryComponent component;
+                if (s.Kind == KindGround)
+                {
+                    // An empty ground slot is "take everything OUT of that pile" — it must FIND one, never make one.
+                    component = GroundContainer(tlc, s.SetGuid, s.Pos, create: s.ItemDefs.Count > 0);
+                    if (component == null && firstUnresolved == null && s.ItemDefs.Count > 0)
+                        firstUnresolved = "the pile of dropped items at " + s.Pos +
+                                          " (this peer can neither find nor build one)";
+                }
+                else
+                {
+                    string why;
+                    var actor = TacticalActorKey.Resolve(tlc, s.ActorKey, out why);
+                    component = ContainerOf(actor, s.Kind);
+                    if (component == null && firstUnresolved == null)
+                        firstUnresolved = (s.Kind == KindEquipments ? "the equipment slots" : "the backpack") +
+                                          " of actor " + s.ActorKey + " (" + (actor == null ? why : "that actor has no such container") + ")";
+                }
                 targets.Add(component);
             }
 
@@ -291,6 +396,10 @@ namespace Multiplayer.Tactical
                                       true, true, false);
             if (refusal != null) return refusal;
 
+            // A pile emptied by these moves destroys ITSELF — ItemContainer.OnItemRemovedFromContainer:93-96 is
+            // the game's own DestroyWhenEmpty rule, and letting it run is what makes a picked-up pile disappear
+            // on every peer with nothing of ours doing the destroying (law L67). An emptied pile is only ever a
+            // SOURCE in this loop, so it is never dereferenced after it goes.
             int moved = 0;
             for (int i = 0; i < slots.Count; i++)
             {
@@ -393,25 +502,29 @@ namespace Multiplayer.Tactical
                 }
                 int key;
                 byte kind;
-                if (!AddressOf(component, out key, out kind))
+                Slot slot;
+                if (AddressOf(component, out key, out kind))
                 {
-                    // THE ARC'S ONE NAMED CEILING. Pre-existing crates and corpses are keyed — ItemContainer IS a
-                    // TacticalActorBase, so TacticalActorKey.BuildBattleKeys gives every one on the map a
-                    // battle-start ordinal. What is NOT keyed is the container the game spawns THE MOMENT you drop
-                    // something onto bare ground (UIStateInventory.CreateGroundInventory:512-521 calls
-                    // ActorSpawner.SpawnActor<ItemContainer>), because A4 replicates mid-battle spawns only for
-                    // TacticalActor. So the batch ships WITHOUT that container and says so — marked PARTIAL, which
-                    // is what stops the host refusing the whole batch for the one item that "vanished" out of it.
+                    slot = new Slot { ActorKey = key, Kind = kind };
+                }
+                else if (GroundSlot(component, out slot))
+                {
+                    // An untouched EMPTY pile is the one UIStateInventory:513-522 spawns on every inventory open
+                    // and destroys again on close. Naming it would make every other peer build the same litter.
+                    if (q.Items.Count == 0 && !q.WillModifyInventory()) continue;
+                }
+                else
+                {
+                    // What is left here is a container that is neither an actor's own two nor a pile on the
+                    // ground — a mount, a mod's, something this arc has not met. It ships PARTIAL, which is what
+                    // stops the host refusing the whole batch for the one item that "vanished" out of it.
                     partial = true;
                     SayOnce("addr-" + TacticalActorLifecycle.SafeName(component),
-                        "[Multiplayer][tac] an inventory container in this batch has NO shared address — almost " +
-                        "always the pile the game just spawned under a soldier who dropped something onto bare " +
-                        "ground, which exists on this peer alone (A6 replicates container CONTENTS, not container " +
-                        "spawns). The rest of the batch still crosses; the dropped item stays in that soldier's " +
-                        "pack on every other screen.");
+                        "[Multiplayer][tac] an inventory container in this batch has NO shared address and is not a " +
+                        "pile on the ground either, so whatever moved through it stays on this peer's screen. The " +
+                        "rest of the batch still crosses.");
                     continue;
                 }
-                var slot = new Slot { ActorKey = key, Kind = kind };
                 foreach (var item in q.Items) slot.ItemDefs.Add(DefGuid(item));
                 slots.Add(slot);
             }
@@ -456,9 +569,9 @@ namespace Multiplayer.Tactical
             var slots = ReadLayout(r, out payerKey, out payerAp, out charged, out partial);
             if (partial)
                 Debug.LogWarning("[Multiplayer][tac] peer=" + senderPeerId + " sent a PARTIAL inventory batch — one of " +
-                                 "its containers has no shared identity (a pile dropped onto bare ground). The " +
-                                 "contents check is skipped for it, so the items it swallowed stay where they are " +
-                                 "on this peer instead of the whole batch being refused.");
+                                 "its containers is neither an actor's own two nor a pile on the ground, so it has no " +
+                                 "shared identity at all. The contents check is skipped, so the items it swallowed " +
+                                 "stay where they are on this peer instead of the whole batch being refused.");
 
             string why;
             var payer = TacticalActorKey.Resolve(TacticalDamageSync.Tlc(), payerKey, out why) as TacticalActor;

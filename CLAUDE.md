@@ -130,9 +130,19 @@ BEHAVIOR (per-subsystem mirroring).
    centre and round-trips through `GetDamageReceiverForHit`'s own inverse — proved numerically, not assumed —
    because one explosion damages many tiles that all share a single `ImpactHit.Point`. FALLS ARE DERIVED:
    `CheckForFallAbilitiesToActivate`:1916-1935 runs per-peer off each peer's `OnMapUpdate`, so
-   `FallNoSupportAbility` stays a declared local by A5's autonomy rule. KNOWN A6 CEILING: dropping onto BARE
-   ground spawns a fresh `ItemContainer` that A4 does not replicate, so such a batch ships marked PARTIAL —
-   the rest crosses and the dropped item stays in that soldier's pack elsewhere, loudly.
+   `FallNoSupportAbility` stays a declared local by A5's autonomy rule. A6's GROUND-DROP CEILING IS CLOSED
+   (law L80): a pile of dropped items gets a THIRD container kind, addressed by the GAME'S OWN container
+   identity `(ComponentSetDef guid, Pos)` — `TacticalItem.GetOrCreateItemContainer`:668-690 finds one by
+   `Utl.Equals(actor.Pos, pos) && actor.ActorDef == def` and spawns it with that exact recipe when there is
+   none, so the mirror re-enters the game's own find-or-create. No actor key could ever have named such a
+   pile: it is created LOCALLY by whichever peer's screen dropped into it
+   (`UIStateInventory.CreateGroundInventory`:513-522, which runs on EVERY inventory open and destroys the
+   empty one again on close) or by a death every peer mirrors separately (`DieAbility.DropItems`:181), so
+   A4's host-assigned key had nothing to assign and the client's screen needs the pile before any host round
+   trip. An untouched EMPTY pile is never named (it would litter every peer with the container the screen
+   makes and unmakes); an emptied one destroys ITSELF through `ItemContainer`:93-96, so nothing in this arc
+   calls `DestroyActor` (RailCheck L67 asserts that mechanically). PARTIAL now means only a container that is
+   neither an actor's own two nor a pile on the ground.
    **A7** (law L76) = THE SECOND TACTICAL FUNNEL + the two item riders, and it takes **no new surface**:
    op 3 on **0x82** / op 4 on **0x83**. Switching a soldier's weapon is NOT an ability, so the A3a prefix on
    `TacticalAbility.Activate` could never see it — the model funnel is `EquipmentComponent.SetSelectedEquipment`:242
