@@ -4260,35 +4260,51 @@ namespace RailCheck
         private static IEnumerable<string> WindowAutonomyLaw()
         {
             // ── (1) the arbiter, EXECUTED on the cases that actually happen ──
-            const string modalState = "PhoenixPoint.Geoscape.View.ViewStates.UIStateGeoModal";
-            const string otherState = "PhoenixPoint.Geoscape.View.ViewStates.UIStateGeoscapeTutorial";
-            int brief = (int)ModalType.GeoHavenAttackBrief, research = (int)ModalType.GeoResearchComplete;
+            // Identities are opaque strings to the arbiter by design (WindowQueueSync.IdentityOf mints them);
+            // what it has to get right is that ONLY a named, byte-identical window advances anything. The
+            // two below differ ONLY in the trailing key — same ModalType, same shape, same faction — which
+            // is exactly the pair the pre-narrowing arbiter could not tell apart.
+            const string research = "GeoResearchComplete|ResearchComplete|PXF|RES_AlienBiology";
+            const string another  = "GeoResearchComplete|ResearchComplete|PXF|RES_MutoidTech";
             byte confirm = (byte)ModalResult.Confirm;
 
-            if (WindowQueueSync.Validate(true, modalState, brief, modalState, brief, confirm) != null)
+            if (WindowQueueSync.Validate(research, research, confirm) != null)
                 yield return "L82 arbiter-refuses-the-legal-case: the host refuses an answer that names the very " +
                              "window it has up, with a real ModalResult — no peer could ever resolve anything and " +
                              "an idle host stops the campaign permanently";
-            if (WindowQueueSync.Validate(true, otherState, WindowQueueSync.NotAModal,
-                                         otherState, WindowQueueSync.NotAModal, WindowQueueSync.ResultNone) != null)
-                yield return "L82 arbiter-refuses-the-plain-dismissal: a non-modal window (cutscene, asset " +
-                             "deployment, replenish) carries no answer BY CONSTRUCTION, so demanding one refuses " +
-                             "exactly the kinds that only ever block";
-            if (WindowQueueSync.Validate(false, "", WindowQueueSync.NotAModal, modalState, brief, confirm) == null)
-                yield return "L82 arbiter-advances-nothing: the host accepts an advance while it has NO window up — " +
-                             "FinishQueriedState then pops a state the queue never pushed";
-            if (WindowQueueSync.Validate(true, otherState, WindowQueueSync.NotAModal, modalState, brief, confirm) == null)
-                yield return "L82 arbiter-ignores-the-type: an answer naming " + modalState + " is accepted while the " +
-                             "host is on " + otherState + " — a peer closing a window of its own then dismisses " +
-                             "whatever the host happens to be looking at";
-            if (WindowQueueSync.Validate(true, modalState, research, modalState, brief, confirm) == null)
-                yield return "L82 arbiter-ignores-the-modal: 43 ModalTypes ride the one UIStateGeoModal, so an " +
-                             "answer matched on the TYPE alone lets a research-complete acknowledgement run the " +
-                             "mission brief's DialogCallback — i.e. Confirm → LaunchMission on a window nobody saw";
-            if (WindowQueueSync.Validate(true, modalState, brief, modalState, brief, WindowQueueSync.ResultNone) == null)
+            if (WindowQueueSync.Validate(research, another, confirm) == null)
+                yield return "L82 arbiter-ignores-the-instance: two windows of the SAME ModalType and the same " +
+                             "data shape but DIFFERENT contents are treated as one. This is the 2026-08-01 " +
+                             "regression verbatim (multiplayer.log 15:17:53): a peer answering its own copy then " +
+                             "dismisses an unrelated window on the host, and for an event picker the host's " +
+                             "ExitState:61-65 answers it with Choices.Last() on its way out";
+            if (WindowQueueSync.Validate(null, research, confirm) == null)
+                yield return "L82 arbiter-advances-nothing: the host accepts an advance while it holds no SHARED " +
+                             "window — FinishDialog then runs a DialogCallback on whatever the host had of its own, " +
+                             "or on nothing at all";
+            if (WindowQueueSync.Validate(research, null, confirm) == null)
+                yield return "L82 arbiter-accepts-the-unnamed: an answer that identifies no window is accepted. " +
+                             "Only a host-RAISED mirrored modal has an identity both peers can agree on; anything " +
+                             "else is a peer's own presentation and must never reach another peer's queue";
+            if (WindowQueueSync.Validate(research, research, WindowQueueSync.ResultNone) == null)
                 yield return "L82 arbiter-answers-blind: a modal is accepted with result=" +
                              WindowQueueSync.ResultNone + ", which is not a ModalResult — the host's own " +
                              "DialogCallback would then branch on an undefined value";
+
+            // ── (1b) IDENTITY: only a window the HOST RAISED to this peer has one ──
+            if (WindowQueueSync.IdentityOf(new object()) != null)
+                yield return "L82 identity-names-a-non-modal: something that is not a UIStateGeoModal was given an " +
+                             "identity. Only the Mirrored modal family is built on this peer out of the host's own " +
+                             "0xB7 payload, so it is the only kind for which 'we are looking at the same window' is " +
+                             "a fact rather than a coincidence of types";
+            if (WindowQueueSync.IdentityOf(new UIStateGeoModal(ModalType.ActivateBase, null, null)) != null)
+                yield return "L82 identity-names-a-local-modal: ActivateBase is declared LocalOnly — the clicking " +
+                             "peer's OWN ability confirmation — and it was given an identity anyway, so closing it " +
+                             "would advance another peer's queue";
+            if (WindowQueueSync.IdentityOf(new UIStateGeoModal(ModalType.GeoPhoenixBaseOutcome, null, null)) == null)
+                yield return "L82 identity-misses-the-mirrored-modal: GeoPhoenixBaseOutcome is declared Mirrored and " +
+                             "raises with null modalData (DataShape.None), and it got NO identity — the one family " +
+                             "this op can legitimately advance would be refused and peer autonomy is dead code";
 
             // ── (2) the seams really are the game's own funnels ─────────────
             var handle = ModMethod(typeof(WindowQueueSync), "HandleAdvance");
@@ -4302,10 +4318,18 @@ namespace RailCheck
                                  "own DialogCallback, so without it a brief's Confirm never becomes LaunchMission and " +
                                  "a soldier-join never becomes reward.Apply; the window would close having decided " +
                                  "nothing";
-                if (!Reaches(handle, "GeoscapeView", "FinishQueriedState"))
-                    yield return "L82 dismissal-unfunnelled: HandleAdvance does not reach " +
-                                 "GeoscapeView.FinishQueriedState:2164 — the non-modal arm (asset deployment, " +
-                                 "cutscene, tutorial, replenish) then has no way to clear the queue slot at all";
+                // FALSIFIED AND INVERTED 2026-08-01: this used to REQUIRE the plain
+                // GeoscapeView.FinishQueriedState arm for non-modal windows, and that arm was the regression.
+                // A non-modal queued window has no per-instance identity on either side — the host's asset
+                // deployment and the client's tutorial are both "not a modal" — so the arm could only ever
+                // match on kind, and a peer closing its own window then dismissed the host's. It is now
+                // forbidden rather than required, and the autonomy it claimed was always vacuous: those
+                // windows are declared Gap/LocalOnly and reach ONE screen, so no peer ever held one to close.
+                if (Reaches(handle, "GeoscapeView", "FinishQueriedState"))
+                    yield return "L82 dismissal-unaddressed: HandleAdvance reaches GeoscapeView" +
+                                 ".FinishQueriedState:2164 — that is the blind arm, which pops whatever the host " +
+                                 "has up without naming a window instance. Only UIStateGeoModal.FinishDialog on an " +
+                                 "identity-matched mirrored modal may advance the host's queue";
             }
             // Law 3: the answer crosses as a byte and the host runs its OWN callback. A handler that reached
             // an authoritative method directly would be the client driving host logic by proxy.
