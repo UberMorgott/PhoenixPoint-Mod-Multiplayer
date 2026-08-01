@@ -1187,41 +1187,62 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
-    /// DIAGNOSTIC ONLY — no fix, by design. The 2026-07-31 live run produced "an empty modal with an OK
-    /// button and no text" on a peer, and the RCA could not name the window because ZERO <c>[MP][modals]</c>
-    /// lines exist for it. <c>UIModuleSiteEncounters.SetClosingEncounter</c> (:324-356) is the outcome page
-    /// and is the prime suspect BY SHAPE: it composes exactly one choice whose text falls back to
-    /// <c>OKTextKey</c> (:345-354) over a body that is <c>closingChoice.Outcome.OutcomeText</c> and, when
-    /// that resolves empty and <c>useEventTexts</c> is false, is NEVER refilled (:332-337) — an OK button
-    /// over nothing. This prefix records the lengths on EVERY peer so the next run identifies it instead of
-    /// guessing. It is a PREFIX (the inputs are what decide the page) and it changes nothing.
+    /// THE EMPTY OK-MODAL, fixed at its source. The 2026-07-31 probe named the window on the 08-01 run:
+    /// <c>event='PROG_AN2_MISS' useEventTexts=False outcomeLen=0 descrFallbackLen=325</c> — a page with a
+    /// body of nothing and an OK button, exactly the shape the user reported.
+    /// <c>UIModuleSiteEncounters.SetClosingEncounter</c> (:324-356) builds the body from
+    /// <c>closingChoice.Outcome.OutcomeText</c> (:332) and refills it from the event description ONLY when
+    /// <c>useEventTexts</c> is true (:333-336). A REPLAYED event — one whose answer belongs to another peer
+    /// (<c>ReplayClosingPage</c> invokes it with <c>useEventTexts: false</c>) — therefore renders empty
+    /// whenever that choice's outcome carries no text of its own, which is the ordinary case for a choice
+    /// whose payload is mechanical rather than narrative.
+    ///
+    /// The fix runs the game's OWN :335 fallback for that case, and does it by substituting the parameter
+    /// rather than by forcing <c>useEventTexts</c> true: that flag ALSO swaps the button caption from
+    /// <c>OKTextKey</c> to <c>closingChoice.Text</c> (:345), which would relabel the button with the choice
+    /// the player never picked. Past :332 the native body reads <c>closingChoice</c> only at :345, and only
+    /// under the flag we are not setting — so a minimal clone is sufficient and touches nothing else. The
+    /// clone is mandatory: <c>Outcome.OutcomeText</c> belongs to the DEF, and writing through it would
+    /// corrupt that event for the rest of the campaign.
     /// </summary>
     [HarmonyPatch(typeof(UIModuleSiteEncounters), "SetClosingEncounter")]
-    internal static class ClosingEncounterProbe
+    internal static class ClosingEncounterEmptyBodyFix
     {
-        private static void Prefix(GeoscapeEvent geoEvent, GeoEventChoice closingChoice, bool useEventTexts)
+        private static void Prefix(GeoscapeEvent geoEvent, ref GeoEventChoice closingChoice, bool useEventTexts)
         {
+            // useEventTexts==true already reaches the native fallback; nothing to repair.
+            if (useEventTexts || closingChoice?.Outcome == null) return;
             try
             {
-                // Exactly the two strings the native body composes the page from (:332 and the :335
-                // fallback), resolved through the game's own EventTextVariation.GetText.
-                var outcomeText = closingChoice?.Outcome?.OutcomeText;
-                string body = null, fallback = null;
-                try { body = outcomeText?.GetText(geoEvent?.Context); } catch { /* length is the datum */ }
+                var ctx = geoEvent?.Context;
+                string body = null;
+                try { body = closingChoice.Outcome.OutcomeText?.GetText(ctx); } catch { /* empty is the datum */ }
+                if (!string.IsNullOrEmpty(body)) return;
+
+                // The same string :335 would have used — the event description's last variation.
                 var descr = geoEvent?.EventData?.Description;
-                try { if (descr != null && descr.Count > 0) fallback = descr[descr.Count - 1]?.GetText(geoEvent.Context); } catch { }
-                Debug.Log("[MP][modals] SetClosingEncounter host=" + (NetworkEngine.Instance?.IsHost.ToString() ?? "solo") +
-                          " event='" + (geoEvent?.EventID ?? "<null>") + "'" +
-                          " useEventTexts=" + useEventTexts +
-                          " hasChoice=" + (closingChoice != null) +
-                          " hasOutcome=" + (closingChoice?.Outcome != null) +
-                          " outcomeLen=" + (body?.Length ?? -1) +
-                          " descrFallbackLen=" + (fallback?.Length ?? -1) +
-                          " choiceTextKey='" + (closingChoice?.Text?.LocalizationKey ?? "<none>") + "'" +
-                          " — outcomeLen 0/-1 with useEventTexts=False IS the empty modal with an OK button " +
-                          "(the :335 fallback only runs when useEventTexts is True).");
+                if (descr == null || descr.Count == 0) return;
+                string fallback = null;
+                try { fallback = descr[descr.Count - 1]?.GetText(ctx); } catch { }
+                if (string.IsNullOrEmpty(fallback)) return;
+
+                // Shaped exactly like the page the native body builds for itself at :338-343.
+                closingChoice = new GeoEventChoice
+                {
+                    Text = closingChoice.Text,
+                    Outcome = new GeoEventChoiceOutcome
+                    {
+                        OutcomeText = new EventTextVariation
+                        {
+                            General = new LocalizedTextBind(fallback, doNotLocalize: true)
+                        }
+                    }
+                };
+                Debug.Log("[MP][modals] empty outcome page refilled from the event description — event='" +
+                          (geoEvent?.EventID ?? "<null>") + "' fallbackLen=" + fallback.Length +
+                          " (native :335 only runs under useEventTexts, and a replayed page passes false).");
             }
-            catch (Exception e) { Debug.LogWarning("[MP][modals] SetClosingEncounter probe failed: " + e.Message); }
+            catch (Exception e) { Debug.LogWarning("[MP][modals] SetClosingEncounter refill failed: " + e.Message); }
         }
     }
 }
