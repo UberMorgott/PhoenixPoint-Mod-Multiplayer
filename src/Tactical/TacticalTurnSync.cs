@@ -82,6 +82,7 @@ namespace Multiplayer.Tactical
             HostFactionGuid = null;
             HostTurnNumber = 0;
             HostMissionOver = false;
+            ClientMissionStartHints.Reset();   // the next battle gets its own mission-start replay
         }
 
         internal static void RegisterIntents()
@@ -430,50 +431,92 @@ namespace Multiplayer.Tactical
     }
 
     /// <summary>
-    /// DIAGNOSTIC ONLY — NO BEHAVIOUR. On maps with a special squad the HOST gets a camera move onto the
-    /// elite unit plus a left-side info panel before the combat UI, and clients jump straight to the ready
-    /// UI. That panel is the NATIVE ContextHelp hint system, not a cutscene and not a TFTV widget:
+    /// THE MISSION-START INTRO, ON EVERY PEER. On maps with a special squad the HOST gets a camera move onto
+    /// the elite unit plus a left-side info panel before the combat UI, and clients jumped straight to the
+    /// ready UI. That panel is the NATIVE ContextHelp hint system, not a cutscene and not a TFTV widget:
     /// <c>TacContextHelpManager</c>:118 subscribes <c>ActorSawOtherFactionActorEvent</c> → <c>OnActorSeen</c>
     /// :199 → <c>EventTypeTriggered(HintTrigger.ActorSeen, …)</c>:205, and the panel + camera move are
     /// <c>UIStateTacticalContextHelp.EnterState</c>:75 → <c>TryFocusCameraOnContext</c>:98-110 →
     /// <c>DoCameraChase()</c>. TFTV only registers <c>ContextHelpHintDef</c>s on that trigger
     /// (<c>TFTVHints.cs</c>:400-410).
     ///
-    /// THE HYPOTHESIS THIS LINE EXISTS TO KILL OR CONFIRM: the mission-start replay lives in
-    /// <c>TacContextHelpManager.OnStartTurn</c>:244-262, gated <c>nextFaction == _tacLevel.FirstFaction &amp;&amp;
-    /// nextFaction.TurnNumber == 1</c>, and it is what walks <c>Vision.KnownActors</c> re-firing
-    /// <c>OnActorSeen</c> for everything already visible. The host crosses that edge natively; the client's
-    /// battle is BUILT FROM A MID-TACTICAL SAVE that is already past it, so the replay loop may never run.
+    /// ROOT CAUSE — NOT A SIM-GATE OF OURS, AND NOT HOST-ONLY GENERATION. The 2026-08-01 probe on this exact
+    /// method confirmed its hypothesis. The mission-start replay lives in
+    /// <c>TacContextHelpManager.OnStartTurn</c>:244-262 behind <c>nextFaction == _tacLevel.FirstFaction &amp;&amp;
+    /// nextFaction.TurnNumber == 1</c>, and it is the only thing that walks <c>Vision.KnownActors</c>
+    /// re-firing <c>OnActorSeen</c> for everything already visible at deployment. The host crosses that edge
+    /// natively. The client's battle is BUILT FROM THE HOST'S MID-TACTICAL SAVE, captured at
+    /// <c>HasAnyTurnStarted</c> — i.e. AFTER <c>PlayTurnCrt</c>:390-391 already did its unconditional
+    /// <c>TurnNumber = TurnNumber + 1</c> — so the client resumes holding turn 1 and its own first
+    /// <c>PlayTurnCrt</c> makes it 2. The gate is false, the replay never runs, and the pending-hint list is
+    /// NOT part of what crosses either: <c>ContextHelpManager.RecordInstanceData</c>:93-99 serialises only
+    /// <c>_shownHints</c>, never <c>_hintsPendingDisplay</c>.
     ///
-    /// WHY THE PREFIX SITS ON THAT EXACT METHOD rather than on <c>NewTurnEvent</c>: the gate reads
-    /// POST-increment <c>TurnNumber</c> (<c>PlayTurnCrt</c> does the +1 before raising the event, whereas
-    /// <c>TacMission.OnNewTurn</c> at TacticalLevelController.cs:712 still sees the pre-increment value), so
-    /// logging anywhere else would print a different number than the gate tests. Patching the gate's own
-    /// method also proves whether it RUNS on the client at all. Both members read here are public —
-    /// <c>TacticalLevelController.FirstFaction</c>:187 and <c>TacticalFactionVision.KnownActors</c>:115 — so
-    /// no reflection is needed to read them; <c>AccessTools</c> is used only because <c>OnStartTurn</c>
-    /// itself is private. NO FIX IS ATTEMPTED IN THIS BATCH.
+    /// THE FIX = RUN THE NATIVE REPLAY THE GATE SKIPPED, once, on the peers the gate skipped it on.
+    /// A POSTFIX (law 4c presentation seam), no wire bytes and no surface — hints are per-peer presentation,
+    /// which is why <c>ContextHelpData</c> is already an excluded field on the rail (RailMeta.cs:753). Nothing
+    /// here can strand a peer: each peer's popup is its own local <c>UIStateTacticalContextHelp</c> and holds
+    /// only its own UI stack — the model, the turn machine and every mirrored order keep running underneath,
+    /// and no peer waits on another's OK.
+    ///
+    /// NOTHING SHOWS IT EXPLICITLY, deliberately. <c>UIStateCharacterSelected.UpdateState</c>:1103-1106 calls
+    /// <c>TacticalView.TryShowContextHint</c>:339 EVERY FRAME, so filling <c>_hintsPendingDisplay</c> is the
+    /// entire job; the game pops the panel the moment the client is in its ordinary idle state, and a hint
+    /// flagged <c>DelayUntilActorSelected</c> still waits exactly as long as it does natively.
+    ///
+    /// <c>OnActorSeen</c> is called rather than <c>EventTypeTriggered(ActorSeen, …)</c> directly because it
+    /// also carries the <c>ItemSeen</c> chain (:207-217) and the <c>IsFromViewerFaction</c> test; it is
+    /// private, which is the only reason <c>AccessTools</c> appears. Everything else read here is public.
     /// </summary>
     [HarmonyPatch]
-    internal static class ContextHelpTurnEdgeProbe
+    internal static class ClientMissionStartHints
     {
+        private static bool _replayed;
+
+        internal static void Reset() => _replayed = false;
+
+        private static readonly System.Reflection.MethodInfo ActorSeen =
+            AccessTools.Method(typeof(PhoenixPoint.Tactical.ContextHelp.TacContextHelpManager), "OnActorSeen",
+                               new[] { typeof(PhoenixPoint.Tactical.Entities.TacticalActor),
+                                       typeof(PhoenixPoint.Tactical.Entities.TacticalActor) });
+
         private static System.Reflection.MethodBase TargetMethod() =>
             AccessTools.Method(typeof(PhoenixPoint.Tactical.ContextHelp.TacContextHelpManager), "OnStartTurn",
                                new[] { typeof(TacticalFaction), typeof(TacticalFaction) });
 
-        private static void Prefix(TacticalFaction nextFaction)
+        private static void Postfix(PhoenixPoint.Tactical.ContextHelp.TacContextHelpManager __instance,
+                                    TacticalFaction nextFaction)
         {
             var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession) return;
-            var tlc = nextFaction == null ? null : nextFaction.TacticalLevel;
-            bool isFirst = tlc != null && nextFaction == tlc.FirstFaction;
-            int turn = nextFaction == null ? -1 : nextFaction.TurnNumber;
-            int known = (nextFaction == null || nextFaction.Vision == null)
-                            ? -1 : nextFaction.Vision.KnownActors.Count;
-            Debug.Log("[Multiplayer][tac] contexthelp turn-edge: host=" + engine.IsHost +
-                      " faction='" + (nextFaction == null ? "<null>" : nextFaction.TacticalFactionDef?.name) +
-                      "' isFirstFaction=" + isFirst + " turnNumber=" + turn + " knownActors=" + known +
-                      " → missionStartReplay=" + (isFirst && turn == 1));
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return;
+            if (_replayed || nextFaction == null || !nextFaction.IsControlledByPlayer) return;
+            var tlc = nextFaction.TacticalLevel;
+            if (tlc == null || nextFaction.Vision == null) return;
+            _replayed = true;
+
+            // The native body verbatim (TacContextHelpManager:246-259), minus the turn-number gate this peer
+            // can never satisfy. The viewer is the same "first actor of the faction" the game uses — the
+            // hints are about what was SEEN, not about who saw it.
+            if (ActorSeen == null)
+            {
+                Debug.LogError("[Multiplayer][tac] mission-start hints SKIPPED — TacContextHelpManager.OnActorSeen " +
+                               "did not resolve, so this peer gets no elite/mission intro at all.");
+                return;
+            }
+            __instance.EventTypeTriggered(PhoenixPoint.Common.ContextHelp.HintTrigger.MissionStart, tlc, tlc);
+            var viewer = nextFaction.TacticalActors.FirstOrDefault();
+            if (viewer == null) return;
+            int seen = 0;
+            foreach (var known in new List<PhoenixPoint.Tactical.Entities.TacticalActorBase>(nextFaction.Vision.KnownActors.Keys))
+            {
+                var actor = known as PhoenixPoint.Tactical.Entities.TacticalActor;
+                if (actor == null) continue;
+                ActorSeen.Invoke(__instance, new object[] { viewer, actor });
+                ++seen;
+            }
+            Debug.Log("[Multiplayer][tac] mission-start context hints replayed for this client over " + seen +
+                      " already-visible actor(s) — the host got them at its own turn-1 edge, which a battle " +
+                      "resumed from the host's save is always past.");
         }
     }
 }
