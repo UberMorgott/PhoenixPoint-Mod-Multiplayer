@@ -438,7 +438,12 @@ namespace Multiplayer.Tactical
               "ApplyEffectAbility reaches it through TacticalAbilityTarget.ToEffectTarget:278-282. The mirror's " +
               "EffectTarget.GameObject is null, so the effect resolves against PositionToApply / the actor key " +
               "instead of a scene object — correct for every actor-targeted effect, and a scene-object-targeted " +
-              "one lands at the same coordinates rather than on the same instance" },
+              "one lands at the same coordinates rather than on the same instance. THAT HOLDS FOR EFFECTS AND " +
+              "NOT FOR ATTACKS (2026-08-01): BashAbility.ApplyPayloadEffects:566 dereferences the field with no " +
+              "null test, and the NRE broke the coroutine chain so ClearPlayingAction never ran and the actor " +
+              "stayed in ExecutingAbilities for the rest of the battle. An attack target's scene object is now " +
+              "RE-DERIVED per peer in TacticalCommandSync.FillLiveTargetObject via the game's own " +
+              "IAttackAbility.GetAttackActorTarget — still not shipped, which is why the drop stands" },
             { "InventoryComponent",
               "ApplyStatusAbility reads it to reach an inventory's owner. The mirror falls through to the same " +
               "actor by key (TacticalAbilityTarget.GetWorkingPosition:181 uses it only as a POSITION source, " +
@@ -1387,6 +1392,42 @@ namespace Multiplayer.Tactical
                       "Seeing this often means a peer's weapon switch is not reaching the host.");
         }
 
+        /// <summary>THE DROPPED FIELD THAT WAS NOT SAFE TO DROP (law L66/A3b, 2026-08-01).
+        ///
+        /// <c>GameObject</c> is a live scene object, so by law 2/L3 it cannot ride, and
+        /// <c>TacAbilityTargetCodec.DroppedButRead</c> declared the consequence as "the effect resolves against
+        /// PositionToApply instead". That reading was true for <c>ApplyEffectAbility</c> and FALSE for
+        /// <c>BashAbility</c>, which dereferences it with no null test at all:
+        /// <c>ApplyPayloadEffects</c>:566 <c>hit.Collider = target.GameObject.GetComponent&lt;Collider&gt;()</c>,
+        /// reached from <c>BashCrt</c>:478. The NRE breaks the coroutine chain
+        /// (<c>PlayingAction.CompleteAction</c> never resumes), so <c>ClearPlayingAction</c> never runs and the
+        /// actor stays in <c>ExecutingAbilities</c> for the rest of the battle — after which
+        /// <see cref="Validate"/>'s actorBusy arm refuses EVERY later order for that soldier. One mirrored bash
+        /// therefore bricked a soldier permanently on the host and on the non-acting client, but never on the
+        /// peer that clicked (its own target is native and complete). That is the 2026-08-01 "the client deals
+        /// no damage at all and the round is broken from then on" report, exactly.
+        ///
+        /// A live scene object is not shipped, it is RE-DERIVED, and the game already owns the call:
+        /// <c>IAttackAbility.GetAttackActorTarget</c> builds THIS peer's own target for the same actor off its
+        /// own physics cast (<c>BashAbility</c>:670 → <c>TryGetSpecificActorTargetData</c>:610). Only
+        /// <c>GameObject</c> is copied over — the host's <c>DamageReceiver</c> keeps riding, so every peer still
+        /// aims at the same body part. Of the five <c>IAttackAbility</c> implementations <c>BashAbility</c> is
+        /// the ONLY one that reads the field, so this is a no-op for the shoot path that already works.
+        /// The aim-point fallback exists because a mirror is presentation and the host's damage is authoritative
+        /// on 0x84 either way: a slightly wrong collider costs nothing next to a soldier bricked for the battle.</summary>
+        private static void FillLiveTargetObject(TacticalAbility ability, TacticalAbilityTarget target)
+        {
+            var attack = ability as IAttackAbility;
+            if (attack == null || target == null || target.Actor == null || target.GameObject != null) return;
+            var own = attack.GetAttackActorTarget(target.Actor, target.AttackType);
+            if (own != null && own.GameObject != null) { target.GameObject = own.GameObject; return; }
+            var aim = target.DamageReceiver == null ? null : target.DamageReceiver.GetAimPoint();
+            target.GameObject = aim == null ? target.Actor.gameObject : aim.gameObject;
+            Debug.Log("[Multiplayer][tac] " + SafeActorName(target.Actor) + " could not be re-targeted locally for " +
+                      "a mirrored " + (ability.AbilityDef == null ? "attack" : ability.AbilityDef.name) +
+                      " — falling back to its own scene object so the replay cannot throw and strand the actor.");
+        }
+
         private static void HandleActivate(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
             int key = r.ReadInt32();
@@ -1451,6 +1492,7 @@ namespace Multiplayer.Tactical
             // scoped around this one synchronous call: the capture postfix inside reads it, and the move
             // coroutine it starts runs later with the field already cleared.
             _replayOriginPeer = senderPeerId;
+            FillLiveTargetObject(ability, target);
             try { ability.Activate(target); }
             finally { _replayOriginPeer = 0; }
             Debug.Log("[Multiplayer][tac] HOST command from peer=" + senderPeerId + " ACCEPTED — " + actor.name +
@@ -1551,6 +1593,7 @@ namespace Multiplayer.Tactical
             // because that is exactly the arm that reaches WaitForCameraChase (TacticalAbility:971), so the
             // token is always consumed and never goes stale.
             if (ability.TrackWithCamera) _mirrorSkipsCameraWait.Add(ability);
+            FillLiveTargetObject(ability, target);
             using (SyncApplyScope.Enter()) ability.Activate(target);
             // DID IT START, OR ONLY GET IN LINE? PlayingAction.SetState(Playing) calls StartPlayingAction
             // SYNCHRONOUSLY (PlayingAction:47-53 -> TacticalActorBase.AddExecutingAbility:709), so the moment
