@@ -1925,7 +1925,22 @@ namespace Multiplayer.Tactical
                     Debug.LogWarning("[Multiplayer][tac] applying a FORCED settle to " + actor.name + " while it is " +
                                      "still executing an ability — the host refused that order, so this peer's " +
                                      "speculative play is being overruled mid-flight.");
-                ApplySettle(actor, kv.Value);
+                // ONE ACTOR'S FAILURE MAY NOT WEDGE THE QUEUE (2026-08-04 RCA). A throw out of ApplySettle
+                // used to escape this loop AND this whole Tick: the entry was never added to `done`, so it
+                // sat at the head of _pending and every LATER settle — every actor, for the rest of the
+                // battle — was head-of-line blocked behind it, and the frames after this call in
+                // SyncEngine.Tick (the damage resnapshot, the lifecycle ship, the law-11 repaint flush) never
+                // ran either. It was not even quiet: it was 15305 NREs in Player.log, none of them in the
+                // mod's own log, which is this repo's silent-swallow shape wearing a stack trace.
+                // The entry is DROPPED, not retried: a settle that throws once throws every frame, and the
+                // 0x84 resnapshot + CRC backstop is what re-converges that actor.
+                try { ApplySettle(actor, kv.Value); }
+                catch (Exception ex)
+                {
+                    Debug.LogError("[Multiplayer][tac] the settle for " + actor.name + " THREW and is being " +
+                                   "dropped — that actor keeps this peer's own position and AP until the next " +
+                                   "resnapshot. Every other actor's settle still applies: " + ex);
+                }
                 (done ?? (done = new List<int>())).Add(kv.Key);
             }
             if (done != null) foreach (var k in done) _pending.Remove(k);
@@ -2052,10 +2067,25 @@ namespace Multiplayer.Tactical
         /// ever raises <c>Revealed</c>. Located is repaired at the next faction turn edge by the game's own
         /// full recompute (<c>OnFactionStartTurn</c>:154-175), which every peer runs.
         /// </summary>
+        /// <summary>THE toActor MUST BE A PERCEIVABLE ONE, AND THE GAME DOES NOT CHECK (2026-08-04 RCA — this is what
+        /// killed the whole settle path). <c>UpdateVisibilityOfAllTowardsActor</c>:549-554 guards only the
+        /// LOOKER (<c>if (!(actor.TacticalPerceptionBase == null))</c>); the actor being looked AT is passed
+        /// straight through to <c>CheckVisibleLineBetweenActors</c>:755 →
+        /// <c>GetSizeAndStealthVisibilityMultiplier</c>:842, whose first line dereferences
+        /// <c>actor.TacticalPerceptionBase.TacticalPerceptionBaseDef</c> with no test at all. Natively that is
+        /// safe because the only caller is <c>OnActorMoved</c>, which can only ever name an actor that walked.
+        /// The inverted sweep below names EVERY member of a foreign faction, and <c>TacticalActorBase</c> is
+        /// also what crates, ground piles and destructibles are (A6) — none of which carry a perception
+        /// component. So it threw a plain NRE on the first such entry of the first settle, and kept throwing:
+        /// measured 15305 identical NREs and ZERO applied settles across a whole battle on both clients, while
+        /// the host shipped 94. Same guard as the game's own, on the side the game forgot.</summary>
+        private static bool CanBeSeen(TacticalActorBase actor) =>
+            !ReferenceEquals(actor, null) && actor.TacticalPerceptionBase != null;
+
         private static void RefreshVisionTowards(TacticalActorBase actor)
         {
             var tlc = actor == null ? null : actor.TacticalLevel;
-            if (tlc == null || tlc.TacticalLevelControllerDef == null) return;
+            if (tlc == null || tlc.TacticalLevelControllerDef == null || !CanBeSeen(actor)) return;
             float range = tlc.TacticalLevelControllerDef.DetectionRange;
             var own = actor.TacticalFaction;
             foreach (var faction in tlc.Factions)
@@ -2064,7 +2094,8 @@ namespace Multiplayer.Tactical
                 faction.Vision.UpdateVisibilityOfAllTowardsActor(actor, range, notifyChange: true);
                 if (own == null || own.Vision == null) continue;
                 foreach (var foreign in faction.Actors)
-                    own.Vision.UpdateVisibilityOfAllTowardsActor(foreign, range, notifyChange: true);
+                    if (CanBeSeen(foreign))
+                        own.Vision.UpdateVisibilityOfAllTowardsActor(foreign, range, notifyChange: true);
             }
         }
     }

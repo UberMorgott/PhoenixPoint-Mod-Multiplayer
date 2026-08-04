@@ -66,18 +66,52 @@ namespace Multiplayer.Network.Sync
         internal const float ChurnWindowSeconds = 10f;
         internal const int ChurnThreshold = 4;
 
+        /// <summary>Ceiling on the publish-lag compensation below, and it is not a taste value: the drift
+        /// checks on BOTH sides allow <c>max(5 s, rate × 0.5)</c> of disagreement, so a compensation held
+        /// strictly under <c>rate × 0.5</c> can never by itself make <see cref="Drifted"/> or
+        /// <see cref="EnforceDrift"/> fire. Above it the anchor would start re-latching against its own
+        /// correction — the exact churn the alarm exists to confess. 0.4 leaves the margin.</summary>
+        private const double MaxPublishLagSeconds = 0.4;
+
         /// <summary>The clock collapsed into its own save DTO: the entire anchor in StartTime, accrual zeroed.
         /// The host latches this and the client seeds with it, so the members that never ride (OwnNow) start
-        /// out equal on both peers instead of at a default the client would silently keep.</summary>
-        private static TimingInstanceData Canonical(Timing t) => new TimingInstanceData
+        /// out equal on both peers instead of at a default the client would silently keep.
+        ///
+        /// StartTime is the host's clock AS IT WILL READ WHEN THE ANCHOR IS PUBLISHED, not as it reads now,
+        /// and that difference is the whole of symptom (a) — "the exploration spinner has not finished
+        /// filling when the host already completes the exploration" (3-instance session 2026-08-04 23:22).
+        /// The latch happens at <c>DiffEngine.BeginCycle</c> (IdentityResolver.Roots asks HostDto), the
+        /// delta ships a WHOLE WALK later, and the client then anchors on RECEIPT — so the client's level
+        /// clock landed on a host reading that was already one walk old and STAYED there, because latches
+        /// are events (pause / speed / drift), not a heartbeat. A permanent, one-directional
+        /// client-is-behind bias, and an invisible one: EnforceDrift compares the client against its own
+        /// anchor derivation, never against the host, which is why all three peer logs from that session
+        /// contain not one TimeAnchor line while the bias was there the whole time. Measured that session:
+        /// a host apply reached the clients' appliers 112 ms later (23:28:48.714 host → 23:28:48.826
+        /// client-2), against 16-24 ms for a direct order-channel message on the same loopback — so the
+        /// walk, not the network, is what the clock was losing.
+        /// The correction is therefore the host's OWN publish lag, which the host can measure exactly
+        /// (<see cref="DiffEngine.LastCycleSeconds"/>) and which needs nothing new on the wire, priced at
+        /// the live rate because a paused clock does not advance in flight (rate 0 ⇒ no compensation, which
+        /// is also why a pause latch is untouched and only a RESUME needed fixing).
+        /// ponytail: the one-way NETWORK leg (16-24 ms loopback, more on a real link) stays uncompensated —
+        /// estimating it needs a wire timestamp, and TimeAnchor deliberately rides the game's own DTO,
+        /// which has no field to put one in. Add the ping/pong estimator only when in-game says the
+        /// residual is still visible.</summary>
+        private static TimingInstanceData Canonical(Timing t)
         {
-            Paused = t.Paused,
-            Scale = t.Scale,
-            StartTime = t.Now,
-            StartFixedTime = t.Now,
-            OwnNow = TimeUnit.Zero,
-            OwnFixedNow = TimeUnit.Zero,
-        };
+            double lag = Math.Min(DiffEngine.LastCycleSeconds, MaxPublishLagSeconds);
+            var publishLag = TimeUnit.FromTimeSpan(TimeSpan.FromSeconds(Math.Max(0.0, t.EffectiveScale * lag)));
+            return new TimingInstanceData
+            {
+                Paused = t.Paused,
+                Scale = t.Scale,
+                StartTime = t.Now + publishLag,
+                StartFixedTime = t.Now + publishLag,
+                OwnNow = TimeUnit.Zero,
+                OwnFixedNow = TimeUnit.Zero,
+            };
+        }
 
         /// <summary>Has the host's real clock left the anchor's own prediction? Catches every jump that is
         /// not a pause/speed change — save-load, time skip, any native re-anchor — and, over long unchanged

@@ -91,6 +91,7 @@ namespace Multiplayer.Tactical
             AccessTools.Field(typeof(TacticalViewState), "_stateStack");
 
         private static bool _dirty;
+        private static bool _squadBarDirty;
 
         // What the last paint actually showed. NOT a cache of the model: the gap between these and the live
         // stats IS the second dirty source (see the Update postfix).
@@ -108,6 +109,7 @@ namespace Multiplayer.Tactical
         internal static void Reset()
         {
             _dirty = false;
+            _squadBarDirty = false;
             _painted = null;
             _loggedFailures.Clear();
         }
@@ -157,6 +159,11 @@ namespace Multiplayer.Tactical
                 var tlc = Tlc();
                 var view = tlc == null ? null : tlc.View;
                 if (view == null) { _painted = null; return; }
+
+                // The squad bar is flushed BEFORE the popped-state guard below and outside the _dirty gate:
+                // it repaints Text fields on pooled row elements and touches no view state at all, so none of
+                // the reasons that bail out of an Exit+Enter apply to it.
+                if (_squadBarDirty) { _squadBarDirty = false; PaintSquadBar(view); }
 
                 var actor = view.SelectedActor;
                 float ap = 0f, wp = 0f;
@@ -220,21 +227,59 @@ namespace Multiplayer.Tactical
         /// rail or out of native play — no per-syncer call-outs, and no polling (the AP/WP memo above watches
         /// the SELECTED actor only, which is why another soldier's AP never marked anything).
         ///
-        /// It only ARMS the game's own pass; the game decides when to run it, and its
-        /// <c>SquadManagementModule.gameObject.activeSelf</c> gate (:286) means a hidden bar costs nothing.
+        /// IT DOES NOT ARM THE GAME'S OWN PASS, and that is the correction to the first version of this patch
+        /// (2026-08-04). <c>UpdateSquadMembersActionAndWillPoints</c>:278-281 is not a request, it is a
+        /// RESETTABLE 2-frame countdown — it sets <c>_updateSquadMembersWillAndActionPointsIn = 1</c> and
+        /// <c>Impl</c>:286 only paints once <c>_in-- &lt;= 0</c>, so the pass needs two consecutive
+        /// <c>TacticalView.Update</c>s with NO further arming in between. Natively that always holds, because
+        /// every native arming site is a discrete human gesture. Off <c>BaseStat.OnStatChange</c> it does not:
+        /// the stat stream is every stat of every actor, and while it runs at one write per frame or better
+        /// the countdown is re-armed before it can expire and the bar never repaints at all — it simply holds
+        /// the last paint, which at the top of a turn is every soldier at FULL AP. That starvation is worst on
+        /// the HOST, which alone runs the real damage, status and reaction math (a client's is neutered at
+        /// <c>DamageAccumulation.ApplyAddedDamage</c>:550), and "the host shows full AP for everyone while the
+        /// clients agree with each other" is exactly how it was reported.
+        ///
+        /// So the flag is ours and the PAINT is the game's: <see cref="PaintSquadBar"/> is
+        /// <c>Impl</c>:288-292 verbatim minus the countdown. Coalesced to at most one pass per frame by the
+        /// <see cref="ViewStateUpdatePatch"/> flush, which is what the countdown was there for in the first
+        /// place, so nothing is paid twice.
+        ///
         /// Deliberately NOT <see cref="MarkDirty"/>: a stat change must not Exit+Enter a view state (law
-        /// L63's whole point), and this needs no repaint of anything else.
+        /// L63's whole point), and this needs no repaint of anything else. The postfix body is a single store
+        /// on purpose — it sits on EVERY stat write in the game, including solo play, where the flush end
+        /// bails on <see cref="LiveEngine"/> and the flag is simply never read.
         /// </summary>
         [HarmonyPatch(typeof(BaseStat), "OnStatChange")]
         internal static class SquadBarStatPatch
         {
             private static void Postfix(StatChangeType change)
             {
-                if (change != StatChangeType.Value) return;   // Max/Min/MinimumDelta paint nothing here
-                if (LiveEngine() == null) return;             // solo play keeps native arming exactly as-is
-                var tlc = Tlc();
-                var view = tlc == null ? null : tlc.View;
-                if (view != null) view.UpdateSquadMembersActionAndWillPoints();
+                if (change == StatChangeType.Value) _squadBarDirty = true;  // Max/Min/MinimumDelta paint nothing here
+            }
+        }
+
+        /// <summary><c>TacticalView.UpdateSquadMembersActionAndWillPointsImpl</c>:288-292 with its countdown
+        /// removed — the same <c>GetComponentsInChildren</c> over the pooled row elements and the same
+        /// <c>UpdateActorStats</c> call, and the same <c>activeSelf</c> gate (:286) so a hidden bar costs one
+        /// bool. Rows are pooled and <c>UpdateActorStats</c>:40 returns on a null <c>Actor</c>, so an
+        /// over-count row is a no-op rather than a throw.</summary>
+        private static void PaintSquadBar(TacticalView view)
+        {
+            var modules = view.TacticalModules;
+            var squad = modules == null ? null : modules.SquadManagementModule;
+            if (squad == null || !squad.gameObject.activeSelf || squad.SquadMemberScroller == null) return;
+            try
+            {
+                var rows = squad.SquadMemberScroller
+                    .GetComponentsInChildren<PhoenixPoint.Tactical.View.ViewControllers.SquadMemberScrollerElement>();
+                for (int i = 0; i < rows.Length; i++) rows[i].UpdateActorStats();
+            }
+            catch (Exception ex)
+            {
+                if (_loggedFailures.Add("squadbar"))
+                    Debug.LogWarning("[Multiplayer][tac] squad-bar repaint threw — the AP/WP under the " +
+                                     "portraits may be stale (logged once per battle): " + ex);
             }
         }
 

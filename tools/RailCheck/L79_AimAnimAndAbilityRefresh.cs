@@ -18,16 +18,19 @@ namespace RailCheck
     /// <c>gameObject.activeInHierarchy</c> (how <c>UIModuleBehavior.SetStateID</c>:21-56 hides one), so it
     /// is generic over every view state instead of a second allow list.
     ///
-    /// THE AIM HALF OF THIS LAW IS GONE (2026-08-04, user decision). The mirrored aim STANCE — the shared
-    /// <c>(actorKey, targetKey)</c> table, its 0x85/0x86 surfaces, the auto-enter into a watcher's aim view
-    /// and the mirrored facing lerp — was removed entirely: a peer watching a soldier someone else aims now
-    /// keeps its own free camera and its own screen. The arms that guarded HOW a mirrored aim change reached
-    /// the screen (<c>aim-snap-restored</c>, <c>aim-snap-ungated</c>, <c>aim-turn-unwired</c>,
-    /// <c>aim-turn-frozen</c>, <c>aim-turn-inert</c>, <c>aim-turn-wallclock</c>, the copied-facing-rate
-    /// premise and <c>aim-turn-leaks-battle</c>) would now all be red against the CORRECT behaviour, and a
-    /// law that forbids the correct behaviour is worse than no law — so they were deleted with the code they
-    /// described rather than left to be muted. The shot itself is untouched: it rides the ordinary 0x82
-    /// command seam, and the camera work on a peer that has the firing soldier selected is native.
+    /// THE AIM HALF OF THIS LAW MOVED TO L97 (2026-08-04, user decision, in two steps). First the mirrored
+    /// aim was removed WHOLE — the shared <c>(actorKey, targetKey)</c> table, its 0x85/0x86 surfaces, the
+    /// auto-enter into a watcher's aim view and the facing lerp — and the arms that described it
+    /// (<c>aim-snap-restored</c>, <c>aim-snap-ungated</c>, <c>aim-turn-unwired</c>, <c>aim-turn-frozen</c>,
+    /// <c>aim-turn-inert</c>, <c>aim-turn-wallclock</c>, the copied-facing-rate premise and
+    /// <c>aim-turn-leaks-battle</c>) went with the code rather than being left to be muted. Then the POSE
+    /// half came back as A8b on 0x87/0x88 (<c>TacticalAimPoseSync</c>), because the animator stance is not
+    /// cosmetic: <c>FireWeaponAtTargetCrt</c>:1645 skips its 5 s aim-start wait for an actor already aiming,
+    /// so an unmirrored stance desyncs EVERY shot. **L97 owns all of that now** — including the arm that
+    /// stays red if the camera/UI half ever returns. THIS law keeps only the bottom bar, and the two are
+    /// complementary, not overlapping: L79 asks whether the repaint reaches the guard, L95 asks about its
+    /// ORDER, L97 asks nothing about the UI at all.
+    /// A peer watching a soldier someone else aims still keeps its own free camera and its own screen.
     ///
     /// Falsify: delete the current-state guard → <c>repaint-of-popped-state</c>; delete the
     /// <c>RepaintModules</c> call → <c>bar-repaint-unwired</c>; hand-roll the bar instead of calling the

@@ -40,7 +40,23 @@ namespace Multiplayer.Network.Sync
         public const byte MsgStructural = 3; // root create/destroy (law 3): native-Serializer blob payloads (law 6)
         public const byte MsgCrcReport = 4;  // client→host subtree CRC (law 7 drift backstop, see HandleCrcReport)
 
-        private const float TickInterval = 0.5f;   // ≤2 Hz
+        // The IDLE FLOOR between cycles, NOT the delivery cadence — and this is the difference the
+        // 0.5 f it used to hold got wrong. A cycle is time-sliced, so the real 625-root walk takes ~0.25 s
+        // of wall clock at SliceBudgetMs; the old value then parked the rail for another ~0.25 s doing
+        // nothing before the next one could even START. A host change that no GESTURE flushes — every
+        // change the SIM produces: an exploration finishing, resources ticking, a mission spawning, an
+        // aircraft arriving — therefore waited a whole idle period plus a whole walk, i.e. 0.25-0.75 s
+        // with a mean of ~0.5 s. That mean IS the user's "constant lag of about half a second in
+        // everything" (3-instance session 2026-08-04 23:22); measured against it, the gesture path is
+        // already fine (141 ms end to end, IntentRail's FlushNow).
+        // The cost governor is SliceBudgetMs, never this: the walk can only ever spend ~3 ms of a frame
+        // whether it runs back-to-back or not, so removing the idle buys latency and no frame time. What
+        // this floor still guards is the DEGENERATE graph — a geoscape small enough to walk in under one
+        // slice would otherwise run a full walk + 22k-entry diff + snapshot swap EVERY frame at 60 Hz.
+        // ponytail: this halves the mean (0.5 s → ~0.25 s = one walk). Going below one walk needs either a
+        // bigger SliceBudgetMs (pays frame time on every peer) or a per-slice emit (the whole-cycle
+        // deletion set stops being computable) — do neither until in-game says 0.25 s is still too slow.
+        private const float TickInterval = 0.1f;   // ≤10 Hz floor; a real cycle is slower and runs back-to-back
         private const float ExceptionRetryBackoff = 1f; // min pause between forced retries after a tick exception
         private const int MaxPacketBytes = 45000;  // chunk flush threshold
         internal const int MaxValueBytes = 8192;   // per-entry cap: 45000 + 8192 stays under the u16 envelope
@@ -86,6 +102,18 @@ namespace Multiplayer.Network.Sync
         private static readonly List<string> _forcePrefixes = new List<string>(); // scoped forced re-emit, see ForceReemit
         private static float _nextTickAt;
         private static bool _cycleUrgent;   // a FlushNow is outstanding — see RunSlice / UrgentSliceBudgetMs
+        private static float _cycleStartedAt;
+
+        /// <summary>WALL seconds the last completed cycle took, BeginCycle → DiffAndEmit. Not a perf
+        /// counter (RailCost owns that): it is the PUBLISH LAG of every value this walk carries, and
+        /// <see cref="TimeAnchor"/> is the one consumer that must price it, because a clock latched at
+        /// BeginCycle and delivered a whole walk later lands the client's clock exactly this far in the
+        /// past — a bias no drift check can see, since both sides then agree with the anchor. Deliberately
+        /// NOT cleared by BeginWalkState: the latch happens INSIDE BeginCycle (IdentityResolver.Roots), so
+        /// zeroing it there would zero the very number the latch is about to read. It is last-value-wins,
+        /// which is all it has to be — a stale duration misprices exactly one latch, and the consumer
+        /// clamps it anyway.</summary>
+        internal static float LastCycleSeconds { get; private set; }
         private static float _nextPerfLogAt;
         private static bool _reportWritten;
         private static Timing _armedTiming;                                                 // N3, see ArmChangeDrivenFlush
@@ -321,6 +349,9 @@ namespace Multiplayer.Network.Sync
         public static void ResetForReloadBoundary()
         {
             AbandonCycle();
+            LastCycleSeconds = 0f;      // a peer that was HOST before this boundary must not price the next
+                                        // latch (as host again, or as the seed of its own client DTO) off a
+                                        // walk that belonged to a level it no longer has
             _snapshot = new Dictionary<string, Entry>(StringComparer.Ordinal);
             _sentKinds.Clear();
             _prevRoots.Clear(); _rootsSeeded = false; // re-seed silently on the post-boundary baseline walk
@@ -633,6 +664,7 @@ namespace Multiplayer.Network.Sync
             _cycleRoots = new List<KeyValuePair<string, object>>();
             foreach (var r in IdentityResolver.Roots(geo)) _cycleRoots.Add(r);
             _cycleNext = 0; _cycleFrames = 0; _cycleWalkMs = 0; _maxSliceMs = 0;
+            _cycleStartedAt = Time.realtimeSinceStartup;
         }
 
         /// <summary>One frame's worth of walk: whole roots until the ~<see cref="SliceBudgetMs"/> budget
@@ -665,6 +697,7 @@ namespace Multiplayer.Network.Sync
             int roots = _cycleRoots.Count;
             _cycleRoots = null;
             _cycleUrgent = false; // this cycle carried whatever the flush asked for
+            LastCycleSeconds = Time.realtimeSinceStartup - _cycleStartedAt;
             DiffAndEmit(engine, (long)Math.Round(_cycleWalkMs), _maxSliceMs, _cycleFrames, roots);
         }
 

@@ -101,8 +101,8 @@ namespace Multiplayer.Network.Sync
         /// resources (law 3). Keyed by event id and last-write-wins, which is why it needs no SurfaceSeq: an
         /// event resolves once and a re-delivered payload is the SAME reward, so applying it twice is applying
         /// it once. Consumed by <see cref="MarkResolvedInstance"/>.</summary>
-        private static readonly Dictionary<string, KeyValuePair<ResourcePack, ItemStorage>> _rewards =
-            new Dictionary<string, KeyValuePair<ResourcePack, ItemStorage>>();
+        private static readonly Dictionary<string, MissionOutcomeMirror.RewardWire> _rewards =
+            new Dictionary<string, MissionOutcomeMirror.RewardWire>();
 
         /// <summary>The bound. A peer that is loading a geoscape holds windows for SECONDS, not minutes, so
         /// this is a wide margin over a legitimate burst (the host raised two the frame after a mission ended
@@ -386,10 +386,11 @@ namespace Multiplayer.Network.Sync
                     using (var r = new BinaryReader(ms, Encoding.UTF8))
                     {
                         string eventId = r.ReadString();
-                        MissionOutcomeMirror.Decode(r, out var resources, out var items);
-                        _rewards[eventId] = new KeyValuePair<ResourcePack, ItemStorage>(resources, items);
-                        Debug.Log("[MP][events] reward for '" + eventId + "' received — the outcome page will " +
-                                  "list what the host actually granted");
+                        var wire = MissionOutcomeMirror.DecodeRaw(r);
+                        _rewards[eventId] = wire;
+                        Debug.Log("[MP][events] reward for '" + eventId + "' received (rows=" + wire.Rows.Count +
+                                  ") — the outcome page will list what the host actually granted");
+                        RestampLiveInstance(eventId, wire);
                     }
                 }
                 catch (Exception ex) { Debug.LogError("[Multiplayer][rail] EventPopup reward inbound failed: " + ex); }
@@ -432,15 +433,14 @@ namespace Multiplayer.Network.Sync
         {
             if (_held.Count == 0) return;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) { _held.Clear(); return; }
-            var view = GeoLevel()?.View;
-            if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery)) return;
+            if (!CanCarryWindow(GeoLevel())) return;
 
             var entry = _held[0];
             _held.RemoveAt(0);
             try
             {
                 Debug.Log("[MP][events] replaying HELD raise of '" + entry.Value.EventId + "' seq=" + entry.Key +
-                          " — this peer has a live GeoscapeView again (" + _held.Count + " still waiting)");
+                          " — this peer's geoscape can carry a window again (" + _held.Count + " still waiting)");
                 RaiseMirrored(entry.Value, entry.Key);
             }
             catch (Exception ex)
@@ -477,6 +477,33 @@ namespace Multiplayer.Network.Sync
             return carried;
         }
 
+        // GeoscapeEventSystem._events is the def list GetEventByID:282 dereferences with NO null test
+        // (GeoscapeEventSystem.cs:84, filled at :135).
+        private static readonly System.Reflection.FieldInfo EventsField =
+            AccessTools.Field(typeof(GeoscapeEventSystem), "_events");
+
+        /// <summary>Can this peer carry a mirrored window YET? A live <c>GeoscapeView</c> is NOT the same
+        /// readiness, and that gap cost a whole window on every client of the 2026-08-04 session: the host
+        /// showed four post-mission screens and the clients three. Measured, both clients identically —
+        /// <c>RE26</c>'s held replay at 23:45:33.839 threw <c>ArgumentNullException</c> out of
+        /// <c>GeoscapeEventSystem.GetEventByID</c> (<c>_events</c> still null: the view exists before the
+        /// event system is initialised), <c>DrainHeldRaises</c> had already popped the entry, and the catch
+        /// logged it and moved on — the window was gone for good. <c>PROG_AN2_WIN</c>'s replay 340 ms later on
+        /// the same peer succeeded, which is the whole proof that this is a TIMING gate and not a verdict.
+        ///
+        /// So the readiness test is the thing the raise actually needs, asked of the event system itself.
+        /// Both callers use it, which is what makes this a fix and not a patch on one path: a LIVE raise
+        /// arriving in the same window is HELD by <see cref="RaiseMirrored"/> instead of thrown away, and the
+        /// drain does not pop an entry it cannot place (popping and re-appending would reorder the queue,
+        /// and the host's arrival order is the only ordering these windows have).</summary>
+        private static bool CanCarryWindow(GeoLevelController geo)
+        {
+            var view = geo?.View;
+            if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery)) return false;
+            var es = geo.EventSystem;
+            return es != null && EventsField?.GetValue(es) != null;
+        }
+
         /// <summary>Rebuild the host's window here: resolve the shipped refs, build the REAL context, apply
         /// the wire texts to a PRIVATE copy of the event data, and push the NATIVE view state through the
         /// game's own switch query — the same call the host's <c>OnGeoscapeEventRaised</c> makes.
@@ -485,7 +512,8 @@ namespace Multiplayer.Network.Sync
         {
             var geo = GeoLevel();
             var view = geo?.View;
-            if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery q))
+            var q = view == null ? null : SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
+            if (q == null || !CanCarryWindow(geo))
             {
                 // HELD, not dropped (2026-08-01). "This peer has no geoscape yet" is a TIMING fact, not a
                 // verdict about the window: measured live, a peer still on its battle summary when the host
@@ -493,18 +521,19 @@ namespace Multiplayer.Network.Sync
                 // nothing left to show — the seq had been consumed and the raise is the only carrier (the
                 // mirrored record cannot rebuild a window, which is why 0xB6 exists at all). The peer is
                 // seconds away from a geoscape, so the raise waits for it; ClientTick replays it in arrival
-                // order the moment the view is live. Still bounded and still loud.
+                // order the moment the view is live. Still bounded and still loud. "Ready" is
+                // CanCarryWindow's question, not "is there a view" — see there for the window this cost.
                 if (_held.Count >= MaxHeld)
                 {
-                    Debug.LogError("[MP][events] raise of '" + p.EventId + "' DROPPED — this peer has no live " +
-                                   "GeoscapeView and " + MaxHeld + " raises are already waiting for one; it is " +
-                                   "not loading a geoscape, so the oldest are no longer worth holding");
+                    Debug.LogError("[MP][events] raise of '" + p.EventId + "' DROPPED — this peer's geoscape " +
+                                   "still cannot carry a window and " + MaxHeld + " raises are already waiting; " +
+                                   "it is not loading a geoscape, so the oldest are no longer worth holding");
                     return true; // consumed: the seq must still advance or every later raise is refused
                 }
                 _held.Add(new KeyValuePair<uint, Raise>(seq, p));
-                Debug.LogWarning("[MP][events] raise of '" + p.EventId + "' HELD — this peer has no live " +
-                                 "GeoscapeView yet (tactical, mid-load); it will be replayed when one exists " +
-                                 "(" + _held.Count + " waiting)");
+                Debug.LogWarning("[MP][events] raise of '" + p.EventId + "' HELD — this peer has no geoscape " +
+                                 "ready to carry a window yet (no view, or its event system is still loading); " +
+                                 "it will be replayed when one is (" + _held.Count + " waiting)");
                 return true;
             }
 
@@ -934,33 +963,50 @@ namespace Multiplayer.Network.Sync
         /// <c>if (!ev.IsCompleted) ev.CompleteEvent(...)</c>, and <c>GeoscapeEvent.IsCompleted</c> is
         /// per-INSTANCE (GeoscapeEvent.cs:36) — a mirrored instance over an already-Completed record says
         /// "not completed" and would re-grant the ENTIRE reward client-side. Marking the instance
-        /// completed skips that branch; the empty reward stub keeps <c>SelectChoice</c>:604 and
-        /// <c>SetClosingEncounter</c>:357 from NRE-ing on a null <c>ChoiceReward</c>, while
+        /// completed skips that branch; <see cref="StubReward"/> keeps <c>SelectChoice</c>:604 and
+        /// <c>SetClosingEncounter</c>:357 from NRE-ing on a null <c>ChoiceReward</c> and, when the host's
+        /// 0xBD payload has arrived, gives the page the real list to draw. With no payload yet it is empty,
         /// <c>HasRewards()</c>==false (GeoFactionRewardApplyResult.cs:69) makes <c>ShowReward</c>:363
-        /// return at once, so the native page renders outcome TEXT only. Consumer:
+        /// return at once, and the native page renders outcome TEXT only. Consumer:
         /// <see cref="EventCompleteArbiter"/> refusing a resolution needs exactly that pair of writes.</summary>
         internal static void MarkResolvedInstance(GeoscapeEvent ev)
         {
             SetIsCompleted?.Invoke(ev, new object[] { true });
-            // The stub is no longer always EMPTY: when the host's 0xBD reward for this event has arrived, its
-            // resources and items go in, so ShowReward:363 finds HasRewards()==true and renders the green list
-            // this peer really did receive. Nothing is granted here — the reward already landed on every peer
-            // as ordinary wallet/storage state on the 0xAC value rail; this is the PRESENTATION of it, exactly
-            // like 0xBB does for a mission outcome. An empty stub stays the fallback, so a reward that has not
-            // arrived yet renders as no list rather than as a crash.
-            var applyResult = new GeoFactionRewardApplyResult();
-            var stub = new GeoFactionReward { ApplyResult = applyResult };
-            if (ev != null && _rewards.TryGetValue(ev.EventID, out var reward))
-            {
-                applyResult.Resources = reward.Key;
-                applyResult.Items = reward.Value;
-                // ShowReward reads BOTH objects and they are not the same one: the resource loop GATES on
-                // ApplyResult.Resources (:411) but ITERATES geoEvent.ChoiceReward.Resources (:413), so filling
-                // only the ApplyResult opens the branch and then renders nothing. The item loop reads the
-                // ApplyResult throughout (:395-401), so it needs only the line above.
-                stub.Resources = reward.Key;
-            }
-            SetChoiceReward?.Invoke(ev, new object[] { stub });
+            SetChoiceReward?.Invoke(ev, new object[] { StubReward(ev?.EventID) });
+        }
+
+        /// <summary>The reward object the mirrored outcome page draws. No longer always EMPTY: when the
+        /// host's 0xBD payload for this event has arrived it is BUILT from it — resources, items and every
+        /// row kind the page renders (<c>MissionOutcomeMirror.Build</c> fills the ApplyResult and the
+        /// companion lists <c>ShowReward</c> iterates instead). Nothing is granted here: every value already
+        /// landed on this peer as ordinary replicated state, and this is the PRESENTATION of it, exactly like
+        /// 0xBB does for a mission outcome. An empty stub stays the fallback, so a reward that has not
+        /// arrived yet renders as no list rather than as a crash.</summary>
+        private static GeoFactionReward StubReward(string eventId)
+        {
+            if (eventId != null && _rewards.TryGetValue(eventId, out var wire))
+                return MissionOutcomeMirror.Build(GeoLevel(), wire, "Encounter");
+            return new GeoFactionReward { ApplyResult = new GeoFactionRewardApplyResult() };
+        }
+
+        /// <summary>Close the declared race: 0xBD is broadcast when the HOST completes the event, while a
+        /// mirroring peer may already be building its page off its own record delta, so a payload that lands
+        /// a frame later used to be stashed for a page nobody would build again. If the dialog for this event
+        /// is still live, its stub is REPLACED in place — the next thing to read <c>ChoiceReward</c>
+        /// (<c>SetClosingEncounter</c>:357 → <c>ShowReward</c>) then sees the real reward.
+        ///
+        /// NOT a re-render, deliberately: the outcome page is a synthetic one-off built inline over a
+        /// throwaway event with <c>EventID == ""</c> (UIModuleSiteEncounters.cs:326-355), which is exactly why
+        /// <see cref="RepaintDialog"/> refuses to touch it — re-driving it needs the answering choice this
+        /// peer no longer holds and re-posts the encounter sound. So the race narrows from "the whole dialog
+        /// lifetime" to "after the page was already drawn", and that last sliver stays declared.</summary>
+        private static void RestampLiveInstance(string eventId, MissionOutcomeMirror.RewardWire wire)
+        {
+            var ev = LiveInstance(GeoLevel()?.View, eventId);
+            if (ev == null || !ev.IsCompleted || SetChoiceReward == null) return;
+            SetChoiceReward.Invoke(ev, new object[] { MissionOutcomeMirror.Build(GeoLevel(), wire, "Encounter") });
+            Debug.Log("[MP][events] reward for '" + eventId + "' arrived after this peer had already stubbed the " +
+                      "live dialog — re-stamped in place, so the outcome page draws the host's list");
         }
 
         /// <summary>Is this dialog's outcome someone ELSE's to have decided — so that a click on it must
@@ -1129,10 +1175,11 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>Ship what the host's <c>CompleteEvent</c> actually granted, so every OTHER peer can render
-        /// the green reward list without running the method that mints it. Resources + items only — the same
-        /// scope 0xBB already declares for a mission outcome, and for the same reason: the remaining rows
-        /// (diplomacy, new units, revealed sites, damaged aircraft) hold LIVE refs whose re-resolution is a
-        /// separate piece of work, and they render as nothing rather than as something wrong.</summary>
+        /// the green reward list without running the method that mints it. The WHOLE result since 2026-08-05,
+        /// not just resources+items: the rows that hold live refs (diplomacy first — the one a player
+        /// actually noticed missing, then new units, revealed sites, damaged aircraft and the rest) ride
+        /// <c>MissionOutcomeMirror</c>'s generic row codec as stable ADDRESSES and are re-resolved on the
+        /// receiving peer. Same codec as 0xBB, extended once rather than twice.</summary>
         internal static void HostBroadcastReward(string eventId, GeoFactionReward reward)
         {
             var result = reward?.ApplyResult;
@@ -1146,7 +1193,7 @@ namespace Multiplayer.Network.Sync
                 using (var w = new BinaryWriter(ms, Encoding.UTF8))
                 {
                     w.Write(eventId);
-                    MissionOutcomeMirror.Encode(w, result.Resources, result.Items);
+                    MissionOutcomeMirror.Encode(w, result);
                     body = ms.ToArray();
                 }
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,

@@ -66,67 +66,55 @@ BEHAVIOR (per-subsystem mirroring).
    authoritative delta); `0x40/0x41 PermissionUpdate/SoldierAssignment` stay dead tombstones.
    Tactical surfaces live in 0x80-0x9F ONLY (`src/Rail/SurfaceIds.cs:5`), NEVER 0xA0-0xBF (law L62).
    Local-only, never relayed: idle animation, cover-hug on arrival, camera, selection highlight,
-   hover/preview aiming, per-frame pose — with ONE carve-out, **A8** (laws L81+L82): the COMMITTED manual-aim
-   stance. It was mis-classed as cosmetics. Entering manual aim leaves the soldier in the aim loop, which
-   sets `TravelType.Aim` on the animator; `TacticalActor.CurrentlyAiming`:228-236 reads exactly that, and
-   `TacticalLevelController.FireWeaponAtTargetCrt`:1645 SKIPS the entire aim-start block
-   (`:1649-1683`, a checkpoint wait with a 5 s ceiling) when it is true — so the acting peer fired from a
-   pose it already held while every mirror first played the entry-into-aim animation and only then the
-   shot. A built-in desync on EVERY shot, and no camera fix could reach it. The stance is also
-   SHARED, LAST-WRITER-WINS state per soldier, not a per-window local mode: whoever entered aim last
-   owns it, and a peer switching to that soldier lands DIRECTLY in aim mode off the shared table via
-   the game's own `UIStateCharacterSelected.ActivateAttackAbilityState`:1466-1502, fired on that
-   peer's OWN selection edge — an arriving message NEVER yanks anyone's screen (the A6
-   `InventoryAbility` lesson). What crosses is the DISCRETE pair `(actorKey, targetKey)` on its own
-   surface pair **0x85 TacAim / 0x86 TacAimIntent** (`src/Tactical/TacticalAimSync.cs`), NOT an op on
-   0x82: 0x82 carries ORDERS (discrete, each played exactly once) while this carries a STANDING VALUE
-   whose whole correctness property is that the latest wins, so a re-assert on the order stream would
-   read as a second order. THE FIRST ATTEMPT (`3071859`, ops 5/6 on 0x82/0x83) WAS REVERTED BY
-   `0252247` and those two ops stay dead tombstones: it fed a `CoverPose` to
-   `IdleAbility.ForceRefresh`, whose consumption path `IdleAbility.IdleAction`:275-290 →
-   `RefreshIdle`:324 → `DoAimOrPeek`:166-185 → `TacticalNav.ExecutePoints` is a NAV TRAVERSAL — so a
-   relayed aim MOVED mirrored soldiers instead of posing them (a jetpacked one re-flew, and while it
-   ran the actor reported `HasExecutingAbility()` so its A3a settle was held to the 10 s ceiling).
-   **`IdleAbility` and every nav-reaching path are now FORBIDDEN to this arc**, and the ban is
-   MECHANICAL, not a convention: RailCheck L82 walks the transitive IL closure of every game method
-   the mirror half calls and turns red if it can reach `IdleAbility` /
-   `TacticalNavigationComponent` / `ExecutePoints` / `GetAimOrPeekPathPoints` /
-   `NavigateAndWaitUntilFinished`. What the mirror does instead is write the animator integers
-   `CurrentlyAiming` actually reads, through the game's OWN nav-free aim entry —
-   `PathProcessorUtils.SetAimParams`:81-84 / `SetNullNavParams`:91-94 → `SetParams`:67-74, whose
-   entire body is a loop of `animator.SetInteger` with no other callee, the same pair
-   `FireWeaponAtTargetCrt`:1651/:1712 uses on itself. The POSE never crosses (law 5): cover geometry
-   stays local on every peer. DEDUP IS BY SAMPLING, NOT EDGES — a postfix on
-   `TacticalViewState.Update` reads the live top state once per frame and emits only when it
-   disagrees with the SHARED table, so a transition's intermediate values never exist as a sample
-   (3071859 captured edges and failed BOTH ways at once: 2-3 messages per repaint, because
-   `UIStateShoot` genuinely alternates target→null→target across `ExitState`:1261 and
-   `SetShootTarget`:277, AND swallowed changes a third peer then never learned). Arbitration is the
-   pure `TacticalAimSync.Decide`: the host holds the one `actorKey→targetKey` table and is its only
-   writer, a client announces on 0x86 and the host echoes to ALL peers on 0x85, "last writer" = last
-   to reach the host — the rail's standing arrival-order rule, no ownership table. A peer re-asserts
-   when the shared value was CLEARED under it, and never contests a different non-zero target
-   another peer wrote (that suppression is what stops an unbounded ping-pong between two peers aiming
-   one soldier at two enemies). STILL FORBIDDEN, unchanged: per-frame pose STREAMING, hover/preview
-   aiming (`UIStateFreeCam` is excluded by an exact type test, since its crosshair re-targets as it
-   sweeps), and any path that can reach a nav traversal on a mirror.
-   **RailCheck L82** is that ban made mechanical AND the seam's own proof, and it walks THREE roots —
-   the two `PathProcessorUtils` entries plus `TacActorAnimActions.ActivateShootingClips`, the clip bind
-   `FireWeaponAtTargetCrt`:1566 does one line before setting those very params: a closure over only the
-   first two is a proof about the WRONG SET, since EVERY game method the mirror half calls has to be
-   inside it (`0a66988`). Its arms: the transitive IL walk over those three roots inside
-   `Assembly-CSharp` (red on anything declared by `IdleAbility` / `TacticalNavigationComponent` or named
-   `ExecutePoints` / `GetAimOrPeekPathPoints` / `NavigateAndWaitUntilFinished`); `ApplyStance` may not
-   call `IdleAbility` at one level; the pure `TacticalAimSync.Decide` is EXECUTED on seven cases (fresh
-   aim, steady-state silence, a genuine target change never swallowed, cleared-shared self-heal, a
-   leaving peer clearing its own stance but NOT a newer writer's, and no contest of another peer's
-   different non-zero target); the table is reset in `TacticalTurnSync.Reset` (keys are re-derived per
-   battle — a carried-over table would pose the NEXT battle's actors from a dead one); and a PREMISE
-   arm, `L82 premise-changed`, fires if `TacticalActor.CurrentlyAiming` ever stops calling
-   `Animator.GetInteger` (a game patch backing it with a model field) — the integers would then mean
-   nothing and every mirrored shot would silently replay the aim-in animation again, so the law says so
-   instead of letting the premise rot. Falsified both ways: substituting `IdleAbility.ForceRefresh` for
-   the `SetAimParams` call yields `L82 mirror-applier-navigates` + `L82 mirror-applier-inert`.
+   hover/preview aiming, per-frame pose — with ONE carve-out, **A8b** (law L97): the COMMITTED manual-aim
+   POSE, and only the pose.
+   - **What crosses:** the discrete pair `(actorKey, targetKey)` on its own surface pair **0x87 TacAimPose /
+     0x88 TacAimPoseIntent** (`src/Tactical/TacticalAimPoseSync.cs`), NOT an op on 0x82 — 0x82 carries
+     ORDERS (discrete, each played exactly once) while this is a STANDING VALUE whose whole correctness
+     property is that the latest wins, so a re-assert on the order stream would read as a second order.
+   - **Why it is not cosmetics:** entering manual aim leaves the soldier in the aim loop, which sets
+     `TravelType.Aim` on the animator; `TacticalActor.CurrentlyAiming`:228-238 reads exactly those integers,
+     and `TacticalLevelController.FireWeaponAtTargetCrt`:1645 SKIPS the whole aim-start block (`:1647-1678`,
+     a checkpoint wait with a 5 s ceiling) when it is true — so the acting peer fires from a pose it already
+     holds while every mirror first plays the entry-into-aim. A built-in desync on EVERY shot.
+   - **REMOVED BY DEVELOPER DECISION 2026-08-04, and it stays removed:** the third-person aim camera, the
+     aim UI, the auto-enter/auto-leave of a watcher's aim view state, and the TAB-target mirror. A watcher
+     keeps its own free camera and its own screen; an arriving message yanks nobody. Surfaces **0x85 TacAim /
+     0x86 TacAimIntent**, the `TacticalAimSync` family and **RailCheck L82** went with that half — permanent
+     tombstones, never re-mint those two ids. L97 arm `camera-ui-half-returned` is what keeps it gone, and it
+     scans STRING LITERALS as well as call edges, because the deleted code reached the view stack through
+     `AccessTools.Method(…, "ActivateAttackAbilityState")` and a callee-only walk would see nothing.
+   - **How the mirror poses:** it writes the animator integers `CurrentlyAiming` reads, through the game's
+     OWN nav-free entry `PathProcessorUtils.SetAimParams`:81-84 / `SetNullNavParams`:91-94 →
+     `SetParams`:67-74 (whose entire body is a loop of `animator.SetInteger`), after the clip bind
+     `TacActorAnimActions.ActivateShootingClips` that `FireWeaponAtTargetCrt`:1566 does one line earlier.
+     Facing rides as a LERP at the game's own 6f rate, never its endpoint (`facing-snaps` if `SetForward` is
+     written instead). The POSE never crosses (law 5): cover geometry stays local on every peer.
+   - **`IdleAbility` and every nav-reaching path are FORBIDDEN**, and the ban is MECHANICAL: L97 walks the
+     transitive IL closure of every game method the mirror half calls — rooted on all THREE entries above,
+     since a closure over fewer is a proof about the wrong set — and turns red on `IdleAbility` /
+     `TacticalNavigationComponent` / `ExecutePoints` / `GetAimOrPeekPathPoints` /
+     `NavigateAndWaitUntilFinished`. That ban is the first attempt's grave: `3071859` (ops 5/6 on 0x82/0x83,
+     reverted by `0252247`, both ops dead tombstones) fed a `CoverPose` to `IdleAbility.ForceRefresh`, whose
+     path ends in `TacticalNav.ExecutePoints` — a NAV TRAVERSAL, so a relayed aim MOVED mirrored soldiers
+     instead of posing them (a jetpacked one re-flew, and while it ran the actor reported
+     `HasExecutingAbility()` so its settle was held to the 10 s ceiling).
+   - **Dedup is by SAMPLING, not edges:** a postfix reads the live top view state once per frame and emits
+     only when it disagrees with the shared table, so a transition's intermediate values never exist as a
+     sample. `3071859` captured edges and failed BOTH ways at once: 2-3 messages per repaint, because
+     `UIStateShoot` genuinely alternates target→null→target across `ExitState`:1261 and `SetShootTarget`:277,
+     AND swallowed changes a third peer then never learned.
+   - **Arbitration = shared LAST-WRITER-WINS per soldier, no ownership table.** The host holds the one
+     `actorKey→targetKey` table and is its only writer; a client announces on 0x88 and the host echoes to ALL
+     peers on 0x87, "last writer" = last to reach the host (the rail's standing arrival-order rule, law 7).
+     A peer re-asserts when the shared value was CLEARED under it, and never contests a different non-zero
+     target another peer wrote — that suppression is what stops an unbounded ping-pong between two peers
+     aiming one soldier at two enemies. The decider is the pure `TacticalAimPoseSync.Decide`, which L97
+     EXECUTES case by case (`arbiter-*`). The table is reset per battle (`pose-leaks-battle`): keys are
+     re-derived per mission, so a carried-over table would pose the NEXT battle's actors from a dead one.
+   - **Still forbidden, unchanged:** per-frame pose STREAMING, hover/preview aiming (`UIStateFreeCam` is
+     excluded by an exact type test, since its crosshair re-targets as it sweeps), and any path that can
+     reach a nav traversal on a mirror.
    Entry = native save-transfer (law 1, zero surfaces); exit =
    host's native `GameOver` → native teardown on all peers → one authoritative outcome. Shipped:
    A1 `7808c7f`, A2 `285411d`+`90dc585` (0x80 TacTurn / 0x81 TacTurnIntent, laws L63+L64); A3a
@@ -180,7 +168,7 @@ BEHAVIOR (per-subsystem mirroring).
    a runtime-generated `ComponentSetDef` is a NAMED refusal registered against its key
    (`TacticalActorKey.Refuse`) instead of a misleading "a spawn record never arrived", and the 0x84
    resnapshot carries the host's archived corpse manifest. **A6** (law L69) = INVENTORY/LOOT + DESTRUCTIBLES,
-   and it takes **no new surface**: ops 5/6 on **0x84** plus op 3 on the 0x83 intent family; 0x85 stays free.
+   and it takes **no new surface**: ops 5/6 on **0x84** plus op 3 on the 0x83 intent family (0x85 was free then; it is a retired tombstone now).
    Inventory commits as a WHOLE BATCH because the game's does — every drag only stages an `InventoryQuery`
    (`InventoryQuery.AddItem`:26-33 edits a private list), and the one model commit is
    `InventoryQuery.SyncItems`:44-67, whose single caller in the assembly is

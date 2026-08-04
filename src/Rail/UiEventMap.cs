@@ -294,6 +294,10 @@ namespace Multiplayer.Network.Sync
                 // GeoscapeView.ModalClosed, the very signal a future host→all hide would read as "the host
                 // dismissed it". Returning true is the whole entry.
                 [typeof(UIStateGeoModal)] = (s, v) => true,
+                // Kaos marketplace: also a queued window, so the fallback Exit+Enter skips it (and must —
+                // re-entering re-posts the shop's opening narration). Its rows come off 0xBF and its prices
+                // are paid from the SHARED wallet, so a spend anywhere else must re-gate this screen's buttons.
+                [typeof(UIStateMarketplaceGeoscapeEvent)] = (s, v) => { MarketplaceSync.RepaintOpenMarketplace(); return true; },
                 // Third queued-window citizen, and for it a Table entry is the ONLY repaint that can ever
                 // exist: PauseHold.IsCurrentQueuedWindow makes the fallback re-enter skip this state
                 // (GeoWindowCoverage.cs:174 declares it queued), and skip it it must — EnterState:29

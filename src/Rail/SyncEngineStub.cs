@@ -34,11 +34,16 @@ namespace Multiplayer.Network.Sync
             // 0xBC resupply — the post-mission screen's two writes no other family funnels through
             // (GeoCharacter.RepairItem spends the SHARED wallet; the single-item reload).
             ReplenishSync.RegisterIntents();
+            // 0xBE Kaos marketplace — ONE buy op for every kind of goods (the shop's offer list itself
+            // rides 0xBF, host→all: it is EXCLUDED from the value rail as bridge-unresolved).
+            MarketplaceSync.RegisterIntents();
             // Tactical arc A2's end-turn (0x81) is an ordinary intent family — same engine, same envelope.
             Multiplayer.Tactical.TacticalTurnSync.RegisterIntents();
             // Arc A3a's per-soldier COMMAND (0x83) — likewise ordinary: ONE op carrying
             // (actorKey, abilityDefGuid, TacticalAbilityTarget), which is the whole generic seam.
             Multiplayer.Tactical.TacticalCommandSync.RegisterIntents();
+            // Arc A8b's aim POSE (0x88) — a standing value, not an order, so it takes its own surface pair.
+            Multiplayer.Tactical.TacticalAimPoseSync.RegisterIntents();
             // No intents, no surface: mist coverage is pure host→client mod-state riding the value rail
             // as root "M#mist" — same symmetric registration on both peers as "M#cart" (law L59).
             MistSync.Register();
@@ -54,13 +59,15 @@ namespace Multiplayer.Network.Sync
             SurfaceRouter.TacticalInbound = (peer, surfaceId, payload) =>
                 Multiplayer.Tactical.TacticalTurnSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || Multiplayer.Tactical.TacticalCommandSync.HandleInbound(_engine, peer, surfaceId, payload)
-                || Multiplayer.Tactical.TacticalDamageSync.HandleInbound(_engine, peer, surfaceId, payload);
+                || Multiplayer.Tactical.TacticalDamageSync.HandleInbound(_engine, peer, surfaceId, payload)
+                || Multiplayer.Tactical.TacticalAimPoseSync.HandleInbound(_engine, peer, surfaceId, payload);
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
                 ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || EventPopup.HandleInbound(_engine, peer, surfaceId, payload)
                 || GeoModalMirror.HandleInbound(_engine, peer, surfaceId, payload)
                 || CutsceneMirror.HandleInbound(_engine, peer, surfaceId, payload)
                 || MissionOutcomeMirror.HandleInbound(_engine, peer, surfaceId, payload)
+                || MarketplaceSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || IntentRail.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
@@ -134,6 +141,7 @@ namespace Multiplayer.Network.Sync
             EventPopup.Reset();   // 0xB6 raise seq stream (teardown only — see EventPopup.Reset)
             GeoModalMirror.Reset();  // 0xB7 modal raise seq stream, same teardown-only contract
             CutsceneMirror.Reset();  // 0xBA cutscene raise seq stream, same teardown-only contract
+            MarketplaceSync.Reset();  // 0xBF offer-list seq stream, same teardown-only contract
             MissionOutcomeMirror.Reset();  // 0xBB reward raise seq stream + any un-consumed stash
             Multiplayer.Tactical.TacticalTurnSync.Reset();  // 0x80 seq + the client's turn cursor / mission-over flag
             Multiplayer.Tactical.TacticalCommandSync.Reset();  // 0x82 seq + pending settles + the per-battle "not covered" notices

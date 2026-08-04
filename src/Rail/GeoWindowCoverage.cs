@@ -82,11 +82,16 @@ namespace Multiplayer.Network.Sync
             [typeof(UIStateMarketplaceGeoscapeEvent)] = new WindowRule
             {
                 Sync = WindowSync.LocalOnly,
-                Why = "the marketplace is a LOCAL gesture on either peer (MarketplaceAbility.ActivateInternal:43 → " +
-                      "GeoscapeView.ToMarketplace:734-738 calls the view directly) and its offer list is not " +
-                      "replicated (docs/rail-baseline.txt:14, GeoMarketplace.MarketplaceOptions EXCLUDED) — " +
-                      "mirroring it would open a shop over rows the other peer does not have. EventPopup" +
-                      ".HostBroadcast declines it and MarketplaceChoiceClientLock blocks a client purchase",
+                Why = "VERDICT UNCHANGED, GROUND REPLACED 2026-08-05: opening the shop is still a LOCAL gesture on " +
+                      "either peer (MarketplaceAbility.ActivateInternal:43 → GeoscapeView.ToMarketplace:734-738 " +
+                      "calls the view directly), so the WINDOW is never raised for anyone else. The old rationale " +
+                      "— \"its offer list is not replicated\" — is stale: the offers now ride their own host→all " +
+                      "surface 0xBF (MarketplaceSync; the host owns the roll, the client's UpdateOptions is " +
+                      "blocked) and a purchase rides the 0xBE intent, so both peers DO hold the same rows. What " +
+                      "stays local is only the act of looking at them: mirroring the window would yank a peer's " +
+                      "screen into a shop it never opened (the A6 InventoryAbility lesson). EventPopup" +
+                      ".HostBroadcast declines it; repaint is driven from MarketplaceSync.RepaintOpenMarketplace, " +
+                      "since a queued window is skipped by the universal Exit+Enter repaint",
             },
             [typeof(UIStateRosterDeployment)] = new WindowRule
             {

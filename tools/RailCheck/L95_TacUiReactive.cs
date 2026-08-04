@@ -25,13 +25,16 @@ namespace RailCheck
     /// bonus: <c>TacticalActor.OnAnotherActorDeath</c>:1856-1863 grants it synchronously inside <c>Die</c>,
     /// and the settle carries the host's number from after that same grant).
     ///
-    /// The seam is <c>BaseStat.OnStatChange</c> — one funnel for every stat write in the game — arming the
-    /// game's OWN pass and nothing else. That "nothing else" is the second half of this law: the same postfix
-    /// runs on every AP tick of every actor, so a state Exit+Enter hung off it would turn law L63's
-    /// popped-state hazard into a per-write event.
+    /// The seam is <c>BaseStat.OnStatChange</c> — one funnel for every stat write in the game — setting a
+    /// FLAG and nothing else, with the paint deferred to the per-frame flush (see the retarget note in arm
+    /// (a): the game's own pass is a resettable countdown that the stat stream starves). That "nothing else"
+    /// is the second half of this law: the same postfix runs on every AP tick of every actor, so a state
+    /// Exit+Enter hung off it would turn law L63's popped-state hazard into a per-write event, and a
+    /// <c>GetComponentsInChildren</c> walk hung off it would allocate on every stat write in the game.
     ///
-    /// Falsify: drop the <c>UpdateSquadMembersActionAndWillPoints</c> call → <c>squad-bar-unwired</c>; repaint
-    /// the elements by hand instead → <c>squad-bar-hand-rolled</c>; call <c>MarkDirty</c> from the stat seam →
+    /// Falsify: drop the flag store, the flush's <c>PaintSquadBar</c> call, or that painter's
+    /// <c>UpdateActorStats</c> call → <c>squad-bar-unwired</c>; repaint the elements from the STAT SEAM
+    /// itself → <c>squad-bar-hand-rolled</c>; call <c>MarkDirty</c> from the stat seam →
     /// <c>stat-seam-transitions</c>; clear <c>_dirty</c> before the current-state guard (or delete the guard)
     /// → <c>popped-state-guard-gone</c>; a game patch that stops the native pass repainting the elements →
     /// <c>premise-changed</c>.
@@ -57,20 +60,48 @@ namespace RailCheck
                              "the portrait row showing the pre-order numbers until the user clicks a soldier";
                 yield break;
             }
-            if (!Reaches(statSeam, "TacticalView", "UpdateSquadMembersActionAndWillPoints"))
-                yield return "L95 squad-bar-unwired: the stat seam no longer arms the game's own squad pass " +
-                             "(TacticalView.UpdateSquadMembersActionAndWillPoints:278), so it observes every " +
-                             "stat change and repaints nothing — the seam fires and the screen does not move, " +
-                             "this repo's dominant bug shape";
+            // RETARGETED 2026-08-05, same property, different wiring. The seam used to call the game's own
+            // TacticalView.UpdateSquadMembersActionAndWillPoints:278 — which is NOT a request but a RESETTABLE
+            // 2-frame countdown (:281 sets _updateSquadMembersWillAndActionPointsIn = 1; Impl:286 paints only
+            // once _in-- <= 0). Native arming sites are discrete human gestures so it always expires there;
+            // off BaseStat.OnStatChange — every stat write of every actor — it is re-armed before it can
+            // expire and the bar NEVER repaints, holding the last paint, which at the top of a turn is every
+            // soldier at full AP. Worst on the host, which alone runs the real damage/status/reaction math.
+            // So the chain is now: seam stores a flag → the per-frame flush calls PaintSquadBar →
+            // PaintSquadBar is Impl:288-292 verbatim minus the countdown. All three links are asserted here,
+            // so dropping any one is still red.
+            var squadDirty = repaint.GetField("_squadBarDirty", AllMembers);
+            var painter = Method(repaint, "PaintSquadBar");
+            var flushForBar = NestedMethod(repaint, "ViewStateUpdatePatch", "Postfix");
+            if (squadDirty == null || painter == null || flushForBar == null)
+                yield return "L95 squad-bar-unwired: TacticalUiRepaint's _squadBarDirty / PaintSquadBar / " +
+                             "ViewStateUpdatePatch.Postfix no longer resolve together, so nothing carries a " +
+                             "stat change to the portrait row";
+            else
+            {
+                if (LastStoreTo(statSeam, squadDirty) < 0)
+                    yield return "L95 squad-bar-unwired: the stat seam no longer marks the squad bar dirty, so " +
+                                 "it observes every stat change and repaints nothing — the seam fires and the " +
+                                 "screen does not move, this repo's dominant bug shape";
+                if (!Reaches(flushForBar, null, "PaintSquadBar"))
+                    yield return "L95 squad-bar-unwired: the per-frame flush no longer calls PaintSquadBar, so " +
+                                 "the dirty flag is set and never read — and the game's own countdown pass " +
+                                 "cannot substitute for it: fed from the stat stream it re-arms faster than it " +
+                                 "expires and never paints at all";
+                if (!Reaches(painter, "SquadMemberScrollerElement", "UpdateActorStats"))
+                    yield return "L95 squad-bar-unwired: PaintSquadBar no longer calls SquadMemberScrollerElement" +
+                                 ".UpdateActorStats:38 — the ONLY writer of the per-soldier AP/HP/WP texts. The " +
+                                 "flush would run every frame and paint nothing";
+            }
             foreach (var handRolled in new[] { "UpdateActorStats", "GetComponentsInChildren", "SetSquad",
                                                "SetScroller", "SetActionPoints" })
                 if (Reaches(statSeam, null, handRolled))
                 {
                     yield return "L95 squad-bar-hand-rolled: the stat seam calls " + handRolled + " itself " +
-                                 "instead of arming the native pass. The game's own Impl:284-295 is gated on " +
-                                 "the module being active and coalesces to one run per burst; a hand-rolled " +
-                                 "walk is a second painter with a second set of rules, allocating " +
-                                 "GetComponentsInChildren on a seam that fires on EVERY stat write in the game";
+                                 "instead of marking dirty and leaving the paint to the per-frame flush. The " +
+                                 "flush coalesces to one pass per frame and keeps the module's activeSelf gate; " +
+                                 "painting from the seam is a second painter with a second set of rules, " +
+                                 "allocating GetComponentsInChildren on EVERY stat write in the game";
                     break;
                 }
 
