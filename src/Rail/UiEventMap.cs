@@ -294,6 +294,32 @@ namespace Multiplayer.Network.Sync
                 // GeoscapeView.ModalClosed, the very signal a future host→all hide would read as "the host
                 // dismissed it". Returning true is the whole entry.
                 [typeof(UIStateGeoModal)] = (s, v) => true,
+                // Third queued-window citizen, and for it a Table entry is the ONLY repaint that can ever
+                // exist: PauseHold.IsCurrentQueuedWindow makes the fallback re-enter skip this state
+                // (GeoWindowCoverage.cs:174 declares it queued), and skip it it must — EnterState:29
+                // RequestGamePause()s and rebinds OkButton. Unlike the cutscene next to it, though, this
+                // screen's whole content is model-derived, so "nothing to repaint" is false here.
+                // What goes stale is _missingItems: UIStateReplenish.cs:31 snapshots GetMissingItems() into
+                // the module at Enter, and the screen's own model-change handler (OnResourcesChanged:53-59)
+                // only re-reads COSTS — so a peer replenishing a soldier leaves every other peer's list
+                // naming gear that is already back on the roster. Init is the module's own read-direction
+                // reseed of exactly that (UIModuleReplenish.cs:118-130: re-reads Manufacture.Queue +
+                // missingItems, rebuilds the rows) and writes NOTHING into the model — the write-direction
+                // audit UIStateVehicleRoster needed finds nothing to avoid here, because this screen stages
+                // nothing: a click goes straight into the mirrored manufacture queue (SingleItemReplenish
+                // :205-208 → AddToQueue), so there is no local edit a repaint could eat.
+                // ponytail: Init also drops the hover back to the first row (OnCurrentItemsChanged:176-193).
+                // Native does the same on every wallet change (OnResourcesChanged:55 ResetCurrentlySelected),
+                // so it is not new behaviour; if it ever bites, split the missing-items re-read out of Init.
+                [typeof(UIStateReplenish)] = (s, v) =>
+                {
+                    var m = v.GeoscapeModules.ReplenishModule;
+                    var ctx = StateContext(s);
+                    if (m == null || ctx == null ||
+                        !(Viewer() is PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction px)) return false;
+                    m.Init(ctx, px.GetMissingItems());
+                    return true;
+                },
                 [typeof(UIStateResearch)] = (s, v) => { ResearchSync.RepaintResearchUi(); return true; },
                 [typeof(UIStateEditSoldier)] = (s, v) =>
                 {
@@ -684,6 +710,16 @@ namespace Multiplayer.Network.Sync
             // reseeds the CURRENT character = selection preserved by construction
             return Call(display, state, cur) && Call(refreshStorage, state);
         }
+
+        /// <summary>The context the OPEN state was pushed with — <c>GeoscapeViewState.Context</c>:20, set
+        /// once in <c>Push</c>:84 and the very value every EnterState hands its modules. Reflected because
+        /// it is protected; the alternative (reading a module's own private <c>_context</c> back out) says
+        /// the same thing one indirection later and only works for modules that already ran Init.</summary>
+        private static readonly MethodInfo StateContextGetter =
+            AccessTools.PropertyGetter(typeof(GeoscapeViewState), "Context");
+
+        private static GeoscapeViewContext StateContext(GeoscapeViewState s) =>
+            StateContextGetter == null || s == null ? null : StateContextGetter.Invoke(s, null) as GeoscapeViewContext;
 
         private static GeoFaction Viewer()
         {

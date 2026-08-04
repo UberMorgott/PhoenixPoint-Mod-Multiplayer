@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
+using Base.Entities.Statuses;
 using Base.Input;
 using Base.UI;
 using HarmonyLib;
@@ -184,6 +185,56 @@ namespace Multiplayer.Tactical
                 _dirty = false;
                 if (IsAbilityBarState(__instance)) Repaint(__instance);
                 else RepaintModules(view);
+            }
+        }
+
+        /// <summary>
+        /// THE SQUAD BAR — the row of portraits with each soldier's AP/HP/WP under it, and the ONE part of
+        /// the tactical screen neither repaint path above can reach.
+        ///
+        /// Those numbers are written by exactly one method,
+        /// <c>SquadMemberScrollerElement.UpdateActorStats</c>:38-78, and its only caller in the assembly is
+        /// <c>TacticalView.UpdateSquadMembersActionAndWillPointsImpl</c>:284-295 — a deferred pass ARMED by
+        /// the public <c>UpdateSquadMembersActionAndWillPoints</c>:278. Every native arming site is a LOCAL
+        /// GESTURE: <c>TacticalViewState.ActivateAbility</c>:271 (this peer clicked an ability),
+        /// <c>UIStateCharacterSelected.SelectCharacter</c>:245 (this peer clicked a soldier),
+        /// <c>UIStateShoot.InitState</c>:415, <c>UIStateWaiting</c>:42, <c>UIStateInitial</c>:30. A mirrored
+        /// order raises NONE of them on a peer that did not click, which is the reported defect verbatim:
+        /// the AP under the portraits stays stale until you click one of the soldiers.
+        ///
+        /// Exit+Enter does not fix it either, and that is not an oversight: the state's own re-read reaches
+        /// <c>SetSquad</c>:216 → <c>SquadMemberScrollerController.SetScroller</c>:119 →
+        /// <c>InitSquadMemberElement</c>:179-218, which rebinds portrait, class icons, tooltip and
+        /// selection — and never touches the AP/HP/WP texts. <c>UIUtil.EnsureActiveComponentsInContainer</c>
+        /// REUSES the pooled elements, so after every <c>SetSquad</c> those numbers are literally the
+        /// previous paint's until the deferred pass lands two frames later (:281 sets the countdown to 1 and
+        /// :286 decrements before testing). That two-frame window is also the WP flicker: nothing
+        /// double-applies the kill bonus — <c>TacticalActor.OnAnotherActorDeath</c>:1856-1863 grants it
+        /// synchronously inside <c>Die</c> (<c>TacticalActorBase</c>:626-627) on every peer, and the settle's
+        /// <c>WillPoints.Set</c> carries the host's number from after that same grant — so what flickers is
+        /// the PAINT, re-showing the pre-kill text each time a repaint rebuilds the row.
+        ///
+        /// THE SEAM IS THE STAT ITSELF, not a list of the places a mirror writes one. <c>BaseStat.Set</c>:95
+        /// funnels every stat write in the game through <c>OnStatChange</c>:111, so one postfix covers AP, WP,
+        /// health and corruption, for every soldier, on host and client alike, whether the change came off the
+        /// rail or out of native play — no per-syncer call-outs, and no polling (the AP/WP memo above watches
+        /// the SELECTED actor only, which is why another soldier's AP never marked anything).
+        ///
+        /// It only ARMS the game's own pass; the game decides when to run it, and its
+        /// <c>SquadManagementModule.gameObject.activeSelf</c> gate (:286) means a hidden bar costs nothing.
+        /// Deliberately NOT <see cref="MarkDirty"/>: a stat change must not Exit+Enter a view state (law
+        /// L63's whole point), and this needs no repaint of anything else.
+        /// </summary>
+        [HarmonyPatch(typeof(BaseStat), "OnStatChange")]
+        internal static class SquadBarStatPatch
+        {
+            private static void Postfix(StatChangeType change)
+            {
+                if (change != StatChangeType.Value) return;   // Max/Min/MinimumDelta paint nothing here
+                if (LiveEngine() == null) return;             // solo play keeps native arming exactly as-is
+                var tlc = Tlc();
+                var view = tlc == null ? null : tlc.View;
+                if (view != null) view.UpdateSquadMembersActionAndWillPoints();
             }
         }
 

@@ -1,5 +1,4 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -8,45 +7,29 @@ using System.Reflection.Emit;
 namespace RailCheck
 {
     /// <summary>
-    /// L79 — A MIRRORED AIM CHANGE PLAYS THE GAME'S OWN TURN, AND THE BOTTOM BAR REPAINTS ON THE SCREEN
-    /// EXIT+ENTER IS FORBIDDEN ON. Two halves of the same reported session (3 instances, 2026-08-04), and
-    /// the same shape both times: the mirror reproduces the DESTINATION of a native transition instead of
-    /// the transition.
-    ///
-    /// ─── HALF 1: the swing, not the snap ───
-    /// Cycling targets with TAB on the acting peer never re-runs the aim path points.
-    /// <c>PathProcessorUtils.GetAimOrPeekPathPoints</c>:620 returns FALSE for an actor already in "Aim Loop"
-    /// with no peek — its 90°/180° turn arms are unreachable, both thresholds being the constant
-    /// <c>-2f</c> (:590-591) against a dot product that cannot go below -1 — so
-    /// <c>IdleAbility.DoAimOrPeek</c>:197 takes its else-branch and the whole visible turn is
-    /// <c>TacticalNavigationComponent.FaceWithLerpOnly</c> → <c>NoAnimsFace</c>:1035-1053: a plain
-    /// <c>Vector3.Slerp</c> stepped by <c>Timing.Delta * 6f</c>, written with the same
-    /// <c>TacticalActorBase.SetForward</c> the mirror already called. The mirror wrote that lerp's ENDPOINT
-    /// in one frame — the right facing, reached instantly, which is the teleport every non-acting instance
-    /// showed. The repair runs the lerp itself, from A8's own per-frame postfix, because law L82 bans every
-    /// method DECLARED on <c>TacticalNavigationComponent</c> from this arc's reachable set.
-    ///
-    /// The copied RATE is the fragile part, so it has a premise arm: the mod's <c>FacingLerpSpeed</c> const
-    /// is compared against the float literals actually compiled into <c>NoAnimsFace</c>. A game patch that
-    /// retunes the facing speed turns this red instead of leaving mirrored turns quietly out of step.
-    ///
-    /// ─── HALF 2: the bar that Exit+Enter may not repaint ───
+    /// L79 — THE BOTTOM BAR REPAINTS ON THE SCREEN EXIT+ENTER IS FORBIDDEN ON.
     /// <c>TacticalUiRepaint.AbilityBarStates</c> excludes every state whose <c>EnterState</c> moves the
     /// state stack (law L63 — a re-entered <c>UIStateShoot</c> runs <c>ExitState</c> twice), and the stated
     /// cost was a stale ability bar for a peer sitting in aim mode. It was reported as a bug the first time
-    /// two peers aimed the same sniper: one fired, the other's AP and ability availability did not move.
+    /// two peers looked at the same sniper: one fired, the other's AP and ability availability did not move.
     /// The repair repaints the two MODULES rather than the state —
     /// <c>UIModuleAbilities.SetAbilities</c>:111 (which re-asks every ability's own enabled test) and
     /// <c>UIModuleActionBar.SetActionBar</c>:238 — gated on each module's own
     /// <c>gameObject.activeInHierarchy</c> (how <c>UIModuleBehavior.SetStateID</c>:21-56 hides one), so it
     /// is generic over every view state instead of a second allow list.
     ///
-    /// Falsify: write the destination inside <c>StartTurn</c> → <c>aim-snap-restored</c>; drop the
-    /// already-facing test in front of <c>ApplyStance</c>'s own <c>SetForward</c> → <c>aim-snap-ungated</c>;
-    /// stop arming the turn at all → <c>aim-turn-unwired</c>; drop the <c>AdvanceTurns()</c> call from the postfix →
-    /// <c>aim-turn-frozen</c>; step by <c>Time.deltaTime</c> → <c>aim-turn-wallclock</c>; drop the
-    /// <c>_turning.Clear()</c> in <c>Reset</c> → <c>aim-turn-leaks-battle</c>; delete the
-    /// current-state guard → <c>repaint-of-popped-state</c>; delete the
+    /// THE AIM HALF OF THIS LAW IS GONE (2026-08-04, user decision). The mirrored aim STANCE — the shared
+    /// <c>(actorKey, targetKey)</c> table, its 0x85/0x86 surfaces, the auto-enter into a watcher's aim view
+    /// and the mirrored facing lerp — was removed entirely: a peer watching a soldier someone else aims now
+    /// keeps its own free camera and its own screen. The arms that guarded HOW a mirrored aim change reached
+    /// the screen (<c>aim-snap-restored</c>, <c>aim-snap-ungated</c>, <c>aim-turn-unwired</c>,
+    /// <c>aim-turn-frozen</c>, <c>aim-turn-inert</c>, <c>aim-turn-wallclock</c>, the copied-facing-rate
+    /// premise and <c>aim-turn-leaks-battle</c>) would now all be red against the CORRECT behaviour, and a
+    /// law that forbids the correct behaviour is worse than no law — so they were deleted with the code they
+    /// described rather than left to be muted. The shot itself is untouched: it rides the ordinary 0x82
+    /// command seam, and the camera work on a peer that has the firing soldier selected is native.
+    ///
+    /// Falsify: delete the current-state guard → <c>repaint-of-popped-state</c>; delete the
     /// <c>RepaintModules</c> call → <c>bar-repaint-unwired</c>; hand-roll the bar instead of calling the
     /// two native module entries → <c>bar-repaint-hand-rolled</c>; make it Exit+Enter the state →
     /// <c>bar-repaint-transitions</c>.
@@ -59,97 +42,9 @@ namespace RailCheck
 
         public static IEnumerable<string> Check(Assembly game)
         {
-            var aim = typeof(Multiplayer.Tactical.TacticalAimSync);
             var repaint = typeof(Multiplayer.Tactical.TacticalUiRepaint);
 
-            // ─── (a) THE MIRROR TURNS, IT DOES NOT TELEPORT ───
-            var applyStance = Method(aim, "ApplyStance");
-            var startTurn = Method(aim, "StartTurn");
-            var advance = Method(aim, "AdvanceTurns");
-            var aimPostfix = NestedMethod(aim, "AimStatePatch", "Postfix");
-            if (applyStance == null || startTurn == null || advance == null)
-            {
-                yield return "L79 seam-missing: TacticalAimSync.ApplyStance / StartTurn / AdvanceTurns no " +
-                             "longer exist, so NOTHING about how a mirrored aim change reaches the screen was " +
-                             "checked — the target-switch teleport on every non-acting peer is unguarded";
-                yield break;
-            }
-            if (Reaches(startTurn, null, "SetForward"))
-                yield return "L79 aim-snap-restored: StartTurn writes the facing with SetForward. Arming a " +
-                             "turn and immediately applying its destination IS the teleport — the soldier " +
-                             "lands on the new target in one frame on every mirroring peer while the acting " +
-                             "one swings through it, which is the exact defect this law exists for";
-            if (!Reaches(applyStance, "TacticalAimSync", "StartTurn"))
-                yield return "L79 aim-turn-unwired: ApplyStance no longer starts a turn, so an arriving aim " +
-                             "change either poses nothing or poses instantly — a mirrored soldier's facing " +
-                             "stops being a reproduction of the game's own aim turn";
-            // ApplyStance keeps ONE direct SetForward, and only the branch the game itself snaps on
-            // (FaceIn3d:975-980, "already facing it"). That call is also what keeps law L82's
-            // mirror-applier-faceless arm honest — it must stay, and it must stay gated.
-            if (Reaches(applyStance, null, "SetForward") && !Reaches(applyStance, "Utl", "Equals"))
-                yield return "L79 aim-snap-ungated: ApplyStance writes SetForward without the already-facing " +
-                             "test in front of it. The one branch the game snaps on is the one where there is " +
-                             "nothing to turn; an ungated write is the teleport for every real target switch";
-            if (aimPostfix == null || !Reaches(aimPostfix, "TacticalAimSync", "AdvanceTurns"))
-                yield return "L79 aim-turn-frozen: the per-frame postfix no longer advances the started " +
-                             "turns. A turn is begun and never stepped, so every mirrored soldier stops " +
-                             "HALFWAY between its old target and its new one and stays there — strictly " +
-                             "worse than the snap this replaced, and silent";
-            if (!Reaches(advance, null, "SetForward") || !Reaches(advance, "Vector3", "Slerp"))
-                yield return "L79 aim-turn-inert: AdvanceTurns no longer slerps and writes SetForward. Those " +
-                             "two calls ARE the game's own facing step (NoAnimsFace:1041-1049); anything else " +
-                             "is a second, hand-rolled rotation model on the mirrors";
-            if (Reaches(advance, "Time", "get_deltaTime"))
-                yield return "L79 aim-turn-wallclock: AdvanceTurns steps by UnityEngine.Time.deltaTime. The " +
-                             "game steps by the ACTOR's Timing.Delta, which carries that actor's TimingScale " +
-                             "(an unrevealed actor runs at 4x), so mirrored turns would run at a different " +
-                             "speed than native ones exactly where the game speeds them up";
-
-            // ─── (b) PREMISE: the copied facing rate is still the game's ───
-            var navType = game.GetType("PhoenixPoint.Tactical.Entities.TacticalNavigationComponent");
-            var noAnimsFace = navType == null ? null : navType.GetMethod("NoAnimsFace", AllMembers);
-            // The body is a compiler-generated iterator; the literal lives in its MoveNext.
-            var faceBody = noAnimsFace == null ? null : IteratorBody(navType, "NoAnimsFace") ?? noAnimsFace;
-            var rateField = aim.GetField("FacingLerpSpeed", AllMembers);
-            var rate = rateField == null ? (float?)null : Convert.ToSingle(rateField.GetRawConstantValue());
-            if (noAnimsFace == null || rate == null)
-                yield return "L79 premise-changed: TacticalNavigationComponent.NoAnimsFace or the mod's " +
-                             "FacingLerpSpeed constant is gone. The mirror's turn rate is a COPIED value; " +
-                             "with nothing to compare it against it is a guess";
-            else if (!FloatConsts(faceBody).Any(f => Math.Abs(f - rate.Value) < 0.0001f))
-                yield return "L79 premise-changed: the game's facing lerp no longer steps by " + rate.Value +
-                             " (NoAnimsFace's float literals are now " +
-                             string.Join(", ", FloatConsts(faceBody).Select(f => f.ToString()).ToArray()) +
-                             "). Mirrored aim turns would run at a different speed than native ones on the " +
-                             "acting peer — visible desync, no log line";
-
-            // ─── (c) THE TURN TABLE DIES WITH THE BATTLE (keys are re-derived per battle, law L82) ───
-            var turning = aim.GetField("_turning", AllMembers);
-            var reset = Method(aim, "Reset");
-            if (turning == null || reset == null)
-                yield return "L79 aim-turn-leaks-battle: TacticalAimSync._turning / Reset no longer resolve, " +
-                             "so nothing proves an in-flight turn is dropped at the battle edge";
-            else
-            {
-                var dict = turning.GetValue(null) as IDictionary;
-                var entry = turning.FieldType.GetGenericArguments()[1];
-                bool seeded = false;
-                if (dict != null) { dict.Add(-4242, Activator.CreateInstance(entry)); seeded = dict.Count > 0; }
-                if (!seeded)
-                    yield return "L79 aim-turn-leaks-battle: the turn table could not be seeded, so the reset " +
-                                 "arm below proves nothing about it";
-                else
-                {
-                    reset.Invoke(null, null);
-                    if (dict.Count != 0)
-                        yield return "L79 aim-turn-leaks-battle: TacticalAimSync.Reset leaves in-flight turns " +
-                                     "in the table. Actor keys are re-derived per battle, so a carried-over " +
-                                     "entry rotates whichever actor of the NEXT battle inherits that key";
-                    dict.Clear();
-                }
-            }
-
-            // ─── (d) THE BOTTOM BAR REPAINTS WITHOUT RE-ENTERING THE STATE ───
+            // ─── (a) THE BOTTOM BAR REPAINTS WITHOUT RE-ENTERING THE STATE ───
             var repaintModules = Method(repaint, "RepaintModules");
             var flush = NestedMethod(repaint, "ViewStateUpdatePatch", "Postfix");
             if (repaintModules == null)
@@ -191,7 +86,7 @@ namespace RailCheck
                     break;
                 }
 
-            // ─── (e) PREMISE: the two module entries still have the shape the repaint calls ───
+            // ─── (b) PREMISE: the two module entries still have the shape the repaint calls ───
             var actorType = game.GetType("PhoenixPoint.Tactical.Entities.TacticalActor");
             var inputType = game.GetType("Base.Input.InputController");
             var abilitiesModule = game.GetType("PhoenixPoint.Tactical.View.ViewModules.UIModuleAbilities");
@@ -250,22 +145,6 @@ namespace RailCheck
                 frontier = next;
             }
             return false;
-        }
-
-        /// <summary>An iterator method's real body lives in its compiler-generated MoveNext, so the literals
-        /// a coroutine steps by are invisible on the declaring method itself.</summary>
-        private static MethodBase IteratorBody(Type owner, string name)
-        {
-            var nested = owner.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
-                              .FirstOrDefault(t => t.Name.Contains("<" + name + ">"));
-            return nested == null ? null : nested.GetMethod("MoveNext", AllMembers);
-        }
-
-        private static IEnumerable<float> FloatConsts(MethodBase m)
-        {
-            foreach (var step in Walk(m))
-                if (step.Value.Op == OpCodes.Ldc_R4)
-                    yield return BitConverter.ToSingle(step.Key, step.Value.Pos);
         }
 
         private static List<MethodBase> Callees(MethodBase m)

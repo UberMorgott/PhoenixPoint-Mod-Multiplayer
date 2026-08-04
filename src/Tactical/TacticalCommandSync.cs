@@ -834,8 +834,44 @@ namespace Multiplayer.Tactical
             if (ability == null) return "there is no ability";
             var t = ability.GetType();
             foreach (var kv in LocalAbilities)
-                if (kv.Key.IsAssignableFrom(t)) return kv.Value;
+                if (kv.Key.IsAssignableFrom(t))
+                    return IsOrderedHurtReaction(ability) ? null : kv.Value;
             return null;
+        }
+
+        /// <summary>
+        /// AMBIENT IS A PROPERTY OF THE ACTIVATION, NOT OF THE CLASS — the same distinction
+        /// <see cref="IsAutonomous"/> already draws with <c>AttackType</c>, applied to the one drop-list row
+        /// that is a FAMILY rather than a behaviour.
+        ///
+        /// THE REPORT (2026-08-04, 3 instances). A melee specialist's Dash sprinted on the acting client and
+        /// on EVERY other window the soldier stood still; a later reload settled him BACK. Measured, not
+        /// argued: <c>22:23:17.758 'Dash_AbilityDef' is DECLARED LOCAL — ambient: fired from
+        /// OnActorDamaged:110-129 …</c>. Dash is <c>RepositionAbility</c>, which is a
+        /// <c>TacticalHurtReactionAbility</c> — a row <see cref="LocalAbilities"/> added deliberately
+        /// (its own comment names <c>RepositionAbility</c> as one of the four subclasses it means to sweep in)
+        /// on the premise that the family is only ever raised by damage. THE PREMISE IS HALF TRUE: the family
+        /// is ALSO an ordinary clickable ability, and a per-class drop cannot tell the two apart.
+        ///
+        /// THE DISCRIMINATOR IS THE GAME'S OWN, read off the seam itself.
+        /// <c>TacticalHurtReactionAbility.Activate</c>:43-53 branches on
+        /// <c>TacticalHurtReactionAbilityDef.TriggerOnDamage</c>: false takes
+        /// <c>PlayAction(HurtReaction_Implementation, parameter)</c> — the CALLER'S target, i.e. an order —
+        /// and true takes <c>PlayAction(HurtReactionCrt, GetHurtReactionTarget(), ActorReactions)</c>, which
+        /// ignores the parameter entirely (<c>RepositionAbility.GetHurtReactionTarget</c>:99-107 picks a
+        /// RANDOM one, so an ambient reposition was never relayable anyway). The flag also decides whether the
+        /// ability is wired to damage at all: <c>SubscribeEvents</c>:146-152 hooks
+        /// <c>Health.StatChangeEvent</c> only when it is true, so a <c>TriggerOnDamage:false</c> ability
+        /// CANNOT be ambient — the only way it ever activates is somebody ordering it.
+        ///
+        /// Generic by construction, not a Dash special case: it un-drops every subclass and every modded one,
+        /// and an autonomous activation is still caught downstream by <see cref="IsAutonomous"/>.
+        /// </summary>
+        internal static bool IsOrderedHurtReaction(TacticalAbility ability)
+        {
+            var hurt = ability as TacticalHurtReactionAbility;
+            var def = hurt == null ? null : hurt.TacticalHurtReactionAbilityDef;
+            return def != null && !def.TriggerOnDamage;
         }
 
         /// <summary>Everything rides except a DECLARED local. Kept under its A3a name because it is still the
@@ -1987,15 +2023,49 @@ namespace Multiplayer.Tactical
         /// to a maximum, so re-running this over an already-revealed actor changes nothing. Every faction but
         /// the actor's own, in the shape <c>ShootAbility.Activate</c>:157-163 uses — the reveal is a property of
         /// the board, not of who is currently playing.
+        ///
+        /// BOTH DIRECTIONS, AND THE FIRST VERSION ONLY HAD ONE (2026-08-04). Native vision is a RELATION and
+        /// <c>TacticalFactionVision.OnActorMoved</c>:273-306 recomputes it from BOTH ends: an actor of MY OWN
+        /// faction takes :279-286 → <c>UpdateVisibilityForImpl</c> ("what this actor now SEES", a sweep out
+        /// over every actor on the map), and a FOREIGN one takes :294-301 →
+        /// <c>ReUpdateVisibilityTowardsActorImpl</c> ("who now sees IT"). The repair shipped only the second,
+        /// because that is the only one the game exposes publicly — so a settle for one of THIS peer's own
+        /// soldiers re-tested who could see him and never re-tested what HE could see. That is the whole
+        /// report: a sniper walked on the acting client, spotted a bandit through its own native
+        /// <c>ActorMovedEvent</c>, and every mirroring peer — whose only word on that walk is the settle —
+        /// kept the bandit in fog for rounds (measured: <c>MIRROR play Scab Move_AbilityDef
+        /// shownMode=Hidden</c> on both clients, 22:23).
+        ///
+        /// The missing half is assembled from the SAME native method rather than a new one, by inverting the
+        /// loop: "my faction re-tests toward each foreign actor" covers "my settled soldier now sees them",
+        /// with the game's own LOS cast, the game's own counter arithmetic and the same monotone
+        /// idempotence — nothing here can reveal what this peer's line of sight does not support, which is
+        /// what law L81 bans.
+        /// ponytail: the inverted sweep re-tests the WHOLE faction per foreign actor, not just the one that
+        /// moved, because no public per-actor entry exists (<c>UpdateVisibilityForImpl</c> is private). Cost is
+        /// |ownActors| x |foreignActors| LOS casts per settle, off the frame hot path; if that ever shows up in
+        /// the rail cost line, narrow it to the settled actor with the public
+        /// <c>CheckVisibleLineBetweenActors</c> + <c>IncrementKnownCounter</c> pair.
+        ///
+        /// DECLARED CEILING: <c>KnownState.Located</c> (in detection range, no line of sight — the orange
+        /// beacon) is unreachable from here, because <c>ReUpdateVisibilityTowardsActorImpl</c>:651-662 only
+        /// ever raises <c>Revealed</c>. Located is repaired at the next faction turn edge by the game's own
+        /// full recompute (<c>OnFactionStartTurn</c>:154-175), which every peer runs.
         /// </summary>
         private static void RefreshVisionTowards(TacticalActorBase actor)
         {
             var tlc = actor == null ? null : actor.TacticalLevel;
             if (tlc == null || tlc.TacticalLevelControllerDef == null) return;
             float range = tlc.TacticalLevelControllerDef.DetectionRange;
+            var own = actor.TacticalFaction;
             foreach (var faction in tlc.Factions)
-                if (faction != actor.TacticalFaction && faction.Vision != null)
-                    faction.Vision.UpdateVisibilityOfAllTowardsActor(actor, range, notifyChange: true);
+            {
+                if (faction == own || faction.Vision == null) continue;
+                faction.Vision.UpdateVisibilityOfAllTowardsActor(actor, range, notifyChange: true);
+                if (own == null || own.Vision == null) continue;
+                foreach (var foreign in faction.Actors)
+                    own.Vision.UpdateVisibilityOfAllTowardsActor(foreign, range, notifyChange: true);
+            }
         }
     }
 

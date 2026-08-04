@@ -19,12 +19,13 @@ namespace Multiplayer.Network.Sync
     ///
     /// THE BLOCK, from the game's own code. <c>GeoscapeViewSwitchQuery.ProcessQueriedStateSwitch</c>:58-63
     /// dequeues ONLY while <c>_currentStateSwitchRequest == null</c>, and the single writer that clears that
-    /// field is <c>FinishCurrentStateSwitch</c>:116 — i.e. a HOST CLICK, nothing else. Every pushed window
-    /// also carries <c>PauseGame = true</c> (GeoscapeView.cs:861/:881 and every other queueing raiser), which
-    /// on the host is the AUTHORITATIVE clock (the TimeAnchor mirrors it to every peer). So ONE un-dismissed
-    /// window on an idle host freezes the shared campaign AND wedges the host's window queue for the rest of
-    /// the session — every later window piles up behind it forever. That is not a co-op inconvenience, it is
-    /// the whole game stopped by one peer walking away.
+    /// field is <c>FinishCurrentStateSwitch</c>:116 — i.e. a HOST CLICK, nothing else. So ONE un-dismissed
+    /// window on an idle host wedges the host's window queue for the rest of the session — every later window
+    /// piles up behind it forever. NARROWED 2026-08-04 by the pause rework: the CLOCK half of this argument is
+    /// gone. <c>PauseGame = true</c> is now a ONE-SHOT pause the game issues on the peer that gets the window
+    /// (<c>ProcessQueriedStateSwitch</c>:67-70 → <c>RequestGamePause</c>:1269) and ANY peer resumes it
+    /// unconditionally, first-to-act-wins — an idle host no longer freezes the shared campaign. The QUEUE
+    /// wedge is real and is the whole remaining reason this family exists.
     ///
     /// THE SEAM IS THE GAME'S OWN CHOKEPOINT, at ONE depth (it was two until 2026-08-01, see below):
     /// <c>UIStateGeoModal.FinishDialog(result)</c> (UIStateGeoModal.cs:82), which itself calls
@@ -76,9 +77,10 @@ namespace Multiplayer.Network.Sync
         /// (ModalResult.cs).</summary>
         internal const byte ResultNone = 255;
 
-        // ONE bind of each, shared with PauseHold (which asks the same two fields for the window-hold edge
-        // and for "is this screen a queued window") — a second AccessTools.Field pair is a second thing to
-        // drift when the game renames one.
+        // ONE bind of each, shared with PauseHold.IsCurrentQueuedWindow (all that class still is since the
+        // 2026-08-04 pause rework — no hold set, no arbiter; it asks these same two fields only for "is this
+        // screen a queued window") — a second AccessTools.Field pair is a second thing to drift when the game
+        // renames one.
         internal static readonly FieldInfo SwitchQueryField =
             AccessTools.Field(typeof(GeoscapeView), "_viewSwichQuery");                       // GeoscapeView.cs:138 (game typo)
         internal static readonly FieldInfo CurrentRequestField =

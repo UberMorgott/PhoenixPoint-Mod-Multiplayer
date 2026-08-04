@@ -31,15 +31,14 @@ namespace Multiplayer.Network.Sync
             // 0xB9 window queue — peer autonomy over the host's pushed-window queue, which only ever
             // drains on a click (GeoscapeViewSwitchQuery.ProcessQueriedStateSwitch:60).
             WindowQueueSync.RegisterIntents();
+            // 0xBC resupply — the post-mission screen's two writes no other family funnels through
+            // (GeoCharacter.RepairItem spends the SHARED wallet; the single-item reload).
+            ReplenishSync.RegisterIntents();
             // Tactical arc A2's end-turn (0x81) is an ordinary intent family — same engine, same envelope.
             Multiplayer.Tactical.TacticalTurnSync.RegisterIntents();
             // Arc A3a's per-soldier COMMAND (0x83) — likewise ordinary: ONE op carrying
             // (actorKey, abilityDefGuid, TacticalAbilityTarget), which is the whole generic seam.
             Multiplayer.Tactical.TacticalCommandSync.RegisterIntents();
-            // Arc A8's committed manual-aim stance (0x86) — a standing SHARED value per soldier, not an
-            // order; the host is only its single writer (no validator: aiming costs nothing and any peer
-            // may aim any soldier).
-            Multiplayer.Tactical.TacticalAimSync.RegisterIntents();
             // No intents, no surface: mist coverage is pure host→client mod-state riding the value rail
             // as root "M#mist" — same symmetric registration on both peers as "M#cart" (law L59).
             MistSync.Register();
@@ -55,8 +54,7 @@ namespace Multiplayer.Network.Sync
             SurfaceRouter.TacticalInbound = (peer, surfaceId, payload) =>
                 Multiplayer.Tactical.TacticalTurnSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || Multiplayer.Tactical.TacticalCommandSync.HandleInbound(_engine, peer, surfaceId, payload)
-                || Multiplayer.Tactical.TacticalDamageSync.HandleInbound(_engine, peer, surfaceId, payload)
-                || Multiplayer.Tactical.TacticalAimSync.HandleInbound(_engine, peer, surfaceId, payload);
+                || Multiplayer.Tactical.TacticalDamageSync.HandleInbound(_engine, peer, surfaceId, payload);
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
                 ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || EventPopup.HandleInbound(_engine, peer, surfaceId, payload)

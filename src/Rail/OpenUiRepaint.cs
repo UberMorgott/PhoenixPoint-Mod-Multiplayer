@@ -3,6 +3,8 @@ using System.Reflection;
 using Base.Core;
 using Base.UI;
 using HarmonyLib;
+using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Entities.Abilities;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewModules;
@@ -60,9 +62,39 @@ namespace Multiplayer.Network.Sync
             AccessTools.Method(typeof(UIModuleFactionAgendaTracker), "UpdateData", Type.EmptyTypes);
         private static readonly FieldInfo TrackerNeedsRefresh =
             AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_needsRefresh");
+        // Init(context):93 is what fills it; before the first geoscape state has entered, InitialSetup:144
+        // would NRE on `_faction.Manufacture`. Asked rather than caught: the module handle below is the
+        // NATIVE one, so it resolves long before the module is live.
+        private static readonly FieldInfo TrackerContext =
+            AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_context");
+
+        /// <summary>The open state's OWN contextual-ability derivation, cached per state type. Deliberately
+        /// resolved by NAME on whatever state is open instead of naming screens: the two states that drive
+        /// the site menu build DIFFERENT lists — UIStateNothingSelected.GetContextualAbilities:682 is the
+        /// site's abilities, UIStateVehicleSelected's:1481 prepends the selected vehicle's — so
+        /// re-implementing either here would be a guess about which screen is up AND a second copy of a
+        /// derivation the game already owns.</summary>
+        private static readonly System.Collections.Generic.Dictionary<Type, MethodInfo> ContextualAbilitiesOf =
+            new System.Collections.Generic.Dictionary<Type, MethodInfo>();
+
+        private static MethodInfo ContextualAbilities(Type state)
+        {
+            if (!ContextualAbilitiesOf.TryGetValue(state, out var m))
+                ContextualAbilitiesOf[state] = m =
+                    AccessTools.Method(state, "GetContextualAbilities", new[] { typeof(GeoSite) });
+            return m;
+        }
 
         /// <summary>
-        /// The half of law 11 that belongs to NO view state: the persistent geoscape HUD. The top-right
+        /// The half of law 11 that belongs to NO view state: the geoscape MODULES. <see cref="UiNativeRepaint
+        /// .Table"/> is keyed by view-state TYPE, so a module that spans states — or outlives one — has no
+        /// row that can reach it, no matter how many rows the table grows. That is one gap, not one bug per
+        /// widget, and this method is where it is closed once: every such module is re-derived here, through
+        /// the native <c>GeoscapeView.GeoscapeModules</c> handle, from the ONE universal repaint. Two live
+        /// today — the top-right activity strip and the open site menu — and a third is another block here,
+        /// never another syncer.
+        ///
+        /// The top-right
         /// agenda tracker (<c>UIModuleFactionAgendaTracker</c>) paints "Research: …", the current
         /// manufacturing item, every aircraft ACTION in progress (exploration included,
         /// <c>InitialSetup</c>:162-168 via <c>VehicleActionsViewService.GetCurrentActionTime</c>) and every
@@ -82,11 +114,41 @@ namespace Multiplayer.Network.Sync
         /// </summary>
         internal static void RefreshPersistentHud()
         {
-            if (TrackerUpdateData == null || TrackerNeedsRefresh == null) return;
+            // THE NATIVE HANDLE, never UnityEngine.Object.FindObjectOfType. That is what this method used to
+            // resolve the tracker with, and it is the R3 silent swallow: FindObjectOfType skips every
+            // INACTIVE GameObject, and a geoscape module is switched off by the game itself —
+            // UIModuleBehavior.SetStateID:34 calls `gameObject.SetActive(false)` for the state it is not
+            // part of. So on any peer whose screen had the module off when the delta landed, the lookup
+            // returned null and this whole refresh returned with NO log line at all; only walking into a
+            // state that re-Inits the module (UIStateNothingSelected.EnterState:104) brought the strip back —
+            // the reported "enter Research and come back and it appears". GeoscapeModulesData holds the
+            // module by reference whether it is active or not, so the handle can never go quiet on us.
+            var view = GeoLevel()?.View;
+            var mods = view?.GeoscapeModules;
+            if (mods == null) return; // no geoscape view at all (tactical / main menu) — nothing to repaint
+            RefreshAgendaTracker(mods);
+            RefreshSiteContextualMenu(mods, view.CurrentViewState);
+        }
+
+        /// <summary>Top-right activity strip. The flag makes UpdateData() take its InitialSetup branch
+        /// (UIModuleFactionAgendaTracker.cs:186-190 → :144), i.e. the module's own full rebuild from
+        /// Research.Current / Manufacture.Current / every vehicle action / every facility under
+        /// construction — exactly what its game-clock poll does, one tick early.</summary>
+        private static void RefreshAgendaTracker(GeoscapeModulesData mods)
+        {
+            if (TrackerUpdateData == null || TrackerNeedsRefresh == null || TrackerContext == null) return;
+            var tracker = mods.FactionDataTracker;
+            if (tracker == null)
+            {
+                if (_loggedFailures.Add("AgendaTrackerMissing"))
+                    Debug.LogWarning("[Multiplayer][rail] GeoscapeModulesData.FactionDataTracker is null — the " +
+                                     "top-right activity strip has no handle to repaint and will only ever update " +
+                                     "on its own game-clock poll (logged once)");
+                return;
+            }
+            if (TrackerContext.GetValue(tracker) == null) return; // not Init'd yet — InitialSetup would NRE
             try
             {
-                var tracker = UnityEngine.Object.FindObjectOfType<UIModuleFactionAgendaTracker>();
-                if (tracker == null) return; // no geoscape HUD up (base/tactical/menu) — nothing to repaint
                 // law 8: the rebuild re-reads the model and can fire native UI events a capture seam hears.
                 using (SyncApplyScope.Enter())
                 {
@@ -99,6 +161,56 @@ namespace Multiplayer.Network.Sync
                 if (_loggedFailures.Add("PersistentHud"))
                     Debug.LogWarning("[Multiplayer][rail] persistent-HUD refresh threw — the top-right tracker may " +
                                      "stay stale until the next screen change (logged once): " + ex);
+            }
+        }
+
+        /// <summary>
+        /// The OPEN site menu — the popup carrying "Explore (Xh)", "Move", "Attack" over a clicked site.
+        /// Second citizen of the same gap the tracker was the first of: <see cref="UiNativeRepaint.Table"/>
+        /// is keyed by VIEW STATE, and this module belongs to no single one (both
+        /// UIStateNothingSelected:60 and UIStateVehicleSelected:87 drive it), so no table entry can ever
+        /// reach it — which is why a peer's Explore button survived the exploration that another peer had
+        /// already started (R1). Its whole content is DERIVED: SetMenuItems:74-77 asks each ability
+        /// `View.VisibleInContextMenu(target)` and `View.CanActivate(target)` and hides the ones that answer
+        /// no, so the button disappears by itself the moment the mirrored site/vehicle state says it should
+        /// — nothing about a button is ever synced.
+        ///
+        /// NEVER OPENS ONE: guarded on the module's own <c>IsContextualMenuVisible</c>, so a peer that has
+        /// no menu up keeps having none (the same rule that keeps repaints from re-raising popups —
+        /// GenericApplier.RaiseArrivedForUi's doc). Read-direction only: SetMenuItems reads abilities and
+        /// writes widgets, it mutates no model state.
+        ///
+        /// ponytail: an ability set that empties completely leaves an empty menu frame rather than closing
+        /// it — telling "nothing visible" from "nothing derived" needs SetMenuItems' own filter, and
+        /// duplicating that filter here is the guess this seam exists to avoid. Upgrade path if it ever
+        /// shows: have the module report its own active-item count.
+        /// </summary>
+        private static void RefreshSiteContextualMenu(GeoscapeModulesData mods, GeoscapeViewState current)
+        {
+            var menu = mods.SiteContextualMenuModule;
+            if (menu == null || current == null) return;
+            if (!menu.IsContextualMenuVisible || menu.SelectedSite == null) return;
+            var derive = ContextualAbilities(current.GetType());
+            if (derive == null) return; // this screen owns no site menu of its own — nothing to re-derive
+            try
+            {
+                var abilities = derive.Invoke(current, new object[] { menu.SelectedSite })
+                                as System.Collections.Generic.List<GeoAbility>;
+                if (abilities == null) return;
+                // Put the menu back where it already is: SetMenuItems:54 writes
+                // `position + (CenterXOffset, CenterYOffset)` into the container, so feeding the current
+                // position minus those offsets reproduces the exact same placement without needing the
+                // camera — and the menu must not jump under a player who is aiming at a button.
+                var anchor = menu.MenuButtonsContainer.GetComponent<RectTransform>().position
+                             - new Vector3(menu.CenterXOffset, menu.CenterYOffset, 0f);
+                // law 8: re-deriving runs native ability views, which a capture seam could hear.
+                using (SyncApplyScope.Enter()) menu.SetMenuItems(menu.SelectedSite, abilities, anchor);
+            }
+            catch (Exception ex)
+            {
+                if (_loggedFailures.Add("SiteContextualMenu"))
+                    Debug.LogWarning("[Multiplayer][rail] site contextual-menu re-derive threw — its buttons may stay " +
+                                     "stale until the player clicks the site again (logged once): " + ex);
             }
         }
 

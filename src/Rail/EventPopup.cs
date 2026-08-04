@@ -6,6 +6,7 @@ using System.Text;
 using Base.UI;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
+using PhoenixPoint.Common.Core;
 using PhoenixPoint.Geoscape.Core;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Events;
@@ -80,11 +81,28 @@ namespace Multiplayer.Network.Sync
         /// monotonic stream and a client last-writer guard, so it must NOT be touched at a mid-session
         /// reload boundary (rca-3 contract: a host counter that restarts mid-session makes every following
         /// raise look stale to a client that kept its own high-water mark, and the windows vanish silently).</summary>
-        public static void Reset() { Seq.Reset(); _held.Clear(); }
+        public static void Reset() { Seq.Reset(); _held.Clear(); _unanswered.Clear(); _rewards.Clear(); }
 
         /// <summary>Raises that ARRIVED but had nowhere to go yet, oldest first. See
         /// <see cref="ClientTick"/> for why this exists and why it is bounded.</summary>
         private static readonly List<KeyValuePair<uint, Raise>> _held = new List<KeyValuePair<uint, Raise>>();
+
+        /// <summary>The last raise this peer was given per event id — the carrier a window needs to exist at
+        /// all (a mirrored <c>GeoscapeEventRecord</c> holds no site and no context). Keyed by event id, so it
+        /// is bounded by the campaign's event catalogue and a re-raise overwrites rather than accumulates.
+        /// Read once, by <see cref="RequeueUnanswered"/>, to carry a peer's unread windows across a battle —
+        /// see <c>ReplenishSync.CarryUnreadWindowsPatch</c> for why the save cannot do it on a client.</summary>
+        private static readonly Dictionary<string, KeyValuePair<uint, Raise>> _unanswered =
+            new Dictionary<string, KeyValuePair<uint, Raise>>();
+
+        /// <summary>The host's resolved CHOICE REWARD per event id (0xBD). A mirroring peer cannot compute
+        /// this: <c>GeoscapeEvent.ChoiceReward</c> is written ONLY inside <c>CompleteEvent</c>
+        /// (GeoscapeEvent.cs:101-102) and the very next line GRANTS it, so a client running it would MINT
+        /// resources (law 3). Keyed by event id and last-write-wins, which is why it needs no SurfaceSeq: an
+        /// event resolves once and a re-delivered payload is the SAME reward, so applying it twice is applying
+        /// it once. Consumed by <see cref="MarkResolvedInstance"/>.</summary>
+        private static readonly Dictionary<string, KeyValuePair<ResourcePack, ItemStorage>> _rewards =
+            new Dictionary<string, KeyValuePair<ResourcePack, ItemStorage>>();
 
         /// <summary>The bound. A peer that is loading a geoscape holds windows for SECONDS, not minutes, so
         /// this is a wide margin over a legitimate burst (the host raised two the frame after a mission ended
@@ -117,9 +135,18 @@ namespace Multiplayer.Network.Sync
             /// <c>GeoscapeViewSwitchQuery.QueryStateSwitch</c>:77-82 inserts before the first LOWER-priority
             /// entry while <c>GetNextQueriedStateSwitch</c>:111 pops [0]. Mirroring the raise without it
             /// queued every window at 0 on the client, so the moment two windows were pending the peers were
-            /// looking at DIFFERENT events. Ties need nothing extra: equal priorities append in insert order
-            /// on both sides, and the client's inserts are the host's own order (the raise <c>seq</c> is
-            /// strictly increasing and <see cref="SurfaceSeq"/> drops anything out of order).</summary>
+            /// looking at DIFFERENT events. TIES ARE NOT COVERED, AND THIS DOC USED TO CLAIM THEY WERE:
+            /// "the client's inserts are the host's own order" is true only among MIRRORED raises (the raise
+            /// <c>seq</c> is strictly increasing and <see cref="SurfaceSeq"/> drops anything out of order) and
+            /// FALSE the moment the peer raises a window of its OWN in between — which the post-mission
+            /// arrival batch does every single mission (<c>UIStateInitial.EnterState</c>:112-127 queues the
+            /// outcome modal, the pandoran reveal and the resupply screen locally, AFTER the host has already
+            /// queued the events that mission triggered). Measured 2026-08-04: host queued
+            /// [RE26, PROG_AN2_WIN, UIStateReplenish] in one frame, the client queued
+            /// [UIStateReplenish, RE26, PROG_AN2_WIN] with the two raises landing 103 ms later — all three at
+            /// priority 0, so priority cannot separate them and no re-sort can either, because a locally-raised
+            /// window carries no host ordering key at all. Closing it needs a host→client ordering signal that
+            /// does not exist yet; RailCheck <b>L93 client-raise-not-host-ordered</b> holds the bug open.</summary>
             public int Priority;
         }
 
@@ -350,6 +377,24 @@ namespace Multiplayer.Network.Sync
         /// raise (it already showed the window natively).</summary>
         public static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
         {
+            if (surfaceId == SurfaceIds.GeoEventReward)
+            {
+                if (engine == null || engine.IsHost) return true;
+                try
+                {
+                    using (var ms = new MemoryStream(payload))
+                    using (var r = new BinaryReader(ms, Encoding.UTF8))
+                    {
+                        string eventId = r.ReadString();
+                        MissionOutcomeMirror.Decode(r, out var resources, out var items);
+                        _rewards[eventId] = new KeyValuePair<ResourcePack, ItemStorage>(resources, items);
+                        Debug.Log("[MP][events] reward for '" + eventId + "' received — the outcome page will " +
+                                  "list what the host actually granted");
+                    }
+                }
+                catch (Exception ex) { Debug.LogError("[Multiplayer][rail] EventPopup reward inbound failed: " + ex); }
+                return true;
+            }
             if (surfaceId != SurfaceIds.GeoEventRaise) return false;
             if (engine == null || engine.IsHost) return true;
             try
@@ -400,6 +445,36 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             { Debug.LogError("[MP][events] held raise replay failed for '" + entry.Value.EventId + "': " + ex); }
+        }
+
+        /// <summary>Push every raise this peer was given and has NOT resolved back into the held list, so the
+        /// existing drain replays it onto the geoscape that just came back. Called once, from
+        /// <c>ReplenishSync.CarryUnreadWindowsPatch</c>, right after the native
+        /// <c>GeoscapeView.RestoreState</c>: on a client that restore came out of the HOST's save, so this
+        /// peer's own unread windows were never in it.
+        ///
+        /// "Unresolved" is the game's OWN record state, not a guess about what was on screen: still
+        /// <c>Triggered</c> means nobody — not this peer, not another — has answered it, which is exactly the
+        /// set that should come back. Anything else is pruned, so a window answered while we were in the
+        /// battle never reappears. Returns how many were re-held.</summary>
+        internal static int RequeueUnanswered()
+        {
+            if (_unanswered.Count == 0) return 0;
+            var es = GeoLevel()?.EventSystem;
+            int carried = 0;
+            // Snapshot: the loop removes from _unanswered as it goes (this file has no System.Linq).
+            foreach (var kv in new List<KeyValuePair<string, KeyValuePair<uint, Raise>>>(_unanswered))
+            {
+                _unanswered.Remove(kv.Key);
+                // No record at all = the event system does not know it any more; re-raising would build a
+                // window over nothing. Same drop a live raise takes (RaiseMirrored says why in both cases).
+                var state = es?.GetEventRecord(kv.Key)?.State;
+                if (state != GeoscapeEventRecordState.Triggered) continue;
+                if (_held.Count >= MaxHeld) break;
+                _held.Add(kv.Value);
+                carried++;
+            }
+            return carried;
         }
 
         /// <summary>Rebuild the host's window here: resolve the shipped refs, build the REAL context, apply
@@ -472,7 +547,9 @@ namespace Multiplayer.Network.Sync
             // host via the TimeAnchor" (what this said until 2026-08-04) is false whenever the host is
             // ALREADY paused: its re-write is swallowed by the change-gated Timing.Paused setter, no delta
             // is emitted, and this peer reads the popup while its aircraft keeps flying. True here is what
-            // makes ProcessQueriedStateSwitch:67-70 raise this peer's window hold (see PauseHold).
+            // makes ProcessQueriedStateSwitch:67-70 call RequestGamePause:1269 on THIS peer — a ONE-SHOT
+            // pause issued by the game itself, captured by TimeSync at SetGamePauseState. Nothing holds it:
+            // any peer may resume at any time, first-to-act-wins, and no peer's window vetoes that.
             { PauseGame = true });
             Debug.Log("[MP][events] raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority + " site=" +
                       (site == null ? "none" : site.SiteId.ToString()) +
@@ -480,6 +557,9 @@ namespace Multiplayer.Network.Sync
                       " record=" + rec.State + "#" + rec.TriggerCount +
                       (es.GetEventRecord(p.EventId) == null ? " (placeholder)" : "") +
                       " answeredFrom=#" + raiseTrigger);
+            // The window now exists on this peer; keep its carrier so a battle cannot delete it (see
+            // RequeueUnanswered). Overwrites any earlier raise of the same id — the newest is the live one.
+            _unanswered[p.EventId] = new KeyValuePair<uint, Raise>(seq, p);
             return true;
         }
 
@@ -862,7 +942,25 @@ namespace Multiplayer.Network.Sync
         internal static void MarkResolvedInstance(GeoscapeEvent ev)
         {
             SetIsCompleted?.Invoke(ev, new object[] { true });
-            SetChoiceReward?.Invoke(ev, new object[] { new GeoFactionReward { ApplyResult = new GeoFactionRewardApplyResult() } });
+            // The stub is no longer always EMPTY: when the host's 0xBD reward for this event has arrived, its
+            // resources and items go in, so ShowReward:363 finds HasRewards()==true and renders the green list
+            // this peer really did receive. Nothing is granted here — the reward already landed on every peer
+            // as ordinary wallet/storage state on the 0xAC value rail; this is the PRESENTATION of it, exactly
+            // like 0xBB does for a mission outcome. An empty stub stays the fallback, so a reward that has not
+            // arrived yet renders as no list rather than as a crash.
+            var applyResult = new GeoFactionRewardApplyResult();
+            var stub = new GeoFactionReward { ApplyResult = applyResult };
+            if (ev != null && _rewards.TryGetValue(ev.EventID, out var reward))
+            {
+                applyResult.Resources = reward.Key;
+                applyResult.Items = reward.Value;
+                // ShowReward reads BOTH objects and they are not the same one: the resource loop GATES on
+                // ApplyResult.Resources (:411) but ITERATES geoEvent.ChoiceReward.Resources (:413), so filling
+                // only the ApplyResult opens the branch and then renders nothing. The item loop reads the
+                // ApplyResult throughout (:395-401), so it needs only the line above.
+                stub.Resources = reward.Key;
+            }
+            SetChoiceReward?.Invoke(ev, new object[] { stub });
         }
 
         /// <summary>Is this dialog's outcome someone ELSE's to have decided — so that a click on it must
@@ -1029,6 +1127,53 @@ namespace Multiplayer.Network.Sync
             try { return GeoLevel()?.EventSystem?.GetEventRecord(eventId) ?? fallback; }
             catch { return fallback; }
         }
+
+        /// <summary>Ship what the host's <c>CompleteEvent</c> actually granted, so every OTHER peer can render
+        /// the green reward list without running the method that mints it. Resources + items only — the same
+        /// scope 0xBB already declares for a mission outcome, and for the same reason: the remaining rows
+        /// (diplomacy, new units, revealed sites, damaged aircraft) hold LIVE refs whose re-resolution is a
+        /// separate piece of work, and they render as nothing rather than as something wrong.</summary>
+        internal static void HostBroadcastReward(string eventId, GeoFactionReward reward)
+        {
+            var result = reward?.ApplyResult;
+            if (result == null || string.IsNullOrEmpty(eventId)) return;
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            try
+            {
+                byte[] body;
+                using (var ms = new MemoryStream())
+                using (var w = new BinaryWriter(ms, Encoding.UTF8))
+                {
+                    w.Write(eventId);
+                    MissionOutcomeMirror.Encode(w, result.Resources, result.Items);
+                    body = ms.ToArray();
+                }
+                engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                    SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventReward, SyncKind.StateDelta, body)));
+                Debug.Log("[MP][events] HOST reward for '" + eventId + "' broadcast");
+            }
+            catch (Exception ex)
+            { Debug.LogError("[MP][events] reward broadcast for '" + eventId + "' failed: " + ex); }
+        }
+    }
+
+    /// <summary>
+    /// HOST capture seam (law 4a) for the event's REWARD. <c>GeoscapeEvent.CompleteEvent</c> is the ONLY
+    /// writer of <c>ChoiceReward</c> (GeoscapeEvent.cs:101) and its very next line GRANTS it (:102), so a
+    /// client must never reach it — which leaves every non-answering peer with a null reward and, until now,
+    /// an empty green list on the outcome page (<see cref="EventPopup.MarkResolvedInstance"/> stubs it so the
+    /// unguarded dereferences at <c>SetClosingEncounter</c>:357 and <c>SelectChoice</c>:604 cannot NRE).
+    ///
+    /// A POSTFIX, because the reward does not exist until the native body has run: it is a capture of a
+    /// GRANTED amount, not a request for one, the same posture as
+    /// <c>MissionOutcomeMirror</c>'s <c>OnMissionRewardApplied</c> seam. Host-only inside.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoscapeEvent), nameof(GeoscapeEvent.CompleteEvent))]
+    internal static class EventRewardBroadcast
+    {
+        private static void Postfix(GeoscapeEvent __instance, GeoFactionReward __result) =>
+            EventPopup.HostBroadcastReward(__instance?.EventID, __result);
     }
 
     /// <summary>

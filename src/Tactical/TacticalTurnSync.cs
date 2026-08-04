@@ -87,8 +87,6 @@ namespace Multiplayer.Tactical
             LeftBattle = false;
             ClientMissionStartHints.Reset();   // the next battle gets its own mission-start replay
             TacticalUiRepaint.Reset();         // drop the paint memo: it names an actor of the dead battle
-            TacticalAimSync.Reset();           // A8: keys are re-derived per battle, so a carried-over aim
-                                               // table would pose the next battle's actors from a dead one
         }
 
         internal static void RegisterIntents()

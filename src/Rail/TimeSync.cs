@@ -57,9 +57,10 @@ namespace Multiplayer.Network.Sync
     public static class TimeSync
     {
         // Intent ops (GeoTimeIntent inner payload: [nonce:u32][op:u8][val:u8]).
-        internal const byte OpPause = 1;  // val = 0 resume / 1 pause      → PauseHold.Apply → SetGamePauseState
-        private const byte OpSpeed = 2;   // val = preset index            → SelectTimePreset
-        // op 3 = PauseHold.OpHold (val = 1 hold / 0 release) — the window hold, same family, same envelope.
+        internal const byte OpPause = 1;  // val = 0 resume / 1 pause      → SetGamePauseState
+        internal const byte OpSpeed = 2;  // val = preset index            → SelectTimePreset
+        // op 3 was the WINDOW HOLD. Dead, and it is not coming back: see PauseHold. A blocking window is a
+        // one-shot pause the GAME issues (RequestGamePause → SetGamePauseState), captured by the seam below.
 
         private static float _nextEnforceAt;
 
@@ -87,11 +88,11 @@ namespace Multiplayer.Network.Sync
 
         public static void Reset() => ResetForReloadBoundary();
 
-        /// <summary>Stateless per intent (same rca-3 contract as <see cref="PersonnelSync"/>):
-        /// nothing geoscape-bound cached; dedup/nonce live in <see cref="IntentRail"/>. The window-hold
-        /// set is NOT per-intent state and must go: its windows died with the level, and a surviving hold
-        /// would veto every resume in the next one.</summary>
-        public static void ResetForReloadBoundary() => PauseHold.Reset();
+        /// <summary>Stateless per intent (same rca-3 contract as <see cref="PersonnelSync"/>): nothing
+        /// geoscape-bound is cached, dedup/nonce live in <see cref="IntentRail"/>, and the clock itself is
+        /// re-seeded across the boundary by <see cref="TimeAnchor.Reset"/>. Nothing to clear here — kept
+        /// because <c>SyncEngineStub</c> drives the boundary uniformly across every family.</summary>
+        public static void ResetForReloadBoundary() { }
 
         /// <summary>Arm the 0xB0 surface on the generic intent engine. No family reconverge and no
         /// reject prefixes: the client BLOCKED its local clock write, so a dropped intent leaves both
@@ -104,10 +105,6 @@ namespace Multiplayer.Network.Sync
             {
                 [OpPause] = HandleIntentOp,
                 [OpSpeed] = HandleIntentOp,
-                // The window hold rides THIS family, not a surface of its own: it is a time-control
-                // statement about the same clock, decided by the same host, and a second surface would be
-                // a second ordering stream for one value.
-                [PauseHold.OpHold] = HandleIntentOp,
             };
             IntentRail.Register(SurfaceIds.GeoTimeIntent, "time", ops);
         }
@@ -143,7 +140,11 @@ namespace Multiplayer.Network.Sync
         /// can only end up TOO SLOW, the host's authoritative rate rides "T"/"TA" as before, and
         /// <see cref="TimeAnchor.EnforceDrift"/> re-asserts it within ~1 s if the host disagrees. A RESUME
         /// stays blocked because that direction is not self-healing — it would run the client's campaign
-        /// ahead of the host's — and because a resume is exactly what <see cref="PauseHold"/> arbitrates.
+        /// ahead of the host's. Blocked is NOT refused: the intent ships on the same line, the host applies
+        /// it unconditionally (nothing vetoes a resume any more — see <see cref="PauseHold"/>) and the
+        /// delta comes back, so the cost is one round trip and never a player who cannot play. The same
+        /// EnforceDrift is the backstop for the mirror-image swallow — a client left paused against a host
+        /// that is already running is re-asserted false within ~1 s (TimeAnchor.cs:224-245).
         /// Both native bodies are provably inert past the write for <c>paused == true</c>: the only side
         /// branch in <c>SetGamePauseState</c> needs <c>!paused</c> (GeoscapeView.cs:1259).</summary>
         private static bool PausesLocally(bool paused) => paused;
@@ -160,14 +161,7 @@ namespace Multiplayer.Network.Sync
         {
             private static bool Prefix(UIModuleTimeControl __instance, bool pause)
             {
-                if (IntentRail.ShouldRunNative())
-                {
-                    // The ONE resume veto (host-only inside): a blocking window on ANY peer holds the
-                    // shared clock, and the host pressing play is not an exemption.
-                    if (!pause && PauseHold.VetoResume(GeoLevel(), out string vetoWhy))
-                    { Debug.Log("[MP][pause] host resume gesture VETOED — " + vetoWhy); return false; }
-                    return true;
-                }
+                if (IntentRail.ShouldRunNative()) return true;
                 if (!BindOk()) return false;                 // cannot identify the clock: never write locally
                 if (!IsLevelClock(__instance)) return true;  // interception clock / mid-load: local by design
                 try
@@ -207,6 +201,13 @@ namespace Multiplayer.Network.Sync
         /// LEVEL clock (SetGamePauseState body reads _context.Level.Timing). Blocked wholesale on a
         /// client: the TimeLimit branch inside it is host-only logic.
         ///
+        /// IT IS ALSO THE WINDOW SEAM, and the mod has no other: a queued blocking window reaches exactly
+        /// here — GeoscapeViewSwitchQuery.ProcessQueriedStateSwitch:58-73 → RequestGamePause:1269 →
+        /// RequestPauseCrt:1293 → SetGamePauseState(true) — so the peer whose event popup or cutscene
+        /// opened pauses itself (PausesLocally) and relays the pause to everyone, ONCE. Nothing tracks
+        /// whose window is still up: the pause is a courtesy edge, any peer's later resume simply wins
+        /// (PauseHold).
+        ///
         /// UNLIKE the two gesture seams above, this method is ENGINE-driven: almost every geoscape UI
         /// transition re-asserts the pause state on an already-paused clock (UIModuleGeoSectionBar.cs:119-194
         /// on every section click, UIStateResearch:22, UIStateManufacturing:51, UIStateDiplomacy:27/39,
@@ -222,10 +223,6 @@ namespace Multiplayer.Network.Sync
                 try
                 {
                     var geo = GeoLevel();
-                    // The ONE resume veto, same as the gesture seam (host-only inside). Asked BEFORE the
-                    // inert test: a resume against a paused clock is a real change and would go through.
-                    if (!paused && PauseHold.VetoResume(geo, out string vetoWhy))
-                    { Debug.Log("[MP][pause] screen resume VETOED — " + vetoWhy); return false; }
                     // Native is provably INERT here: its only side branch needs (!paused && timing.Paused)
                     // = a change (GeoscapeView.cs:1259), and the else-write is swallowed by the
                     // change-gated Paused setter (Timing.cs:112). So nothing to capture and nothing to
@@ -251,24 +248,24 @@ namespace Multiplayer.Network.Sync
             byte val = r.ReadByte();
 
             var geo = GeoLevel();
+            if (geo == null)
+            { IntentRail.Reject(SurfaceIds.GeoTimeIntent, senderPeerId, "no geoscape op=" + op); return; }
 
-            if (op == OpPause || op == PauseHold.OpHold)
+            if (op == OpPause)
             {
-                // Deliberately BEFORE the no-geoscape reject: hold membership is a fact about a PEER, not
-                // about this host's level, and it must survive a moment with no geoscape (mid-load, a
-                // battle) or the peer's window would be forgotten and its hold never released. Apply skips
-                // the clock write itself when there is no level to write.
-                // ONE arbiter for both (PauseHold.Decide): a hold pauses, a release never resumes, and a
-                // resume is refused while ANY peer still has a blocking window up. It writes the clock
-                // through the same native funnel as before — TimeLimit guard kept, and the Paused setter
-                // raises the events that latch TimeAnchor + FlushNow the delta out.
-                PauseHold.Apply(geo, senderPeerId, op, val);
+                // UNCONDITIONAL, in BOTH directions, from ANY peer — there is no arbiter and no veto: a
+                // player who has dismissed his own windows must be able to fly the instant he says so, even
+                // while somebody else is still reading (and even while the host is AFK). Native funnel, so
+                // the TimeLimit guard (GeoscapeView.cs:1259) stays and the change-gated Paused setter
+                // raises the events that latch TimeAnchor + flush the delta to every peer.
+                bool paused = val != 0;
+                if (geo.View != null) geo.View.SetGamePauseState(paused);
+                else geo.Timing.Paused = paused;   // view mid-init: same write, same events
+                Debug.Log("[MP][pause] peer=" + senderPeerId + " → paused=" + paused + " nonce=" + nonce);
                 return;
             }
 
             // OpSpeed (the op set is table-gated upstream)
-            if (geo == null)
-            { IntentRail.Reject(SurfaceIds.GeoTimeIntent, senderPeerId, "no geoscape op=" + op); return; }
             var module = geo.View == null || geo.View.GeoscapeModules == null
                 ? null : geo.View.GeoscapeModules.TimeControlModule;
             if (module == null)
