@@ -361,10 +361,56 @@ namespace Multiplayer.Tactical
         private static bool _resnapPending;
         private static readonly HashSet<string> _said = new HashSet<string>(StringComparer.Ordinal);
 
+        /// <summary>CLIENT: how many NATIVE stat events this peer has replayed off the rail (law L105).
+        ///
+        /// THE SNAPSHOT AND THE EVENT RACE, AND THE SNAPSHOT USED TO WIN. A settle is a snapshot of one
+        /// actor's pos+AP+WP taken on the host at <c>ClearPlayingAction</c> — which fires BEFORE that
+        /// action's own damage resolves, measured a full second before it: host log 2026-08-05,
+        /// <c>settle Soldier_4 ap=2,6 wp=8 seq=231</c> @00:38:04.036 → <c>damage Ironbar hp-196 seq=104</c>
+        /// @00:38:04.953 → <c>settle Soldier_4 ap=2,6 wp=10 seq=233</c> @00:38:05.545. The +2 between the
+        /// two settles is the kill bonus: <c>TacticalActor.OnAnotherActorDeath</c>:1849-1865 adds the
+        /// victim's <c>WillPointWorth</c> to its KILLER and subtracts it from every one of the victim's
+        /// faction-mates, synchronously inside <c>Health.Set(0)</c> → <c>OnHealthChange</c>:616-622 →
+        /// <c>Die</c>, on EVERY peer separately. The host therefore shows one clean +2 — it never applies
+        /// its own settles. A client holds settle #231 behind its mirrored ability
+        /// (<c>TacticalCommandSync.ClientTick</c>), applies the death from 0x84 in the meantime (+2), then
+        /// drains the held PRE-kill snapshot (-2) and only then gets #233 (+2). That is the reported
+        /// +2/-2/+2 verbatim, and it is an ORDERING defect, not a paint one.
+        ///
+        /// So every stat snapshot that crosses the wire is stamped with this counter when it ARRIVES, and one
+        /// that drains against a higher counter is older than the board. Dropping its stat write loses
+        /// nothing: this peer replayed the SAME native grant the host did, so the fresher numbers are
+        /// already here.
+        /// ponytail: one global counter, not per actor — a death moves an unbounded set of actors (killer
+        /// plus every faction-mate) and the counter is the cheap superset. Cost is an unrelated actor's
+        /// settle losing its stat write across a death; it says so out loud and the next settle re-asserts.
+        /// Per-actor sets only if a live run shows AP corrections actually being starved.</summary>
+        private static int _statEpoch;
+
+        /// <summary>The stamp to put on a snapshot that arrives NOW.</summary>
+        internal static int StatEpoch => _statEpoch;
+
+        /// <summary>A host fact whose native replay rewrote stats the record itself does not name just
+        /// landed. Only a DEATH qualifies — an ordinary hit's victim has its own AP/WP overwritten from the
+        /// host's snapshot two lines below the apply.</summary>
+        internal static void NoteNativeStatEvent() => ++_statEpoch;
+
+        /// <summary>Was <paramref name="epoch"/> stamped before the last native stat event this peer
+        /// replayed? Then that snapshot's stat values lost the race and must not be written. FALSE is the
+        /// ordinary answer: this is a race guard, not a blanket refusal, and a settle that crossed no death
+        /// still carries the host's authoritative AP (law L98).
+        /// ponytail: the stamp is taken at ARRIVAL, not at the host's capture, so this catches an event
+        /// replayed between arrival and drain — the measured case, and the only one a single ordered
+        /// transport can produce, since both surfaces ride one connection in send order. A death that
+        /// genuinely overtook the settle it precedes would still slip through; that needs a host-side count
+        /// in the settle payload, and no wire change is worth it until one is seen.</summary>
+        internal static bool StatsAreStale(int epoch) => epoch != _statEpoch;
+
         internal static void Reset()
         {
             Seq.Reset();
             _lastContiguous = 0;
+            _statEpoch = 0;
             _resnapRequested = false;
             _resnapPending = false;
             _said.Clear();
@@ -670,6 +716,9 @@ namespace Multiplayer.Tactical
                 Debug.LogError("[Multiplayer][tac] " + actor.name + " is DEAD here but ALIVE on the host after the " +
                                "same hit — this peer killed something the host did not, which nothing can undo. " +
                                "The damage neuter (law L66a) is supposed to make this unreachable.");
+            // L105: the native death this peer just replayed moved the KILLER's will points and every
+            // faction-mate's. Any stat snapshot captured before this instant is now older than the board.
+            if (dead) NoteNativeStatEvent();
         }
 
         /// <summary>Overwrite from the host's snapshot AND report it. A correction that is not zero means
@@ -728,6 +777,7 @@ namespace Multiplayer.Tactical
                     // archived corpse manifest too (declared above), so a recovered corpse holds what the
                     // host's does instead of everything.
                     if (dead && !actor.IsDead) TacticalActorLifecycle.ForceDeath(actor, "the host's resnapshot");
+                    if (dead) NoteNativeStatEvent();   // L105, same reason as ApplyDamage's
                 }
             _resnapRequested = false;
             Debug.LogWarning("[Multiplayer][tac] CLIENT applied the host's resnapshot: " + fixedUp + " actor(s) " +

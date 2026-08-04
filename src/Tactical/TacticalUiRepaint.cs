@@ -215,11 +215,16 @@ namespace Multiplayer.Tactical
         /// selection — and never touches the AP/HP/WP texts. <c>UIUtil.EnsureActiveComponentsInContainer</c>
         /// REUSES the pooled elements, so after every <c>SetSquad</c> those numbers are literally the
         /// previous paint's until the deferred pass lands two frames later (:281 sets the countdown to 1 and
-        /// :286 decrements before testing). That two-frame window is also the WP flicker: nothing
-        /// double-applies the kill bonus — <c>TacticalActor.OnAnotherActorDeath</c>:1856-1863 grants it
-        /// synchronously inside <c>Die</c> (<c>TacticalActorBase</c>:626-627) on every peer, and the settle's
-        /// <c>WillPoints.Set</c> carries the host's number from after that same grant — so what flickers is
-        /// the PAINT, re-showing the pre-kill text each time a repaint rebuilds the row.
+        /// :286 decrements before testing).
+        ///
+        /// THE WP FLICKER WAS NEVER THIS, AND THAT CALL WAS WRONG (corrected 2026-08-05). This block used to
+        /// blame the client's +2/-2/+2 will-point flicker on the same two-frame paint window, on the premise
+        /// that the settle's <c>WillPoints.Set</c> carries the host's number from AFTER the kill grant. It
+        /// does not: a settle is captured at <c>ClearPlayingAction</c>, which fires a full second BEFORE that
+        /// action's own damage resolves, so the number it carries is the PRE-kill one. The three steps are
+        /// three real writes racing, not one value painted three ways — see
+        /// <c>TacticalDamageSync.StatsAreStale</c> (law L105), which is where it is fixed. The bar was an
+        /// honest mirror of the model throughout; it showed exactly what the model held.
         ///
         /// THE SEAM IS THE STAT ITSELF, not a list of the places a mirror writes one. <c>BaseStat.Set</c>:95
         /// funnels every stat write in the game through <c>OnStatChange</c>:111, so one postfix covers AP, WP,

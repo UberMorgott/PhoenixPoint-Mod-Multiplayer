@@ -13,6 +13,7 @@ using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.Research;
 using PhoenixPoint.Geoscape.Entities.Sites;
 using PhoenixPoint.Geoscape.Levels;
+using PhoenixPoint.Geoscape.View.ViewControllers.Modal;
 using UnityEngine;
 
 namespace Multiplayer.Network.Sync
@@ -81,7 +82,12 @@ namespace Multiplayer.Network.Sync
         /// client's <c>GeoMission</c> is a structural mirror the host's ref does not name.</summary>
         private static RewardWire _incoming;
 
-        internal static void Reset() { Seq.Reset(); _incoming = null; }
+        /// <summary>The mission this peer already completed while holding NO payload, so its outcome modal
+        /// went up with an empty reward. Held so a payload that lands afterwards still reaches the panel that
+        /// is on screen, instead of being decoded into a slot nobody will read again.</summary>
+        private static GeoMission _awaitingReward;
+
+        internal static void Reset() { Seq.Reset(); _incoming = null; _awaitingReward = null; }
 
         // ─── HOST ───────────────────────────────────────────────────────────
 
@@ -227,7 +233,24 @@ namespace Multiplayer.Network.Sync
                     return true;
                 }),
             (10, "FactionDiplomacyObjectiveChanged", (r, e) => { foreach (var f in r.FactionDiplomacyObjectiveChanged) e(10, Ref(f), "", 0); },
-                (geo, w, row) => Deref(geo, row.A) is GeoFaction f && Add(w.ApplyResult.FactionDiplomacyObjectiveChanged, f)),
+                (geo, w, row) =>
+                {
+                    // RESOLVING THE ADDRESS IS NOT ENOUGH for this one row: the renderer reads it through a
+                    // lookup that legitimately returns null and then dereferences it with NO guard —
+                    // :500 does f.Diplomacy.GetFactionDiplomacyState(Context.ViewerFaction).PointOfInterest,
+                    // and GetFactionDiplomacyState is a FirstOrDefault over _factionsDiplomacyState
+                    // (FactionDiplomacy.cs:120-123) whose null return the game's OWN callers test for (:151).
+                    // Measured 2026-08-05 00:40:01.910, both clients identically: NRE at IL_06cc =
+                    // `ldfld FactionDiplomacyState::PointOfInterest`, thrown out of the mirrored replay of
+                    // 'PROG_AN2_WIN' and killing the WHOLE page, not merely this row. So the row is shippable
+                    // only where this peer can also RENDER it; where it cannot, it is dropped out loud like
+                    // any unresolved address.
+                    if (!(Deref(geo, row.A) is GeoFaction f)) return false;
+                    var viewer = geo.ViewerFaction;   // == UIModuleSiteEncounters' Context.ViewerFaction
+                    if (viewer == null || f.Diplomacy == null ||
+                        f.Diplomacy.GetFactionDiplomacyState(viewer) == null) return false;
+                    return Add(w.ApplyResult.FactionDiplomacyObjectiveChanged, f);
+                }),
             (11, "SpawnedHavenDefensesAt", (r, e) => { foreach (var s in r.SpawnedHavenDefensesAt) e(11, Ref(s), "", 0); },
                 (geo, w, row) => Deref(geo, row.A) is GeoSite s && Add(w.ApplyResult.SpawnedHavenDefensesAt, s)),
             (12, "NewPhoenixBase", (r, e) => { if (r.NewPhoenixBase != null) e(12, Ref(r.NewPhoenixBase), "", 0); },
@@ -441,14 +464,17 @@ namespace Multiplayer.Network.Sync
                 {
                     uint seq = r.ReadUInt32();
                     if (!Seq.ShouldApply(SurfaceIds.GeoMissionOutcome, seq)) return true; // stale (law 7)
-                    // Wire only — this peer is still in TACTICAL, so there is no geoscape to resolve the row
-                    // addresses against yet. Build() does that at StampMirroredOutcome, where there is one.
+                    // Wire only — in the ORDINARY order this peer is still in TACTICAL, so there is no
+                    // geoscape to resolve the row addresses against yet. Build() does that at
+                    // StampMirroredOutcome, where there is one — or at RestampLateOutcome below, which is
+                    // the same resolution done one step later because this peer got back first.
                     _incoming = DecodeRaw(r);
                     Seq.Mark(SurfaceIds.GeoMissionOutcome, seq);
                     Debug.Log("[MP][outcome] CLIENT mission reward seq=" + seq + " res=" + Count(_incoming.Resources) +
                               " items=" + Count(_incoming.Items) + " rows=" + _incoming.Rows.Count +
                               " — held for this peer's own mission completion");
                 }
+                RestampLateOutcome();
             }
             catch (Exception ex) { Debug.LogError("[MP][outcome] inbound failed: " + ex); }
             return true;
@@ -471,15 +497,19 @@ namespace Multiplayer.Network.Sync
 
             var wire = _incoming;
             _incoming = null;
+            _awaitingReward = null;
             var reward = wire == null ? null : Build(GeoLevel(), wire, "Mission");
             if (reward == null)
             {
-                // The panel still OPENS (the gate above is what decides that) and reads "nothing gained".
-                // Loud, because the alternative reading — "this mission really granted nothing" — is one a
-                // player cannot tell apart from a lost message.
+                _awaitingReward = mission;   // ARM the late path — see RestampLateOutcome
+                // The panel still OPENS (the gate above is what decides that) and reads "nothing gained"
+                // UNTIL the payload lands. Loud anyway, because the alternative reading — "this mission
+                // really granted nothing" — is one a player cannot tell apart from a lost message, and
+                // because this branch running at all means the two peers raced.
                 Debug.LogWarning("[MP][outcome] no host reward payload had arrived when this peer completed its " +
-                                 "mission — the outcome panel will open EMPTY. The 0xBB raise is sent as the host " +
-                                 "applies the reward, so this means the host had not got there yet.");
+                                 "mission — the outcome panel opens EMPTY and is filled in when the payload " +
+                                 "lands (RestampLateOutcome). The 0xBB raise is sent as the host applies the " +
+                                 "reward, so this means the host had not got there yet.");
                 reward = new GeoFactionReward { Reason = "Mission" };
             }
             if (RewardSetter == null)
@@ -492,6 +522,63 @@ namespace Multiplayer.Network.Sync
             Debug.Log("[MP][outcome] CLIENT stamped mission outcome — CompleteSilently + the host's reward " +
                       "(res=" + Count(reward.Resources) + " items=" + Count(reward.Items) + "); the native " +
                       "UIStateInitial:101 branch now runs the outcome modal and the resupply screen.");
+        }
+
+        /// <summary>The payload landed AFTER this peer had already completed its own mission, so
+        /// <see cref="StampMirroredOutcome"/> stamped an empty reward and the outcome modal went up with its
+        /// whole reward section HIDDEN — every outcome DataBind gates that section on
+        /// <c>Reward.HasRewards()</c> (e.g. AncientSiteOutcomeDataBind.cs:105-113), which is why the player
+        /// reports the window as absent rather than as empty.
+        ///
+        /// NOT a rare sliver: 0xBB is broadcast when the HOST applies its reward, i.e. when the HOST's player
+        /// clicks through the battle summary, so a client that clicks faster ALWAYS loses this race and the
+        /// gap is a human's reaction time — measured 2026-08-05, client stamp 00:39:53.963 vs host apply
+        /// 00:39:55.978, 2.0 s, with the host's own panel listing 13 items the clients never saw. Waiting is
+        /// therefore not an option and neither is holding the modal shut; the payload is applied LATE.
+        ///
+        /// Nothing is granted here either (law 3) — same <see cref="Build"/>, same display-only rows.</summary>
+        private static void RestampLateOutcome()
+        {
+            var mission = _awaitingReward;
+            var wire = _incoming;
+            if (mission == null || wire == null || RewardSetter == null) return;
+            _awaitingReward = null;
+            _incoming = null;
+            RewardSetter.Invoke(mission, new object[] { Build(GeoLevel(), wire, "Mission") });
+            Debug.Log("[MP][outcome] host reward arrived AFTER this peer had already completed its mission — " +
+                      "re-stamped in place, and the open outcome modal is re-populated so the list appears");
+            RepopulateModal(mission);
+        }
+
+        /// <summary>Re-run the game's OWN population pass over whatever modal is currently showing
+        /// <paramref name="data"/>. This is <c>UIModal.Show</c>:29-33 and NOTHING else from it — no
+        /// <c>SetActive</c>, no <c>OnModalShow</c> re-raise, no re-open — so it is a REPAINT of a modal that
+        /// is already up. Deliberately not a view-state move: exiting and re-entering a state that is not the
+        /// live current one is what resurrected a zombie ability and replayed a cutscene seven times, and the
+        /// outcome modal is persistent and queued, so a re-open would also reorder the queue.
+        ///
+        /// Generic by construction (law 11 / rule#2): there are nine outcome DataBinds and this names none of
+        /// them — it dispatches through <c>IModalHandler</c>, the interface the game itself dispatches
+        /// through, so any modal whose data this rail re-stamps repaints the same way.</summary>
+        private static void RepopulateModal(object data)
+        {
+            if (data == null) return;
+            try
+            {
+                var modals = GeoLevel()?.View?.GeoscapeModules?.ModalModule;
+                if (modals == null) return;
+                foreach (var md in modals.CurrentModals)
+                {
+                    if (md.Modal == null || !ReferenceEquals(md.Modal.Data, data)) continue;
+                    foreach (var h in md.Modal.GetComponents<IModalHandler>()) h.ModalShowHandler(md.Modal);
+                    Debug.Log("[MP][outcome] re-populated the open '" + md.Type + "' modal in place");
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MP][outcome] re-populating the open outcome modal failed, so the reward list " +
+                               "stays missing on this peer for this mission: " + ex);
+            }
         }
 
         private static int Count(ResourcePack p) => p?.Values?.Count ?? 0;

@@ -524,6 +524,50 @@ namespace Multiplayer.Tactical
     }
 
     /// <summary>
+    /// A TURN DOES NOT END OVER AN ORDER THAT HAS NOT BEEN PLAYED YET (law L104).
+    ///
+    /// THE NATIVE GATE, USED AS-IS. <c>TacticalFaction.PlayTurnCrt</c>:471-483 is the player-turn input loop,
+    /// and it does NOT act on <c>_endTurnRequested</c> while
+    /// <c>TacticalView.IsWaitingForActiveAndQueuedAbilitiesAndMapUpdate</c>:867-874 is true — which is true for
+    /// as long as any actor has an ability whose <c>ShouldForceViewInWaitingState</c> is set
+    /// (<c>TacticalActor.ShouldViewWaitForMe</c>:1342-1360, fed by <c>StartPlayingAction</c>:1015-1018). So
+    /// EVERY peer, host and client alike, already refuses to end a turn on top of a running animation, and
+    /// <see cref="TacticalTurnSync.HandleEndTurn"/> handing a peer's ask to the very same
+    /// <c>RequestEndTurn</c>:382-386 (which only sets a bool) keeps it that way. Nothing here re-implements
+    /// that; this is the one thing the game cannot see.
+    ///
+    /// THE HOLE IT CLOSES. An order the host has ACCEPTED but is deliberately HOLDING — a peer's follow-up
+    /// that arrived while that soldier was still finishing that same peer's previous order
+    /// (<c>TacticalCommandSync.BusyWithOwnOrder</c>, the melee case law 5 spells out) — is not an executing
+    /// ability anywhere, so the native gate reads the board as idle in the window between the previous order
+    /// ending and <c>HostTick</c> releasing the held one. End the turn there and the held order is released
+    /// into a faction that is no longer playing, where <c>Validate</c> refuses it: the acting peer sees its
+    /// click evaporate and its soldier snap back on the forced settle.
+    ///
+    /// BOUNDED BY CONSTRUCTION, which is the only reason a turn may be held at all: <c>HostTick</c> refuses a
+    /// hold older than <c>DeferCeilingSeconds</c> (10 s) OUT LOUD and drops it, so <c>HasHeldOrders</c> cannot
+    /// stay true. Client-side and solo this is inert — <c>_deferred</c> is only ever written by the host's
+    /// intent handler and is cleared for a non-host on the first <c>HostTick</c>.
+    ///
+    /// The QUEUED half of the same question — a mirror this peer enqueued behind a running action
+    /// (<c>ApplyActivate</c>'s "MIRROR QUEUED" line) — is deliberately NOT gated here. Such a mirror always
+    /// sits behind an ability that IS executing, so the native gate already covers it; and a
+    /// <c>NotStarted</c> action is removed by <c>ActionComponent.PlayActionAfterCurrent</c>:85-89 WITHOUT
+    /// <c>SetState</c>, so its <c>OnCoroutineEnd</c> never runs and any set we tracked it in would leak an
+    /// entry that parks the turn forever — a swallowed hold, this repo's dominant bug class.
+    /// </summary>
+    [HarmonyPatch(typeof(PhoenixPoint.Tactical.View.TacticalView),
+                  nameof(PhoenixPoint.Tactical.View.TacticalView.IsWaitingForActiveAndQueuedAbilitiesAndMapUpdate))]
+    internal static class EndTurnWaitsForHeldOrders
+    {
+        private static void Postfix(ref bool __result)
+        {
+            if (__result || !TacticalCommandSync.HasHeldOrders) return;
+            __result = true;
+        }
+    }
+
+    /// <summary>
     /// The turn edge, both halves. Host broadcasts the cursor; client verifies its own against it. One patch
     /// because it is one edge: <c>TacMission.OnNewTurn</c> is called once per faction-turn-start by
     /// <c>NextTurnCrt</c> on EVERY peer running the native turn machine (TacticalLevelController.cs:716).

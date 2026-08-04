@@ -9,6 +9,7 @@ using Multiplayer.Network.Sync;
 using PhoenixPoint.Common.Core;
 using PhoenixPoint.Geoscape.Core;
 using PhoenixPoint.Geoscape.Events;
+using PhoenixPoint.Geoscape.Levels.Factions;
 using PhoenixPoint.Geoscape.View.ViewControllers.Modal;
 using PhoenixPoint.Geoscape.View.ViewModules;
 
@@ -56,13 +57,28 @@ namespace RailCheck
     /// fix is that the readiness question is asked of the event system rather than of the view, in ONE
     /// predicate both callers use — <c>window-readiness-*</c> holds all three parts of that.
     ///
+    /// THIRD HALF — THE SAME WINDOW, REPORTED AGAIN (2026-08-05 00:49, DLL 885760 B): "on the HOST there was
+    /// a THIRD window with a pile of rewards listed with numbers; on the CLIENTS it was not there." The
+    /// readiness gate above WORKED — <c>RE26</c> replayed clean this time — and the window in the report was
+    /// never the encounter page at all: it is the POST-MISSION outcome modal, and it failed twice over.
+    /// <c>outcome-late-*</c> holds the cause the player saw (the host's 0xBB lands after a faster-clicking
+    /// client has already stamped an empty reward, and every outcome DataBind HIDES its reward section on
+    /// <c>HasRewards()==false</c>); <c>row-render-precondition</c> holds the one underneath it (a row whose
+    /// address resolves can still be unrenderable, and one such row NREs the WHOLE page). Both are in
+    /// <see cref="RenderPrecondition"/> / <see cref="LateOutcomeDelivery"/>, whose own doc comments carry the
+    /// measurements — and both prove WIRING, not landing: the landing is an in-game gate, said plainly here
+    /// because the previous law on this window was green while the window was still missing.
+    ///
     /// Falsify: delete a table row → <c>row-kind-uncovered</c>; point row 2's Write at
     /// <c>RevealedSites</c> → <c>row-kind-mismatched</c>; drop the row block from either Encode overload →
     /// <c>rows-lost-in-roundtrip</c> / <c>head-format-diverged</c>; make any Build/Deref path call
     /// <c>GeoFactionReward.Apply</c> or a <c>Wallet</c> member → <c>mirror-applies-reward</c>; make Build
     /// substitute a stand-in for an unresolved address → <c>build-drops-unresolved</c>; revert
     /// <c>CanCarryWindow</c> to the view-only test → <c>window-readiness-view-only</c>; stop calling it from
-    /// either caller → <c>window-readiness-not-gating</c>; rename the game's field → <c>premise-events-field-gone</c>.
+    /// either caller → <c>window-readiness-not-gating</c>; rename the game's field → <c>premise-events-field-gone</c>;
+    /// drop the <c>RestampLateOutcome</c> call from <c>HandleInbound</c> → <c>outcome-late-not-drained</c>;
+    /// repaint by re-opening the modal instead of re-populating it → <c>outcome-repaint-reopens</c>; delete
+    /// row kind 10's diplomacy-state guard → <c>row-render-precondition</c>.
     /// </summary>
     internal static class L101_RewardRows
     {
@@ -155,6 +171,151 @@ namespace RailCheck
             // ─── The missing window: readiness is asked of the event system ───
 
             foreach (var f in WindowReadiness()) yield return f;
+
+            // ─── A row must satisfy what the renderer dereferences UNGUARDED ───
+
+            foreach (var f in RenderPrecondition()) yield return f;
+
+            // ─── A payload that lands LATE still reaches the panel ───
+
+            foreach (var f in LateOutcomeDelivery()) yield return f;
+        }
+
+        // ─── ARM: resolving the address is not the same as being renderable ──
+
+        /// <summary>THIRD REPORT OF THE SAME WINDOW (2026-08-05 00:49, DLL 885760 B): "on the HOST there was
+        /// a THIRD window with a pile of rewards listed with numbers; on the CLIENTS that window was not
+        /// there." Two independent causes, and this arm holds the second one.
+        ///
+        /// <c>UIModuleSiteEncounters.ShowReward</c>:500 renders a
+        /// <c>FactionDiplomacyObjectiveChanged</c> row as
+        /// <c>f.Diplomacy.GetFactionDiplomacyState(Context.ViewerFaction).PointOfInterest</c> — and
+        /// <c>GetFactionDiplomacyState</c> is a <c>FirstOrDefault</c> over <c>_factionsDiplomacyState</c>
+        /// (FactionDiplomacy.cs:120-123) whose null return the GAME's own callers test for (:151-155) and
+        /// this one does not. Measured on both clients identically at 00:40:01.910: NRE at IL_06cc
+        /// (<c>ldfld FactionDiplomacyState::PointOfInterest</c>) out of the mirrored replay of
+        /// <c>PROG_AN2_WIN</c>, which killed the ENTIRE page — three rows the host resolved fine cost the
+        /// clients the whole window, not one line of it.
+        ///
+        /// The general rule this encodes: a row is shippable only where this peer can also RENDER it. Row
+        /// <c>Read</c> returning true on a resolved address is NOT sufficient when the renderer then
+        /// dereferences a second, nullable lookup on it. Falsify: delete the
+        /// <c>GetFactionDiplomacyState</c> guard from row kind 10 → <c>row-render-precondition</c>.</summary>
+        private static IEnumerable<string> RenderPrecondition()
+        {
+            var lookups = typeof(FactionDiplomacy).GetMethods(AllMembers)
+                                                  .Where(m => m.Name == "GetFactionDiplomacyState").ToList();
+            if (lookups.Count == 0)
+            {
+                yield return "L101 premise-render-precondition-gone: FactionDiplomacy.GetFactionDiplomacyState " +
+                             "no longer exists. That nullable lookup, dereferenced with no null test at " +
+                             "UIModuleSiteEncounters:500, is the ENTIRE reason row kind 10 carries a render " +
+                             "guard — with it renamed the guard is checking nothing and the page-killing NRE " +
+                             "of 2026-08-05 can return with no error until a player loses a window.";
+                yield break;
+            }
+
+            var show = typeof(UIModuleSiteEncounters).GetMethod("ShowReward", AllMembers);
+            if (show != null && !Calls(show).Any(c => c.DeclaringType == typeof(FactionDiplomacy) &&
+                                                     c.Name == "GetFactionDiplomacyState"))
+                yield return "L101 premise-render-precondition-unused: ShowReward no longer calls " +
+                             "FactionDiplomacy.GetFactionDiplomacyState, so the precondition row kind 10 pays " +
+                             "for is derived from a renderer that no longer has it. Re-ground the guard " +
+                             "against what the page reads NOW — including whatever replaced it.";
+
+            if (!ClosureMethods(typeof(MissionOutcomeMirror))
+                    .Any(m => Calls(m).Any(c => c.DeclaringType == typeof(FactionDiplomacy) &&
+                                                c.Name == "GetFactionDiplomacyState")))
+                yield return "L101 row-render-precondition: no row-table Read asks " +
+                             "FactionDiplomacy.GetFactionDiplomacyState before shipping a " +
+                             "FactionDiplomacyObjectiveChanged row. Resolving the faction's address is not " +
+                             "enough — where this peer holds no diplomacy state for the pair the renderer " +
+                             "NREs at :500 and the mirroring peer loses the WHOLE reward page, exactly as it " +
+                             "did on both clients at 2026-08-05 00:40:01.910.";
+        }
+
+        // ─── ARM: the payload that lands after the panel is already up ───────
+
+        /// <summary>THE FIRST of the two causes, and the one the player actually reported. 0xBB is broadcast
+        /// when the HOST applies its reward — i.e. when the HOST's player clicks through the battle summary —
+        /// so a client that clicks faster reaches <c>StampMirroredOutcome</c> with NO payload, stamps an empty
+        /// reward, and every outcome DataBind then HIDES its whole reward section because it gates on
+        /// <c>Reward.HasRewards()</c> (AncientSiteOutcomeDataBind.cs:105-113). That is why the report says the
+        /// window was ABSENT rather than empty. Measured 2026-08-05: client stamp 00:39:53.963, host apply
+        /// 00:39:55.978 — 2.0 s, and the gap is a human's reaction time, so it is not a sliver to declare.
+        ///
+        /// Both halves must exist or the payload is decoded into a slot nobody reads again — that is the
+        /// SWALLOW shape this repo keeps meeting, and the old code even logged the warning while dropping the
+        /// data. And the repaint must go through the game's own <c>IModalHandler</c> dispatch
+        /// (<c>UIModal.Show</c>:29-33) and NOT through <c>Show</c>/<c>Hide</c>: re-opening a persistent modal
+        /// reorders the queue, and re-entering a view state that is not the live current one is what
+        /// resurrected a zombie ability and replayed a cutscene seven times.
+        ///
+        /// HONEST LIMIT, stated rather than implied: RailCheck is reflection + IL over a dead assembly, so
+        /// this arm proves the late path is WIRED end to end, not that the window lands. The landing is an
+        /// in-game gate. Falsify: drop the <c>RestampLateOutcome</c> call from <c>HandleInbound</c>, or swap
+        /// the <c>ModalShowHandler</c> dispatch for <c>UIModal.Show</c>.</summary>
+        private static IEnumerable<string> LateOutcomeDelivery()
+        {
+            var t = typeof(MissionOutcomeMirror);
+            var stamp = t.GetMethod("StampMirroredOutcome", AllMembers);
+            var inbound = t.GetMethod("HandleInbound", AllMembers);
+            var late = t.GetMethod("RestampLateOutcome", AllMembers);
+            var repaint = t.GetMethod("RepopulateModal", AllMembers);
+            var slot = t.GetField("_awaitingReward", AllMembers);
+
+            if (stamp == null || inbound == null || late == null || repaint == null || slot == null)
+            {
+                yield return "L101 outcome-late-path-gone: MissionOutcomeMirror is missing one of " +
+                             "_awaitingReward / StampMirroredOutcome / HandleInbound / RestampLateOutcome / " +
+                             "RepopulateModal. Together they are the ONLY thing that saves the outcome " +
+                             "reward list on a peer that returns from the battle before the host does, which " +
+                             "is every peer whose player clicks faster.";
+                yield break;
+            }
+
+            bool Touches(MethodBase m) =>
+                FieldsRead(m).Any(f => f.Name == "_awaitingReward" && f.DeclaringType == t);
+
+            if (!Touches(stamp))
+                yield return "L101 outcome-late-not-armed: StampMirroredOutcome no longer records the mission " +
+                             "it stamped with an EMPTY reward, so a payload arriving one moment later has " +
+                             "nothing to attach to and is dropped in silence — the panel keeps its hidden " +
+                             "reward section for good.";
+
+            if (!Calls(inbound).Any(c => c.Name == "RestampLateOutcome"))
+                yield return "L101 outcome-late-not-drained: HandleInbound decodes the payload and never " +
+                             "offers it to a mission this peer has already completed. The wire is then held " +
+                             "for a stamp that already happened, which is the swallow the 2026-08-05 log " +
+                             "recorded as a warning while losing all 13 items the host listed.";
+
+            if (!Touches(late))
+                yield return "L101 outcome-late-slot-unread: RestampLateOutcome does not read _awaitingReward, " +
+                             "so it cannot tell a late payload from an ordinary one and would restamp a " +
+                             "mission nobody is looking at.";
+
+            if (!Calls(late).Any(c => c.Name == "RepopulateModal"))
+                yield return "L101 outcome-late-not-repainted: RestampLateOutcome writes the reward but never " +
+                             "repaints. The modal is ALREADY on screen and every DataBind reads the reward " +
+                             "once, at population — model fresh, view stale, this repo's dominant bug shape " +
+                             "(law 11).";
+
+            if (!Calls(repaint).Any(c => c.Name == "ModalShowHandler"))
+                yield return "L101 outcome-repaint-not-native: RepopulateModal no longer dispatches through " +
+                             "IModalHandler.ModalShowHandler. That dispatch IS the game's own population pass " +
+                             "(UIModal.Show:29-33) and is what keeps this generic over all nine outcome " +
+                             "DataBinds instead of naming one of them.";
+
+            foreach (var c in Calls(repaint))
+                if (c.DeclaringType?.Name == "UIModal" && (c.Name == "Show" || c.Name == "Hide"))
+                {
+                    yield return "L101 outcome-repaint-reopens: RepopulateModal calls UIModal." + c.Name + ". " +
+                                 "A persistent outcome modal must be RE-POPULATED in place, never re-opened: " +
+                                 "Show re-raises OnModalShow and re-runs SetActive, which reorders the " +
+                                 "persistent queue and puts this rail back on the Exit/Enter path that " +
+                                 "resurrected a zombie ability and replayed a cutscene seven times.";
+                    yield break;
+                }
         }
 
         // ─── ARM: the wire ──────────────────────────────────────────────────

@@ -991,6 +991,10 @@ namespace Multiplayer.Tactical
             public float Wp;
             public int WaitedFrames;
 
+            /// <summary>L105: TacticalDamageSync.StatEpoch when this settle ARRIVED. A settle held behind a
+            /// mirrored ability routinely outlives the death it was captured before.</summary>
+            public int Epoch;
+
             /// <summary>The host sent this one because it REFUSED an order for that actor. The refusing peer
             /// is precisely the peer whose actor is mid-speculation, so the ordinary "wait until it goes
             /// idle" hold would sit on the correction for as long as the speculative ability runs — and if
@@ -1062,6 +1066,8 @@ namespace Multiplayer.Tactical
             _mirrorSkipsCameraWait.Clear();   // live ability refs: never let them outlive the battle
             _saidKeyless.Clear();
             _replayOriginPeer = 0;
+            _burstFrame = 0;
+            _burstCount = 0;
             TacticalActorKey.Reset();   // A3b: the derived alien keys belong to ONE battle and to no other
             TacAbilityTargetCodec.ResetDropNotices();   // A5: each battle reports its own dropped fields
             FumbleGate.Reset();
@@ -1174,6 +1180,27 @@ namespace Multiplayer.Tactical
                                    ". This peer acted alone; no other peer will follow.");
                 return;
             }
+
+            // ─── THE ANCHOR (law L104) ─────────────────────────────────────
+            // AN ACTION'S VISIBLE START MUST NOT BE SET BY WHERE THIS PEER'S CAMERA HAPPENS TO BE POINTING.
+            // TacticalAbility wraps EVERY action in WaitingForCameraBlendingAction:969-976, which — only when
+            // TrackWithCamera — first spins WaitForCameraChase:953-966 on CameraDirector.Chasing. ApplyActivate
+            // already exempts every MIRROR from that wait, so a watcher starts the shot NOW; the ACTING peer
+            // did not, and it is the one peer that pays, because it is the peer holding this soldier SELECTED
+            // and therefore the only one whose hint survives TacticalCameraPolicy.AllowAbilityHint. That is the
+            // whole "the other windows are half a second ahead of the one I clicked on" report: the acting
+            // peer's action was waiting out its own camera flight while everyone else's had already begun.
+            // TacticalCameraPolicy.SnapToAbilitySubject removes the DISTANCE, but only for a PlanarScrollCamera
+            // (:163) — a shot that resolves to the orbit behaviour keeps its full flight, which is why shooting
+            // is exactly where the complaint survived that fix.
+            //
+            // Armed for EVERY relayed activation — the host's own click, the host replaying a peer's intent, a
+            // client's speculative play — so the moment the actor starts aiming/shooting is the moment the
+            // order exists, on every peer, for every rider and not just for shooting. The cinematic still
+            // fires and still tracks: only the ACTION stops waiting for it, which is precisely what the game
+            // itself does for every ability with TrackWithCamera == false. Same arm as the mirror's (:1803),
+            // so the one-shot token is always consumed and never goes stale.
+            if (ability.TrackWithCamera) _mirrorSkipsCameraWait.Add(ability);
 
             if (relay == RelayMirror)
             {
@@ -1672,6 +1699,12 @@ namespace Multiplayer.Tactical
         /// onto a free soldier — so two held orders for one soldier still run in the order they arrived.
         /// The release re-enters <see cref="HandleActivate"/> with the bytes as they came, which is what keeps
         /// the arbitration, the reject and the mirror in exactly one place.</summary>
+        /// <summary>HOST: does this peer still owe somebody an order it has ACCEPTED but not started? The
+        /// end-turn gate reads it — see <c>EndTurnWaitsForHeldOrders</c> in <c>TacticalTurnSync</c>. Bounded by
+        /// <see cref="DeferCeilingSeconds"/>: <see cref="HostTick"/> refuses a hold that old out loud, so the
+        /// gate can never park a turn forever.</summary>
+        internal static bool HasHeldOrders => _deferred.Count > 0;
+
         internal static void HostTick(NetworkEngine engine)
         {
             if (_deferred.Count == 0) return;
@@ -1727,6 +1760,7 @@ namespace Multiplayer.Tactical
                     if (!Seq.ShouldApply(SurfaceIds.TacCommand, seq)) return true;  // stale re-delivery (law 7)
                     if (op == OpActivate)
                     {
+                        NoteCatchUpBurst();
                         int actorKey = r.ReadInt32();
                         string abilityGuid = r.ReadString();
                         var unresolved = new List<string>();
@@ -1753,6 +1787,40 @@ namespace Multiplayer.Tactical
                                "the host's: " + ex);
             }
             return true;
+        }
+
+        private static int _burstFrame;
+        private static int _burstCount;
+
+        /// <summary>CATCH-UP, MEASURED INSTEAD OF ARGUED (law L104). The transport is reliable and ordered and
+        /// drains its WHOLE backlog in one pump (<c>DirectTransport.Update</c>:462-473), so a peer that stalled
+        /// applies every missed order inside a single frame — it re-plays the HISTORY, it does not jump to now.
+        /// What that costs is bounded by the game itself and NOT by how long the stall was: per soldier
+        /// <c>MoveAbility.Activate</c> takes <c>PlayAction</c> → <c>ActionComponent.PlayAction</c>:57-60
+        /// <c>CancelActions(channel)</c> (every earlier move on that actor is cancelled) and
+        /// <c>ShootAbility.Activate</c>:173 takes <c>EnqueueAction(soloAfterCurrent:true)</c> →
+        /// <c>PlayActionAfterCurrent</c>:80-91 (the queued tail is cancelled), so one soldier collapses to
+        /// "whatever is running + the newest". AUTHORITATIVE state never replays at all: settles are a per-actor
+        /// dictionary (<see cref="QueueSettle"/>, last write wins) and damage/spawn/death are applied from the
+        /// host's snapshot verbatim. So the residue is one stale animation per SOLDIER, and this line is what
+        /// says how deep it actually got. One line per burst, never per message.</summary>
+        private static void NoteCatchUpBurst()
+        {
+            if (!CatchUpBurst(Time.frameCount, ref _burstFrame, ref _burstCount)) return;
+            Debug.LogWarning("[Multiplayer][tac] CATCH-UP BURST — more than one host order arrived in the same " +
+                             "frame, so this peer had fallen behind and is replaying what it missed. The game's " +
+                             "own action channel collapses each soldier to its newest order and the settle/damage " +
+                             "records are already at NOW; what you SEE is one stale animation per soldier (law L104).");
+        }
+
+        /// <summary>The burst decider, PURE so RailCheck L104 can execute it case by case rather than read a
+        /// counter's IL. True EXACTLY ONCE per frame — on the second order of that frame, the moment "one
+        /// order arrived" stops being the ordinary case. A <c>&gt;= 2</c> here would be one line per message,
+        /// which is the log volume that buried a whole live run in 23642 lines of one family.</summary>
+        internal static bool CatchUpBurst(int frame, ref int lastFrame, ref int count)
+        {
+            if (frame != lastFrame) { lastFrame = frame; count = 0; }
+            return ++count == 2;
         }
 
         /// <summary>Play the host's order with the game's own code, inside an apply scope so the capture
@@ -1869,7 +1937,8 @@ namespace Multiplayer.Tactical
 
         private static void QueueSettle(int key, Vector3 pos, float ap, float wp, bool forced)
         {
-            _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced };
+            _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced,
+                                                Epoch = TacticalDamageSync.StatEpoch };
         }
 
         /// <summary>The standing settle applier (driven from <c>SyncEngine.Tick</c>, client-only inside). A
@@ -1997,8 +2066,20 @@ namespace Multiplayer.Tactical
                 var stats = actor.CharacterStats;
                 if (stats != null)
                 {
-                    stats.ActionPoints.Set(s.Ap);
-                    stats.WillPoints.Set(s.Wp);
+                    // L105: captured on the host BEFORE a death this peer has since replayed natively, so
+                    // writing them rewinds a kill bonus every peer granted itself. Position is never stale —
+                    // no death moves an actor — and still applies.
+                    if (TacticalDamageSync.StatsAreStale(s.Epoch))
+                        Debug.LogWarning("[Multiplayer][tac] the settle for " + actor.name + " is OLDER than a " +
+                                         "death this peer already replayed — its ap=" + s.Ap.ToString("0.##") +
+                                         " wp=" + s.Wp.ToString("0.##") + " predate that kill's own will-point " +
+                                         "grant, so only its position is applied. The host's next settle for " +
+                                         "this actor re-asserts the numbers.");
+                    else
+                    {
+                        stats.ActionPoints.Set(s.Ap);
+                        stats.WillPoints.Set(s.Wp);
+                    }
                 }
                 RefreshVisionTowards(actor);
             }
@@ -2314,14 +2395,28 @@ namespace Multiplayer.Tactical
     /// and <c>AnyGlobalEffectExecuting</c>:267 are reached from coroutine drivers, never from inside one
     /// synchronous <c>Activate</c>. A postfix, not a prefix: when the client legitimately has an evaluation
     /// running the native answer is already TRUE and must survive.
+    ///
+    /// NARROWED TO THE AI TURN (law L104, 2026-08-05), because "match the host" is only PlayAction while the
+    /// host is actually running its AI. During a PLAYER turn the host's own answer here is FALSE — its
+    /// <c>_aiEvaluationUpdateable</c> is null — so a blanket lie made a WATCHER the only peer taking
+    /// <c>PlayAction(cancelCurrent: true)</c> while the acting peer and the host both took
+    /// <c>EnqueueAction(soloAfterCurrent: true)</c>. That is the second half of "I move behind a wall and
+    /// immediately shoot, and the other windows do it noticeably faster than mine": a watcher CANCELLED the
+    /// move mid-walk and fired at once, while the peer who clicked correctly finished the walk first. It was
+    /// not merely faster, it was wrong — cancelling a move leaves that peer at a position the order never
+    /// reached until the settle drags it back (the same hazard law 5 spells out for held melee orders).
+    /// The narrowing is derived from REPLICATED state (whose turn it is), so every peer computes the same
+    /// answer for the same order without a byte on the wire.
     /// </summary>
     [HarmonyPatch(typeof(TacticalLevelController),
                   nameof(TacticalLevelController.AnyAIEvaluationAbilityExecuting), MethodType.Getter)]
     internal static class MirroredPlayMatchesHostPacing
     {
-        private static void Postfix(ref bool __result)
+        private static void Postfix(TacticalLevelController __instance, ref bool __result)
         {
-            if (!__result && SyncApplyScope.Active) __result = true;
+            if (__result || !SyncApplyScope.Active) return;
+            var faction = __instance == null ? null : __instance.CurrentFaction;
+            if (faction != null && faction.IsControlledByAI) __result = true;
         }
     }
 
@@ -2340,8 +2435,16 @@ namespace Multiplayer.Tactical
     /// the SAME order start at different times, which a per-actor action queue cannot.
     ///
     /// Skipping it costs nothing but the camera blend: the coroutine is a pure wait, so the mirrored action
-    /// simply starts now. The acting peer's own click is untouched — it never routes through
-    /// <c>ApplyActivate</c>, so it still waits for its camera exactly as in single player.
+    /// simply starts now.
+    ///
+    /// AND THE ACTING PEER TAKES THE SAME EXEMPTION (law L104, 2026-08-05). Leaving its own click on the
+    /// native wait did not make it "single player" — it made it the SLOW one, because the acting peer is the
+    /// peer holding that soldier selected and therefore the ONLY peer whose camera hint survives
+    /// <c>TacticalCameraPolicy.AllowAbilityHint</c>. Every watcher started the shot immediately and the peer
+    /// who clicked watched its own camera fly in first: "on the other windows this happens noticeably faster
+    /// than on mine". The token is now armed in <see cref="TacticalCommandSync.OnAbilityActivated"/> for every
+    /// RELAYED activation as well, so a shared action begins at the moment the order exists on all peers
+    /// alike, and this class's name is now half the story — it is the ANCHOR, not a mirror concession.
     /// </summary>
     [HarmonyPatch(typeof(TacticalAbility), "WaitForCameraChase")]
     internal static class MirroredPlayDoesNotWaitForThisPeersCamera
