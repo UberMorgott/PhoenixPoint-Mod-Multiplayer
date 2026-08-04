@@ -18,7 +18,7 @@ namespace Multiplayer.Network.Sync
     /// LEVEL TEARDOWN IS SAFE AND LOUD (law L70) — the fix for the 2026-07-31 live blocker where the
     /// geoscape→tactical transition froze on every peer and tactical was never reached.
     ///
-    /// WHAT HAPPENED (reproduced from PP-Instance2\Player.log:4699-4708 and :4771-4781, both stacks
+    /// WHAT HAPPENED (reproduced from the client's Player.log:4699-4708 and :4771-4781, both stacks
     /// identical): a peer was sitting in a geoscape SUB-SCREEN (<c>UIStateEditSoldier</c> — the soldier
     /// equip page; multiplayer-2.log 00:22:14.778 "SKIP GeoscapeLog on UIStateEditSoldier" is the same
     /// peer, same screen) when the level was torn down. The teardown order is the whole bug:

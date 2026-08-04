@@ -17,7 +17,7 @@ namespace RailCheck
     ///   HOST   Player.log:26726-26750, all inside ONE frame t=104905, in this order:
     ///            UIStateGeoscapeEvent (RE26, prio 0) · UIStateGeoscapeEvent (PROG_AN2_WIN, prio 0) ·
     ///            UIStateReplenish (prio 0)
-    ///   CLIENT D:\PP-Instance2\Player.log:24161-24278:
+    ///   CLIENT Player.log:24161-24278:
     ///            UIStateReplenish (prio 0) at t=104321 — and ENTERED at t=104322, before the curtain lift —
     ///            then UIStateGeoscapeEvent RE26 seq=9 and PROG_AN2_WIN seq=10 at t=104424, 103 ms LATER.
     ///

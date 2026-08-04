@@ -7,7 +7,7 @@
   "Version": "0.0.1",
   "Name": [
     { "Key": "English", "Value": "Multiplayer — Cooperative Multiplayer" },
-    { "Key": "Russian", "Value": "Multiplayer — Кооперативная мультиплеер" }
+    { "Key": "Russian", "Value": "Multiplayer — Кооперативный мультиплеер" }
   ],
   "Description": [
     { "Key": "English", "Value": "Cooperative campaign multiplayer mod. Share your Phoenix Point campaign with friends. Supports Steam P2P, direct IP, and STUN NAT traversal." },

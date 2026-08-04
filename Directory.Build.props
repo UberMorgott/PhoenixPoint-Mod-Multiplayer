@@ -1,0 +1,33 @@
+<Project>
+  <!--
+    Where Phoenix Point is installed. Both projects in this repo (the mod and tools/RailCheck)
+    reference the game's assemblies from here, so this is the only thing a new machine has to get
+    right.
+
+    Resolution order:
+      1. -p:PhoenixPointDir="X:\path\to\Phoenix Point" on the dotnet/msbuild command line
+      2. an environment variable named PhoenixPointDir
+      3. the usual Steam / Epic install locations, probed below
+    Build fails with a clear message if none of them resolve.
+  -->
+  <PropertyGroup Condition="'$(PhoenixPointDir)' == ''">
+    <PhoenixPointDir Condition="Exists('$(MSBuildProgramFiles32)\Steam\steamapps\common\Phoenix Point')">$(MSBuildProgramFiles32)\Steam\steamapps\common\Phoenix Point</PhoenixPointDir>
+    <PhoenixPointDir Condition="'$(PhoenixPointDir)' == '' And Exists('C:\Steam\steamapps\common\Phoenix Point')">C:\Steam\steamapps\common\Phoenix Point</PhoenixPointDir>
+    <PhoenixPointDir Condition="'$(PhoenixPointDir)' == '' And Exists('D:\Steam\steamapps\common\Phoenix Point')">D:\Steam\steamapps\common\Phoenix Point</PhoenixPointDir>
+    <PhoenixPointDir Condition="'$(PhoenixPointDir)' == '' And Exists('E:\Steam\steamapps\common\Phoenix Point')">E:\Steam\steamapps\common\Phoenix Point</PhoenixPointDir>
+    <PhoenixPointDir Condition="'$(PhoenixPointDir)' == '' And Exists('$(MSBuildProgramFiles32)\Epic Games\PhoenixPoint')">$(MSBuildProgramFiles32)\Epic Games\PhoenixPoint</PhoenixPointDir>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <GameManaged>$(PhoenixPointDir)\PhoenixPointWin64_Data\Managed</GameManaged>
+    <!-- 0Harmony.dll ships with the game's official Mod SDK (Phoenix Point > Properties > DLC in Steam). -->
+    <ModSDK>$(PhoenixPointDir)\ModSDK</ModSDK>
+  </PropertyGroup>
+
+  <Target Name="VerifyPhoenixPointDir" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('$(GameManaged)')"
+           Text="Phoenix Point not found at '$(PhoenixPointDir)'. Pass -p:PhoenixPointDir=&quot;X:\path\to\Phoenix Point&quot; or set an environment variable of that name (expected '$(GameManaged)' to exist)." />
+    <Error Condition="!Exists('$(ModSDK)\0Harmony.dll')"
+           Text="0Harmony.dll not found in '$(ModSDK)'. Install the Phoenix Point Mod SDK (Steam: Phoenix Point > Properties > DLC)." />
+  </Target>
+</Project>

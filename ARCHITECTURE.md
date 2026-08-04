@@ -1,28 +1,26 @@
-# Architecture — rail rewrite (recon-grounded + mandate v2, 2026-07-16)
+# Architecture — the sync rail
 
-Sources: recon workflow (4 readers over decompile + old repo + docs/research) + developer mandate
-`docs/MANDATE-v2.md` (verbatim, binding). Where mandate wording and recon facts diverge, the
-reconciliation below is authoritative.
+How this mod keeps two campaigns identical: the host runs the game, a generic diff of the live
+object graph becomes a delta, and every peer applies it. Grounded in the decompiled game assembly;
+where a design intention and an observed engine fact diverge, the fact below wins.
 
-## Mandate ↔ recon reconciliation (the one real conflict)
+## Why the delta is a live-graph walk, not a blob diff
 
-Mandate З5/З8 says "Serialize(current) → Diff(previous, current)". Literal blob-diffing is NOT
-feasible (recon): serializer ObjectIDs are session-local nondeterministic ints
+The obvious design — "serialize the whole state, diff the bytes" — is NOT
+feasible: serializer ObjectIDs are session-local nondeterministic ints
 (`SerializationWriter._object2ID`, hash-collection traversal order); wire format not structurally
 diffable; `SerializationReader.ReadObjects` always builds NEW graphs (`Activator.CreateInstance`).
 **Implementation of the law:** the diff engine walks the LIVE game object graph, addressed by
 stable game IDs, using the save serializer's TYPE METADATA (`[SerializeType]` + AQN field
-discovery) to enumerate persistent fields generically — this preserves the mandate's goals
+discovery) to enumerate persistent fields generically — this preserves the design goals
 (generalized enumeration kills "forgot the field"; canonical byte-identical deltas via sorted-ID
 traversal + fixed field order; TFTV fields ride free) without depending on blob determinism.
 Serializer blobs remain ONLY as payloads for structural creates (spawn → blob → deserialize →
 attach → fire native added-event).
 
-## What IS proven (old-repo code)
+## Proven building blocks
 
-- Per-entity blob roundtrip: `TacticalDeploySync.SerializeGraph/DeserializeGraph`
-  (old repo `src/Sync/Tactical/TacticalDeploySync.cs:1490-1629`) → extracted to
-  `src/Rail/SerializerRoundtrip.cs`.
+- Per-entity blob roundtrip: `SerializeGraph`/`DeserializeGraph` → `src/Rail/SerializerRoundtrip.cs`.
 - Live hot-apply by field-copy onto running instances: `PersonnelChannel.Apply` →
   `PersonnelReflection.ApplySoldierState`; spawn path `TacticalActorLifecycleSync.HandleActorSpawn`
   → `ActorSpawner.SpawnActor`.
@@ -44,40 +42,10 @@ vehicle add/loss (scene binding + `VehicleAdded/Removed`); soldier hire/death (`
 registry + `CharacterAdded/Died`); base build (facility graph); haven zone built/destroyed;
 research-complete reward chain; manufacture-complete item creation; mission start/end deployment.
 
-**Wire:** SyncProtocol envelope over SurfaceRouter (quarried), SurfaceSeq + IntentDedup per
+**Wire:** SyncProtocol envelope over SurfaceRouter, SurfaceSeq + IntentDedup per
 surface, CRC per path-subtree backstop (diverged subtree resent alone). Join/reconnect = native
-save transfer (SaveTransferCoordinator, quarried). Journal (law 9): written post-pipeline,
+save transfer (SaveTransferCoordinator). Journal (law 9): written post-pipeline,
 observational, debug builds OK.
-
-## Spike — split A/B (mandate §3 proof list)
-
-The load-bearing assumption: save serializer usable as live-graph mechanism AND applied state
-preserves runtime invariants (caches, subscribers, scheduler, Unity views, backrefs are NOT
-serialized — the false-green scenario "CRC matches, game corrupted" is the top danger).
-
-**Spike A (DONE — first in-game gate passed; grew into ResearchSync): host starts research →
-client bar moves, no reload.**
-- Host, on research start: `blob = SerializeGraph(new[]{ researchElement }, quiet:true)`
-  (configured serializer + `Timing.RunUntilComplete`, `TimeSlice(3600f)`, `ByRef<byte[]>` via
-  `new object[]{null}`). Send `(factionDefGuid, researchDefGuid, blob)`.
-- Client: defer to game loop (no `Timing.Current` in network callbacks); locate LIVE element by
-  `ResearchDef` key; field-copy progress; fire faction research event → GeoscapeView repaints.
-- Periodic host ticks = pure value delta (defGuid + progress ints, no blob).
-- Logs blob byte + object count (risk 1 probe).
-
-**Spike B (next batch, before rail generalization):**
-1. Structural-apply probe: create/destroy an entity with a live Unity view on the client
-   (site spawn or vehicle add) via blob + native added/removed event.
-2. Runtime-invariant checklist after Apply: events/subscribers fire; UI reacts; scheduler/timers
-   alive; cached dicts/lookups consistent; Unity views bound; backrefs intact.
-3. Idempotence: Apply(delta); Apply(delta) → same state.
-4. Out-of-order: late seq after newer seq → no damage.
-5. No dangling refs after entity destroy (top Unity hazard).
-
-**Fork (mandate §3):** live-apply works broadly → continue in this repo. Works only for part of
-the graph → rail narrows to that part, remainder strangler-style in the OLD repo; this repo
-becomes reference or is discarded. (Deviation from mandate: spike runs HERE, not in the old repo —
-transport was already quarried in; the fork itself is preserved.)
 
 ## Rail engine (implemented 2026-07-17) — THE generic value rail (laws 3/6/11)
 
@@ -386,7 +354,7 @@ so it is reference identity at walk time:
 - **Membership gates:** chat + rail resync-requests from senders not on the roster are dropped (no
   "Player" injection, no unthrottled full resends).
 
-## Verification (mandate §4)
+## Verification
 
 - **Stage 1 = `tools/RailCheck` (BUILT 2026-07-18).** `cd tools/RailCheck && dotnet run -c Debug`
   — exit 0 green, 1 red. Seconds, no game, no save.
@@ -428,7 +396,7 @@ so it is reference identity at walk time:
     `--update` and commit the baseline in the same commit.
 - **What stage 1 does NOT cover** (do not read green as "safe"):
   - No simulation, no LIVE-TREE CRC(host)==CRC(client), no seeded command sequences — those need a
-    live `GeoLevelController`, so the mandate's original SimCluster shape is still unbuilt. L13
+    live `GeoLevelController`, so the originally intended SimCluster shape is still unbuilt. L13
     covers only the separable identity underneath: re-encode-after-apply is byte/CRC-identical at
     the field codec.
   - `LeafKind.DefRef` / `EntityRef` round-trip stays UNTESTABLE offline and is deliberately not faked:
@@ -452,109 +420,7 @@ so it is reference identity at walk time:
     drift, and only when the change touches the table. The husk lists exist so review catches it.
 - Stage 2 in-game 2-instance gate per subsystem.
 - Done = stage 1 green + stage 2 passed + legacy counterpart not ported.
-- Quarry `Multiplayer.GameTests`: **read, not reused — it has no headless bootstrap to reuse.** It is
-  an xunit project that only `Compile Include`s mod sources and references `0Harmony` +
-  `UnityEngine.CoreModule`; it never references `Assembly-CSharp`, and its own header says the linked
-  game-bound code is "never invoked in tests". RailCheck goes further (loads the game assembly and
-  drives the real `Serializer`) and needs no bootstrap at all.
-
-## Top risks + cheapest early tests
-
-1. **Graph-chase blowup** — serializer walks all non-embedded refs from a root; one blob may drag
-   the whole level. Spike A logs byte/object count; if huge → DTO boundary, blobs only for creates.
-2. **Client double-execution** — client sim not frozen by nature (clock advance drives its
-   scheduler); applied delta + local tick = divergence. Wallet delta test with sim-gating seam
-   active (migration step 2).
-3. **Reflection-copy burden per type** — blobs deserialize to NEW instances; each type needs a
-   field-copier. If 3rd copier still costs days → value-tuples on wire for value deltas, blobs
-   only for structural creates. (Metadata-guided generic copier is the intended escape — same
-   serializer metadata as the diff engine.)
-4. **False-green** — CRC matches but runtime invariants broken. Spike B checklist is the probe;
-   in-game gates stay mandatory regardless of harness green.
-
-## Named next steps (post-audit 2026-07-19, none blocking)
-
-- **Husk-gated blob licensing.** `a6fd0a5` removed the walk-time `EntityCollection`→blob fallback
-  outright, because every `EntityCollection` field in the closure holds `ResearchElement` (7-member
-  husk) — the fallback's only possible use was exactly the hazard it re-opened. The GENERAL law
-  behind it is still unstated in code: *a type may only be blob-reconstructed if its husk is
-  empty*, i.e. the blob carries everything the game's own load path would have re-`Init`'d.
-  Deliberately NOT implemented as a second runtime husk table — `HuskMembers` lives in
-  `tools/RailCheck/Program.cs` and duplicating it into `src/` is the two-tables-disagree shape that
-  produced the `GeoItem`/`TypeKeyable` bug. Right shape when it is needed: move `HuskMembers` into
-  `RailMeta` next to `ListApplyStrategy` and have BOTH classify and the report ask it. Today it is
-  argued per-type in review via the baseline's `husk=` column, which is why the defect was findable.
-- **`ApplyList` inserts nulls for contentless element types.** `RailMeta` writes `TagNull` when
-  `!HasBlobContent`, and `ApplyList` strips nulls only for root-entity/`BaseDef` element types, so
-  another element type could land nulls in a live list. Unproven reachable in the 40-type closure.
-  Do NOT "fix" it by stripping nulls unconditionally: `AbilityTrack.AbilitiesByLevel` is an
-  `AbilityTrackSlot[]` whose INDEX IS THE LEVEL, so dropping holes would shift every ability up a
-  level. The safe shape is a classify-time refusal (`EntityList` where `!HasBlobContent(elem)`),
-  which needs the serializer available at classify time — verify that before writing it.
-- ~~**`GeoPhoenixFacility` is not in the harness closure**~~ DONE 2026-07-19 (`5ca3687`): seeded,
-  types 40→41, N4's refusal of the readonly `_components` array now EXECUTED rather than argued.
-  7 covered / 4 excluded (`_def`/`_position`/`_rotation` read-only), no new violations. It was
-  outside only because the closure is built from DECLARED types while the live walk types every hop
-  by `obj.GetType()` — `GeoSite.SerializationData` is declared `ActorInstanceData` but IS a
-  `GeoSiteInstaceData`, so the walk does reach `PhoenixBaseData → Layout → Facilities`.
-  **The general hole remains:** any other type reachable only through a runtime subtype is still
-  invisible to the harness, and each one needs its own seed line until the closure follows runtime
-  types the way the walk does.
-
-## Known temporary state
-
-- **`TEMP diag` trace on `.TacUnits`** in `DiffEngine.cs` and `GenericApplier.cs`: logs every
-  changed TacUnits list leaving the host and every TacUnits apply/skip on the client. Kept
-  deliberately for one pending in-game verification (host-initiated reassign mirroring on clients);
-  marked for removal right after that retest.
-
-## Migration order (mandate §6 — ascending structural complexity; WIP limit 1)
-
-1. Research — **DONE pending in-game gate** (generic rail 0xAC + intents 0xAB; the 0xAA side
-   channel retired 2026-07-26 — queue membership+order ride the order-vector, presentation is a
-   mirror-fed latch; gate = start/cancel/reorder/complete from both peers).
-2. Wallet/Resources — **DONE pending in-game gate** (rides the generic rail 0xAC + `ClientSimGate`;
-   repaint via native ResourcesChanged + open-screen dirty-mark).
-3. Manufacturing — **DONE pending in-game gate** (0xAD order snapshot + 0xAE intents + scrap-mode
-   snapshot resync; equip ops split to own 0xB3 GeoEquipIntent surface 2026-07-26).
-4. Diplomacy (mostly values) — not started.
-5. Personnel — intent+value+structural layer **DONE pending in-game gate** (0xAF spendStats/
-   buyAbility/secondSpec/reassign/skillReset/hire/fire/hireNaked + TFTV ops 9/10/11
-   tftvRedeploy/tftvTrainDeploy/tftvPromote via TftvLateBinder; reassign seam moved to model
-   funnel on `GeoSite.AddCharacter/RemoveCharacter` + `GeoVehicle` twins (`7d4a083`/`228de05`);
-   stat co-management deleted (`c400a6a`) — host commits natively per gesture via
-   `UIModuleCharacterProgression.CommitStatChanges`, minus-button undo is a host round-trip
-   (accepted trade-off)).
-6. Aircraft — not started (scalar subset already rides the generic rail).
-7. GeoSites (spawn/despawn, fog, Unity views) — not started.
-8. Mission generation — last.
-Time (unnumbered, rode along 2026-07-23): **DONE pending in-game gate** — 0xB0 intents + "TA"
-anchor + EnforceDrift (see Time sync section).
-Tactical (own arc track, quarantine RETIRED 2026-07-31 — MANDATE L5 = shared battle, no ownership
-model, all peers command simultaneously, host-authoritative outcomes):
-- A1 (`7808c7f`) — **DONE**: both peers enter the same battle via the save-transfer entry path (no
-  deploy-snapshot surface); client = suppressed spectator (`ClientSimGate` pattern:
-  `TacticalFaction.RequestEndTurn` blocked, `AIUpdateCrt` held). ZERO wire surfaces.
-- A2 (`285411d`, `90dc585`) — **DONE**: turn mirror + end-turn intent + mission end/return.
-  Surfaces 0x80 TacTurn, 0x81 TacTurnIntent. Faction identified by def GUID, never a list index
-  (law 2). Native turn loop preserved — the host only PACES it, no reflection, no private-field
-  writes. Laws L63+L64 (34 arms, all falsified).
-- A3 — not started: generic command intent + `DamageResult` results; gated on digging three
-  unknowns (the RNG path, `MoveAbility` target encoding, whether TFTV overrides `Activate`).
-- A4 concurrent presentation, A5 inventory/loot, A6 spawn/despawn/destructibles — not started.
-- Surface band: tactical ids stay in 0x80-0x9F (`src/Rail/SurfaceIds.cs:5`), NEVER 0xA0-0xBF
-  (geoscape, occupied through 0xB7) — law L62; v1 RCA 3ff508d.
-
-## Quarry transfer list (verbatim, ~45 files — landed by skeleton stage)
-
-Transport (ITransport, TransportType, DirectTransport, CompositeTransport, SteamTransport,
-StunTransport, SteamInvite); MessageLayer (PacketType, NetworkMessage, MessageSerializer);
-Lobby (LobbyController, SessionLifecycle, SlotAllocator, SteamConnect, ParityManifest → upgrade
-to BLOCKING per law 10, SessionManager, NetworkEngine, ClientIdentity, HostLeaveHandler,
-SessionNotifier, LobbyPanel, LobbyTheme, MultiplayerUI, UiToolkit, NativeWidgetFactory,
-LoadOverlayController, LoadOverlayVisibility, ChatLog, MainMenuPatches); Sync primitives
-(SurfaceSeq, IntentDedup, SurfaceIds, SyncKind, SyncProtocol, SurfaceRouter);
-Bootstrap (MultiplayerMain, meta.json, Multiplayer.csproj, deploy.ps1, MultiplayerLog,
-TftvLateBinder, Crc32); SaveTransferCoordinator + SaveTransferMath; connect-code utils
-(ConnectCode, InviteCode, UnifiedCode, SmartJoinParser, JoinPlan, LanIpResolver, UpnpPortMapper).
-EXTRACT: SerializerRoundtrip.cs (done by skeleton stage). STUB: NetworkEngine.Sync.
+- An xunit test project was considered and rejected: it would only `Compile Include` mod sources and
+  reference `0Harmony` + `UnityEngine.CoreModule`, never `Assembly-CSharp` — so the game-bound code
+  is never actually invoked. RailCheck goes further (loads the game assembly and drives the real
+  `Serializer`) and needs no bootstrap at all.

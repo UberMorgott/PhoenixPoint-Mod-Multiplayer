@@ -10,10 +10,8 @@
     <Deterministic>true</Deterministic>
     <DebugType>portable</DebugType>
   </PropertyGroup>
-  <PropertyGroup>
-    <ModSDK>D:\Steam\steamapps\common\Phoenix Point\ModSDK</ModSDK>
-    <GameManaged>D:\Steam\steamapps\common\Phoenix Point\PhoenixPointWin64_Data\Managed</GameManaged>
-  </PropertyGroup>
+  <!-- $(GameManaged) / $(ModSDK) come from Directory.Build.props — see it to point the build at
+       your own Phoenix Point install. -->
   <ItemGroup>
     <!-- tools/ are their own projects (RailCheck); the SDK glob must not swallow them into the mod. -->
     <Compile Remove="tools\**" />

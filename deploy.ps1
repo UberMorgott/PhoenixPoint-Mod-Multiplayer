@@ -1,34 +1,46 @@
+<#
+.SYNOPSIS
+  Builds the mod and copies it into a Phoenix Point install's Mods folder.
+
+.PARAMETER GameDir
+  Phoenix Point install root. Defaults to the PhoenixPointDir environment variable, then to the
+  usual Steam / Epic locations.
+
+.EXAMPLE
+  .\deploy.ps1
+  .\deploy.ps1 -GameDir "C:\Games\Phoenix Point"
+#>
+param([string]$GameDir = $env:PhoenixPointDir)
+
 $ErrorActionPreference = 'Stop'
-# Path-agnostic: resolves relative to this script's folder, so it works before AND after the
-# root folder is renamed to Multiplayer (only the folder name differs; the layout is identical).
+# Path-agnostic: everything resolves relative to this script's folder.
 $root = $PSScriptRoot
 $proj = Join-Path $root "Multiplayer.csproj"
 $out  = Join-Path $root "bin\Release"
-# Deploy targets: the main install (always) + each local co-op test instance (skipped if absent,
-# so this script still works on a machine with no instances). Instances hold REAL mod copies,
-# not junctions - see tools\sync-mods.ps1 for why.
-$mainRoot  = "D:\Steam\steamapps\common\Phoenix Point"
-$instRoots = @("D:\PP-Instance2", "D:\PP-Instance3")
 
-dotnet build $proj -c Release
+if (-not $GameDir) {
+    $GameDir = @(
+        "${env:ProgramFiles(x86)}\Steam\steamapps\common\Phoenix Point"
+        "C:\Steam\steamapps\common\Phoenix Point"
+        "D:\Steam\steamapps\common\Phoenix Point"
+        "E:\Steam\steamapps\common\Phoenix Point"
+        "${env:ProgramFiles(x86)}\Epic Games\PhoenixPoint"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if (-not $GameDir -or -not (Test-Path $GameDir)) {
+    throw "Phoenix Point install not found. Pass -GameDir '<path>' or set the PhoenixPointDir environment variable."
+}
+
+dotnet build $proj -c Release -p:PhoenixPointDir="$GameDir"
 if ($LASTEXITCODE) { throw "build failed ($LASTEXITCODE)" }
 
+$dest = Join-Path $GameDir "Mods\Multiplayer"
+New-Item -ItemType Directory -Force -Path $dest | Out-Null
+Copy-Item "$out\Multiplayer.dll" $dest -Force
+if (Test-Path "$out\Multiplayer.pdb") { Copy-Item "$out\Multiplayer.pdb" $dest -Force }
+# Single self-contained assembly: PP's mod loader loads the entry DLL via Assembly.Load(byte[])
+# with no AssemblyResolve handler, so sibling DLLs would never resolve at enable time.
+Copy-Item (Join-Path $root "meta.json") $dest -Force
 $assets = Join-Path $root "Assets"
-foreach ($modRoot in @($mainRoot) + $instRoots) {
-    if ($modRoot -ne $mainRoot -and -not (Test-Path $modRoot)) {
-        Write-Host "Skipped $modRoot (instance not present)"; continue
-    }
-    $dest = Join-Path $modRoot "Mods\Multiplayer"
-    # Never deploy through a link - that would write into another target's copy.
-    if ((Test-Path $dest) -and (((Get-Item $dest -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
-        Write-Host "Skipped $dest (junction - run tools\sync-mods.ps1 first)"; continue
-    }
-    New-Item -ItemType Directory -Force -Path $dest | Out-Null
-    Copy-Item "$out\Multiplayer.dll" $dest -Force
-    if (Test-Path "$out\Multiplayer.pdb") { Copy-Item "$out\Multiplayer.pdb" $dest -Force }
-    # Single self-contained assembly: PP's mod loader loads the entry DLL via Assembly.Load(byte[])
-    # with no AssemblyResolve handler, so sibling DLLs would never resolve at enable time.
-    Copy-Item (Join-Path $root "meta.json") $dest -Force
-    if (Test-Path $assets) { Copy-Item $assets $dest -Recurse -Force }
-    Write-Host "Deployed Multiplayer to $dest"
-}
+if (Test-Path $assets) { Copy-Item $assets $dest -Recurse -Force }
+Write-Host "Deployed Multiplayer to $dest"

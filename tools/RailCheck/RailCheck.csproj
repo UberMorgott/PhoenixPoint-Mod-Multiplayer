@@ -8,10 +8,7 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
   </PropertyGroup>
-  <PropertyGroup>
-    <ModSDK>D:\Steam\steamapps\common\Phoenix Point\ModSDK</ModSDK>
-    <GameManaged>D:\Steam\steamapps\common\Phoenix Point\PhoenixPointWin64_Data\Managed</GameManaged>
-  </PropertyGroup>
+  <!-- $(GameManaged) / $(ModSDK) come from the repo-root Directory.Build.props. -->
   <ItemGroup>
     <!-- The REAL shipped rail bits — the harness must test what the game loads, not a recompile. -->
     <ProjectReference Include="..\..\Multiplayer.csproj" />

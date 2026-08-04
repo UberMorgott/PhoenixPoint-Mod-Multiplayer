@@ -20,7 +20,7 @@ using UnityEngine;
 namespace RailCheck
 {
     /// <summary>
-    /// Stage-1 rail gate (CLAUDE.md "Verification"). NOT a simulation: it never boots the game and
+    /// Stage-1 rail gate (ARCHITECTURE.md "Verification"). NOT a simulation: it never boots the game and
     /// never touches a live GeoLevelController. It asserts the rail's OWN laws — classification,
     /// blob reconstructability, list-apply reachability, leaf codec round-trip — over the real game
     /// assembly's real type metadata, plus a committed snapshot so any change to the rail's coverage
@@ -33,14 +33,36 @@ namespace RailCheck
     /// </summary>
     internal static class Program
     {
-        private const string DefaultManaged = @"D:\Steam\steamapps\common\Phoenix Point\PhoenixPointWin64_Data\Managed";
-        private static string _managed = DefaultManaged;
+        // The game's Managed folder, which the resolver below loads Assembly-CSharp &co from.
+        // Same resolution order as Directory.Build.props: explicit wins, then the PhoenixPointDir
+        // environment variable, then the usual installs.
+        private static readonly string[] InstallProbes =
+        {
+            Environment.GetEnvironmentVariable("PhoenixPointDir"),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) + @"\Steam\steamapps\common\Phoenix Point",
+            @"C:\Steam\steamapps\common\Phoenix Point",
+            @"D:\Steam\steamapps\common\Phoenix Point",
+            @"E:\Steam\steamapps\common\Phoenix Point",
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86) + @"\Epic Games\PhoenixPoint",
+        };
+
+        private static string _managed = InstallProbes
+            .Where(p => !string.IsNullOrEmpty(p))
+            .Select(p => Path.Combine(p, @"PhoenixPointWin64_Data\Managed"))
+            .FirstOrDefault(Directory.Exists) ?? "";
 
         private static int Main(string[] args)
         {
             System.Threading.Thread.CurrentThread.CurrentUICulture = System.Globalization.CultureInfo.InvariantCulture;
             var i = Array.IndexOf(args, "--managed");
             if (i >= 0 && i + 1 < args.Length) _managed = args[i + 1];
+            if (!Directory.Exists(_managed))
+            {
+                Console.Error.WriteLine("RailCheck: Phoenix Point not found. Pass --managed " +
+                                        @"""X:\...\Phoenix Point\PhoenixPointWin64_Data\Managed""" +
+                                        " or set the PhoenixPointDir environment variable.");
+                return 2;
+            }
             AppDomain.CurrentDomain.AssemblyResolve += (s, e) =>
             {
                 var p = Path.Combine(_managed, new AssemblyName(e.Name).Name + ".dll");
@@ -8957,7 +8979,7 @@ namespace RailCheck
             var retired = new (string Phrase, string Withdrawn)[]
             {
                 ("quarantine",
-                 "law 5 RETIRED the tactical quarantine on 2026-07-31 (MANDATE-v2 §9, commit f3b01c2) — tactical " +
+                 "law 5 RETIRED the tactical quarantine on 2026-07-31 (commit f3b01c2) — tactical " +
                  "is a shared battle on the same rail, so 'tactical is quarantined' justifies nothing any more"),
             };
 

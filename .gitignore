@@ -1,5 +1,18 @@
+# build output
 bin/
 obj/
 *.user
+*.suo
+
+# IDE / editor
 .vs/
+.idea/
+.vscode/
+
+# local tooling caches
+.claude/
 .serena/
+
+# local deploy config (game path override lives in the environment or -GameDir/-p:PhoenixPointDir)
+deploy.local.ps1
+*.local.props

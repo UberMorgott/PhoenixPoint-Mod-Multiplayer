@@ -890,7 +890,7 @@ namespace Multiplayer.Tactical
     }
 
     /// <summary>
-    /// THE NEUTER THE MANDATE NAMES: <c>DamageAccumulation.ApplyAddedDamage</c>:550 is the ONE place where a
+    /// THE NEUTER THE DESIGN NAMES: <c>DamageAccumulation.ApplyAddedDamage</c>:550 is the ONE place where a
     /// computed hit becomes a real one — <c>AddTarget</c>/<c>GenerateStandardDamageTargetData</c> only fill
     /// <c>_targetsData</c>, so skipping this deletes every client-side weapon/explosion/fire application at
     /// once while leaving the projectile and its animation completely intact. It sits HERE and not at
