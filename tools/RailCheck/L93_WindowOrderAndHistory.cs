@@ -64,7 +64,16 @@ namespace RailCheck
     /// <c>premise-history-rides-the-save</c>; drop <c>UIStateReplenish</c> from the rank table, or rank it at
     /// or below 15 → <c>replenish-not-ranked</c>; add the event family to the table →
     /// <c>rank-table-overreaches</c>; delete <c>EventPopup.RequeueUnanswered</c> or the
-    /// <c>RestoreState</c> postfix → <c>history-not-carried-across-mission</c>.
+    /// <c>RestoreState</c> postfix → <c>history-not-carried-across-mission</c>; call
+    /// <c>CompleteEvent</c> from the mirrored replay half → <c>mirror-mints-reward</c>; drop the reward stub
+    /// → <c>mirror-reward-stub-gone</c>; make the reward capture a prefix → <c>reward-not-captured</c>.
+    ///
+    /// ARM I ALSO CORRECTS A DIAGNOSIS. The R2 report said the missing green reward list was an NRE at
+    /// <c>SetClosingEncounter</c>:357. It is not: <c>MarkResolvedInstance</c> has always stubbed
+    /// <c>ChoiceReward</c> with an empty <c>GeoFactionRewardApplyResult</c> precisely because that read and
+    /// <c>SelectChoice</c>:604 are unguarded. The page renders fine — the list is empty because the stub was
+    /// empty and nothing shipped the host's reward. 0xBD ships it; the stub is now filled. The separate
+    /// "empty modal with an OK button and no text" therefore still has no confirmed cause.
     /// </summary>
     internal static class L93_WindowOrderAndHistory
     {
