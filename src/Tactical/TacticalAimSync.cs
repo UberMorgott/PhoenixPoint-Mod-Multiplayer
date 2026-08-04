@@ -4,6 +4,7 @@ using System.IO;
 using System.Reflection;
 using System.Text;
 using Base.Core;
+using Base.Utils.Maths;
 using HarmonyLib;
 using Multiplayer.Network;
 using Multiplayer.Network.MessageLayer;
@@ -108,6 +109,20 @@ namespace Multiplayer.Tactical
         private static readonly HashSet<int> _pending = new HashSet<int>();
         private static readonly List<int> _retryScratch = new List<int>();
 
+        /// <summary>The mirror's IN-FLIGHT facing turns, actorKey → where it started, where it is going, how
+        /// far along. See <see cref="AdvanceTurns"/> — the stance's facing is a LERP on every peer, not a
+        /// hard write on the mirrors only.</summary>
+        private static readonly Dictionary<int, AimTurn> _turning = new Dictionary<int, AimTurn>();
+        private static readonly List<int> _turnScratch = new List<int>();
+
+        private struct AimTurn { public Vector3 From, To; public float T; }
+
+        /// <summary>The game's own aim-facing rate, <c>TacticalNavigationComponent.NoAnimsFace</c>:1040
+        /// (<c>FacingLerp += (float)Timing.Delta * 6f</c>) — copied as a value, not called, because that
+        /// method is declared on <c>TacticalNavigationComponent</c> and law L82 bans the whole type from this
+        /// arc's reachable set.</summary>
+        private const float FacingLerpSpeed = 6f;
+
         private static readonly HashSet<string> _loggedFailures = new HashSet<string>();
 
         /// <summary>Per-BATTLE state (driven from <c>TacticalTurnSync.Reset</c>). Carrying the table into the
@@ -122,6 +137,8 @@ namespace Multiplayer.Tactical
             _armedActor = _armedTarget = _autoEnteredFor = 0;
             _pending.Clear();
             _retryScratch.Clear();
+            _turning.Clear();
+            _turnScratch.Clear();
             _loggedFailures.Clear();
         }
 
@@ -206,6 +223,7 @@ namespace Multiplayer.Tactical
                 Sample(__instance, view);
                 Emit();
                 RetryPending();
+                AdvanceTurns();
                 DriveAutoEnter(__instance, view);
             }
         }
@@ -400,6 +418,7 @@ namespace Multiplayer.Tactical
             {
                 PathProcessorUtils.SetNullNavParams(animator);
                 _pending.Remove(actorKey);
+                _turning.Remove(actorKey);   // the stance is gone; a swing still owed to it is stale
                 return;
             }
 
@@ -423,8 +442,77 @@ namespace Multiplayer.Tactical
             // NoAnimsFace zeroes y on the same vector); the up axis stays the actor's own.
             var dir = target.Pos - actor.Pos;
             dir.y = 0f;
-            if (dir.sqrMagnitude > 0.0001f) actor.SetForward(dir.normalized);
+            if (dir.sqrMagnitude > 0.0001f)
+            {
+                // The game's own facing entry has exactly these two branches
+                // (TacticalNavigationComponent.FaceIn3d:975-980): already there → write it and stop,
+                // otherwise hand it to the lerp. Keeping both is why a re-assert of an unchanged stance
+                // still costs nothing and never restarts a swing.
+                var to = dir.normalized;
+                if (Utl.Equals(actor.transform.forward, to, 0.0001f))
+                {
+                    actor.SetForward(to);
+                    _turning.Remove(actorKey);
+                }
+                else StartTurn(actorKey, actor, to);
+            }
             _pending.Remove(actorKey);
+        }
+
+        /// <summary>
+        /// THE SWING, not the snap. A retarget (TAB) on the ACTING peer never re-runs the aim path points:
+        /// <c>PathProcessorUtils.GetAimOrPeekPathPoints</c>:620 returns FALSE for an actor already in "Aim
+        /// Loop" with no peek (its 90°/180° turn arms are dead code — both thresholds are the constant
+        /// <c>-2f</c>, :590-591, and a dot product cannot go below -1), so <c>IdleAbility.DoAimOrPeek</c>:197
+        /// takes its else-branch and the whole visible turn is
+        /// <c>TacticalNavigationComponent.FaceWithLerpOnly</c> → <c>NoAnimsFace</c>:1035-1053, a plain
+        /// <c>Vector3.Slerp</c> stepped by <c>Timing.Delta * 6f</c> and written with the very
+        /// <c>SetForward</c> the mirror already calls. The mirror wrote the ENDPOINT of that lerp in one
+        /// frame — the same destination, reached instantly, which is exactly the teleport reported on every
+        /// non-acting instance while the acting one swung.
+        ///
+        /// So the mirror runs the lerp instead of its endpoint: same rate, same primitive, driven from this
+        /// class's own per-frame postfix rather than a coroutine on the nav component, because law L82 bans
+        /// every method DECLARED on <c>TacticalNavigationComponent</c> from this arc's reachable set (the
+        /// nav-traversal ban that got 3071859 reverted). The step uses the ACTOR's timing, not
+        /// <c>Time.deltaTime</c>: <c>NoAnimsFace</c> reads <c>base.Timing.Delta</c>, which carries that
+        /// actor's <c>TimingScale</c> (an unrevealed actor runs at 4x), so copying the wall clock instead
+        /// would make mirrored turns disagree with native ones exactly where the game speeds them up.
+        ///
+        /// ponytail: the facing lerps, the AIM IK does not — <c>DoAimOrPeek</c>:210-243 cross-fades
+        /// <c>AimIK.solver.IKPositionWeight</c> over <c>FacingLerp</c> through <c>TrySetupAimIK</c>, which is
+        /// private to <c>IdleAbility</c>, the one type this arc may not touch at all. Upgrade path if the
+        /// weapon (as opposed to the soldier) is ever observed lagging on a mirror: drive the actor's own
+        /// <c>AimIK</c> component directly, never through <c>IdleAbility</c>.
+        /// </summary>
+        private static void StartTurn(int actorKey, TacticalActor actor, Vector3 to)
+        {
+            // Only ever ARMS the turn: writing the destination here — even once, even as a "first step" —
+            // is the teleport this whole seam replaces.
+            _turning[actorKey] = new AimTurn { From = actor.transform.forward, To = to, T = 0f };
+        }
+
+        /// <summary>One frame of every in-flight mirrored turn. Bounded by the number of soldiers whose aim
+        /// changed in the last ~1/6 s (in practice 0 or 1), silent when empty, and self-terminating: an entry
+        /// leaves on completion or the moment its actor stops resolving.</summary>
+        private static void AdvanceTurns()
+        {
+            if (_turning.Count == 0) return;
+            _turnScratch.Clear();
+            _turnScratch.AddRange(_turning.Keys);
+            foreach (var key in _turnScratch)
+            {
+                AimTurn turn;
+                if (!_turning.TryGetValue(key, out turn)) continue;
+                string why;
+                var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
+                if (actor == null || actor.Timing == null) { _turning.Remove(key); continue; }
+
+                turn.T += (float)actor.Timing.Delta * FacingLerpSpeed;
+                actor.SetForward(Vector3.Slerp(turn.From, turn.To, Mathf.Min(turn.T, 1f)));
+                if (turn.T >= 1f) _turning.Remove(key);
+                else _turning[key] = turn;
+            }
         }
 
         /// <summary>Re-applies the stances that could not land when they arrived. Bounded by the number of

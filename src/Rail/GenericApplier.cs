@@ -921,7 +921,17 @@ namespace Multiplayer.Network.Sync
         {
             if (v == null || ExplorationStartField == null ||
                 ExploreCurrentSiteMethod == null || EndExploreCurrentSiteMethod == null) return;
-            var timing = v.GeoLevel == null ? null : v.GeoLevel.Timing;
+            // THE ACTOR'S OWN CLOCK, not the level's — and this one line is why the client's fill never
+            // appeared (live 2026-08-04, client Player.log): every ActorComponent gets `Timing = new Timing()`
+            // parented to the level's (Base.Entities/ActorComponent.cs:85/:89), and Timing.Now is
+            // `StartTime + OwnNow` (Base.Core/Timing.cs:55) — a PER-ACTOR epoch, not the campaign date.
+            // `StartedExplorationAt = base.Timing.Now` (GeoVehicle.cs:423) and both consumers,
+            // `ExploreCurrentSite`'s `end - base.Timing.Now`:449 and `SetProgression(start, end, base.Timing)`:456,
+            // read that same actor clock. Asking GeoLevel.Timing compared two different epochs — the log read
+            // `mirrored start 36.08:16:30 … the clock (747322.13:10:33) is already past`, i.e. ~36 days of actor
+            // life against the level's absolute datetime — so `timing.Now < end` was false for EVERY vehicle,
+            // forever, and `should` could never be true. RailCheck L77 holds the two apart by name.
+            var timing = v.Timing;
             if (timing == null) return;
             var site = v.CurrentSite;
             var start = (TimeUnit)ExplorationStartField.GetValue(v);
@@ -1036,7 +1046,10 @@ namespace Multiplayer.Network.Sync
                 return;
             }
 
-            if (root != null) _seededRoute.Remove(root);
+            // The client's ARRIVAL EDGE, and the only one it has: the mirrored order says "parked" for an
+            // aircraft this client was actively flying a re-seeded route for. Once per journey by
+            // construction — the route memo is written only by the flying arm above and removed here.
+            bool wasFlying = root != null && _seededRoute.Remove(root);
             if (v.CurrentSite != null)
             {
                 // THE ARRIVAL SNAP, and the reason the parked arm is not merely a pose write. The client
@@ -1060,6 +1073,51 @@ namespace Multiplayer.Network.Sync
                                                                                              // half of the pose the
                                                                                              // client's own nav set
                                                                                              // via InitiateTravelling
+                if (wasFlying) RaiseArrivedForUi(v);
+            }
+        }
+
+        private static readonly FieldInfo ViewArrivedEvent =
+            AccessTools.Field(typeof(PhoenixPoint.Geoscape.View.GeoscapeView), "FactionVehicleArrived");
+
+        /// <summary>
+        /// Law 11 at the arrival edge, in its ORIGINAL phrasing — "fire the native event the view already
+        /// listens to" — and NOT a repaint: what the game does on arrival is OPEN a popup, which no repaint
+        /// entry may ever do (it would re-open on every rail batch the player dismissed it after).
+        ///
+        /// <c>VehicleArrivalGate</c> (ClientSimGate.cs:222) skips <c>GeoVehicle.OnArrived</c> WHOLE on a
+        /// client, correctly — its body is the authoritative arrival. But the last two lines of that body
+        /// are not: <c>CurrentSite.VehicleArrived</c>:347 and <c>OnArrivedAtDestination</c>:348 are the
+        /// NOTIFICATION, and losing them is why a client's site panel had no Explore button. Native, the
+        /// chain <c>ArrivedAtDestinationEvent</c> → <c>VehicleFactionController.OnVehicleArrived</c>:126 →
+        /// <c>GeoFaction.OnVehicleArrived</c>:1875 → <c>GeoscapeView.OnFactionVehicleArrived</c>:1629 ends
+        /// at <c>UIStateVehicleSelected.OnVehicleArrived</c>:1180-1192, which calls
+        /// <c>UpdateReachableSitesMarkers</c> + <c>UpdateVehicleActions</c> + <c>ShowContextualMenu</c> —
+        /// the auto-opened site menu carrying "Explore (Xh)". Without it the client player falls back to
+        /// the native CLICK path, and that path natively needs TWO clicks:
+        /// <c>ShowBaseInfoCrt</c>:775-779 `yield break`s on the first one when the site was not already the
+        /// hovered one. Exactly the symptom reported.
+        ///
+        /// ENTERED AT THE PRESENTATION BOUNDARY, one link down from the gameplay: the raise is on
+        /// <c>GeoscapeView.FactionVehicleArrived</c> (GeoscapeView.cs:201, raised :1631), NOT on
+        /// <c>GeoFaction.OnVehicleArrived</c>, whose body FIRST does SetInspected / UpdateVehicleSite /
+        /// Refill / EngageEnemyAircraftOnSite (GeoFaction.cs:1877-1897) — authoritative state a projector
+        /// may not mint (law 3). Its only two subscribers in the assembly are
+        /// <c>UIStateVehicleSelected</c>:146 and <c>GeoscapeSound</c>:35: UI and audio, nothing else.
+        /// Inside <see cref="SyncApplyScope"/> (law 8) because the handler runs native UI code.
+        /// </summary>
+        private static void RaiseArrivedForUi(GeoVehicle v)
+        {
+            var view = v.GeoLevel == null ? null : v.GeoLevel.View;
+            var del = view == null || ViewArrivedEvent == null ? null : ViewArrivedEvent.GetValue(view) as Delegate;
+            if (del == null) return; // nobody subscribed — no open geoscape screen to notify
+            try
+            {
+                using (SyncApplyScope.Enter()) del.DynamicInvoke(v, false); // justPassing:false — the order is done
+            }
+            catch (Exception ex)
+            {
+                LogMissOnce("arrival notify failed for " + (IdentityResolver.RootRef(v) ?? "V#?") + ": " + ex.Message);
             }
         }
 

@@ -300,6 +300,25 @@ namespace Multiplayer.Network.Sync
                                      " threw — screen kept (logged once per screen): " + rebuildEx);
                 return;
             }
+            // A QUEUED WINDOW IS NOT A SCREEN — it is never Exit+Enter'd. The fallback below is a lifecycle
+            // TRANSITION, and everything the game's switch-query puts up is a ONE-SHOT PRESENTATION whose
+            // EnterState re-fires the very thing it exists to show: UIStateGeoCutscene.ExitState:76 stops
+            // the video and EnterState:59 Setup()s it again (→ VideoPlaybackClipFinishedLoading →
+            // PlayCutsceneOnFinishedLoad:114 → Play()), so ONE cinematic restarted 7 times on both clients
+            // during one rail-batch storm (live 2026-08-04, multiplayer-2.log 21:20:36-21:20:54); the same
+            // line re-entered UIStateRosterDeployment mid-deployment. A window that CAN be repainted
+            // declares a UiNativeRepaint.Table entry and returns above (UIStateGeoModal, UIStateGeoscapeEvent)
+            // — reaching HERE while the queue is showing you is itself the proof that there is nothing to
+            // repaint. The persistent HUD was already refreshed by the caller, so law 11 keeps its half.
+            // Never silent: once per screen type, un-gated, like every other declined repaint.
+            if (PauseHold.IsCurrentQueuedWindow(view, current))
+            {
+                if (_loggedSkips.Add("queued:" + current.GetType().Name))
+                    Debug.Log("[MP][uirepaint] SKIP re-enter of queued window " + current.GetType().Name +
+                              " — a one-shot presentation has no repaint, and Exit+Enter would replay it " +
+                              "(logged once per screen)");
+                return;
+            }
             // LAST RESORT: lifecycle re-enter for screens with no native-rebuild registration yet.
             // One-time inventory line per screen type = the to-do list for the next table entry.
             if (_loggedFallback.Add(current.GetType().Name))

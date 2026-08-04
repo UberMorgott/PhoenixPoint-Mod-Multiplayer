@@ -468,7 +468,12 @@ namespace Multiplayer.Network.Sync
 
             // The host's OWN priority, so this peer's queue orders the window exactly as the host's did.
             q.QueryStateSwitch(new GeoscapeViewStateSwitchRequest(new UIStateGeoscapeEvent(geoEvent), p.Priority)
-            { PauseGame = false }); // pause mirrors from the host via the TimeAnchor
+            // PauseGame = the GAME'S OWN flag, and it must be true on a mirror too. "Pause mirrors from the
+            // host via the TimeAnchor" (what this said until 2026-08-04) is false whenever the host is
+            // ALREADY paused: its re-write is swallowed by the change-gated Timing.Paused setter, no delta
+            // is emitted, and this peer reads the popup while its aircraft keeps flying. True here is what
+            // makes ProcessQueriedStateSwitch:67-70 raise this peer's window hold (see PauseHold).
+            { PauseGame = true });
             Debug.Log("[MP][events] raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority + " site=" +
                       (site == null ? "none" : site.SiteId.ToString()) +
                       " vehicle=" + (vehicle == null ? "none" : vehicle.VehicleID.ToString()) +

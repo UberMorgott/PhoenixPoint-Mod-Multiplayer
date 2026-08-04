@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Base.Core;
+using Base.Input;
 using Base.UI;
 using HarmonyLib;
 using Multiplayer.Network;
@@ -166,8 +167,23 @@ namespace Multiplayer.Tactical
                 _paintedWp = wp;
 
                 if (!_dirty) return;
+                // THE ENGINE'S OWN GUARD, which this postfix omitted (TacticalViewState.Update:53/74 applies
+                // it three times inside the very method we run after): confirming an ability TRANSITIONS
+                // inside Update (UIStateAbilitySelected.OnSelect → ActivateAbility:259-277 →
+                // SwitchToState(UIStateWaiting, ClearStackAndPush) → StateStack.Clear:107-121), so without it
+                // the repaint Exit+ENTERs a state that is already exited AND already popped —
+                // UIStateAbilitySelected.EnterState:180 re-subscribes AbilityConfirmed on the SHARED
+                // UIModuleAbilityConfirmationButton and nothing can ever Exit it again (Clear exits only the
+                // TOP, :113-117), so the zombie keeps its _selectedAbility and fires FIRST on every later
+                // confirmation (the JetJump that flew instead of shooting, AP charged for the shot).
+                var stack = StateStackField == null
+                    ? null
+                    : StateStackField.GetValue(__instance) as StateStack<TacticalViewContext>;
+                if (stack == null || !ReferenceEquals(stack.CurrentState, __instance)) return;  // keep _dirty:
+                                                    // the REAL current state's own Update repaints next frame
                 _dirty = false;
                 if (IsAbilityBarState(__instance)) Repaint(__instance);
+                else RepaintModules(view);
             }
         }
 
@@ -246,6 +262,66 @@ namespace Multiplayer.Tactical
                 CurrentPromptField.SetValue(prompts, null);
                 Debug.Log("[Multiplayer][tac] tactical prompt closed at the turn edge — the turn ended for " +
                           "every peer, so a prompt still asking about it is stale on this one.");
+            }
+        }
+
+        /// <summary>
+        /// THE OTHER HALF OF LAW 11 FOR THE TACTICAL SCREEN — the states Exit+Enter may NOT be used on.
+        /// <see cref="AbilityBarStates"/> excludes every state whose <c>EnterState</c> moves the state stack
+        /// (<c>UIStateShoot</c> above all), and the cost was stated plainly there: a peer sitting in aim mode
+        /// keeps a stale ability bar until its own next transition. Reported live as a bug on 2026-08-04 —
+        /// two peers held the same sniper in aim mode, one fired, and the other's bottom bar kept the
+        /// pre-shot AP with every ability still lit. Model fresh, view stale: this repo's dominant shape.
+        ///
+        /// A stale bar does not need the state re-entered, only the two MODULES that paint it re-read. Both
+        /// are public, both take the actor and nothing else, and both are exactly what the excluded state's
+        /// own init calls: <c>UIModuleAbilities.SetAbilities(TacticalActor, InputController)</c>:111-143
+        /// (<c>UIStateShoot.InitSpecificUI</c>:449, and the same call every allow-listed state makes through
+        /// its <c>EnterState</c>) re-asks every ability's <c>GetDisabledState()</c>, and
+        /// <c>UIModuleActionBar.SetActionBar(TacticalActor)</c>:238 re-reads the AP bar off the live actor.
+        /// Neither touches the state stack, so the double-<c>ExitState</c> hazard (law L63) is structurally
+        /// out of reach — this path never calls <c>Exit</c> or <c>Enter</c> at all.
+        ///
+        /// GENERIC, NOT A SECOND ALLOW LIST. There is no state-name test here: the gate is the module's own
+        /// <c>gameObject.activeInHierarchy</c>, which is how <c>UIModuleBehavior.SetStateID</c>:21-56 hides
+        /// one (<c>gameObject.SetActive(false)</c> on its off state — these modules are
+        /// <c>UIModuleBehavior</c> MonoBehaviours, not <c>Base.UI.UIModule</c>, so they have no
+        /// <c>Active</c>). It is fail-safe in the right direction: a module hidden through the ANIMATOR arm
+        /// of that same method keeps an active GameObject, so the worst this gate can do is refresh
+        /// something already invisible — it can never skip a module that is on screen. That is also why it
+        /// is safe on the states <see cref="AbilityBarStates"/> deliberately refuses to Exit+Enter for
+        /// danger (<c>UIStateInventory</c>): this repaints, it does not commit anything and it destroys
+        /// nothing.
+        ///
+        /// ponytail: the two bottom-bar modules only. The aim screen's other stale pixel — a dead target's
+        /// crosshair, from the <c>_selectedValidShoots</c> constructor snapshot (<c>UIStateShoot</c>:193) —
+        /// stays stale, because refreshing it means rebuilding the state, which is the thing L63 forbids.
+        /// Upgrade path if it is ever reported: a targeted refilter of that field, never an Exit+Enter.
+        /// </summary>
+        private static void RepaintModules(TacticalView view)
+        {
+            var actor = view.SelectedActor;
+            var modules = view.TacticalModules;
+            if (actor == null || modules == null) return;
+            try
+            {
+                // Law 8: a module re-read fires native UI events our own intent-capture seams listen to.
+                using (SyncApplyScope.Enter())
+                {
+                    var abilities = modules.AbilitiesModule;
+                    if (abilities != null && abilities.gameObject.activeInHierarchy)
+                        abilities.SetAbilities(actor, GameUtl.GameComponent<InputController>());
+                    var actionBar = modules.ActionBarModule;
+                    if (actionBar != null && actionBar.gameObject.activeInHierarchy)
+                        actionBar.SetActionBar(actor);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Same non-destructive posture as Repaint: a partial refresh, not a lost screen.
+                if (_loggedFailures.Add("modules"))
+                    Debug.LogWarning("[Multiplayer][tac] module repaint threw — bottom bar may be stale " +
+                                     "(logged once per battle): " + ex);
             }
         }
 

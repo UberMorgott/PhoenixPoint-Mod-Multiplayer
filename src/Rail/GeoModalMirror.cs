@@ -327,7 +327,11 @@ namespace Multiplayer.Network.Sync
             // save-restored with the game's own authoritative ModalResultCallback closure (RestoreContext:36).
             var state = new UIStateGeoModal(modalType, null, data);
             q.QueryStateSwitch(new GeoscapeViewStateSwitchRequest(state, p.Priority)
-            { PauseGame = false });   // pause is host-authoritative and arrives via the TimeAnchor
+            // The GAME'S OWN flag, true as on the host: a mirrored modal blocks THIS peer, so it must hold
+            // the shared clock (PauseHold). It used to be false on the theory that pause arrives via the
+            // rail — it does not when the host is already paused (change-gated Timing.Paused setter → no
+            // delta), which is how a client kept running under an open window.
+            { PauseGame = true });
             Debug.Log("[MP][modals] raised '" + modalType + "' seq=" + seq + " shape=" + p.Shape +
                       " priority=" + p.Priority + " data=" + (data == null ? "none" : data.GetType().Name));
             return true;

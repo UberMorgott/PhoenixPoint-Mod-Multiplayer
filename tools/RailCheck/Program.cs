@@ -137,6 +137,10 @@ namespace RailCheck
             laws.AddRange(TacticalFunnelLaw(game));
             laws.AddRange(SharedAimLaw(game));
             laws.AddRange(SettleVisionLaw(game));
+            laws.AddRange(L77_SitePoiRepaint.Check(game));
+            laws.AddRange(L26_PauseAndOneShot.Check());
+            laws.AddRange(L79AimAnimAndAbilityRefresh.Check(game));
+            laws.AddRange(L80_AbilityKeyStability.Check(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

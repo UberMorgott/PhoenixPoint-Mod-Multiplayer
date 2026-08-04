@@ -76,9 +76,12 @@ namespace Multiplayer.Network.Sync
         /// (ModalResult.cs).</summary>
         internal const byte ResultNone = 255;
 
-        private static readonly FieldInfo SwitchQueryField =
+        // ONE bind of each, shared with PauseHold (which asks the same two fields for the window-hold edge
+        // and for "is this screen a queued window") — a second AccessTools.Field pair is a second thing to
+        // drift when the game renames one.
+        internal static readonly FieldInfo SwitchQueryField =
             AccessTools.Field(typeof(GeoscapeView), "_viewSwichQuery");                       // GeoscapeView.cs:138 (game typo)
-        private static readonly FieldInfo CurrentRequestField =
+        internal static readonly FieldInfo CurrentRequestField =
             AccessTools.Field(typeof(GeoscapeViewSwitchQuery), "_currentStateSwitchRequest"); // :17
 
         internal static void RegisterIntents()
