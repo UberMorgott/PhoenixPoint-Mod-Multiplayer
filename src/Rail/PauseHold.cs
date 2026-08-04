@@ -43,9 +43,10 @@ namespace Multiplayer.Network.Sync
     /// <c>FinishCurrentStateSwitch</c>:118 having cleared it. Edge-triggered, so the wire cost is one
     /// message per window, not per frame.
     ///
-    /// The host's set is PRUNED at read time against the live roster instead of hooking a disconnect
-    /// callback: a peer that crashed while holding a window must not freeze the campaign forever, and
-    /// prune-on-read needs no lifecycle wiring to be correct.
+    /// The host's set is PRUNED at read time — against the live roster, and against the existence of a
+    /// geoscape at all — instead of hooking disconnect and level-exit callbacks: a peer that crashed or
+    /// walked into a battle while holding a window must not freeze the campaign forever, and prune-on-read
+    /// needs no lifecycle wiring to be correct. Nothing in this class sends on a reset path (law 19).
     ///
     /// <see cref="Decide"/> is PURE and RailCheck L26 executes it — an arbiter that only ever runs in a
     /// live 3-instance session is exactly how "the clock is stuck paused" ships.
@@ -67,18 +68,17 @@ namespace Multiplayer.Network.Sync
         /// <summary>Session teardown and reload boundary (driven from <see cref="TimeSync.Reset"/>): the
         /// windows are gone with the level, so a surviving hold would veto every resume in the next one.
         ///
-        /// A CLIENT LEAVING THE GEOSCAPE RELEASES ON THE WIRE FIRST. Its edge seam lives on
-        /// <c>GeoscapeView.Update</c>, which stops running the moment this peer drops into a battle or a
-        /// load — so a peer that walked out from under an open window would otherwise leave its hold in the
-        /// host's set with nothing left to clear it, and the campaign would refuse every resume for the rest
-        /// of the session. (A DISCONNECTED peer is handled by <see cref="Prune"/>; this is the peer that is
-        /// still here and simply has no geoscape.)</summary>
+        /// LOCAL ONLY — IT MUST NOT SEND. It briefly did, to release a hold for a peer that walked into a
+        /// battle under an open window, and that was wrong twice. Mechanically: teardown reaches here from
+        /// <c>FinishLevelAndGoToLobbyTearDownPatch.Postfix</c> → <c>NetworkEngine.TearDown</c> →
+        /// <c>DetachAllChannels</c>, so the emit was a RESULT-SHIP out of a model patch (law 19, and RailCheck
+        /// caught it). Substantively: the other caller of this pair is not "left the geoscape" at all — it is
+        /// the DIAL/rejoin path (NetworkEngine.cs:320) and the save transfer
+        /// (SaveTransferCoordinator.cs:1373) — so no split of Reset/ResetForReloadBoundary could have put the
+        /// send on the right edge, because that edge is not on this axis. The stale hold is handled where it
+        /// actually lives instead, in <see cref="Prune"/>.</summary>
         internal static void Reset()
         {
-            var engine = NetworkEngine.Instance;
-            if (_announced && engine != null && engine.IsActiveSession && !engine.IsHost)
-                IntentRail.Send(SurfaceIds.GeoTimeIntent, OpHold, "window release (left the geoscape)",
-                    w => w.Write((byte)0));
             _holds.Clear();
             _announced = false;
         }
@@ -125,7 +125,7 @@ namespace Multiplayer.Network.Sync
         /// delta all still run.</summary>
         internal static void Apply(GeoLevelController geo, ulong peer, byte op, byte val)
         {
-            Prune();
+            Prune(geo);
             var d = Decide(_holds, peer, op, val);
             _holds.Clear();
             foreach (var h in d.Holds) _holds.Add(h);
@@ -152,9 +152,19 @@ namespace Multiplayer.Network.Sync
                       " holders=" + _holds.Count);
         }
 
-        /// <summary>A peer that dropped cannot dismiss anything. Pruned on READ (see the class doc).</summary>
-        private static void Prune()
+        /// <summary>Pruned on READ (see the class doc), for the two ways a hold outlives its window.
+        ///
+        /// NO GEOSCAPE, NO HOLDS. A hold is a claim about a window on a geoscape; with no level there is
+        /// nothing to veto and nothing the claim can mean. That is also the ONLY thing that can clear a hold
+        /// left by a peer which walked into a battle under an open window — its edge seam rides
+        /// <c>GeoscapeView.Update</c>, which stops with its view, so no release can ever arrive from it. Law
+        /// 5 puts every peer in the same mission, so this host loses its geoscape too and the set goes with
+        /// it. Local, needs no lifecycle hook, and sends nothing (law 19 — see <see cref="Reset"/>).
+        ///
+        /// A DROPPED PEER cannot dismiss anything either.</summary>
+        private static void Prune(GeoLevelController geo)
         {
+            if (geo == null) { _holds.Clear(); return; }
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsHost || engine.Session == null) return;
             _holds.RemoveWhere(p => p != HostPeer && !engine.Session.TryGetClientName(p, out _));
@@ -168,7 +178,7 @@ namespace Multiplayer.Network.Sync
             why = null;
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || !engine.IsHost) return false;
-            Prune();
+            Prune(geo);
             if (_holds.Count == 0) return false;
             // The game's OWN carve-out (GeoscapeView.cs:1259): past the time limit a "resume" is not a
             // resume at all, it is OnTimeLimitReached. Never veto that branch out of existence.
