@@ -136,6 +136,7 @@ namespace RailCheck
             laws.AddRange(TacticalPayloadUseLaw(game));
             laws.AddRange(TacticalFunnelLaw(game));
             laws.AddRange(SharedAimLaw(game));
+            laws.AddRange(SettleVisionLaw(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -6008,6 +6009,161 @@ namespace RailCheck
         /// <summary>A private/internal method on a mod type, by name. Null when it is gone — every caller
         /// turns that into its own "the arm checked nothing" violation rather than passing silently.</summary>
         private static MethodBase ModMethod(Type owner, string name) => owner?.GetMethod(name, AllMembers);
+
+        /// <summary>L81 — A PEER RE-RUNS ITS OWN VISION AT THE HOST'S SETTLE, AND A MIRRORED STAT WRITE FIRES
+        /// THE GAME'S OWN STAT EVENT. The two halves of ONE symptom: an enemy that is invisible on a client
+        /// and an enemy with no health bar are the same miss, because both derive from the same local
+        /// dictionary. <c>TacticalView.OnFactionKnowledgeChanged</c>:486-516 is the ONLY writer of
+        /// <c>TacticalActorViewBase.SetShownMode</c> for ordinary actors, it reads
+        /// <c>ViewerFaction.Vision.KnownActors</c>, and <c>ShouldRenderUI</c>:395-403 gates the health bar on
+        /// the result (<c>Update</c>:416 calls <c>UIActorElement.SetHidden(!ShouldRenderUI())</c> every frame,
+        /// so the bar is POLLED off ShownMode and never needs an event of its own).
+        ///
+        /// WHY IT NEEDS A LAW AT ALL. <c>0c54378</c> shipped the repair and named this law in its subject, but
+        /// touched ONE file and added NO arm — so nothing has ever proved the seam is reached, and the repo's
+        /// dominant bug class is exactly the fix that stops being wired without a log line. Native fills
+        /// KnownActors by sampling LOS only on <c>ActorMovedEvent</c>, and both halves of that sampling are
+        /// one-sided against a mirroring peer (an unrevealed actor carries <c>TimingScale 4f</c>, so its walk
+        /// is LOS-tested ~4x more coarsely; and a settle landing where this peer already stood raises no event
+        /// at all). The repair re-runs the GAME'S own test at the settle — the one universal moment the host
+        /// has closed an order and this peer holds the authoritative position.
+        ///
+        /// THE STAT HALF is the arm the 2026-08-01 handoff named as missing outright: nothing asserted that a
+        /// mirrored stat write goes through <c>BaseStat.Set</c> instead of poking the raw value.
+        /// <c>Set</c>:94-107 is the ONLY path that reaches <c>OnStatChange</c>:110 → <c>StatChangeEvent</c>:49,
+        /// and <c>HealthbarUIActorElement</c>:216-250 subscribes to exactly that event for health, armour, AP,
+        /// endurance, corruption and every body part. Writing <c>Value.EndValue</c> (or its
+        /// <c>ModifiableValue</c> backing fields) sets the number and raises NOTHING — the model would be right
+        /// and every bar in the game stale, which is this repo's "model fresh + view stale" shape and is
+        /// indistinguishable from the change never having crossed. Universal on purpose: the ban is on the
+        /// WHOLE mod assembly, not on the tactical mirror, because any future stat write has the same hazard.
+        ///
+        /// Falsify: delete the <c>RefreshVisionTowards</c> call in <c>ApplySettle</c> → <c>settle-blind</c>;
+        /// swap it for a hand-rolled reveal → <c>vision-hand-rolled</c>; unhook <c>ClientTick</c> →
+        /// <c>settle-unreachable</c>; replace <c>stat.Set(v)</c> with <c>stat.Value.EndValue = v</c> →
+        /// <c>stat-write-silent</c> + <c>correction-inert</c>.</summary>
+        private static IEnumerable<string> SettleVisionLaw(Assembly game)
+        {
+            var sync = typeof(Multiplayer.Tactical.TacticalCommandSync);
+            var damage = typeof(Multiplayer.Tactical.TacticalDamageSync);
+            var mod = sync.Assembly;
+
+            // ─── (a) THE SEAM IS WIRED, AND IT IS REACHED ───
+            var applySettle = ModMethod(sync, "ApplySettle");
+            var refresh = ModMethod(sync, "RefreshVisionTowards");
+            var clientTick = ModMethod(sync, "ClientTick");
+            if (applySettle == null || refresh == null)
+            {
+                yield return "L81 seam-missing: TacticalCommandSync.ApplySettle / RefreshVisionTowards no longer " +
+                             "exist, so NOTHING about enemy visibility on a client was checked — the invisible " +
+                             "enemy and the missing health bar are both back and unguarded";
+                yield break;
+            }
+            if (!Reaches(applySettle, "TacticalCommandSync", "RefreshVisionTowards"))
+                yield return "L81 settle-blind: the settle applier no longer re-runs this peer's vision. The host's " +
+                             "authoritative position is written and never put to a line-of-sight test, so an enemy " +
+                             "that walked into view during a mirrored move stays Hidden/Located until the next " +
+                             "faction-turn edge — renderers disabled, health bar hidden, action played at 4x unseen";
+            if (clientTick == null || !Reaches(clientTick, "TacticalCommandSync", "ApplySettle"))
+                yield return "L81 settle-unreachable: TacticalCommandSync.ClientTick no longer reaches ApplySettle, " +
+                             "so the standing settle applier is dead code — every arm above is about a repair " +
+                             "nothing runs, and no correction the host sends ever lands on a client";
+
+            // ─── (b) IT IS THE GAME'S OWN VISION, NOT A SECOND VISIBILITY SYSTEM ───
+            if (!Reaches(refresh, "TacticalFactionVision", "UpdateVisibilityOfAllTowardsActor"))
+                yield return "L81 vision-hand-rolled: RefreshVisionTowards no longer calls the native " +
+                             "TacticalFactionVision.UpdateVisibilityOfAllTowardsActor. Anything else is a parallel " +
+                             "visibility system on the client — it can reveal what this peer's own line of sight " +
+                             "does not support, which is a peer seeing through walls the host cannot";
+
+            // ─── (c) PREMISE: the native entry still has the shape the repair calls ───
+            var visionType = game.GetType("PhoenixPoint.Tactical.Levels.TacticalFactionVision");
+            var actorBase = game.GetType("PhoenixPoint.Tactical.Entities.TacticalActorBase");
+            var upd = visionType == null ? null : visionType.GetMethod("UpdateVisibilityOfAllTowardsActor", AllMembers);
+            var updPs = upd == null ? null : upd.GetParameters();
+            if (upd == null || updPs.Length != 3 || actorBase == null ||
+                updPs[0].ParameterType != actorBase || updPs[1].ParameterType != typeof(float) ||
+                updPs[2].ParameterType != typeof(bool))
+                yield return "L81 premise-changed: TacticalFactionVision.UpdateVisibilityOfAllTowardsActor" +
+                             "(TacticalActorBase, float, bool) no longer resolves with that shape. The settle " +
+                             "repair is written against it verbatim; a changed signature means it either stopped " +
+                             "compiling against the real game or is now calling something else";
+
+            // ─── (d) PREMISE: renderers and the health bar still gate on ShownMode ───
+            var viewBase = game.GetType("PhoenixPoint.Tactical.Entities.TacticalActorViewBase");
+            var shouldRender = viewBase == null ? null : viewBase.GetMethod("ShouldRenderUI", AllMembers);
+            if (shouldRender == null)
+                yield return "L81 premise-changed: TacticalActorViewBase.ShouldRenderUI is gone, so what actually " +
+                             "hides a mirrored enemy's health bar is now unknown and this law guards a guess";
+            else if (!Reaches(shouldRender, null, "get_ShownMode") &&
+                     !FieldRefs(shouldRender, OpCodes.Ldfld).Any(f => f != null && f.Name.Contains("ShownMode")))
+                yield return "L81 premise-changed: ShouldRenderUI no longer reads ShownMode. The whole reason a " +
+                             "vision miss is also a MISSING HEALTH BAR was that one gate — if the bar is now driven " +
+                             "by something else, repairing vision no longer repaints it and this law says so " +
+                             "instead of quietly protecting the wrong thing";
+
+            // ─── (e) PREMISE: BaseStat.Set is still the one path that raises the stat event ───
+            var baseStat = game.GetType("Base.Entities.Statuses.BaseStat");
+            var set = baseStat == null
+                ? null
+                : baseStat.GetMethod("Set", AllMembers, null, new[] { typeof(float), typeof(bool) }, null);
+            if (set == null)
+                yield return "L81 premise-changed: BaseStat.Set(float, bool) no longer resolves — the mirror's " +
+                             "stat corrections are written against it and the event they must raise is unproven";
+            else
+            {
+                var ps = set.GetParameters();
+                if (!ps[1].HasDefaultValue || !(ps[1].DefaultValue is bool) || !((bool)ps[1].DefaultValue))
+                    yield return "L81 premise-changed: BaseStat.Set's triggerStatChangeEvent no longer defaults to " +
+                                 "true. Every mirror call site passes ONE argument and silently stopped raising " +
+                                 "StatChangeEvent — health bars would freeze at their last value with no log line";
+                if (!Reaches(set, "BaseStat", "OnStatChange"))
+                    yield return "L81 premise-changed: BaseStat.Set no longer reaches OnStatChange, so calling Set " +
+                                 "is no longer what notifies HealthbarUIActorElement";
+            }
+
+            // Positive control FIRST: without it the ban below passes trivially on a mod that writes no stats.
+            var correct = ModMethod(damage, "Correct");
+            if (correct == null || !Reaches(correct, "BaseStat", "Set"))
+                yield return "L81 correction-inert: TacticalDamageSync.Correct no longer calls BaseStat.Set. That " +
+                             "method is the ONE funnel every host-authoritative hp/armour/AP/WP correction passes " +
+                             "(resolved damage AND resnapshot), so either corrections stopped happening or they " +
+                             "now bypass the only writer that repaints a health bar";
+
+            // ─── (f) NOTHING IN THIS MOD WRITES A STAT'S RAW VALUE ───
+            Type[] modTypes;
+            try { modTypes = mod.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { modTypes = ex.Types.Where(t => t != null).ToArray(); }
+            var offenders = new List<string>();
+            int scanned = 0;
+            foreach (var t in modTypes)
+            {
+                var members = t.GetMethods(AllMembers).Cast<MethodBase>()
+                               .Concat(t.GetConstructors(AllMembers).Cast<MethodBase>());
+                foreach (var m in members)
+                {
+                    bool hasBody;
+                    try { hasBody = m.GetMethodBody() != null; } catch { hasBody = false; }
+                    if (!hasBody) continue;
+                    scanned++;
+                    if (Reaches(m, "ModifiableValue", "set_EndValue") ||
+                        FieldRefs(m, OpCodes.Stfld).Any(f => f != null && f.DeclaringType != null &&
+                                                            f.DeclaringType.Name == "ModifiableValue"))
+                        offenders.Add(t.Name + "." + m.Name);
+                }
+            }
+            if (scanned < 200)
+                yield return "L81 stat-scan-blind: the raw-stat-write sweep walked only " + scanned + " mod " +
+                             "method bodies, which is far too few for this assembly — the walk is broken, so the " +
+                             "ban below proves nothing";
+            if (offenders.Count > 0)
+                yield return "L81 stat-write-silent: " + string.Join(", ", offenders.ToArray()) + " write(s) a stat's " +
+                             "RAW value (ModifiableValue.EndValue / its backing fields) instead of BaseStat.Set. " +
+                             "That sets the number and raises StatChangeEvent for nobody, and " +
+                             "HealthbarUIActorElement:216-250 subscribes to exactly that event — the model would be " +
+                             "correct on every peer while every health bar shows the previous value, which is " +
+                             "indistinguishable from the change never having crossed the wire";
+        }
 
         /// <summary>L63 — CLIENT TURN CONTROL IS HOST-PACED, AND END-TURN IS AN INTENT (tactical arc A2).
         /// Two ways for a client to advance a turn, and both must be host-driven or the peers silently
