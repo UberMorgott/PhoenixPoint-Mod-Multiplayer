@@ -60,7 +60,11 @@ namespace Multiplayer.Network.Sync
                 Multiplayer.Tactical.TacticalTurnSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || Multiplayer.Tactical.TacticalCommandSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || Multiplayer.Tactical.TacticalDamageSync.HandleInbound(_engine, peer, surfaceId, payload)
-                || Multiplayer.Tactical.TacticalAimPoseSync.HandleInbound(_engine, peer, surfaceId, payload);
+                || Multiplayer.Tactical.TacticalAimPoseSync.HandleInbound(_engine, peer, surfaceId, payload)
+                // 0x89 native tactical entry (law L103, EXPERIMENT — NativeTacticalEntry.Enabled defaults to
+                // false). Registered unconditionally so the id is CLAIMED in the tactical band whether the
+                // experiment is on or off: an unclaimed 0x89 would fall through to the geoscape hook.
+                || Multiplayer.Tactical.NativeTacticalEntry.HandleInbound(_engine, peer, surfaceId, payload);
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
                 ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || EventPopup.HandleInbound(_engine, peer, surfaceId, payload)

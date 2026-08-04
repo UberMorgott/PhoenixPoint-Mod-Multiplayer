@@ -114,7 +114,7 @@ namespace RailCheck
                     yield return "L94 premise-changed: SaveTransferCoordinator." + name + " is gone — this law's " +
                                  "whole reasoning is that the barrier is two latches that must be re-armed " +
                                  "together, and it can no longer prove that";
-                else if (!WritesField(arm, f))
+                else if (!ArmersOf(coord, arm).Any(m => WritesField(m, f)))
                     yield return "L94 half-armed: OpenReturnBarrier does not reset " + name + ". " +
                                  (name == "_revealed"
                                      ? "HoldCurtain reads exactly that flag, so the curtain gate never engages and " +
@@ -237,6 +237,16 @@ namespace RailCheck
         }
 
         private static bool WritesField(MethodBase m, FieldInfo f) => TouchesField(m, f, 0x7D, 0x80); // stfld / stsfld
+
+        /// <summary>
+        /// OpenReturnBarrier plus the same-type helpers it delegates to. Both latches must still be re-armed on
+        /// the return path; whether the stfld sits in OpenReturnBarrier itself or in a helper it calls
+        /// unconditionally is a refactor, not a behaviour change — the native tactical ENTRY experiment (law
+        /// L103) extracted this exact body to <c>ArmSelfLoadBarrier</c> to share it geo→tac. ONE level only, so
+        /// the law still fails if the re-arm merely moves somewhere nothing on this path reaches.
+        /// </summary>
+        private static IEnumerable<MethodBase> ArmersOf(Type coord, MethodBase arm) =>
+            new[] { arm }.Concat(coord.GetMethods(AllMembers).Where(m => m != arm && CallsMethod(arm, m)));
         private static bool ReadsField(MethodBase m, FieldInfo f) => TouchesField(m, f, 0x7B, 0x7E);  // ldfld / ldsfld
 
         private static bool TouchesField(MethodBase m, FieldInfo f, params byte[] opcodes)

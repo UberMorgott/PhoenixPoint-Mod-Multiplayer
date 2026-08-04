@@ -123,11 +123,12 @@ namespace Multiplayer.Network.Sync
             // state that re-Inits the module (UIStateNothingSelected.EnterState:104) brought the strip back —
             // the reported "enter Research and come back and it appears". GeoscapeModulesData holds the
             // module by reference whether it is active or not, so the handle can never go quiet on us.
-            var view = GeoLevel()?.View;
+            var geo = GeoLevel();
+            var view = geo?.View;
             var mods = view?.GeoscapeModules;
             if (mods == null) return; // no geoscape view at all (tactical / main menu) — nothing to repaint
             RefreshAgendaTracker(mods);
-            RefreshSiteContextualMenu(mods, view.CurrentViewState);
+            RefreshSiteContextualMenu(geo, mods, view.CurrentViewState);
         }
 
         /// <summary>Top-right activity strip. The flag makes UpdateData() take its InitialSetup branch
@@ -169,27 +170,65 @@ namespace Multiplayer.Network.Sync
         /// Second citizen of the same gap the tracker was the first of: <see cref="UiNativeRepaint.Table"/>
         /// is keyed by VIEW STATE, and this module belongs to no single one (both
         /// UIStateNothingSelected:60 and UIStateVehicleSelected:87 drive it), so no table entry can ever
-        /// reach it — which is why a peer's Explore button survived the exploration that another peer had
-        /// already started (R1). Its whole content is DERIVED: SetMenuItems:74-77 asks each ability
-        /// `View.VisibleInContextMenu(target)` and `View.CanActivate(target)` and hides the ones that answer
-        /// no, so the button disappears by itself the moment the mirrored site/vehicle state says it should
-        /// — nothing about a button is ever synced.
+        /// reach it. Most of its content IS derived — SetMenuItems:76-83 asks each ability
+        /// `View.VisibleInContextMenu(target)` and drops the ones that answer no — so re-deriving is the
+        /// right primitive for everything whose availability the model can express.
+        ///
+        /// RE-DERIVING IS NOT ENOUGH FOR AN OFFER THAT WAS TAKEN, and that is why R1 came back: the menu is
+        /// a TRANSIENT OFFER, and on the peer that takes it the game does not re-derive anything — it
+        /// CLOSES the menu, unconditionally, at UIStateVehicleSelected.OnContextualItemSelected:431 (and
+        /// UIStateNothingSelected's twin). A mirror never walks that click path, so the offer stays on
+        /// screen. For exploration the derivation cannot cover for it even in principle:
+        /// ExploreSiteAbility.GetDisabledStateInternal:18-29 and GetTargetDisabledStateInternal:31-55 read
+        /// crew, visibility, ExplorationTime, GetInspected and CurrentSite — and NEVER
+        /// GeoVehicle.IsExploringSite:236, whose only readers in the whole assembly are the ability's own
+        /// no-op guard (ExploreSiteAbility:12) and VehicleActionsViewService:179/:192. So "Explore" derives
+        /// as visible AND activatable for the entire duration of the exploration, on every peer, exactly as
+        /// it does in vanilla — and SetMenuItems would not have hidden it even if CanActivate had gone
+        /// false, because a non-activatable ability is GREYED (SetInteractable:94), never dropped.
+        /// Measured, not assumed (2026-08-05 00:17 session): the watcher's re-seed line
+        /// "exploration re-seed V#1@8be7e872… → started" IS in its log, i.e. the state mirror lands and the
+        /// spinner runs — the derived list simply does not change.
+        ///
+        /// So the offer is closed, on the EDGE — the batch in which this peer first learns the site is
+        /// under exploration. State-based would be wrong here and not merely inelegant: rail batches arrive
+        /// continuously, so "hide whenever the site is being explored" would slam the menu shut on the next
+        /// batch every time a player deliberately opened it at an exploring site, which vanilla allows.
+        /// The edge is sampled from the model on EVERY refresh, before every bail below, so a site whose
+        /// exploration started while its menu was closed is already in the memo and never reads as a fresh
+        /// edge later.
         ///
         /// NEVER OPENS ONE: guarded on the module's own <c>IsContextualMenuVisible</c>, so a peer that has
         /// no menu up keeps having none (the same rule that keeps repaints from re-raising popups —
         /// GenericApplier.RaiseArrivedForUi's doc). Read-direction only: SetMenuItems reads abilities and
-        /// writes widgets, it mutates no model state.
+        /// writes widgets, and HideContextualMenu:138-144 only SetActive(false)s three GameObjects — no
+        /// view-state transition, so the popped-state caution does not apply.
         ///
-        /// ponytail: an ability set that empties completely leaves an empty menu frame rather than closing
-        /// it — telling "nothing visible" from "nothing derived" needs SetMenuItems' own filter, and
-        /// duplicating that filter here is the guess this seam exists to avoid. Upgrade path if it ever
-        /// shows: have the module report its own active-item count.
+        /// ponytail: exploration is the only order named here, because it is the only one whose in-progress
+        /// state the native derivation is blind to (a departure moves CurrentSite/Travelling, which the
+        /// derivation DOES read). Upgrade path if a second such order appears: widen
+        /// <see cref="ExploringSiteRefs"/> to "sites with an order in flight", not another branch here.
         /// </summary>
-        private static void RefreshSiteContextualMenu(GeoscapeModulesData mods, GeoscapeViewState current)
+        private static void RefreshSiteContextualMenu(GeoLevelController geo, GeoscapeModulesData mods,
+                                                      GeoscapeViewState current)
         {
             var menu = mods.SiteContextualMenuModule;
+            // UNCONDITIONAL, before every bail: the memo must track every site, not only the selected one.
+            bool offerTaken = ExplorationJustStarted(_exploringSites, ExploringSiteRefs(geo),
+                menu == null ? null : IdentityResolver.RootRef(menu.SelectedSite));
             if (menu == null || current == null) return;
             if (!menu.IsContextualMenuVisible || menu.SelectedSite == null) return;
+            if (offerTaken)
+            {
+                // Not silent, and not once-per-site-per-session either: this is a per-exploration event, so
+                // a line per close is a line per order — and "the menu closed on its own" is otherwise
+                // indistinguishable in a log from "the player clicked something".
+                Debug.Log("[MP][uirepaint] site menu CLOSED for " + IdentityResolver.RootRef(menu.SelectedSite) +
+                          " — its exploration has started, so the offer this menu made is already taken " +
+                          "(the game closes it the same way on the peer that clicked)");
+                menu.HideContextualMenu();
+                return;
+            }
             var derive = ContextualAbilities(current.GetType());
             if (derive == null) return; // this screen owns no site menu of its own — nothing to re-derive
             try
@@ -212,6 +251,47 @@ namespace Multiplayer.Network.Sync
                     Debug.LogWarning("[Multiplayer][rail] site contextual-menu re-derive threw — its buttons may stay " +
                                      "stale until the player clicks the site again (logged once): " + ex);
             }
+        }
+
+        /// <summary>Sites this peer already knew were under exploration at the previous HUD refresh.
+        /// Site REFS, not GeoSite handles: the same key GenericApplier's exploration seam logs with, and
+        /// the only shape RailCheck L102 can drive without a live scene.</summary>
+        private static readonly System.Collections.Generic.HashSet<string> _exploringSites =
+            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+        private static readonly System.Collections.Generic.HashSet<string> _exploringNow =
+            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>Every site the player faction is CURRENTLY exploring, asked of the model — the same
+        /// <c>GeoVehicle.IsExploringSite</c>:236 the mirror's own re-seed drives
+        /// (GenericApplier.ReseedExploration), so host and client answer off one predicate.</summary>
+        private static System.Collections.Generic.ICollection<string> ExploringSiteRefs(GeoLevelController geo)
+        {
+            _exploringNow.Clear();
+            var faction = geo == null ? null : geo.PhoenixFaction;
+            if (faction == null) return _exploringNow;
+            foreach (var v in faction.Vehicles)
+            {
+                if (v == null || !v.IsExploringSite || v.CurrentSite == null) continue;
+                var siteRef = IdentityResolver.RootRef(v.CurrentSite);
+                if (siteRef != null) _exploringNow.Add(siteRef);
+            }
+            return _exploringNow;
+        }
+
+        /// <summary>THE EDGE, kept pure so RailCheck L102 can execute it case by case: did exploration at
+        /// <paramref name="siteRef"/> START since the last call? <paramref name="seen"/> is re-based to
+        /// <paramref name="now"/> on EVERY call — including the ones that ask about no site
+        /// (<paramref name="siteRef"/> null, i.e. no menu open) — which is what makes a second call about
+        /// the same still-exploring site answer false, so a player may open that site's menu and keep it.
+        /// </summary>
+        internal static bool ExplorationJustStarted(System.Collections.Generic.HashSet<string> seen,
+                                                    System.Collections.Generic.ICollection<string> now,
+                                                    string siteRef)
+        {
+            bool started = siteRef != null && now.Contains(siteRef) && !seen.Contains(siteRef);
+            seen.Clear();
+            foreach (var s in now) seen.Add(s);
+            return started;
         }
 
         private static GeoLevelController GeoLevel()
@@ -288,6 +368,8 @@ namespace Multiplayer.Network.Sync
             _loggedFailures.Clear();
             _loggedFallback.Clear();
             _loggedSkips.Clear();
+            // Next session's first refresh must not read a dead session's site refs as a fresh edge.
+            _exploringSites.Clear();
         }
 
         /// <summary>

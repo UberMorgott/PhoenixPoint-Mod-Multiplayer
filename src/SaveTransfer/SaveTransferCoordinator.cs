@@ -1134,8 +1134,24 @@ namespace Multiplayer.Network
         // in the quarry). Arc A1 wires ENTRY only; the tac→geo return is a later arc.
         public void OpenReturnBarrier()
         {
-            if (_engine == null || !_engine.IsActive || !SessionStarted) return; // live co-op sessions only
             if (!_revealed || _barrierOpen) return; // already armed / an entry transfer owns the state
+            ArmSelfLoadBarrier("tac→geo return");
+        }
+
+        /// <summary>
+        /// THE SELF-LOAD ARM: every peer loads its OWN level natively and nothing ships a save, so there is no
+        /// chunk transfer to open the LOADED barrier and no <c>OnSaveChunk</c> to re-arm the reveal hold — the
+        /// two things this method does instead. Extracted from <see cref="OpenReturnBarrier"/> (whose whole
+        /// body it was) because the native tactical ENTRY experiment (law L103,
+        /// <c>NativeTacticalEntry.Enabled</c>) is the same shape in the other direction: geo→tac with every
+        /// peer building locally. Same machinery downstream, unchanged: <c>OnReachedPlaying</c> → hold +
+        /// LoadComplete, host <c>Update()</c> aggregates → <c>AllDone</c> → <c>RevealAll</c> → simultaneous
+        /// lift, with the existing three openers (roster shrink on peer-left, the host's 180 s forced reveal,
+        /// each peer's own self-reveal) as the belts.
+        /// </summary>
+        public void ArmSelfLoadBarrier(string why)
+        {
+            if (_engine == null || !_engine.IsActive || !SessionStarted) return; // live co-op sessions only
             _revealed = false;
             _reachedPlaying = false;
             _revealHoldStartedMs = 0;
@@ -1150,7 +1166,7 @@ namespace Multiplayer.Network
             _loadPhaseActive = true;
             _phase2DeadlineMs = NowMs() + RevealDeadlineMs;
             _revealAllSent = false;
-            Debug.Log($"[Multiplayer] return barrier armed (tac→geo): host={_engine.IsHost} — " +
+            Debug.Log($"[Multiplayer] self-load barrier armed ({why}): host={_engine.IsHost} — " +
                       "holding reveal until every roster slot reports load-complete.");
         }
 

@@ -151,6 +151,8 @@ namespace RailCheck
             laws.AddRange(L99_MarketplaceIntent.Check());
             laws.AddRange(L100_RailLatency.Check());
             laws.AddRange(L101_RewardRows.Check());
+            laws.AddRange(L102_ExploreButtonDerive.Check(game));
+            laws.AddRange(L103_NativeTacticalEntry.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

@@ -50,12 +50,26 @@ namespace Multiplayer.Tactical
 
             if (!engine.IsHost)
             {
+                // NATIVE-ENTRY EXPERIMENT (law L103, off by default): a client STILL never generates a
+                // battle. What passes here is only its replay of the host's already-generated
+                // TacticalGameParams through the game's own launch — NativeTacticalEntry.Replaying is set
+                // for exactly the synchronous span of that one call, so a genuine self-launch is still
+                // blocked on the very next line.
+                if (NativeTacticalEntry.Enabled && NativeTacticalEntry.Replaying)
+                {
+                    coord.ArmSelfLoadBarrier("tac-entry, native local build");
+                    return true;
+                }
                 Debug.LogWarning("[Multiplayer][tac] client LaunchTacticalGame BLOCKED — a client enters the " +
                                  "battle from the host's mid-tactical save transfer, never by self-launching.");
                 return false;
             }
 
             coord.OpenTacticalEntryBarrier();
+            // Native mode ships no save, so nothing else opens the LOADED barrier or starts the host's
+            // reveal aggregation (HostTacticalEntryTransferCrt's OpenBarrier is the save path's job). Arm the
+            // same self-load barrier the tac→geo return uses — every peer is loading its own level here too.
+            if (NativeTacticalEntry.Enabled) coord.ArmSelfLoadBarrier("tac-entry, native local build");
             return true;
         }
     }
@@ -103,6 +117,18 @@ namespace Multiplayer.Tactical
                                "receive a half-initialised battle.");
             else
                 Debug.Log("[Multiplayer][tac] deploy-ready after " + frames + " frame(s) → mid-tactical save transfer.");
+
+            // NATIVE-ENTRY EXPERIMENT (law L103, off by default): in native mode every peer built this
+            // battle from the host's shipped TacticalGameParams, so there is nothing to transfer — UNLESS a
+            // peer said it could not (NativeTacticalEntry.FallbackArmed), which is precisely what this path
+            // is the answer to. Read HERE and not at launch, because the request can arrive at any point
+            // during the deploy-ready wait above.
+            if (NativeTacticalEntry.Enabled && !NativeTacticalEntry.FallbackArmed)
+            {
+                Debug.Log("[Multiplayer][tac] native entry: every peer built the battle locally — no save " +
+                          "transfer. (Flip NativeTacticalEntry.Enabled to false to restore the save path.)");
+                yield break;
+            }
 
             // Never silent: a refused start strands every peer behind the reveal-hold armed at launch, so
             // the abort route (0x47 → client curtain lift) is the ONLY correct answer to "false".
