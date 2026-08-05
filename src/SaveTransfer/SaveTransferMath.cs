@@ -1,4 +1,4 @@
-﻿namespace Multiplayer.Network
+namespace Multiplayer.Network
 {
     /// <summary>
     /// Pure, Unity-free save-transfer load-barrier + chunk-grid predicates. Extracted from the
@@ -46,5 +46,21 @@
         /// </summary>
         public static bool HoldCurtain(bool engineActive, bool sessionStarted, bool revealed)
             => engineActive && sessionStarted && !revealed;
+
+        /// <summary>
+        /// PER-PEER REVEAL-BARRIER HOLD (developer ruling, 2026-08-05): "without options EVERYONE must load,
+        /// in order to start. And if someone hard-crashes — the process died, the connection broke — we wait
+        /// for them; if nothing is happening, then they get dropped and we load on without them."
+        ///
+        /// So the release criterion is LIVENESS AND PROGRESS, never a wall clock. One roster slot holds the
+        /// synchronized reveal for as long as it is (a) not loaded, (b) still MOVING — its download percent or
+        /// native-load percent advanced within the grace window — and (c) still AUDIBLE — some packet arrived
+        /// from it within the same window. A slow disk or a lossy link costs nobody their transition: both
+        /// clocks keep being bumped, so the wait is unbounded BY DESIGN. Only the absence of BOTH signals ends
+        /// it, and ending it drops the peer from this BARRIER only — never from the session (law L84: it keeps
+        /// its row, slot, permissions and guid binding, and re-converges through the on-demand join).
+        /// </summary>
+        public static bool HoldsBarrier(bool loadComplete, long msSinceProgress, long msSinceHeard, long graceMs)
+            => !loadComplete && msSinceProgress <= graceMs && msSinceHeard <= graceMs;
     }
 }

@@ -63,10 +63,13 @@ namespace Multiplayer.Harmony
     /// game). A barrier that waits on a peer that will never report is a permanent block, so the release
     /// this re-enters has three independent openers, all pre-existing: (1) a peer that drops is removed from
     /// the roster before <c>AllDone(GetRosterSlots())</c> is next evaluated, so the expected set SHRINKS and
-    /// the barrier opens with whoever is left — the normal case, and it is immediate; (2) the host's forced
-    /// reveal after <c>RevealDeadlineMs</c> (180 s) broadcasts <c>RevealAll</c> regardless; (3) each peer's
-    /// own self-reveal after the same deadline, for a host that died holding the announcement. Teardown is a
-    /// fourth: <c>HoldCurtain</c> returns false the moment the engine goes inactive.
+    /// the barrier opens with whoever is left — the normal case, and it is immediate; (2) the host's LIVENESS
+    /// release (<c>NoLiveLoaderLeft</c>): a peer that shows no progress AND says nothing for
+    /// <c>BarrierLivenessGraceMs</c> (60 s) stops being waited for and <c>RevealAll</c> goes out without it,
+    /// while a peer that is merely SLOW is waited for indefinitely, by design; (3) each peer's own self-reveal
+    /// once the HOST has been silent for the same grace, for a host that died holding the announcement.
+    /// Teardown is a fourth: <c>HoldCurtain</c> returns false the moment the engine goes inactive. None of the
+    /// four removes anybody from the session (law L84) — they leave the BARRIER, not the game.
     /// </summary>
     [HarmonyPatch(typeof(PhoenixGame), nameof(PhoenixGame.FinishLevel))]
     internal static class LoadBarrierGate

@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.Network;
+using Multiplayer.Transport;
 using PhoenixPoint.Common.Game;
 using PhoenixPoint.Common.Levels.Params;
 
@@ -43,18 +44,26 @@ namespace RailCheck
     /// loading on the far side, so an arm there holds a curtain over a lobby waiting on peers who are not
     /// loading anything — a barrier turned into a hang by the one transition that has no other side.
     ///
-    /// SELF-RELEASE IS A FIRST-CLASS LAW ARM, NOT A ROBUSTNESS NICETY (arms d + e). The user's standing rule is
-    /// that at ANY moment ANY player must be able to play EVERYTHING — if 49 of 50 players are AFK the single
-    /// active one still finishes the whole game. A barrier that waits on a peer who crashed, quit or died
-    /// mid-load would block the rest FOREVER, which is strictly worse than the desync it prevents. Arm (d)
-    /// EXECUTES the real release predicate to prove a peer leaving the roster opens the barrier for whoever is
-    /// left, and arm (e) holds the bounded belt in place for the peer that neither reports nor drops.
+    /// THE RELEASE RULE, RULED ON 2026-08-05 (arms d + e + g). "If it's loading from geoscape into tactical, or
+    /// from tactical back, then without options EVERYONE must load, in order to start. And if someone
+    /// hard-crashes — the process died, the connection broke — we wait for them; if nothing is happening, then
+    /// they get dropped and we load on without them." So the barrier STAYS for level transitions, and only its
+    /// release criterion changed: it opens when every LIVE peer has loaded. LIVE is two signals already on the
+    /// wire — that peer's download/native-load percent still advancing, and any packet still arriving from it —
+    /// and while either is fresh the wait is UNBOUNDED BY DESIGN. The flat 180 s wall clock is gone: it
+    /// force-revealed a healthy-but-slow peer mid-load (a black globe, and his transition lost to owning an
+    /// HDD) and, in the other direction, made forty-nine players stare at three minutes of nothing when the
+    /// fiftieth had plainly died. Arm (d) EXECUTES the roster predicate (a peer that LEFT stops being expected),
+    /// arm (e) EXECUTES the per-peer one — never abandon a peer that is progressing, never wait on one that has
+    /// gone silent AND still — and arm (g) pins the distinction that makes this safe: dropping out of the
+    /// BARRIER is not leaving the SESSION. The peer keeps its row, slot, permissions and guid binding (law L84)
+    /// and re-converges through the on-demand join when it returns.
     ///
     /// ARM (f) IS A PREMISE ARM. Re-arming <c>_revealed</c> alone looks correct and is not: with
     /// <c>_reachedPlaying</c> left latched, <c>OnReachedPlaying</c> returns on its first line, no peer ever
-    /// reports <c>LoadComplete</c>, <c>AllDone</c> never holds, and the barrier releases only on the 180 s
-    /// deadline — a three-minute black screen at the end of every battle that reads as a network fault. The
-    /// law pins both writes so that half-fix cannot ship looking like a whole one.
+    /// reports <c>LoadComplete</c>, <c>AllDone</c> never holds, and the barrier releases only on the liveness
+    /// give-up — a minute of black screen at the end of every battle that reads as a network fault. The law
+    /// pins both writes so that half-fix cannot ship looking like a whole one.
     /// </summary>
     internal static class L94_LoadBarrier
     {
@@ -103,7 +112,8 @@ namespace RailCheck
                     yield return "L94 quit-arms-barrier: " + seamType.Name + " arms the load barrier on " +
                                  "FinishLevel without ever testing for QuitGameResult, so leaving to the main menu " +
                                  "(FinishLevelAndGoToLobby:284 / AndQuitGame:276) now arms a barrier for a level " +
-                                 "nobody is loading — the curtain holds over the lobby until the 180 s deadline, " +
+                                 "nobody is loading — the curtain holds over the lobby until the liveness " +
+                                 "give-up finally times somebody out, " +
                                  "which is this fix turning into the hang it exists to prevent";
 
             // ─── (f) PREMISE: BOTH LATCHES ARE RE-ARMED, NOT JUST THE VISIBLE ONE. ───
@@ -161,19 +171,101 @@ namespace RailCheck
                              "session died mid-load is then stuck behind a loading screen with nothing left to " +
                              "release it";
 
-            // ─── (e) SELF-RELEASING: THE BOUNDED BELT FOR A PEER THAT NEITHER REPORTS NOR DROPS. ───
+            // ─── (e) THE WAIT ENDS ON ABSENCE OF LIFE, NEVER ON A CLOCK. ───
+            // EXECUTED against the real per-peer predicate, same as arm (d).
             var update = coord.GetMethod("Update", AllMembers);
             var lift = coord.GetMethod("PerformDeferredLift", AllMembers);
-            var deadline = coord.GetField("_phase2DeadlineMs", AllMembers);
-            if (update == null || lift == null || deadline == null)
+            var giveUp = coord.GetMethod("NoLiveLoaderLeft", AllMembers);
+            var holds = typeof(SaveTransferMath).GetMethod("HoldsBarrier", AllMembers);
+            var graceF = coord.GetField("BarrierLivenessGraceMs", AllMembers);
+            if (update == null || lift == null || giveUp == null || holds == null || graceF == null)
                 yield return "L94 premise-changed: SaveTransferCoordinator.Update / PerformDeferredLift / " +
-                             "_phase2DeadlineMs no longer all exist, so this law can no longer prove the barrier " +
-                             "has a bounded escape for a peer that hangs without disconnecting";
-            else if (!ReadsField(update, deadline) || !CallsMethod(update, lift))
-                yield return "L94 deadline-fallback-gone: Update no longer reads _phase2DeadlineMs and reveals on " +
-                             "it. A peer that hangs mid-load WITHOUT dropping its connection is never removed from " +
-                             "the roster, so arm (d)'s shrink never happens and this deadline is the only thing " +
-                             "left between the other players and a permanent block";
+                             "NoLiveLoaderLeft / BarrierLivenessGraceMs / SaveTransferMath.HoldsBarrier no longer " +
+                             "all exist, so this law can no longer prove the barrier waits on liveness rather than " +
+                             "on a stopwatch — and cannot prove it has any escape at all from a peer that hangs " +
+                             "without dropping its connection";
+            else
+            {
+                if (!CallsMethod(update, giveUp) || !CallsMethod(update, lift))
+                    yield return "L94 liveness-release-gone: Update no longer asks NoLiveLoaderLeft before it " +
+                                 "reveals. Either the barrier has gone back to a wall-clock deadline — which " +
+                                 "force-revealed a healthy-but-slow peer mid-load and cost him his transition for " +
+                                 "owning an HDD — or it has no escape at all and one crashed process now blocks " +
+                                 "everybody else's level transition for ever";
+
+                if (!CallsMethod(giveUp, holds))
+                    yield return "L94 release-not-the-predicate: NoLiveLoaderLeft does not call " +
+                                 "SaveTransferMath.HoldsBarrier, so the rule the arms below EXECUTE is not the " +
+                                 "rule the host actually runs. A second copy of the release condition is how the " +
+                                 "law goes green while the game hangs";
+
+                long grace = Convert.ToInt64(graceF.GetRawConstantValue());
+
+                if (!SaveTransferMath.HoldsBarrier(false, msSinceProgress: 0, msSinceHeard: 0, graceMs: grace))
+                    yield return "L94 abandons-a-live-peer: a peer that reported progress THIS INSTANT does not " +
+                                 "hold the barrier. The ruling is that a peer which is alive and still making " +
+                                 "progress is waited for indefinitely — a slow disk or a lossy link must never " +
+                                 "cost a player his transition";
+
+                if (!SaveTransferMath.HoldsBarrier(false, grace, grace, grace))
+                    yield return "L94 abandons-a-live-peer: at EXACTLY the grace window the peer is already " +
+                                 "dropped from the barrier. The window is how long it may be silent, so the " +
+                                 "give-up belongs strictly after it — an off-by-one here abandons peers on the " +
+                                 "boundary that the honest reading of the constant says are still fine";
+
+                if (SaveTransferMath.HoldsBarrier(false, grace + 1, grace + 1, grace))
+                    yield return "L94 waits-on-the-dead: a peer that has neither moved nor said anything for " +
+                                 "longer than the grace window still holds the barrier. That is the crashed " +
+                                 "process the ruling names — the rest of the session must load on without it";
+
+                if (SaveTransferMath.HoldsBarrier(false, grace + 1, 0, grace))
+                    yield return "L94 idle-peer-holds-forever: a peer whose progress has been frozen past the " +
+                                 "grace window still holds the barrier because packets keep arriving. Heartbeats " +
+                                 "prove a socket, not a load: a peer stuck at 12% for ever would hold forty-nine " +
+                                 "others behind a curtain while chatting happily";
+
+                // Fresh clocks on purpose: a stale-clock probe here passes for the WRONG reason (the timing
+                // terms alone answer false), which is exactly how the done term could be dropped unnoticed.
+                if (SaveTransferMath.HoldsBarrier(true, msSinceProgress: 0, msSinceHeard: 0, graceMs: grace))
+                    yield return "L94 done-still-holds: a slot that already reported LoadComplete keeps holding " +
+                                 "the barrier while it is still chattering. Every peer talks right up to the " +
+                                 "moment it is in, so nobody would ever be released — the block this whole " +
+                                 "release path exists to make impossible";
+
+                var hbF = typeof(SessionManager).GetField("HeartbeatTimeoutMs", AllMembers);
+                if (hbF != null && grace < 2L * Convert.ToInt64(hbF.GetRawConstantValue()))
+                    yield return "L94 grace-too-tight: BarrierLivenessGraceMs (" + grace + " ms) is under twice " +
+                                 "SessionManager.HeartbeatTimeoutMs. A peer on a bad link routinely goes quiet for " +
+                                 "one heartbeat window and gets PAUSED, then resumes on its next packet; a grace " +
+                                 "that tight abandons exactly those players at every single level transition — the " +
+                                 "'fight to be able to play' the N=50 mandate forbids";
+            }
+
+            // ─── (g) DROPPING OUT OF THE BARRIER IS NOT LEAVING THE SESSION (L84's line, restated here). ───
+            // The release above gives up on a peer. That must cost it the WAIT and nothing else: its row, slot,
+            // permissions and guid binding stay, and it re-converges through the on-demand join. If a barrier
+            // path ever "tidies up" by removing the peer it just stopped waiting for, a slow HDD becomes an
+            // eviction — the single most user-hostile thing this mod ever did, arriving through the back door.
+            var removeClient = typeof(SessionManager).GetMethod("RemoveClient", AllMembers);
+            var disconnect = typeof(ITransport).GetMethod("DisconnectPeer", AllMembers);
+            if (removeClient == null || disconnect == null)
+                yield return "L94 premise-changed: SessionManager.RemoveClient / ITransport.DisconnectPeer no " +
+                             "longer both exist, so this law can no longer prove the barrier never evicts the peer " +
+                             "it stopped waiting for";
+            else
+                foreach (var name in new[] { "Update", "NoLiveLoaderLeft", "PerformDeferredLift",
+                                             "TryReleaseBarrier", "OnLoadComplete", "OpenReturnBarrier",
+                                             "ArmSelfLoadBarrier" })
+                {
+                    var m = coord.GetMethod(name, AllMembers);
+                    if (m == null) continue;
+                    if (CallsMethod(m, removeClient) || CallsMethod(m, disconnect))
+                        yield return "L94 barrier-removes-the-peer: SaveTransferCoordinator." + name + " removes a " +
+                                     "client / severs a transport link. The barrier may stop WAITING for a peer; " +
+                                     "it may never take one out of the session (law L84). A peer that loses power " +
+                                     "mid-load must find its seat, its slot and its permissions exactly where it " +
+                                     "left them when it comes back";
+                }
         }
 
         // ── Harmony target, read off the attribute's own constructor arguments so this does not depend on
@@ -247,7 +339,6 @@ namespace RailCheck
         /// </summary>
         private static IEnumerable<MethodBase> ArmersOf(Type coord, MethodBase arm) =>
             new[] { arm }.Concat(coord.GetMethods(AllMembers).Where(m => m != arm && CallsMethod(arm, m)));
-        private static bool ReadsField(MethodBase m, FieldInfo f) => TouchesField(m, f, 0x7B, 0x7E);  // ldfld / ldsfld
 
         private static bool TouchesField(MethodBase m, FieldInfo f, params byte[] opcodes)
         {

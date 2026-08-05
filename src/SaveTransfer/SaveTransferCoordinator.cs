@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Base.Core;
@@ -58,14 +58,19 @@ namespace Multiplayer.Network
         public const long MaxTransferBytes = 64L * 1024 * 1024;
 
 
-        // Phase-2 reveal deadline: how long the held (opaque) overlay stays up — i.e. how long both
-        // reveal fallbacks wait for every peer to finish its NATIVE world-load and report done — before
-        // forcing the synchronized reveal anyway. Used by BOTH fallbacks: the host forced-reveal
-        // (a peer errored / never reported done) and the per-peer self-reveal (RevealAll never arrived,
-        // dead host). A 1–5 MB geoscape world-load on an HDD can exceed 60 s, so under the old single
-        // 60 s constant a healthy-but-slow client got force-revealed MID-LOAD (black globe). 3 min gives
-        // a real world-load room to finish while still bounding a genuinely stuck peer (review fix #3).
-        private const long RevealDeadlineMs = 180_000;
+        // LIVENESS GRACE — how long a peer may show NO sign of life at all before the reveal barrier stops
+        // waiting for it. This is a LIVENESS timeout, not a load timeout: it is never measured against "how
+        // long the load takes" (that is unbounded on purpose — a slow disk or a lossy link must not cost a
+        // player his transition), only against "how long since we last saw this peer move or speak". Both
+        // clocks feed it (SaveTransferMath.HoldsBarrier): the per-slot progress clock (download percent /
+        // native-load percent advancing) and the per-peer heard clock (any inbound packet).
+        //
+        // 60 s = parity with SessionManager.TransferStallMs, which is already this codebase's declared
+        // meaning of "this transfer/load has stopped moving", and 3× HeartbeatTimeoutMs (20 s) so a peer that
+        // merely missed a heartbeat window and got PAUSED-then-resumed is never abandoned by the barrier. It
+        // REPLACES the flat 180 s wall-clock deadline, which force-revealed healthy-but-slow peers mid-load
+        // and made everybody else stare at three minutes of nothing when a peer had genuinely died.
+        private const long BarrierLivenessGraceMs = 60_000;
 
         private readonly NetworkEngine _engine;
 
@@ -152,12 +157,10 @@ namespace Multiplayer.Network
         // ─── Second barrier: synchronized geoscape reveal (BUG D) ─────────
         // The native curtain auto-lifts on Loaded→Playing; the mod overlay (opaque) is held as the
         // real synchronized cover and dropped together via RevealAll. _reachedPlaying: this peer hit
-        // Playing (CurtainShowPatch); _revealHoldStartedMs: when the hold began (self-reveal fallback
-        // baseline); _phase2DeadlineMs: host forced-reveal deadline; _revealed: lift performed once;
-        // _revealAllSent: host broadcast-once guard.
+        // Playing (CurtainShowPatch); _revealHoldStartedMs: when the hold began (self-reveal baseline);
+        // _revealed: lift performed once; _revealAllSent: host broadcast-once guard.
         private bool _reachedPlaying;
         private long _revealHoldStartedMs;
-        private long _phase2DeadlineMs;
         private bool _revealed;
         private bool _revealAllSent;
         // Batch 2 (entry-via-save): the host is holding its loading screen for a tactical-ENTRY transfer.
@@ -213,6 +216,22 @@ namespace Multiplayer.Network
         /// </summary>
         public long LastProgressMs { get; private set; } = NowMs();
         private void NoteProgress() => LastProgressMs = NowMs();
+
+        // PER-SLOT progress clock for the reveal barrier (host view). LastProgressMs above is one clock for
+        // the whole session — it cannot tell WHICH peer stopped. This one is bumped only when that slot's
+        // (phase, percent) actually MOVED FORWARD (RosterProgressTracker.Merge returned true), so it is a
+        // progress signal and not merely a traffic signal; traffic is the second, separate input
+        // (SessionManager.LastSeenMsForSlot). Seeded lazily on first read so a slot that has not reported
+        // anything yet starts its grace window now instead of at epoch 0.
+        private readonly Dictionary<byte, long> _slotAdvancedMs = new Dictionary<byte, long>();
+        private void NoteSlotAdvance(byte slot) => _slotAdvancedMs[slot] = NowMs();
+        private long SlotAdvancedMs(byte slot)
+        {
+            if (_slotAdvancedMs.TryGetValue(slot, out var t)) return t;
+            var now = NowMs();
+            _slotAdvancedMs[slot] = now;
+            return now;
+        }
 
         public SaveTransferCoordinator(NetworkEngine engine)
         {
@@ -1115,7 +1134,8 @@ namespace Multiplayer.Network
             _revealed = false;
             _revealAllSent = false;
             _revealHoldStartedMs = 0;
-            _phase2DeadlineMs = 0;
+            _slotAdvancedMs.Clear();   // fresh barrier: every slot's grace window starts on its first read
+            _lastBarrierWaitLogMs = 0;
             Debug.Log($"[Multiplayer] LOADED barrier open, host self-added id={_engine.LocalSteamId}.");
         }
 
@@ -1220,9 +1240,10 @@ namespace Multiplayer.Network
             _slotProgress.Clear();
             _tracker.Reset();
             _lastSnapshotMs = -1;
-            // Host aggregation + forced-reveal deadline (same Update() path as phase-2; unused off-host).
+            // Host aggregation + liveness-based release (same Update() path as phase-2; unused off-host).
             _loadPhaseActive = true;
-            _phase2DeadlineMs = NowMs() + RevealDeadlineMs;
+            _slotAdvancedMs.Clear();   // fresh barrier: every slot's grace window starts on its first read
+            _lastBarrierWaitLogMs = 0;
             _revealAllSent = false;
             Debug.Log($"[Multiplayer] self-load barrier armed ({why}): host={_engine.IsHost} — " +
                       "holding reveal until every roster slot reports load-complete.");
@@ -1799,10 +1820,10 @@ namespace Multiplayer.Network
             _barrierOpen = false;
             // Phase-2 (world load) starts now; keep snapshots flowing until the roster is all-done.
             _loadPhaseActive = true;
-            // Host forced-reveal deadline: if a peer errors / never reports done, reveal anyway.
-            // Uses the phase-2 reveal deadline (NOT the phase-1 load timeout) so a long native world-load
-            // is not force-revealed mid-load (fix #3).
-            _phase2DeadlineMs = NowMs() + RevealDeadlineMs;
+            // Phase-2 release runs on LIVENESS (NoLiveLoaderLeft), so a long native world-load is never
+            // force-revealed mid-load — it is waited out. Restart every slot's grace window here.
+            _slotAdvancedMs.Clear();
+            _lastBarrierWaitLogMs = 0;
 
             Debug.Log("[Multiplayer] BEGIN broadcast.");
             var startTicks = DateTime.UtcNow.Ticks;
@@ -1881,7 +1902,7 @@ namespace Multiplayer.Network
             {
                 // Host has no host→host hop: aggregate its own slot 0 (phase 1) directly.
                 _slotProgress[0] = (1, percent);
-                _tracker.Merge(0, 1, percent);
+                if (_tracker.Merge(0, 1, percent)) NoteSlotAdvance(0);
             }
             else
             {
@@ -1913,13 +1934,76 @@ namespace Multiplayer.Network
             if (_engine.Session.TryGetSlotForPeer(msg.SenderSteamId, out var slot))
             {
                 _slotProgress[slot] = (phase, percent);
-                _tracker.Merge(slot, phase, percent);
+                // A forward MOVE (not just a packet) is the barrier's progress signal for this peer.
+                if (_tracker.Merge(slot, phase, percent)) NoteSlotAdvance(slot);
             }
         }
 
         // ══════════════════════════════════════════════════════════════════
-        //  Per-frame: host barrier timeout / kick
+        //  Per-frame: reveal barrier (liveness, not a clock)
         // ══════════════════════════════════════════════════════════════════
+
+        // How often the host restates WHO the barrier is waiting for. The wait itself is unbounded, so
+        // without this line an operator reading the log cannot tell "waiting for a slow peer" from "hung".
+        private const long BarrierWaitLogIntervalMs = 5_000;
+        private long _lastBarrierWaitLogMs;
+
+        /// <summary>
+        /// HOST: is there nobody left worth waiting for? Developer ruling 2026-08-05 — on a level transition
+        /// EVERYONE must load before anyone starts, and a peer that hard-crashed is waited for until it is
+        /// clear nothing is happening, then the rest go on without it.
+        ///
+        /// So this asks a liveness question, never a clock question. A slot that has not reported
+        /// LoadComplete keeps the barrier shut while EITHER of its two signals is fresh — its progress
+        /// advancing or any packet arriving (<see cref="SaveTransferMath.HoldsBarrier"/>) — which makes a slow
+        /// disk or a 5%-loss link cost nothing but time. Returns true only when every unfinished slot has been
+        /// silent AND motionless for <see cref="BarrierLivenessGraceMs"/>; <paramref name="abandoned"/> then
+        /// names them for the release log. Returns false when every slot is DONE — that release belongs to the
+        /// AllDone path below, which is the normal, simultaneous one.
+        ///
+        /// Leaving the BARRIER is not leaving the SESSION (law L84): nothing here removes a peer, drops a
+        /// connection or touches the roster. The abandoned peer keeps its row, slot, permissions and guid
+        /// binding, finishes loading at its own pace and re-converges through the on-demand join.
+        /// </summary>
+        private bool NoLiveLoaderLeft(out string abandoned)
+        {
+            abandoned = null;
+            var now = NowMs();
+            List<string> waiting = null, gone = null;
+            foreach (var slot in _engine.Session.GetRosterSlots())
+            {
+                if (_tracker.IsDone(slot)) continue;
+                var sinceProgress = now - SlotAdvancedMs(slot);
+                var sinceHeard = now - _engine.Session.LastSeenMsForSlot(slot);
+                var st = _tracker.Get(slot);
+                if (SaveTransferMath.HoldsBarrier(false, sinceProgress, sinceHeard, BarrierLivenessGraceMs))
+                {
+                    if (waiting == null) waiting = new List<string>();
+                    waiting.Add($"s{slot} {(st.phase == 0 ? "downloading" : "loading")} {st.percent}% " +
+                                $"(moved {sinceProgress}ms ago, heard {sinceHeard}ms ago)");
+                }
+                else
+                {
+                    if (gone == null) gone = new List<string>();
+                    gone.Add($"s{slot} (no progress for {sinceProgress}ms, nothing heard for {sinceHeard}ms)");
+                }
+            }
+
+            if (waiting != null)
+            {
+                // Somebody is alive and moving: wait, for as long as it takes. Say so, throttled.
+                if (now - _lastBarrierWaitLogMs > BarrierWaitLogIntervalMs)
+                {
+                    _lastBarrierWaitLogMs = now;
+                    Debug.Log("[Multiplayer] reveal barrier holding for " + string.Join(", ", waiting) +
+                              " — alive and progressing, so there is no deadline on this wait.");
+                }
+                return false;
+            }
+            if (gone == null) return false;   // everyone loaded → the AllDone release below owns it
+            abandoned = string.Join(", ", gone);
+            return true;
+        }
 
         public void Update()
         {
@@ -2006,25 +2090,36 @@ namespace Multiplayer.Network
                 }
             }
 
-            // Reveal deadlock fallbacks — run on EVERY peer every frame (above the host-only return).
-            // Host forced reveal: a peer errored / never reported done before the deadline. Broadcast
-            // RevealAll anyway so nobody is stuck behind the held overlay forever.
-            if (_engine.IsHost && _loadPhaseActive && !_revealAllSent && NowMs() > _phase2DeadlineMs)
+            // Reveal release on LIVENESS — runs on EVERY peer every frame (above the host-only return).
+            // Host: give up on a peer only when it shows no sign of life at all; a peer that is still
+            // downloading, still loading or still talking holds the barrier for as long as it takes.
+            if (_engine.IsHost && _loadPhaseActive && !_revealAllSent && NoLiveLoaderLeft(out var abandoned))
             {
                 _revealAllSent = true;
                 _engine.BroadcastToAll(new NetworkMessage(
                     PacketType.RevealAll, MessageSerializer.SerializeRevealAll(DateTime.UtcNow.Ticks)));
                 _loadPhaseActive = false;
-                Debug.LogWarning($"[Multiplayer] host reveal released: timeout fallback ({RevealDeadlineMs}ms) — " +
-                                 $"revealing without all clients (loadedClients={_loadedPeers.Count}).");
+                Debug.LogWarning($"[Multiplayer] host reveal released: no sign of life from {abandoned} for " +
+                                 $"{BarrierLivenessGraceMs}ms — revealing without them. They keep their roster " +
+                                 $"row/slot/permissions and re-converge through the on-demand join when back " +
+                                 $"(loadedClients={_loadedPeers.Count}).");
                 PerformDeferredLift();
-                HostReseedAfterReveal(); // rca-4: forced-reveal path still re-seeds a reloaded session
+                HostReseedAfterReveal(); // rca-4: this release path still re-seeds a reloaded session
             }
-            // Per-peer self-reveal: this peer is holding (reached Playing) but the RevealAll never
-            // arrived (dead host). After the hold timeout, reveal locally so it isn't stuck forever.
-            if (_reachedPlaying && !_revealed && NowMs() - _revealHoldStartedMs > RevealDeadlineMs)
+            // Per-peer self-reveal: this peer is holding (reached Playing) but no RevealAll came. The host
+            // broadcasts a RosterProgress snapshot ≤20 Hz for the whole barrier (each one bumps
+            // LastProgressMs), so silence here means the HOST is gone — not that it is patiently waiting for
+            // a slow peer, which must never end this hold. Same liveness grace, same "absence of life" rule.
+            if (_reachedPlaying && !_revealed)
             {
-                PerformDeferredLift();
+                var lastHostSignMs = LastProgressMs > _revealHoldStartedMs ? LastProgressMs : _revealHoldStartedMs;
+                if (NowMs() - lastHostSignMs > BarrierLivenessGraceMs)
+                {
+                    Debug.LogWarning($"[Multiplayer] barrier released locally: no sign of life from the host for " +
+                                     $"{NowMs() - lastHostSignMs}ms (no RevealAll, no roster snapshot) — lifting " +
+                                     "alone rather than holding a curtain nobody is coming to open.");
+                    PerformDeferredLift();
+                }
             }
 
             // Snapshots must flow through BOTH phases: the LOADED barrier window (_barrierOpen) AND

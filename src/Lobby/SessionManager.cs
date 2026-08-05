@@ -132,7 +132,7 @@ namespace Multiplayer.Network
             // world-load can block the busy peer's main thread for >20 s — in both cases the peer is
             // perfectly alive but no heartbeat gets through the window. The transfer/barrier machinery
             // proves liveness chunk-by-chunk (and owns its OWN straggler timeout: Phase1LoadTimeoutMs /
-            // RevealDeadlineMs), and RefreshLiveness keeps _lastHeartbeat fresh as chunks arrive, so
+            // BarrierLivenessGraceMs), and RefreshLiveness keeps _lastHeartbeat fresh as chunks arrive, so
             // nothing false-fires the instant the load ends.
             var st = _engine.SaveTransfer;
             bool loadInFlight = st != null && (st.TransferActive || st.InPhase2 || st.LoadPhaseStarted);
@@ -645,6 +645,24 @@ namespace Multiplayer.Network
         {
             if (_lastHeartbeat.ContainsKey(peerId))
                 _lastHeartbeat[peerId] = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+        }
+
+        /// <summary>
+        /// Host: when we last heard ANYTHING from the peer sitting in <paramref name="slot"/> (ms clock),
+        /// i.e. the same row <see cref="RefreshLiveness"/> bumps on every inbound packet. The reveal barrier
+        /// reads this to tell "still there, just slow" from "the process died" (SaveTransferMath.HoldsBarrier)
+        /// — deliberately the RAW clock, not the reaper's verdict: a PAUSED peer keeps its roster row (L84) and
+        /// would otherwise hold the barrier for ever. Slot 0 is the host itself, always live. A slot no longer
+        /// on the roster returns 0 (never heard) — unreachable while iterating GetRosterSlots.
+        /// </summary>
+        public long LastSeenMsForSlot(byte slot)
+        {
+            var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+            if (slot == 0) return now;
+            foreach (var c in _clients.Values)
+                if (c.SlotIndex == slot)
+                    return _lastHeartbeat.TryGetValue(c.SteamId, out var last) ? last : 0;
+            return 0;
         }
 
         /// <summary>

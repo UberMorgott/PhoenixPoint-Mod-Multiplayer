@@ -36,6 +36,16 @@ namespace RailCheck
     ///     now ONE rule — <c>SessionManager.PausePeer</c> — and a peer keeps its row, slot, permissions and
     ///     guid binding while it is away.
     ///
+    /// WHAT "NOBODY WAITS" MEANS, SCOPED (developer ruling, 2026-08-05). The forbidden wait is an ADMISSION
+    /// quorum: a gate that reads what OTHER peers have done before letting play begin — the ready vote and the
+    /// LOADED count, both of which held a whole lobby hostage to one AFK or slow player, and both of which arms
+    /// (c) and (d) keep dead. A LEVEL TRANSITION is explicitly NOT that wait: "if it's loading from geoscape
+    /// into tactical, or from tactical back, then without options EVERYONE must load, in order to start" —
+    /// otherwise the first peer in plays a world the others have not reached (law L94's report). That barrier is
+    /// legitimate because it can never strand anybody: it releases as soon as every LIVE peer is in, gives up on
+    /// a peer showing no sign of life, and — the part this law owns — takes NOBODY out of the session when it
+    /// does. Arms (a), (b) and (e) are what make the two rules compatible; none of them was weakened.
+    ///
     /// THE ONE KICK THAT SURVIVES is a peer that LEFT: <c>SessionManager.HandleLeave</c>, on the ClientLeave
     /// packet. Arm (a) is that sentence made mechanical — the caller SET of <c>ITransport.DisconnectPeer</c>
     /// must be exactly that one method. It is a set equality on purpose, not a "does it still get called":
