@@ -972,7 +972,13 @@ namespace Multiplayer.Network.Sync
         internal static void MarkResolvedInstance(GeoscapeEvent ev)
         {
             SetIsCompleted?.Invoke(ev, new object[] { true });
-            SetChoiceReward?.Invoke(ev, new object[] { StubReward(ev?.EventID) });
+            // NEVER OVER A REAL ONE. The stub exists for the peer that did not mint the reward; the HOST that
+            // lost the click race reaches this same replay (EventChoiceClientLock -> ReplayResolution) holding
+            // the GeoFactionReward its own CompleteEvent:101 just minted, and overwriting it made
+            // HasRewards()==false, ShowReward:363 return at once, and the host's outcome page list the point of
+            // interest's gains as nothing at all. The stub is a FALLBACK, not a reset.
+            if (ev?.ChoiceReward == null)
+                SetChoiceReward?.Invoke(ev, new object[] { StubReward(ev?.EventID) });
         }
 
         /// <summary>The reward object the mirrored outcome page draws. No longer always EMPTY: when the
@@ -1198,6 +1204,13 @@ namespace Multiplayer.Network.Sync
                 }
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventReward, SyncKind.StateDelta, body)));
+                // SYMMETRY: every peer that RECEIVES this records it (HandleInbound), the sender did not — so
+                // StubReward on the host had nothing to build from and fell back to the empty object. Read back
+                // from the bytes just written rather than converting a second way: the host then holds exactly
+                // what the clients hold.
+                using (var back = new MemoryStream(body))
+                using (var r = new BinaryReader(back, Encoding.UTF8))
+                { r.ReadString(); _rewards[eventId] = MissionOutcomeMirror.DecodeRaw(r); }
                 Debug.Log("[MP][events] HOST reward for '" + eventId + "' broadcast");
             }
             catch (Exception ex)

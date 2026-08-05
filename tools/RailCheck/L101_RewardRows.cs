@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.Serialization;
 using System.Text;
 using Multiplayer.Network.Sync;
 using PhoenixPoint.Common.Core;
@@ -179,6 +180,96 @@ namespace RailCheck
             // ─── A payload that lands LATE still reaches the panel ───
 
             foreach (var f in LateOutcomeDelivery()) yield return f;
+
+            // ─── The page ENDS with the reward the resolution minted ───
+
+            foreach (var f in ReplayKeepsMintedReward()) yield return f;
+        }
+
+        // ─── ARM: a replay may not clobber a reward that was actually minted ──
+
+        /// <summary>THE HOST-SHAPED ARM, and the one every other arm in this file was missing. Everything
+        /// above proves WIRING — the codec round-trips, <c>CanCarryWindow</c> gates, <c>RestampLateOutcome</c>
+        /// drains — and every one of them is written from the CLIENT's side, where the reward arrives on
+        /// 0xBD and the only question is whether it survives the trip. So all of them stayed green through
+        /// this, measured on the host 2026-08-05: a point-of-interest resolution granted its reward and the
+        /// outcome page listed nothing.
+        ///
+        /// The host reaches <see cref="EventPopup.ReplayResolution"/> whenever it LOSES the click race
+        /// (EventChoiceClientLock -> ReplayResolution -> MarkResolvedInstance) holding the
+        /// <c>GeoFactionReward</c> its own <c>CompleteEvent</c>:101 just minted — and the stub was written
+        /// unconditionally over it. <c>HasRewards()</c> then answers false, <c>ShowReward</c>:363 returns at
+        /// once, and the page renders outcome TEXT with no gain numbers. Nothing throws and nothing logs.
+        ///
+        /// EXECUTED, not asserted: the real production method runs over a real <c>GeoscapeEvent</c> carrying
+        /// a real non-empty reward, and the OUTCOME — what the page would read afterwards — is what is
+        /// checked. Both directions, because "never overwrite" is satisfied perfectly by never writing at
+        /// all, and a null <c>ChoiceReward</c> is what <c>SetClosingEncounter</c>:357 and
+        /// <c>SelectChoice</c>:604 dereference unguarded.
+        ///
+        /// Falsify: make MarkResolvedInstance stamp the stub unconditionally again →
+        /// <c>replay-clobbers-minted-reward</c>; drop the stub entirely → <c>replay-leaves-null-reward</c>.</summary>
+        private static IEnumerable<string> ReplayKeepsMintedReward()
+        {
+            var mark = typeof(EventPopup).GetMethod("MarkResolvedInstance", AllMembers);
+            var rewardSetter = typeof(GeoscapeEvent).GetProperty("ChoiceReward",
+                BindingFlags.Public | BindingFlags.Instance)?.GetSetMethod(nonPublic: true);
+            if (mark == null || rewardSetter == null)
+            {
+                yield return "L101 outcome-reward-path-gone: EventPopup.MarkResolvedInstance or " +
+                             "GeoscapeEvent.ChoiceReward's setter did not resolve. That pair IS the replay's " +
+                             "whole effect on what the outcome page draws, so this arm can no longer tell a " +
+                             "page that lists the host's rewards from one that lists nothing.";
+                yield break;
+            }
+
+            GeoscapeEvent withReward = null, withNone = null;
+            GeoFactionReward minted = null;
+            string blind = null;
+            try
+            {
+                withReward = (GeoscapeEvent)FormatterServices.GetUninitializedObject(typeof(GeoscapeEvent));
+                withNone = (GeoscapeEvent)FormatterServices.GetUninitializedObject(typeof(GeoscapeEvent));
+                // FactionSkillPoints alone makes HasRewards() true (GeoFactionRewardApplyResult.cs:69) with
+                // no object graph at all — this arm is about the reward being KEPT, not about its rows.
+                minted = new GeoFactionReward
+                { ApplyResult = new GeoFactionRewardApplyResult { FactionSkillPoints = 5 } };
+                rewardSetter.Invoke(withReward, new object[] { minted });
+                mark.Invoke(null, new object[] { withReward });
+                mark.Invoke(null, new object[] { withNone });
+            }
+            catch (Exception ex)
+            {
+                blind = "L101 outcome-reward-arm-blind: the replay could not be executed headless (" +
+                        ex.GetType().Name + ": " + (ex.InnerException ?? ex).Message + "). The arm is " +
+                        "ASLEEP, not satisfied — it proves nothing about what the outcome page ends up " +
+                        "holding.";
+            }
+            if (blind != null) { yield return blind; yield break; }
+
+            if (!ReferenceEquals(withReward.ChoiceReward, minted))
+                yield return "L101 replay-clobbers-minted-reward: the replay REPLACED a GeoFactionReward that " +
+                             "was already there. On the peer that minted it — the HOST, whenever another peer " +
+                             "wins the click race — that object is the real reward its own CompleteEvent:101 " +
+                             "granted, and the display stub that took its place answers HasRewards()==false, so " +
+                             "ShowReward:363 returns immediately and the outcome page shows the text with no " +
+                             "gain numbers under it. The stub is a FALLBACK for a peer that has nothing, never " +
+                             "a reset.";
+            else if (withReward.ChoiceReward?.ApplyResult == null ||
+                     !withReward.ChoiceReward.ApplyResult.HasRewards())
+                yield return "L101 replay-clobbers-minted-reward: the reward object survived the replay but no " +
+                             "longer reports HasRewards() — which is the single condition every outcome page " +
+                             "tests before drawing a single row, so the player sees exactly what an empty stub " +
+                             "would have given them.";
+            if (!withReward.IsCompleted)
+                yield return "L101 replay-not-marked-resolved: the replay left IsCompleted false. " +
+                             "SelectChoice:598 tests it and would re-run CompleteEvent, granting the ENTIRE " +
+                             "reward a second time on a peer that is only looking at a picture of it.";
+            if (withNone.ChoiceReward == null)
+                yield return "L101 replay-leaves-null-reward: a replay with NO reward to keep left ChoiceReward " +
+                             "null. SetClosingEncounter:357 and SelectChoice:604 dereference it unguarded, so " +
+                             "the observer's outcome page becomes an NRE inside the native module instead of a " +
+                             "page with an empty list — 'never overwrite' must not have become 'never write'.";
         }
 
         // ─── ARM: resolving the address is not the same as being renderable ──
