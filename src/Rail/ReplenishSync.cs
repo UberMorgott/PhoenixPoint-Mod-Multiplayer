@@ -313,7 +313,7 @@ namespace Multiplayer.Network.Sync
             int charId = (int)character.Id;
 
             var geoItem = character.EquipmentItems.Concat(character.InventoryItems).Concat(character.ArmourItems)
-                                   .FirstOrDefault(i => i?.ItemDef == def &&
+                                   .FirstOrDefault(i => ReferenceEquals(i?.ItemDef, def) &&   // L113: def identity
                                                         i.CommonItemData.CurrentCharges < i.ItemDef.ChargesMax);
             if (geoItem == null)
             { Reject(peer, charId, "reload: U#" + charId + " carries no un-full " + def.name); return; }

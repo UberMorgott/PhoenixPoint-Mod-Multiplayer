@@ -1155,7 +1155,7 @@ namespace Multiplayer.Network.Sync
         internal static object FactionByDef(GeoLevelController geo, object def)
         {
             if (geo == null) return null;
-            if (def is GeoFactionDef gfd) return geo.Factions.FirstOrDefault(f => f.Def == gfd); // GetFaction(GeoFactionDef) throws when missing
+            if (def is GeoFactionDef gfd) return geo.Factions.FirstOrDefault(f => ReferenceEquals(f.Def, gfd)); // GetFaction(GeoFactionDef) throws when missing; L113: def identity
             if (def is PhoenixPoint.Common.Core.PPFactionDef ppd) return geo.GetFaction(ppd, canFail: true);
             return null;
         }

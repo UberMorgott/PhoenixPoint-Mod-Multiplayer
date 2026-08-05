@@ -121,7 +121,13 @@ namespace Multiplayer.Tactical
         internal static void BuildBattleKeys(TacticalLevelController tlc)
         {
             if (_built) return;
-            if (tlc == null || tlc.Map == null) return;
+            // ReferenceEquals, not == (L113). Two reasons, and the second is why Release used to die here:
+            // (1) the question is "was I handed a controller", not "is its native half alive"; (2) Unity's
+            // == reaches the GetCachedPtr ECall, which the JIT INLINES into this method under -c Release —
+            // and an inlined ECall cannot be compiled outside the player, so the whole method threw
+            // "ECall methods must be packaged into a system module" before its first line ran. Debug never
+            // saw it because nothing inlines there and the harness always passes null.
+            if (ReferenceEquals(tlc, null) || ReferenceEquals(tlc.Map, null)) return;
             var keyless = new List<TacticalActorBase>();
             foreach (var a in tlc.Map.GetActors<TacticalActorBase>())
                 // A4: an actor that already carries an ADOPTED host key is deliberately NOT in the ordinal
@@ -249,7 +255,7 @@ namespace Multiplayer.Tactical
                       "key maps or a host spawn record never arrived, so every actor named on the wire is suspect";
                 return null;
             }
-            if (tlc == null || tlc.Map == null)
+            if (ReferenceEquals(tlc, null) || ReferenceEquals(tlc.Map, null))   // L113, same reason as BuildBattleKeys
             {
                 why = "no tactical map on this peer to resolve actor key " + key + " against";
                 return null;
@@ -300,7 +306,9 @@ namespace Multiplayer.Tactical
             if (ReferenceEquals(actor, null)) { why = "no actor"; return null; }
             if (string.IsNullOrEmpty(slotName)) return actor;
             var tacActor = actor as TacticalActor;
-            if (tacActor == null || tacActor.BodyState == null)
+            // L113: `as` already answers the only question here (is it this subtype), and Unity's == would
+            // additionally reject a DESTROYED actor — the corpse a trailing damage record names.
+            if (ReferenceEquals(tacActor, null) || ReferenceEquals(tacActor.BodyState, null))
             {
                 why = SafeName(actor) + " has no BodyState, so it cannot own a body part named '" + slotName + "'";
                 return null;

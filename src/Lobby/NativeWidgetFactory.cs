@@ -146,7 +146,7 @@ namespace Multiplayer.UI
                 foreach (var c in UnityEngine.Object.FindObjectsOfType<Canvas>())
                 {
                     if (c == null || !c.isRootCanvas) continue;
-                    if (c == lobbyCanvas) continue;                         // never disable the lobby's own canvas
+                    if (ReferenceEquals(c, lobbyCanvas)) continue;          // never disable the lobby's own canvas (L113: identity, not liveness)
                     if (modRoot != null && c.transform.IsChildOf(modRoot))  // never disable any Multiplayer canvas
                         continue;                                           // (status bar lives under the same ModGO)
 

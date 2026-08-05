@@ -169,7 +169,10 @@ namespace Multiplayer.Tactical
                 float ap = 0f, wp = 0f;
                 var stats = actor == null ? null : actor.CharacterStats;
                 if (stats != null) { ap = stats.ActionPoints; wp = stats.WillPoints; }
-                if (actor == _painted && (ap != _paintedAp || wp != _paintedWp)) _dirty = true;
+                // ReferenceEquals, not ==: "is this the actor the bar is painted for" is an IDENTITY question,
+                // and Unity's == answers liveness — with _painted still null it reports a DESTROYED actor as
+                // the painted one and marks the bar dirty for a corpse (L113).
+                if (ReferenceEquals(actor, _painted) && (ap != _paintedAp || wp != _paintedWp)) _dirty = true;
                 _painted = actor;
                 _paintedAp = ap;
                 _paintedWp = wp;

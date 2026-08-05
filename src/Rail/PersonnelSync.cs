@@ -873,7 +873,7 @@ namespace Multiplayer.Network.Sync
         private static void GiveVehicleScrap(GeoLevelController geo, GeoCharacter unit)
         {
             var def = GameUtl.GameComponent<DefRepository>().GetAllDefs<GroundVehicleItemDef>()
-                .FirstOrDefault(d => d.VehicleTemplateDef == unit.TemplateDef);
+                .FirstOrDefault(d => ReferenceEquals(d.VehicleTemplateDef, unit.TemplateDef));   // L113: def identity
             if (def != null && !def.ScrapPrice.IsEmpty)
                 geo.PhoenixFaction.Wallet.Give(def.ScrapPrice, OperationReason.Scrap);
         }
@@ -1115,9 +1115,9 @@ namespace Multiplayer.Network.Sync
             var vehicleTag = GameUtl.GameComponent<SharedData>().SharedGameTags.VehicleClassTag;
             foreach (var spec in character.Faction.GeoLevel.PhoenixFaction.AvailablePandoranSpecialzations)
             {
-                if (spec == null || spec.ClassTag == vehicleTag) continue;
+                if (spec == null || ReferenceEquals(spec.ClassTag, vehicleTag)) continue;   // L113: def identity
                 var offers = spec.AbilityTrack.AbilitiesByLevel.Where(a => a.Ability != null).ToArray();
-                if (buttonLevel <= offers.Length && offers[buttonLevel - 1].Ability == wanted) return true;
+                if (buttonLevel <= offers.Length && ReferenceEquals(offers[buttonLevel - 1].Ability, wanted)) return true;   // L113: def identity
             }
             return false;
         }
@@ -1130,7 +1130,7 @@ namespace Multiplayer.Network.Sync
             int charId = (int)character.Id;
             if (!(ResolveDef(specGuid) is SpecializationDef spec)) { Reject(peer, charId, "unknown spec " + specGuid); return false; }
             if (progression.SecondarySpecDef != null) { Reject(peer, charId, "second class already learned"); return false; }
-            if (progression.MainSpecDef == spec) { Reject(peer, charId, "spec equals main class"); return false; }
+            if (ReferenceEquals(progression.MainSpecDef, spec)) { Reject(peer, charId, "spec equals main class"); return false; }   // L113: def identity
             var levels = progression.LevelProgression;
             if (levels.Level < levels.Def.SecondSpecializationLevel)
             { Reject(peer, charId, "level " + levels.Level + " < " + levels.Def.SecondSpecializationLevel); return false; }

@@ -111,7 +111,7 @@ namespace Multiplayer.UI
         {
             var rt = leaf;
             int guard = 0;
-            while (rt != null && rt.transform != stopRoot && guard++ < 16)
+            while (rt != null && !ReferenceEquals(rt.transform, stopRoot) && guard++ < 16)   // L113: identity stop test
             {
                 ForceStretchFill(rt);
                 rt = rt.parent as RectTransform;

@@ -387,7 +387,7 @@ namespace Multiplayer.Network.Sync
                 var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as ItemDef;
                 var faction = GeoLevel()?.PhoenixFaction;
                 if (def != null && faction?.Wallet != null && faction.ItemStorage != null &&
-                    manufacture.ManufacturableItems.Any(i => i.RelatedItemDef == def) &&
+                    manufacture.ManufacturableItems.Any(i => ReferenceEquals(i.RelatedItemDef, def)) &&   // L113: def identity
                     faction.Wallet.HasResources(def.ManufacturePrice))
                 {
                     faction.Wallet.Take(def.ManufacturePrice, OperationReason.Purchase);
@@ -572,7 +572,7 @@ namespace Multiplayer.Network.Sync
                     {
                         // an instance not already staged — the cart and snapshot partition instance refs
                         var inst = faction.AircraftItemStorage.Items.FirstOrDefault(
-                            v => v.EquipmentDef == t.Key && !vehCart.Items.Contains(v));
+                            v => ReferenceEquals(v.EquipmentDef, t.Key) && !vehCart.Items.Contains(v));   // L113: def identity
                         if (inst == null) break;
                         vehCart.AddItem(inst);
                     }

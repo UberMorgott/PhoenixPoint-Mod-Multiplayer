@@ -179,23 +179,27 @@ namespace Multiplayer.Tactical
         {
             actorKey = 0;
             kind = KindInventory;
-            if (component == null) return false;
+            // ReferenceEquals throughout (L113): this IS the address rule, and a destroyed container still
+            // HAS an address — a corpse the game just destroyed is exactly what a trailing loot record
+            // names. Unity's == reports it as null and the record is dropped as unaddressable, silently.
+            // Same reasoning DefGuid/OrdinalOf/ResolveIn already carry below.
+            if (ReferenceEquals(component, null)) return false;
             var actor = component.Actor as TacticalActorBase;
-            if (actor == null) return false;
+            if (ReferenceEquals(actor, null)) return false;
             actorKey = TacticalActorKey.Of(actor);
             if (actorKey == 0) return false;
             if (ReferenceEquals(component, actor.Inventory)) { kind = KindInventory; return true; }
             var tac = actor as TacticalActor;
-            if (tac != null && ReferenceEquals(component, tac.Equipments)) { kind = KindEquipments; return true; }
+            if (!ReferenceEquals(tac, null) && ReferenceEquals(component, tac.Equipments)) { kind = KindEquipments; return true; }
             return false;
         }
 
         internal static InventoryComponent ContainerOf(TacticalActorBase actor, byte kind)
         {
-            if (actor == null) return null;
+            if (ReferenceEquals(actor, null)) return null;                 // L113, see AddressOf
             if (kind == KindInventory) return actor.Inventory;
             var tac = actor as TacticalActor;
-            return tac == null ? null : tac.Equipments;
+            return ReferenceEquals(tac, null) ? null : tac.Equipments;
         }
 
         /// <summary>EVERY pile at this address, because <c>(ComponentSetDef guid, Pos)</c> names a SET and not a
@@ -227,7 +231,7 @@ namespace Multiplayer.Tactical
             }
             // The game's own lookup, verbatim (TacticalItem.GetOrCreateItemContainer:676-684) — but exhaustive.
             foreach (var c in tlc.Map.GetActors<ItemContainer>())
-                if (Utl.Equals(c.Pos, pos) && c.ActorDef == containerDef) found.Add(c.Inventory);
+                if (Utl.Equals(c.Pos, pos) && ReferenceEquals(c.ActorDef, containerDef)) found.Add(c.Inventory);   // L113: def identity
             if (found.Count > 0 || !create) return found;
             // ...and the game's own spawn recipe when there is none (:685-690, UIStateInventory:516-521).
             var data = containerDef.CreateInstanceData();

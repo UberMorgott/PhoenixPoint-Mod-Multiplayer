@@ -787,7 +787,11 @@ namespace Multiplayer.UI
         {
             if (start == null) return null;
             var t = start;
-            while (t.parent != null && t.parent != container)
+            // ReferenceEquals on the stop test (L113): "have I reached THAT transform" is identity, and
+            // Unity's != would walk past a container whose native half is already gone, off the top of the
+            // hierarchy. The `parent != null` arm stays ==-based on purpose — there the question really is
+            // liveness, which is what the operator answers.
+            while (t.parent != null && !ReferenceEquals(t.parent, container))
                 t = t.parent;
             return t;
         }
@@ -836,7 +840,7 @@ namespace Multiplayer.UI
         {
             if (content == null || host == null) return;
             Transform t = content.transform;
-            while (t.parent != null && t.parent != host)
+            while (t.parent != null && !ReferenceEquals(t.parent, host))   // L113: identity stop test
                 t = t.parent;
             var rt = t as RectTransform;
             if (rt == null) return;

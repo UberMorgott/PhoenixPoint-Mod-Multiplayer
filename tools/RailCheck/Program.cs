@@ -184,6 +184,7 @@ namespace RailCheck
             laws.AddRange(L110_ReplenishWalletChoke.Check());
             laws.AddRange(L111_SharedOfferCommit.Check());
             laws.AddRange(L112_ItemAddressOrdinal.Check());
+            laws.AddRange(L113_UnityIdentityEquality.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -9661,12 +9662,28 @@ namespace RailCheck
         // else about it changes.
         internal static IEnumerable<MethodBase> Callees(MethodBase m, Assembly asm, bool directCallsOnly = false)
         {
+            foreach (var site in CallSites(m, asm, directCallsOnly)) yield return site.Key;
+        }
+
+        /// <summary><see cref="Callees"/> with the one extra bit L113 needs: whether a NULL LITERAL was pushed
+        /// as one of the call's two top operands. That single bit separates `x == null` (Unity's overload is
+        /// the RIGHT answer there — "is the native half still alive") from `a == b` (it is the WRONG answer —
+        /// it compares liveness and instance ids, never reference identity), and the two cases need opposite
+        /// verdicts. Approximated by looking back TWO instructions, which is exact for the operator's own
+        /// shape: `ldnull` is emitted immediately before the call for `x == null` and one slot earlier for
+        /// `null == x`, and nothing else can occupy those slots for a two-argument static call.
+        ///
+        /// It lives HERE, as the one walker Callees itself now runs on, rather than as a second copy in the
+        /// law file — the duplicated-IL-walker shape is exactly what the comment above warns about.</summary>
+        internal static IEnumerable<KeyValuePair<MethodBase, bool>> CallSites(MethodBase m, Assembly asm, bool directCallsOnly = false)
+        {
             byte[] il = null;
             try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }
             if (il == null) yield break;
             var typeArgs = m.DeclaringType != null && m.DeclaringType.IsGenericType ? m.DeclaringType.GetGenericArguments() : null;
             var methodArgs = m.IsGenericMethodDefinition ? m.GetGenericArguments() : null;
             int i = 0;
+            short prev1 = -1, prev2 = -1;
             while (i < il.Length)
             {
                 short code = il[i++];
@@ -9685,8 +9702,12 @@ namespace RailCheck
                 {
                     MethodBase callee = null;
                     try { callee = m.Module.ResolveMethod(BitConverter.ToInt32(il, i), typeArgs, methodArgs); } catch { }
-                    if (callee != null && callee.Module.Assembly == asm) yield return callee;
+                    if (callee != null && callee.Module.Assembly == asm)
+                        yield return new KeyValuePair<MethodBase, bool>(
+                            callee, prev1 == OpCodes.Ldnull.Value || prev2 == OpCodes.Ldnull.Value);
                 }
+                prev2 = prev1;
+                prev1 = code;
                 i += size;
             }
         }
