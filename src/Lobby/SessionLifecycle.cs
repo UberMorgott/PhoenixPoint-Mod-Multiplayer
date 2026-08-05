@@ -14,17 +14,6 @@ namespace Multiplayer.Network
         /// <summary>Fallback display name when a peer's real name is unknown (id-only event).</summary>
         public const string UnknownPlayer = "a player";
 
-        /// <summary>
-        /// The persistent system-chat / toast line for a peer connecting or dropping. Used by
-        /// SessionNotifier for BOTH surfaces so the toast and the chat line never drift. The name is
-        /// sanitized to <see cref="UnknownPlayer"/> when null/empty so a raw id is never shown.
-        /// </summary>
-        public static string FormatPeerEvent(bool connected, string playerName)
-        {
-            var name = string.IsNullOrEmpty(playerName) ? UnknownPlayer : playerName;
-            return connected ? $"— {name} joined —" : $"— {name} left —";
-        }
-
         /// <summary>The session-fatal line shown to a client when the host ends the session (F3).</summary>
         public const string HostEndedSession = "Host ended the session";
 
@@ -56,6 +45,16 @@ namespace Multiplayer.Network
 
         private static string Named(string playerName) =>
             string.IsNullOrEmpty(playerName) ? UnknownPlayer : playerName;
+
+        /// <summary>WHICH NAME THE LEAVE NOTICE USES. A ClientLeave can arrive after the roster row is
+        /// already gone (a returning peer's stale-rejoin prune, a transport drop the host handled first),
+        /// and the notice then reads "— a player left the game —" to everyone still in the session: the one
+        /// case where the notice tells four people to go and count heads. The last name the roster ever held
+        /// for that peer is still the truth about who left, so it is preferred over the placeholder — and
+        /// the LIVE row still wins over it, because a peer that renamed itself is named by its new name.
+        /// Pure so RailCheck L120 can execute it.</summary>
+        public static string LeaverName(string rosterName, string lastKnownName) =>
+            string.IsNullOrEmpty(rosterName) ? lastKnownName : rosterName;
 
         /// <summary>
         /// F3 host-left suppression gate. A CLIENT closing its only peer (the host) on a VOLUNTARY

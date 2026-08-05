@@ -7,17 +7,17 @@ using PhoenixPoint.Common.View.ViewControllers;
 namespace Multiplayer.Network
 {
     /// <summary>
-    /// F1 — peer connect/disconnect notification. A single subscriber wired ONCE per engine init
-    /// (<see cref="AttachTo"/>) to the dangling <c>OnClientConnected</c> / <c>OnClientDisconnectedNamed</c>
-    /// events. Renders two native surfaces, native-UI-first:
-    ///   • a transient TOAST via the game's own <see cref="NotificationController.ShowNotification"/>
-    ///     WHERE one is live (geoscape / main-menu) — absent in tactical, so it falls back to chat-only;
-    ///   • a persistent system-chat line via <see cref="SessionManager.SystemChat"/> (host-only,
-    ///     broadcast to every remaining client) for crash/timeout DROPS, so behaviour matches the
-    ///     graceful-leave line <c>HandleLeave</c> already posts.
-    /// Connect chat is already posted by <c>HandleConnectionRequest</c> and graceful-leave chat by
-    /// <c>HandleLeave</c>; the notifier adds ONLY the missing crash-drop chat line (no duplicates) plus
-    /// the toast on both events. Never throws into gameplay (every native call is guarded).
+    /// F1 — peer JOIN notification, plus the shared native TOAST surface. A single subscriber wired ONCE
+    /// per engine init (<see cref="AttachTo"/>) to the dangling <c>OnClientConnected</c> event: the join
+    /// CHAT line is already posted by <c>SessionManager.HandleConnectionRequest</c>, so all this adds is the
+    /// transient toast via the game's own <see cref="NotificationController.ShowNotification"/>.
+    ///
+    /// DEPARTURES ARE NOT ANNOUNCED HERE — the roster level owns them end to end (SessionManager.PausePeer
+    /// = lost connection, HandleLeave = left, ResumePeer = back), because only it can tell those three
+    /// facts apart and name the player. See the comment on the deleted handler below. RailCheck L120 keeps
+    /// this to ONE announcer per departure.
+    ///
+    /// Never throws into gameplay (every native call is guarded).
     /// </summary>
     public static class SessionNotifier
     {
@@ -35,7 +35,6 @@ namespace Multiplayer.Network
 
             Detach();
             engine.OnClientConnected += OnClientConnected;
-            engine.OnClientDisconnectedNamed += OnClientDisconnectedNamed;
             _attached = engine;
         }
 
@@ -44,7 +43,6 @@ namespace Multiplayer.Network
         {
             if (_attached == null) return;
             _attached.OnClientConnected -= OnClientConnected;
-            _attached.OnClientDisconnectedNamed -= OnClientDisconnectedNamed;
             _attached = null;
         }
 
@@ -56,26 +54,22 @@ namespace Multiplayer.Network
             ShowToast("A player joined the session");
         }
 
-        private static void OnClientDisconnectedNamed(ulong peerId, string playerName, bool wasKnown)
-        {
-            // A transport drop that arrives AFTER a graceful leave already removed the peer reports
-            // wasKnown=false — HandleLeave already posted the chat line and the leaver is gone, so do
-            // not double-notify. Genuine crash/timeout drops report wasKnown=true with the captured name.
-            if (!wasKnown) return;
-
-            var line = SessionLifecycle.FormatPeerEvent(connected: false, playerName: playerName);
-
-            // Persistent chat line — host-only (SystemChat self-guards + broadcasts to every remaining
-            // client, so they all see the drop, not just the host). Fills the crash/timeout gap so the
-            // disconnect line is uniform with the graceful-leave line.
-            try { _attached?.Session?.SystemChat(line); }
-            catch (Exception e) { Debug.LogError("[Multiplayer] SessionNotifier chat failed: " + e.Message); }
-
-            // Transient toast on THIS peer where a NotificationController is live (geoscape/menu);
-            // in tactical (no controller) fall back to the native prompt — a partner drop is
-            // session-significant and must be VISIBLE, not a chat line nobody has open.
-            ShowToast(line, modalFallback: true);
-        }
+        // THE DEPARTURE NOTICE IS NOT HERE ANY MORE (deleted 2026-08-05). It was a SECOND announcer for an
+        // event the roster level already announces, and on every path it could still fire it was the wrong
+        // one:
+        //   • HOST — unreachable by construction. `wasKnown` is TryGetClientName:318, i.e. the row is in
+        //     _clients; that is the very condition NetworkEngine:587 uses to PausePeer, and the raise passes
+        //     `wasKnown && !paused` (:597). So on the host wasKnown ⇒ paused ⇒ this never ran. The host's
+        //     departure lines come from PausePeer:266 (lost connection) and HandleLeave:1041 (left) — one
+        //     each, named, and broadcast to every peer through SystemNotice.
+        //   • CLIENT — the only peer a client has a transport link to is the HOST (star topology), so this
+        //     fired only for the host's own drop, where HostLeaveHandler.OnPeerDroppedMaybeHost:55 is
+        //     subscribed to the SAME event and already announces it (SessionEnd.Begin, "Host ended the
+        //     session"). Two prompts, one event — and in tactical BOTH were native modals.
+        //   • WORSE, on a client's OWN leave: HostLeaveHandler deliberately suppresses there
+        //     (ShouldNotifyHostLeft:65), so this was left showing "— <host> left —" to the player who had
+        //     just chosen to leave.
+        // The join toast below stays: nothing else raises one.
 
         /// <summary>
         /// Show a transient toast via the live native NotificationController if one exists in the

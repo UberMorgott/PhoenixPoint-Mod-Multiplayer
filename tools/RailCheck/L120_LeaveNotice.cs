@@ -42,6 +42,14 @@ namespace RailCheck
     ///   (f) THE ARM THAT MATTERS: the notice path REMOVES NOBODY and COUNTS NOBODY. Announcing is not
     ///       deciding. The moment the notice path frees a seat it has become a kick (L84), and the moment it
     ///       reads how many peers are left it has become a quorum (L91, L119).
+    ///   (h) EXECUTED: EXACTLY ONE NOTICE PER DEPARTURE PER PEER, AND IT NAMES THE PLAYER. Every other arm
+    ///       asks WHICH notice; none asked HOW MANY, and the answer was two — SessionNotifier announced the
+    ///       same transport event HostLeaveHandler already announces, so a client whose host went away got
+    ///       "— X left —" and "Host ended the session", both native prompts in tactical. The count is
+    ///       DERIVED: run every formatter, keep the lines that claim a departure, and demand exactly one
+    ///       announcer per departure FACT (the leaver's farewell, the host's silence). The name half is
+    ///       executed too — a farewell arriving after the roster row is gone must still name the player
+    ///       rather than "a player", which is the one case where the notice makes people count heads.
     ///   (g) THE FAREWELL IS ACTUALLY FLUSHED. Alt+F4 and the window X are the common case, and
     ///       DirectTransport only ENQUEUES for a background writer thread the process teardown then kills —
     ///       so the quit path must also drain, or the most common voluntary leave in the game is reported to
@@ -57,6 +65,8 @@ namespace RailCheck
     ///   • call RemoveClient from PausePeer                  → notice-path-removes-a-peer
     ///   • read ClientCount from BroadcastChat               → notice-path-counts-peers
     ///   • drop engine.Shutdown() from OnApplicationQuit     → farewell-not-flushed
+    ///   • re-add SessionNotifier's own "— X left —" handler → two-notices-per-departure
+    ///   • drop LeaverName's last-known fallback             → notice-does-not-name-the-player
     /// </summary>
     internal static class L120_LeaveNotice
     {
@@ -216,6 +226,83 @@ namespace RailCheck
                              "never run the menu-quit path, so without this the peer simply stops answering " +
                              "and everyone else is told it LOST CONNECTION — for the most common way a " +
                              "player actually leaves a game";
+            // ═══ (h) EXACTLY ONE NOTICE PER DEPARTURE, AND IT NAMES THE PLAYER ═══
+            //
+            // Every arm above asks WHICH notice a path emits. None of them asks HOW MANY, and the answer was
+            // two: SessionNotifier held a second announcer on the same transport event HostLeaveHandler
+            // already answers ("— X left —" plus "Host ended the session", both native prompts in tactical),
+            // dead on the host by construction and wrong on the client on every path it could still reach.
+            // A count is the outcome a player actually experiences, so it is derived here rather than
+            // declared: EXECUTE every notice formatter the mod owns, keep the ones whose text CLAIMS A
+            // DEPARTURE, and demand that exactly one method in the whole mod both formats such a line and
+            // puts it on a screen. A second one is a second modal, whatever it is called.
+            var probe = "Zephyr";
+            var departureFormatters = new List<MethodBase>();
+            foreach (var f in typeof(SessionLifecycle).GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (f.ReturnType != typeof(string)) continue;
+                var ps = f.GetParameters();
+                if (ps.Length == 0 || ps.Length > 2 ||
+                    !ps.All(p => p.ParameterType == typeof(string) || p.ParameterType == typeof(bool))) continue;
+                foreach (var args in Combinations(ps, probe))
+                {
+                    string text = null;
+                    try { text = f.Invoke(null, args) as string; } catch { }
+                    // "left" is the DEPARTURE claim; "lost connection" is deliberately a different fact and
+                    // has its own single announcer, so both count as departure lines for the count below.
+                    if (text != null && (text.IndexOf("left", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                         text.IndexOf("lost connection", StringComparison.OrdinalIgnoreCase) >= 0))
+                    { departureFormatters.Add(f); break; }
+                }
+            }
+            if (departureFormatters.Count == 0)
+                yield return "L120 departure-formatters-blind: EXECUTING every SessionLifecycle formatter " +
+                             "produced no line that claims a departure at all, yet FormatLeaveNotice and " +
+                             "FormatConnectionLostNotice are right there. The sweep this count rests on is " +
+                             "broken, so 'exactly one notice per departure' is a statement about the empty set";
+            else
+            {
+                var sinks = new[] { toast, notice, session.GetMethod("SystemChat", All) }
+                            .Where(s => s != null).ToArray();
+                var announcers = ModTypes(mod)
+                    .SelectMany(t => { try { return t.GetMethods(All).Cast<MethodBase>(); }
+                                       catch { return Enumerable.Empty<MethodBase>(); } })
+                    .Where(m => { try { return m.GetMethodBody() != null; } catch { return false; } })
+                    .Where(m => departureFormatters.Any(f => Reaches(m, f, mod)) &&
+                                sinks.Any(s => Reaches(m, s, mod)))
+                    .Select(m => (m.DeclaringType?.Name ?? "?") + "." + m.Name)
+                    .Distinct().OrderBy(s => s, StringComparer.Ordinal).ToList();
+                // One per FACT, and there are exactly two facts: the leaver said so, or the host heard
+                // nothing. Anything past that is the same departure announced twice on the same screen.
+                if (announcers.Count != 2)
+                    yield return "L120 two-notices-per-departure: " + announcers.Count + " method(s) in the mod " +
+                                 "both format a departure line and put it on a screen — " +
+                                 string.Join(", ", announcers) + ". There are exactly TWO departure facts (the " +
+                                 "leaver's own farewell, and silence the host observed) and therefore exactly two " +
+                                 "announcers may exist; a third is one player leaving and two prompts arriving, " +
+                                 "which in tactical are two native modals stacked on the same screen. Fewer than " +
+                                 "two means a departure nobody is told about";
+            }
+            // EXECUTED: the name. A farewell can arrive after the roster row is gone (a returning peer's
+            // stale-rejoin prune, a drop the host handled first), and the notice then reads "— a player left
+            // the game —" to everyone still in the session — the one case where it tells four people to go
+            // and count heads instead.
+            var resolve = typeof(SessionLifecycle).GetMethod("LeaverName", All);
+            if (resolve == null)
+                yield return "L120 leaver-name-unresolved: SessionLifecycle.LeaverName is gone, so the leave " +
+                             "notice is back to naming the peer from the roster row alone — and the row is " +
+                             "exactly what a late farewell no longer has";
+            else if (SessionLifecycle.LeaverName(null, probe) != probe ||
+                     SessionLifecycle.LeaverName("", probe) != probe ||
+                     SessionLifecycle.LeaverName("Ayla", probe) != "Ayla" ||
+                     SessionLifecycle.FormatLeaveNotice(SessionLifecycle.LeaverName(null, probe))
+                         .IndexOf(probe, StringComparison.Ordinal) < 0)
+                yield return "L120 notice-does-not-name-the-player: with the roster row already purged the " +
+                             "leave notice does not fall back to the last name that peer was known by (it came " +
+                             "out as '" + SessionLifecycle.FormatLeaveNotice(SessionLifecycle.LeaverName(null, probe)) +
+                             "'), or a LIVE row stopped winning over the cached name — a renamed player would " +
+                             "then be announced under the name they left behind";
+
             if (!Reaches(quit, shutdown, mod))
                 yield return "L120 farewell-not-flushed: OnApplicationQuit sends the farewell but never drains " +
                              "the transport. DirectTransport.Send only ENQUEUES the frame for that peer's " +
@@ -240,6 +327,30 @@ namespace RailCheck
                              ") yet reaches SessionLifecycle." + theirs.Name + " — the OTHER path's notice. " +
                              "It would report a fact it cannot establish: an observer cannot know a silent " +
                              "peer left, and a peer that sent its own farewell did not lose its connection";
+        }
+
+        /// <summary>Every type the mod actually loaded — a half-loadable assembly must narrow the sweep, not
+        /// abort the law.</summary>
+        private static Type[] ModTypes(Assembly asm)
+        {
+            try { return asm.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { return ex.Types.Where(t => t != null).ToArray(); }
+            catch { return new Type[0]; }
+        }
+
+        /// <summary>Argument sets for EXECUTING a formatter headless: the probe name for every string slot,
+        /// both values for every bool one (a "connected" flag decides whether the line is a departure at
+        /// all, and this law must see the departure half of it).</summary>
+        private static IEnumerable<object[]> Combinations(ParameterInfo[] ps, string probe)
+        {
+            var slots = ps.Select(p => p.ParameterType == typeof(bool)
+                                       ? new object[] { false, true } : new object[] { probe }).ToArray();
+            if (slots.Length == 1)
+                foreach (var a in slots[0]) yield return new[] { a };
+            else
+                foreach (var a in slots[0])
+                    foreach (var b in slots[1])
+                        yield return new[] { a, b };
         }
 
         private static bool Reaches(MethodBase from, MethodBase target, Assembly mod) =>

@@ -20,6 +20,11 @@ namespace Multiplayer.Network
         // chokepoint) — it only ever covers a CURRENTLY CONNECTED peer; see the takeover check in
         // HandleConnectionRequest for why it must not survive a disconnect.
         private readonly Dictionary<Guid, ulong> _guidOwners = new Dictionary<Guid, ulong>();
+        // Last display name seen for a peer whose roster row has since been purged. Written at the one
+        // detach chokepoint (RemoveClient), read only by the leave notice (HandleLeave) so a farewell that
+        // arrives after the row is gone still names the player instead of "a player". Never authoritative:
+        // the live row wins wherever there is one (SessionLifecycle.LeaverName).
+        private readonly Dictionary<ulong, string> _lastKnownNames = new Dictionary<ulong, string>();
 
         // Host-authoritative chat backlog (whole-session history). Every line the host fans out via
         // BroadcastChat is appended here in arrival order; on a new client fully joining the host
@@ -298,6 +303,11 @@ namespace Multiplayer.Network
                 // a reconnecting player gets its own slot and rights back.
                 if (client.PlayerGuid != Guid.Empty)
                     _guidOwners.Remove(client.PlayerGuid);
+                // The name outlives the row by exactly one purpose: a ClientLeave that arrives after the row
+                // is gone still has to say WHO left (SessionLifecycle.LeaverName). Same chokepoint argument
+                // as the guid release above — every drop path passes through here.
+                if (!string.IsNullOrEmpty(client.PlayerName))
+                    _lastKnownNames[steamId] = client.PlayerName;
             }
             _clients.Remove(steamId);
             _lastHeartbeat.Remove(steamId);
@@ -1038,7 +1048,9 @@ namespace Multiplayer.Network
                 // than an inference. Every other way a peer can go silent lands in PausePeer above and is
                 // reported as a lost connection. Name resolved BEFORE RemoveClient purges the row.
                 var leaverNick = _clients.TryGetValue(peerSteamId, out var lc) ? lc.PlayerName : null;
-                SystemNotice(SessionLifecycle.FormatLeaveNotice(leaverNick));
+                _lastKnownNames.TryGetValue(peerSteamId, out var lastKnown);
+                SystemNotice(SessionLifecycle.FormatLeaveNotice(
+                    SessionLifecycle.LeaverName(leaverNick, lastKnown)));
             }
             // A VOLUNTARY leave is the one thing that frees a seat: give the slot back to the pool so a
             // long session cannot exhaust the byte-wide slot space (SlotAllocator.Assign). A peer that
