@@ -304,4 +304,38 @@ namespace Multiplayer.Network
         /// <summary>Re-arm the latch for a fresh session (called on a new host/join).</summary>
         public void Reset() => _handled = false;
     }
+
+    /// <summary>
+    /// ONE DEPARTURE, ONE NOTICE — per peer, for as long as that peer is away.
+    ///
+    /// A peer going away raises TWO independent facts on the host, and both have an announcer:
+    /// the transport says the socket died (<c>SessionManager.PausePeer</c>) and the peer's own
+    /// farewell says it left (<c>SessionManager.HandleLeave</c>). Their mutual exclusion used to
+    /// rest entirely on the ClientLeave frame draining BEFORE the socket FIN — <c>NetworkEngine
+    /// .OnPeerDisconnected</c> pauses whenever the roster row is still there, and a PAUSE keeps the
+    /// row on purpose (L84), so the farewell that lands a frame later finds that row and announces a
+    /// second time. No transport orders those two, least of all Steam P2P, so on the losing
+    /// interleaving one player leaving produced two prompts — and in tactical two stacked native
+    /// modals, which is exactly what the developer reported.
+    ///
+    /// So the announcement is latched on the PEER, not on the path: the first fact that reaches a
+    /// screen wins, every later one for the same absence is silent, and <see cref="Rearm"/> at the
+    /// return edge (resume / a fresh roster row) makes the peer announceable again for its NEXT
+    /// departure. Not a de-dup cache of strings and not a timer: it is the roster's own answer to
+    /// "have the others already been told this peer is gone?". Pure + Unity-free so RailCheck L120
+    /// can execute it.
+    /// </summary>
+    public sealed class DepartureLatch
+    {
+        private readonly HashSet<ulong> _announced = new HashSet<ulong>();
+
+        /// <summary>True only for the FIRST announcement of this peer's current absence.</summary>
+        public bool TryAnnounce(ulong peerId) => _announced.Add(peerId);
+
+        /// <summary>The peer is back (resume, or a fresh roster row): its next departure is news again.</summary>
+        public void Rearm(ulong peerId) => _announced.Remove(peerId);
+
+        /// <summary>True iff this peer's departure has already been put on the other players' screens.</summary>
+        public bool Announced(ulong peerId) => _announced.Contains(peerId);
+    }
 }

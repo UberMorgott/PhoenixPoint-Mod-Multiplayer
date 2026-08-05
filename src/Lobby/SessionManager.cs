@@ -26,6 +26,11 @@ namespace Multiplayer.Network
         // the live row wins wherever there is one (SessionLifecycle.LeaverName).
         private readonly Dictionary<ulong, string> _lastKnownNames = new Dictionary<ulong, string>();
 
+        // "Have the others already been told this peer is gone?" — see DepartureLatch. Consulted by the
+        // ONE departure chokepoint (AnnounceDeparture); re-armed at every return edge (ResumePeer, and a
+        // fresh roster row in AddClient) so the peer's NEXT departure is news again.
+        private readonly DepartureLatch _departureAnnounced = new DepartureLatch();
+
         // Host-authoritative chat backlog (whole-session history). Every line the host fans out via
         // BroadcastChat is appended here in arrival order; on a new client fully joining the host
         // replays this backlog to ONLY that client (ReplayChatHistoryTo) so late joiners see the
@@ -240,6 +245,9 @@ namespace Multiplayer.Network
                     ConnectedAt = DateTime.UtcNow
                 };
                 _lastHeartbeat[steamId] = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+                // A fresh roster row is a peer that is HERE, so whatever was announced about its last
+                // absence is spent: its next departure has to be announceable again.
+                _departureAnnounced.Rearm(steamId);
                 // SlotIndex is assigned in BuildPeerList (host), keyed by the client's persistent
                 // PlayerGuid so a reconnecting client reuses its slot.
             }
@@ -268,8 +276,8 @@ namespace Multiplayer.Network
                 // panel open, and "did he rage-quit or is his wifi down?" is exactly the question this
                 // feature exists to answer. The wording says what the host OBSERVED (silence), never that
                 // the player left — it did not, and its seat is still here (L84).
-                SystemNotice(SessionLifecycle.FormatConnectionLostNotice(client.PlayerName));
-                Debug.Log("[Multiplayer] connection-lost notice sent for peer " + steamId + ": " + reason);
+                AnnounceDeparture(steamId, "pause(" + reason + ")",
+                    SessionLifecycle.FormatConnectionLostNotice(client.PlayerName));
                 BroadcastPeerList();
             }
         }
@@ -281,6 +289,9 @@ namespace Multiplayer.Network
             if (!_clients.TryGetValue(steamId, out var client) || !client.IsPaused) return;
             client.IsPaused = false;
             Debug.Log($"[Multiplayer] Peer {steamId} ({client.PlayerName}) RESUMED.");
+            // The return edge closes this absence: whatever was announced about it is spent, and the
+            // peer's NEXT departure has to reach everyone's screen again.
+            _departureAnnounced.Rearm(steamId);
             if (_engine.IsHost)
             {
                 SystemNotice(SessionLifecycle.FormatReconnectedNotice(client.PlayerName));
@@ -1049,8 +1060,9 @@ namespace Multiplayer.Network
                 // reported as a lost connection. Name resolved BEFORE RemoveClient purges the row.
                 var leaverNick = _clients.TryGetValue(peerSteamId, out var lc) ? lc.PlayerName : null;
                 _lastKnownNames.TryGetValue(peerSteamId, out var lastKnown);
-                SystemNotice(SessionLifecycle.FormatLeaveNotice(
-                    SessionLifecycle.LeaverName(leaverNick, lastKnown)));
+                AnnounceDeparture(peerSteamId, "leave",
+                    SessionLifecycle.FormatLeaveNotice(
+                        SessionLifecycle.LeaverName(leaverNick, lastKnown)));
             }
             // A VOLUNTARY leave is the one thing that frees a seat: give the slot back to the pool so a
             // long session cannot exhaust the byte-wide slot space (SlotAllocator.Assign). A peer that
@@ -1159,6 +1171,31 @@ namespace Multiplayer.Network
         {
             if (!_engine.IsHost || string.IsNullOrEmpty(text)) return;
             BroadcastChat(0, null, text, true, isNotice: true);
+        }
+
+        /// <summary>
+        /// THE ONE PLACE A DEPARTURE REACHES A SCREEN. Both departure facts funnel through here — the
+        /// transport's silence (<see cref="PausePeer"/>) and the peer's own farewell
+        /// (<see cref="HandleLeave"/>) — because they are two reports of ONE event and no transport
+        /// orders them: the ClientLeave frame and the socket FIN race, and on the losing interleaving
+        /// the pause announces first (the roster row survives a pause by design, L84) and the farewell
+        /// then announces the same absence a second time. Latched per peer for the duration of that
+        /// absence, so whichever fact lands first is the single notice every remaining player sees.
+        ///
+        /// The <paramref name="producer"/> tag is only for the log line: departures used to leave NO
+        /// trace at all (HandleLeave logged nothing), so a doubled prompt was unresolvable after the
+        /// fact. Now every announcement AND every suppression names its own source.
+        /// </summary>
+        private void AnnounceDeparture(ulong peerId, string producer, string text)
+        {
+            if (!_departureAnnounced.TryAnnounce(peerId))
+            {
+                Debug.Log("[Multiplayer] departure notice SUPPRESSED (peer " + peerId + " already announced " +
+                          "this absence) from " + producer + ": " + text);
+                return;
+            }
+            Debug.Log("[Multiplayer] departure notice from " + producer + " for peer " + peerId + ": " + text);
+            SystemNotice(text);
         }
 
         // Host-authoritative fan-out: raise locally + push to clients (mirrors BroadcastPeerList).

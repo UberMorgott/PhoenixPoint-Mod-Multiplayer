@@ -42,14 +42,18 @@ namespace RailCheck
     ///   (f) THE ARM THAT MATTERS: the notice path REMOVES NOBODY and COUNTS NOBODY. Announcing is not
     ///       deciding. The moment the notice path frees a seat it has become a kick (L84), and the moment it
     ///       reads how many peers are left it has become a quorum (L91, L119).
-    ///   (h) EXECUTED: EXACTLY ONE NOTICE PER DEPARTURE PER PEER, AND IT NAMES THE PLAYER. Every other arm
-    ///       asks WHICH notice; none asked HOW MANY, and the answer was two — SessionNotifier announced the
-    ///       same transport event HostLeaveHandler already announces, so a client whose host went away got
-    ///       "— X left —" and "Host ended the session", both native prompts in tactical. The count is
-    ///       DERIVED: run every formatter, keep the lines that claim a departure, and demand exactly one
-    ///       announcer per departure FACT (the leaver's farewell, the host's silence). The name half is
-    ///       executed too — a farewell arriving after the roster row is gone must still name the player
-    ///       rather than "a player", which is the one case where the notice makes people count heads.
+    ///   (h) EXACTLY ONE NOTICE PER DEPARTURE PER PEER, AND IT NAMES THE PLAYER. This arm ONCE COUNTED
+    ///       ANNOUNCERS, demanded two, found two, and stayed green while one player leaving still produced
+    ///       two stacked prompts — because two announcers is the correct design and never was the defect.
+    ///       The defect is both firing for the SAME peer's SAME absence: no transport orders the ClientLeave
+    ///       frame against the socket FIN, and a PAUSE deliberately keeps the roster row (L84), so the
+    ///       farewell landing second finds that row and announces again. A count cannot see that, and the
+    ///       old direct-call sweep could not see an announcer one hop from its sink either. So the criterion
+    ///       is now structural and exhaustive: EVERY method in the assembly that formats a departure line
+    ///       and can TRANSITIVELY reach a user-visible surface must pass the per-peer DepartureLatch — plus
+    ///       the latch itself EXECUTED on that exact interleaving, and the host-gone path shown to carry its
+    ///       own one-shot latch. The name half is executed too — a farewell arriving after the roster row is
+    ///       gone must still name the player rather than "a player".
     ///   (g) THE FAREWELL IS ACTUALLY FLUSHED. Alt+F4 and the window X are the common case, and
     ///       DirectTransport only ENQUEUES for a background writer thread the process teardown then kills —
     ///       so the quit path must also drain, or the most common voluntary leave in the game is reported to
@@ -65,7 +69,10 @@ namespace RailCheck
     ///   • call RemoveClient from PausePeer                  → notice-path-removes-a-peer
     ///   • read ClientCount from BroadcastChat               → notice-path-counts-peers
     ///   • drop engine.Shutdown() from OnApplicationQuit     → farewell-not-flushed
-    ///   • re-add SessionNotifier's own "— X left —" handler → two-notices-per-departure
+    ///   • point PausePeer/HandleLeave back at SystemNotice  → two-notices-per-departure (VERIFIED red
+    ///     directly (bypassing AnnounceDeparture)               2026-08-05 on the pre-fix code: both named)
+    ///   • make DepartureLatch.TryAnnounce always return true → two-notices-per-departure (executed half)
+    ///   • drop HostLeaveLatch from HandleHostLeft           → two-notices-per-departure (host fact)
     ///   • drop LeaverName's last-known fallback             → notice-does-not-name-the-player
     /// </summary>
     internal static class L120_LeaveNotice
@@ -83,6 +90,7 @@ namespace RailCheck
             var handleLeave = session.GetMethod("HandleLeave", All);
             var handleChat = session.GetMethod("HandleChat", All);
             var notice = session.GetMethod("SystemNotice", All);
+            var announce = session.GetMethod("AnnounceDeparture", All);
             var broadcastChat = session.GetMethod("BroadcastChat", All);
             var replay = session.GetMethod("ReplayChatHistoryTo", All);
             var removeClient = session.GetMethod("RemoveClient", All);
@@ -160,9 +168,11 @@ namespace RailCheck
                              "every other screen keeps reading as one player down for the rest of the battle";
 
             // ═══ (d) IT REACHES EVERY REMAINING PEER'S SCREEN ═══
-            if (!Reaches(pause, notice, mod) || !Reaches(resume, notice, mod) || !Reaches(handleLeave, notice, mod))
-                yield return "L120 notice-not-emitted: one of PausePeer / ResumePeer / HandleLeave no longer " +
-                             "goes through SessionManager.SystemNotice. SystemNotice is the single carrier " +
+            if (!Reaches(pause, announce, mod) || !Reaches(handleLeave, announce, mod) ||
+                !Reaches(announce, notice, mod) || !Reaches(resume, notice, mod))
+                yield return "L120 notice-not-emitted: one of PausePeer / HandleLeave no longer goes through " +
+                             "SessionManager.AnnounceDeparture, or ResumePeer/AnnounceDeparture no longer " +
+                             "reach SystemNotice. SystemNotice is the single carrier " +
                              "that both fans the line out to every peer AND marks it as a thing to paint; " +
                              "posting a plain SystemChat instead leaves the event in a log that a player in " +
                              "the geoscape or mid-battle has no way to see";
@@ -262,26 +272,86 @@ namespace RailCheck
                              "broken, so 'exactly one notice per departure' is a statement about the empty set";
             else
             {
-                var sinks = new[] { toast, notice, session.GetMethod("SystemChat", All) }
+                // WHAT THE OLD COUNT MISSED, and why counting announcers was the wrong question.
+                //
+                // The previous version of this arm asked "how many methods DIRECTLY call a formatter AND
+                // DIRECTLY call a sink" and demanded the answer 2. It found PausePeer and HandleLeave,
+                // said two, and went green — while a single player leaving still produced two prompts,
+                // because TWO ANNOUNCERS IS THE CORRECT DESIGN and was never the defect. The defect is
+                // that both of them can fire for the SAME peer's SAME absence: the ClientLeave frame and
+                // the socket FIN race, a PAUSE deliberately keeps the roster row (L84), so the farewell
+                // that lands second finds that row and announces again. A count of announcers cannot see
+                // that, and neither could the old sweep see an announcer one call-hop away from its sink
+                // or one that hardcodes its own line instead of using a formatter.
+                //
+                // So the criterion is no longer a count and no longer a hand-listed set: EVERY method in
+                // the assembly that formats a departure line and can reach a user-visible surface —
+                // transitively, so an extra hop hides nothing — MUST pass the per-peer latch first.
+                var sinks = new[] { toast, notice, session.GetMethod("SystemChat", All),
+                                    typeof(SessionEnd).GetMethod("ShowNotice", All) }
                             .Where(s => s != null).ToArray();
-                var announcers = ModTypes(mod)
-                    .SelectMany(t => { try { return t.GetMethods(All).Cast<MethodBase>(); }
-                                       catch { return Enumerable.Empty<MethodBase>(); } })
-                    .Where(m => { try { return m.GetMethodBody() != null; } catch { return false; } })
-                    .Where(m => departureFormatters.Any(f => Reaches(m, f, mod)) &&
-                                sinks.Any(s => Reaches(m, s, mod)))
+                var latchGate = typeof(DepartureLatch).GetMethod("TryAnnounce", All);
+                var reachesSink = ReachingSet(mod, sinks);
+                var reachesLatch = ReachingSet(mod, new[] { latchGate }.Where(s => s != null).ToArray());
+
+                var unlatched = ModMethods(mod)
+                    .Where(m => departureFormatters.Any(f => Reaches(m, f, mod)) && reachesSink.Contains(Key(m)))
+                    .Where(m => !reachesLatch.Contains(Key(m)))
                     .Select(m => (m.DeclaringType?.Name ?? "?") + "." + m.Name)
                     .Distinct().OrderBy(s => s, StringComparer.Ordinal).ToList();
-                // One per FACT, and there are exactly two facts: the leaver said so, or the host heard
-                // nothing. Anything past that is the same departure announced twice on the same screen.
-                if (announcers.Count != 2)
-                    yield return "L120 two-notices-per-departure: " + announcers.Count + " method(s) in the mod " +
-                                 "both format a departure line and put it on a screen — " +
-                                 string.Join(", ", announcers) + ". There are exactly TWO departure facts (the " +
-                                 "leaver's own farewell, and silence the host observed) and therefore exactly two " +
-                                 "announcers may exist; a third is one player leaving and two prompts arriving, " +
-                                 "which in tactical are two native modals stacked on the same screen. Fewer than " +
-                                 "two means a departure nobody is told about";
+                if (unlatched.Count > 0)
+                    yield return "L120 two-notices-per-departure: " + string.Join(", ", unlatched) + " put(s) a " +
+                                 "departure on every remaining player's screen without passing " +
+                                 "DepartureLatch.TryAnnounce" + (latchGate == null ? " (which does not exist)" : "") +
+                                 ". One peer going away raises TWO facts — the transport's silence and the peer's " +
+                                 "own farewell — and nothing in the network orders them: no transport guarantees " +
+                                 "the ClientLeave frame drains before the socket FIN, and a PAUSE keeps the roster " +
+                                 "row on purpose (L84), so on the losing interleaving the second fact finds that " +
+                                 "row and announces the same absence again. That is one player leaving and two " +
+                                 "prompts arriving — two stacked native modals in tactical. Which announcer wins " +
+                                 "is not the fix; the fix is that the peer, not the path, carries whether the " +
+                                 "others have already been told";
+
+                // EXECUTED — the latch itself, on the exact interleaving above. A structural arm alone would
+                // stay green on a latch that latched nothing.
+                if (latchGate == null)
+                    yield return "L120 departure-latch-missing: SessionLifecycle.DepartureLatch.TryAnnounce is " +
+                                 "gone, so 'one departure, one notice' rests on the two announcers never " +
+                                 "overlapping — which is exactly the race that produced two prompts";
+                else
+                {
+                    var latch = new DepartureLatch();
+                    const ulong leaver = 7UL, bystander = 9UL;
+                    if (!latch.TryAnnounce(leaver))
+                        yield return "L120 departure-never-announced: the FIRST report of a peer's departure is " +
+                                     "swallowed, so a player leaves and nobody is told at all";
+                    if (latch.TryAnnounce(leaver))
+                        yield return "L120 two-notices-per-departure: the latch let the SAME peer's absence be " +
+                                     "announced twice (pause first, its farewell a frame later — or simply two " +
+                                     "farewell packets from one quit path). Two prompts, one departure";
+                    if (!latch.TryAnnounce(bystander))
+                        yield return "L120 departure-never-announced: announcing one peer's departure silenced " +
+                                     "ANOTHER peer's — a second player leaving in the same session would go " +
+                                     "unreported for the rest of it";
+                    latch.Rearm(leaver);
+                    if (!latch.TryAnnounce(leaver))
+                        yield return "L120 departure-never-announced: a peer that came back and left AGAIN is " +
+                                     "never announced the second time. The latch covers ONE absence, not the " +
+                                     "peer for the whole session, or a reconnecting player leaves in silence";
+                }
+
+                // The OTHER departure fact — the host's — is announced by a different path onto the same
+                // native prompt (SessionEnd), and it carries its own one-shot latch. It is enumerated here
+                // rather than trusted: the graceful HostDisconnected packet and the host's transport drop
+                // are two signals for one event, exactly the shape that doubled the peer notice.
+                var hostLeft = typeof(HostLeaveHandler).GetMethod("HandleHostLeft", All);
+                var hostLatch = typeof(HostLeaveLatch).GetMethod("TryHandle", All);
+                if (hostLeft == null || hostLatch == null || !Reaches(hostLeft, hostLatch, mod))
+                    yield return "L120 two-notices-per-departure: HostLeaveHandler.HandleHostLeft no longer " +
+                                 "consults HostLeaveLatch.TryHandle. A graceful HostDisconnected packet followed " +
+                                 "by the host's transport drop (or a heartbeat timeout) are two signals for one " +
+                                 "event, and each would pop its own 'Host ended the session' prompt on top of a " +
+                                 "client already being pulled back to the menu";
             }
             // EXECUTED: the name. A farewell can arrive after the roster row is gone (a returning peer's
             // stale-rejoin prune, a drop the host handled first), and the notice then reads "— a player left
@@ -327,6 +397,45 @@ namespace RailCheck
                              ") yet reaches SessionLifecycle." + theirs.Name + " — the OTHER path's notice. " +
                              "It would report a fact it cannot establish: an observer cannot know a silent " +
                              "peer left, and a peer that sent its own farewell did not lose its connection";
+        }
+
+        /// <summary>Every method the mod actually carries a body for. The sweep below has to be over the WHOLE
+        /// assembly, not a list somebody remembered to extend — a producer nobody enumerated is the entire
+        /// failure mode this arm exists to catch.</summary>
+        private static IEnumerable<MethodBase> ModMethods(Assembly mod) =>
+            ModTypes(mod)
+                .SelectMany(t => { try { return t.GetMethods(All).Cast<MethodBase>()
+                                                  .Concat(t.GetConstructors(All)); }
+                                   catch { return Enumerable.Empty<MethodBase>(); } })
+                .Where(m => { try { return m.GetMethodBody() != null; } catch { return false; } });
+
+        private static string Key(MethodBase m) => m.Module.Name + "#" + m.MetadataToken;
+
+        /// <summary>Every method that can reach one of <paramref name="targets"/> through mod-internal calls,
+        /// at ANY depth. Direct-callee checks are what let the old count miss an announcer sitting one hop
+        /// away from its sink; this is a backward fixed point over the whole call graph, so an extra hop
+        /// hides nothing. Includes the targets themselves.</summary>
+        private static HashSet<string> ReachingSet(Assembly mod, MethodBase[] targets)
+        {
+            var callers = new Dictionary<string, List<MethodBase>>();
+            foreach (var m in ModMethods(mod))
+                foreach (var c in Program.Callees(m, mod))
+                {
+                    var k = Key(c);
+                    if (!callers.TryGetValue(k, out var list)) callers[k] = list = new List<MethodBase>();
+                    list.Add(m);
+                }
+            var seen = new HashSet<string>();
+            var queue = new Queue<string>();
+            foreach (var t in targets) if (t != null && seen.Add(Key(t))) queue.Enqueue(Key(t));
+            while (queue.Count > 0)
+                if (callers.TryGetValue(queue.Dequeue(), out var ups))
+                    foreach (var up in ups)
+                    {
+                        var k = Key(up);
+                        if (seen.Add(k)) queue.Enqueue(k);
+                    }
+            return seen;
         }
 
         /// <summary>Every type the mod actually loaded — a half-loadable assembly must narrow the sweep, not

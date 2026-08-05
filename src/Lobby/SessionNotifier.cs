@@ -91,8 +91,15 @@ namespace Multiplayer.Network
                 // notice falls back to the native prompt (same widget the F3 host-leave path uses —
                 // works tactical + geoscape + home); the join toast and CRC divergence hint stay quiet.
                 if (modalFallback)
+                {
+                    // THE user-visible surface, and until now a silent one: two stacked prompts left
+                    // nothing whatsoever in Player.log, so "why did I get two boxes" could only be
+                    // guessed at. One cheap line per prompt (they are rare — session events only) and
+                    // the next occurrence names itself.
+                    Debug.Log("[Multiplayer] native prompt: " + message);
                     GameUtl.GetMessageBox()?.ShowSimplePrompt(
                         message, MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
+                }
             }
             catch (Exception e)
             {
