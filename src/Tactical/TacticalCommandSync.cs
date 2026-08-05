@@ -2241,6 +2241,36 @@ namespace Multiplayer.Tactical
             catch (Exception ex) { Debug.LogWarning("[Multiplayer][tac] mirror telemetry failed: " + ex.Message); }
         }
 
+        /// <summary>THE WHOLE HOLD DECISION, PURE — and it is the rail's only guarantee that a MIRRORED
+        /// ability always reaches a terminal state.
+        ///
+        /// A mirrored ability can hang on a receiving peer for reasons that have nothing to do with the order:
+        /// <c>EnterVehicleCrt</c>:104 and <c>ExitVehicleCrt</c>:75 both park on
+        /// <c>AnimEvents.WaitForEvent("OpenedDoor")</c> with no ceiling of their own, and a broken coroutine
+        /// chain (the 2026-08-01 bash NRE) never resumes either. <c>PlayingAction.CompleteAction</c> then never
+        /// runs, <c>ClearPlayingAction</c> never runs, the actor stays in <c>ExecutingAbilities</c> forever and
+        /// <see cref="Validate"/>'s actorBusy arm refuses every later order for that soldier — a soldier
+        /// bricked for the rest of the battle, per ability, with no way back.
+        ///
+        /// It is answered ONCE, HERE, for every ability rather than by a timeout bolted onto each one: the
+        /// host's settle is the closer for EVERY rider (<see cref="OnAbilityActionEnded"/>) and the turn-edge
+        /// sweep re-issues one for every keyed live actor, so a peer holding a settle for a busy actor is the
+        /// one place that sees "this ability is not slow, it is stuck" for all of them. Past the ceiling the
+        /// settle is applied anyway, and <see cref="ApplySettle"/> ends the ability through the game's own
+        /// teardown (<c>ActionComponent.CancelActions</c> → <c>ClearPlayingAction</c> → the same exit a
+        /// completed action takes) and then reconciles the actor's status set to the host's, so the terminal
+        /// state is the host's state and not whatever half the torn coroutine had reached.
+        ///
+        /// The frame count is a fallback and it CONVERGES rather than diverges — it applies the host's own
+        /// position, AP, WP and status set, which is the definition of not diverging. Pure so RailCheck L133
+        /// can execute the hold to exhaustion and assert it terminates.</summary>
+        internal static bool SettleMustBeForced(bool actorBusy, bool alreadyForced, int waitedFrames)
+        {
+            if (alreadyForced) return true;
+            if (!actorBusy) return true;
+            return waitedFrames >= SettleHoldCeilingFrames;
+        }
+
         private static void QueueSettle(int key, Vector3 pos, float ap, float wp, bool forced, List<string> statuses)
         {
             _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced,
@@ -2279,7 +2309,7 @@ namespace Multiplayer.Tactical
                 {
                     var held = kv.Value;
                     ++held.WaitedFrames;
-                    if (held.WaitedFrames >= SettleHoldCeilingFrames)
+                    if (SettleMustBeForced(true, false, held.WaitedFrames))
                     {
                         // THE HOLD HAS A CEILING (2026-07-31 RCA). "Still moving" is a correct reason to wait
                         // and a wrong reason to wait forever: an ability that never ends on this peer — a
