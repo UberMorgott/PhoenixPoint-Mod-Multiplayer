@@ -309,6 +309,7 @@ namespace Multiplayer.Tactical
                 WireClick(go);
                 CollectLabels(go);      // before the overlay: the overlay's depth is derived from the labels'
                 BuildGreenOverlay(go);
+                TrimRaycast(go);        // last: it must also see the overlay it is trimming around
                 Repaint();
                 // The CLONE's subtree, not the template's: the question this answers is "did the frame come
                 // across", and only the clone can answer it.
@@ -467,6 +468,68 @@ namespace Multiplayer.Tactical
             _green.raycastTarget = false;
             _green.enabled = false;
         }
+
+        /// <summary>
+        /// ONE CLICKABLE SURFACE, AND IT IS THE BUTTON'S OWN.
+        ///
+        /// A cloned prefab brings its whole raycast footprint with it. Unity decides "is the cursor over the
+        /// GUI" with <c>EventSystem.IsPointerOverGameObject()</c>, which answers YES for ANY
+        /// <c>Graphic</c> with <c>raycastTarget</c> under the pointer — background art, frame, glow, shadow,
+        /// underlight, a transparent inherited overlay, all of it, whether or not it is even visible. The
+        /// engine reads that same flag through <c>TacticalView.IsCursorOverGUI()</c>
+        /// (<c>TacticalView.cs</c>:801-804) and gates the tactical MAP click on it —
+        /// <c>UIStateOverwatchAbilitySelected.OnInputEvent</c>:215 is
+        /// <c>ev.Name == "Select" &amp;&amp; !IsCursorOverGUI()</c>, and
+        /// <c>UIStateAbilitySelected.OnSelect</c> opens with <c>if (CursorOverGui) return;</c>. So a stray
+        /// raycast rect of ours parked over the battlefield does not merely sit there: it silently eats the
+        /// player's confirm click, and the symptom is precisely the one reported — clicks on the UI keep
+        /// working while clicks on the map do nothing.
+        ///
+        /// This is a real risk for THIS clone and not a hypothetical: it is placed a full button-height plus
+        /// the row's spacing plus clearance BELOW the native End Turn button, so unlike every native widget
+        /// it is the one HUD element that can end up outside the panel that hosts it. The measurement that
+        /// says whether it actually does is logged once per battle from the settled layout, in
+        /// <see cref="TacticalReadyRowFollower.Apply"/> — this method makes the footprint one button wide
+        /// either way, so the answer stops mattering.
+        ///
+        /// KEEP EXACTLY ONE: <c>Selectable.targetGraphic</c>, which is Unity's OWN answer to "which graphic
+        /// is this button's clickable face" — the same one it tints on hover — rather than a name or a
+        /// depth we would be guessing. If the prefab names none, the clone is left ALONE and says so: a
+        /// button with every graphic silenced is not clickable at all, and trading a possible swallowed map
+        /// click for a certainly dead ready button is not a fix.
+        ///
+        /// The width is deliberately NOT narrowed. The clone mirrors the native End Turn button's
+        /// <c>sizeDelta</c> every frame (<see cref="TacticalReadyRowFollower.Apply"/>), so its rect is the
+        /// native button's rect exactly — it is not a frozen prefab size overhanging its own art, and
+        /// shrinking it would only make the clone stop matching the row it belongs to.
+        /// </summary>
+        private static void TrimRaycast(GameObject go)
+        {
+            var pgb = go.GetComponent<PhoenixGeneralButton>();
+            var btn = pgb != null && pgb.BaseButton != null ? pgb.BaseButton : go.GetComponentInChildren<Button>();
+            var keep = btn == null ? null : btn.targetGraphic;
+            if (keep == null)
+            {
+                Debug.LogWarning("[Multiplayer][tac] ready button raycast NOT trimmed — its Button names no " +
+                                 "targetGraphic, so there is no way to tell the clickable face from the " +
+                                 "decoration and silencing them all would leave a button nothing can click. " +
+                                 "The clone keeps the whole cloned footprint; if map clicks die near it, this " +
+                                 "line is why.");
+                return;
+            }
+            int silenced = 0;
+            foreach (var g in go.GetComponentsInChildren<Graphic>(true))
+            {
+                if (g == null || !g.raycastTarget || ReferenceEquals(g, keep)) continue;
+                g.raycastTarget = false;
+                silenced++;
+            }
+            _raycastReport = "kept 1 (" + keep.gameObject.name + "), silenced " + silenced;
+        }
+
+        /// <summary>What <see cref="TrimRaycast"/> did, carried to the settled-layout diagnostic — where the
+        /// clone's real rect is finally knowable and the two facts are worth reading together.</summary>
+        internal static string _raycastReport = "not run";
 
         /// <summary>Every text component on the clone, by SHAPE (a settable public <c>string text</c>), plus
         /// the standing-down of any I2 <c>Localize</c> component — a live localiser would overwrite our label
@@ -660,6 +723,55 @@ namespace Multiplayer.Tactical
                       me.anchoredPosition + " ready worldHeight=" + WorldHeight(me) +
                       " (must equal EndTurn's worldHeight — a 0 here means the clone has no rect for the " +
                       "frame sprites to fill).");
+            ReportFootprint(me);
+        }
+
+        /// <summary>
+        /// DOES OUR CLONE HANG OFF THE HUD, AND HOW MANY THINGS ON IT CAN EAT A CLICK — the two facts that
+        /// decide whether this button can swallow a map click, logged from the SETTLED layout rather than
+        /// from construction, because at construction the canvas has not placed anything yet and every
+        /// number would be the raw prefab's (that mistake is miss #1 in <c>PlaceBelow</c>'s list).
+        ///
+        /// "HUD bounds" is read as the clone's own PARENT rect — the row container the native End Turn
+        /// button lives in. Our clone is the one element deliberately pushed BELOW its row, so if its world
+        /// bottom sits under the container's, it is drawing over whatever is behind the HUD, which in a
+        /// battle is the tactical map. Combined with the raycast count this is the whole question: a rect
+        /// over the map with nothing raycastable on it is harmless, and one raycastable graphic there is a
+        /// dead confirm click (<c>TacticalReadyButton.TrimRaycast</c>).
+        /// </summary>
+        private void ReportFootprint(RectTransform me)
+        {
+            var parent = me.parent as RectTransform;
+            me.GetWorldCorners(Corners);
+            float myBottom = Mathf.Min(Corners[0].y, Corners[3].y);
+            float myTop = Mathf.Max(Corners[1].y, Corners[2].y);
+            float myLeft = Mathf.Min(Corners[0].x, Corners[1].x);
+            float myRight = Mathf.Max(Corners[2].x, Corners[3].x);
+            string hud = "(no parent rect)";
+            string verdict = "UNKNOWN";
+            if (parent != null)
+            {
+                parent.GetWorldCorners(Corners);
+                float pBottom = Mathf.Min(Corners[0].y, Corners[3].y);
+                float pTop = Mathf.Max(Corners[1].y, Corners[2].y);
+                hud = parent.name + " world y=[" + pBottom + ".." + pTop + "]";
+                verdict = myBottom < pBottom
+                    ? "OVERHANGS its HUD container by " + (pBottom - myBottom) + " world units — that part of " +
+                      "the clone is drawn over the tactical map"
+                    : "inside its HUD container";
+            }
+
+            int live = 0;
+            var names = new List<string>();
+            foreach (var g in GetComponentsInChildren<Graphic>(true))
+                if (g != null && g.raycastTarget) { live++; if (names.Count < 8) names.Add(g.gameObject.name); }
+
+            Debug.Log("[Multiplayer][tac] ready button footprint: world x=[" + myLeft + ".." + myRight +
+                      "] y=[" + myBottom + ".." + myTop + "] vs HUD container " + hud + " -> " + verdict +
+                      " | raycast-enabled graphics remaining: " + live + " [" + string.Join(", ", names.ToArray()) +
+                      "] (trim: " + TacticalReadyButton._raycastReport + "). Anything above 1 here is a " +
+                      "surface that can answer EventSystem.IsPointerOverGameObject() and silently eat a map " +
+                      "click — that is what IsCursorOverGUI() gates the tactical confirm on.");
         }
 
         /// <summary>

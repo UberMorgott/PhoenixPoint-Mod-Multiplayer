@@ -24,5 +24,11 @@
       <HintPath>$(GameManaged)\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- L127 arm (d) names Graphic.raycastTarget and Selectable.targetGraphic directly: "one clickable
+         surface" has no expression that does not mention the two Unity members that define it. -->
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(GameManaged)\UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 </Project>
