@@ -28,6 +28,35 @@ namespace Multiplayer.Network
         /// <summary>The session-fatal line shown to a client when the host ends the session (F3).</summary>
         public const string HostEndedSession = "Host ended the session";
 
+        // ─── The three leave/return notices ─────────────────────────────────
+        //
+        // THEY MUST NOT BE INTERCHANGEABLE, and that is the whole reason they live here as three separate
+        // formatters instead of one string with a reason argument. Since the six removal paths became a
+        // per-peer PAUSE (2026-08-05, law L84 — nobody is kicked outside a voluntary leave), "gone" and
+        // "left" stopped being the same fact: a peer that went quiet still holds its seat and is expected
+        // back, and telling the remaining players it LEFT would be a guess presented as news. So the
+        // VOLUNTARY path — the leaver's own farewell packet — is the only one allowed to say "left", the
+        // involuntary silence says exactly what the host actually observed, and the resume edge closes the
+        // loop rather than leaving everyone wondering.
+
+        /// <summary>VOLUNTARY: the player chose to go (main-menu quit, Alt+F4, the window's X). Only ever
+        /// emitted off that player's OWN ClientLeave packet, never off an observation.</summary>
+        public static string FormatLeaveNotice(string playerName) =>
+            $"— {Named(playerName)} left the game —";
+
+        /// <summary>INVOLUNTARY: the host stopped hearing from the peer. It has NOT left — its seat, slot,
+        /// permissions and identity binding are all still held for it (L84).</summary>
+        public static string FormatConnectionLostNotice(string playerName) =>
+            $"— {Named(playerName)} lost connection — holding their seat —";
+
+        /// <summary>The resume edge. Worth its own line precisely because the notice above is not final:
+        /// without it a session that healed itself still reads, on every other screen, as one player down.</summary>
+        public static string FormatReconnectedNotice(string playerName) =>
+            $"— {Named(playerName)} is back —";
+
+        private static string Named(string playerName) =>
+            string.IsNullOrEmpty(playerName) ? UnknownPlayer : playerName;
+
         /// <summary>
         /// F3 host-left suppression gate. A CLIENT closing its only peer (the host) on a VOLUNTARY
         /// LEAVE produces a transport drop that is byte-for-byte indistinguishable from a genuine host

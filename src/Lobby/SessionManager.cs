@@ -259,7 +259,12 @@ namespace Multiplayer.Network
                              "Roster row kept — it resumes its seat when it comes back.");
             if (_engine.IsHost)
             {
-                SystemChat($"— {client.PlayerName} lost connection ({reason}); holding their seat —");
+                // A NOTICE, not a chat line: the other players are mid-geoscape or mid-battle with no chat
+                // panel open, and "did he rage-quit or is his wifi down?" is exactly the question this
+                // feature exists to answer. The wording says what the host OBSERVED (silence), never that
+                // the player left — it did not, and its seat is still here (L84).
+                SystemNotice(SessionLifecycle.FormatConnectionLostNotice(client.PlayerName));
+                Debug.Log("[Multiplayer] connection-lost notice sent for peer " + steamId + ": " + reason);
                 BroadcastPeerList();
             }
         }
@@ -273,7 +278,7 @@ namespace Multiplayer.Network
             Debug.Log($"[Multiplayer] Peer {steamId} ({client.PlayerName}) RESUMED.");
             if (_engine.IsHost)
             {
-                SystemChat($"— {client.PlayerName} is back —");
+                SystemNotice(SessionLifecycle.FormatReconnectedNotice(client.PlayerName));
                 BroadcastPeerList();
             }
         }
@@ -1028,8 +1033,12 @@ namespace Multiplayer.Network
                 _engine.BroadcastToAll(new NetworkMessage(PacketType.ClientLeave,
                     MessageSerializer.SerializeLeave(peerSteamId)));
 
-                var leaverNick = _clients.TryGetValue(peerSteamId, out var lc) ? lc.PlayerName : "a player";
-                SystemChat($"— {leaverNick} left —");
+                // ANNOUNCED BY THE LEAVER, not guessed by an observer: we are here because THAT peer sent
+                // its own ClientLeave, which is the one and only thing that makes "left" a fact rather
+                // than an inference. Every other way a peer can go silent lands in PausePeer above and is
+                // reported as a lost connection. Name resolved BEFORE RemoveClient purges the row.
+                var leaverNick = _clients.TryGetValue(peerSteamId, out var lc) ? lc.PlayerName : null;
+                SystemNotice(SessionLifecycle.FormatLeaveNotice(leaverNick));
             }
             // A VOLUNTARY leave is the one thing that frees a seat: give the slot back to the pool so a
             // long session cannot exhaust the byte-wide slot space (SlotAllocator.Assign). A peer that
@@ -1118,15 +1127,39 @@ namespace Multiplayer.Network
             BroadcastChat(0, null, text, true);
         }
 
+        /// <summary>
+        /// Host-only: a system line that is also a session EVENT — somebody left, lost connection, or came
+        /// back. It travels EXACTLY like a system chat line (same packet, same ordering, same host-
+        /// authoritative fan-out, replayed to late joiners like any other backlog line) and additionally
+        /// surfaces on every peer's SCREEN, because the players who need it are in the geoscape or in a
+        /// battle with no chat panel open.
+        ///
+        /// NO NEW SURFACE and NO NEW WIDGET: the carrier is the existing chat packet with kind byte 2, and
+        /// the screen is <see cref="SessionNotifier.ShowToast"/>, which is already the mod's one native
+        /// notice path — the game's own <c>NotificationController</c> where a toast surface is live
+        /// (geoscape, main menu) and the game's own message prompt in tactical, where none is.
+        ///
+        /// READS NOTHING AND REMOVES NOBODY. A notice is an announcement about ONE named peer; it never
+        /// counts the roster and never touches a seat (L84, and L91's "no host decision reads other peers'
+        /// membership" — a notice is not a decision, and it must not become one).
+        /// </summary>
+        public void SystemNotice(string text)
+        {
+            if (!_engine.IsHost || string.IsNullOrEmpty(text)) return;
+            BroadcastChat(0, null, text, true, isNotice: true);
+        }
+
         // Host-authoritative fan-out: raise locally + push to clients (mirrors BroadcastPeerList).
-        private void BroadcastChat(ulong senderId, string senderNick, string text, bool isSystem)
+        private void BroadcastChat(ulong senderId, string senderNick, string text, bool isSystem,
+                                   bool isNotice = false)
         {
             var chat = new ChatMessageData
             {
                 SenderSteamId = senderId,
                 SenderNick = senderNick ?? "",
                 Text = text,
-                IsSystem = isSystem
+                IsSystem = isSystem,
+                IsNotice = isNotice
             };
             // Record into the host-authoritative backlog (arrival order) BEFORE fan-out so late
             // joiners can be replayed the full session history. Bounded ring: drop the oldest line
@@ -1136,6 +1169,9 @@ namespace Multiplayer.Network
                 _chatHistory.RemoveAt(0);
 
             OnChatReceived?.Invoke(chat.SenderNick, chat.Text, chat.IsSystem); // local echo on host
+            // The HOST's own screen. It receives none of its own packets, so without this the one player
+            // who always knows first is the one player who never sees it (the same missing half F1 had).
+            if (isNotice) SessionNotifier.ShowToast(text, modalFallback: true);
             _engine.BroadcastToAll(new NetworkMessage(PacketType.ChatMessage,
                 MessageSerializer.SerializeChat(chat)));
         }
@@ -1149,8 +1185,20 @@ namespace Multiplayer.Network
             if (!_engine.IsHost || _chatHistory.Count == 0) return;
             foreach (var chat in _chatHistory)
             {
+                // A BACKLOG IS NOT NEWS. Replayed with IsNotice cleared, so a peer joining an hour-old
+                // session gets the log it missed and not a burst of "X lost connection" prompts for
+                // events that resolved before it arrived. The stored line keeps its flag; only the copy
+                // on the wire is demoted.
+                var replay = new ChatMessageData
+                {
+                    SenderSteamId = chat.SenderSteamId,
+                    SenderNick = chat.SenderNick,
+                    Text = chat.Text,
+                    IsSystem = chat.IsSystem,
+                    IsNotice = false
+                };
                 _engine.SendToClient(clientId, new NetworkMessage(PacketType.ChatMessage,
-                    MessageSerializer.SerializeChat(chat)));
+                    MessageSerializer.SerializeChat(replay)));
             }
         }
 
@@ -1172,6 +1220,9 @@ namespace Multiplayer.Network
             {
                 // Client: render exactly what the host broadcast.
                 OnChatReceived?.Invoke(chat.SenderNick, chat.Text, chat.IsSystem);
+                // …and, for a session EVENT, put it on screen too — this peer is in the geoscape or in a
+                // battle and will never look at the chat log. Reactive on ARRIVAL, never on the next open.
+                if (chat.IsNotice) SessionNotifier.ShowToast(chat.Text, modalFallback: true);
             }
         }
 

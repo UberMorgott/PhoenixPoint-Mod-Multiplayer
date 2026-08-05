@@ -248,7 +248,10 @@ namespace Multiplayer.Network.MessageLayer
                 bw.Write(chat.SenderSteamId);
                 bw.Write(chat.SenderNick ?? "");
                 bw.Write(chat.Text ?? "");
-                bw.Write((byte)(chat.IsSystem ? 1 : 0));
+                // KIND, not a bool: 0 player line, 1 system line, 2 system line that is ALSO an event
+                // every peer must SEE (a player left / lost connection / came back). Same byte, same
+                // length — a reader that only knows 0/1 still classifies a notice as a system line.
+                bw.Write((byte)(chat.IsNotice ? 2 : chat.IsSystem ? 1 : 0));
                 return ms.ToArray();
             }
         }
@@ -258,12 +261,17 @@ namespace Multiplayer.Network.MessageLayer
             using (var ms = new MemoryStream(data))
             using (var br = new BinaryReader(ms))
             {
+                var senderSteamId = br.ReadUInt64();
+                var senderNick = br.ReadString();
+                var text = br.ReadString();
+                var kind = br.ReadByte();
                 return new ChatMessageData
                 {
-                    SenderSteamId = br.ReadUInt64(),
-                    SenderNick = br.ReadString(),
-                    Text = br.ReadString(),
-                    IsSystem = br.ReadByte() != 0
+                    SenderSteamId = senderSteamId,
+                    SenderNick = senderNick,
+                    Text = text,
+                    IsSystem = kind != 0,
+                    IsNotice = kind == 2
                 };
             }
         }
@@ -581,5 +589,12 @@ namespace Multiplayer.Network.MessageLayer
         public string SenderNick { get; set; }
         public string Text { get; set; }
         public bool IsSystem { get; set; }
+
+        /// <summary>A system line that is also a session EVENT — a player left, lost connection, or came
+        /// back. Implies <see cref="IsSystem"/>. Notices are surfaced on every peer's screen (native toast
+        /// in the geoscape, native prompt in tactical) on top of landing in the chat log; ordinary system
+        /// lines stay in the log. Replayed history is deliberately shipped with this FALSE — a backlog is
+        /// not news, and toasting it would fire the whole session's events at a late joiner at once.</summary>
+        public bool IsNotice { get; set; }
     }
 }

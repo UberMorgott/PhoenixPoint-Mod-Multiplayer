@@ -1372,8 +1372,18 @@ namespace Multiplayer.UI
         // Alt+F4 / native window close never runs the menu-quit path, so without this the other side
         // waits out the full 20 s heartbeat timeout. Best-effort leave notice on Unity's process-quit
         // callback (fires on Alt+F4 and normal quit; a hard kill/crash still falls back to the
-        // heartbeat). TCP writes flush synchronously; Steam P2P sends queue to the separate Steam
-        // client process, which delivers them after the game exits.
+        // heartbeat).
+        //
+        // QUEUING THE FAREWELL IS NOT SENDING IT. DirectTransport.Send only ENQUEUES the frame for that
+        // peer's writer thread, and every one of those threads is IsBackground — the process teardown
+        // that follows this callback kills them where they stand, so the ClientLeave could die in the
+        // queue and the leaver would be reported to everyone else as a LOST CONNECTION instead of a
+        // player who left. Shutdown() is the drain that already exists for exactly this: it requests
+        // flush-then-close per peer and JOINs each writer under one bounded grace budget
+        // (DirectTransport.Shutdown:117-127), so the farewell is on the wire before we exit. Steam P2P
+        // needs no drain (sends hand off to the separate Steam client process, which delivers them after
+        // the game is gone); a hard kill or a crash still reaches nobody, and the heartbeat backstop
+        // reports that honestly as a lost connection, because that is what it is.
         private void OnApplicationQuit()
         {
             var engine = NetworkEngine.Instance;
@@ -1382,8 +1392,15 @@ namespace Multiplayer.UI
             {
                 if (engine.IsHost) engine.Session?.SendHostDisconnected();
                 else engine.Session?.SendClientLeave();
+                engine.Shutdown();
             }
-            catch { /* quitting — never block the exit */ }
+            catch (System.Exception e)
+            {
+                // Never block the exit — but never swallow it silently either: if this throws, the other
+                // players are about to be told this player lost connection rather than left.
+                Debug.LogWarning("[Multiplayer] quit farewell not flushed (" + e.Message + ") — remaining " +
+                                 "players will see a lost-connection notice instead of a leave notice.");
+            }
         }
 
         private void Update()
