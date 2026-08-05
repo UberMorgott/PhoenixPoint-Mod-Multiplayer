@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -366,37 +366,61 @@ namespace Multiplayer.Transport
         {
             List<Peer> peers;
             lock (_lock) { peers = new List<Peer>(_clients.Values); }
-            foreach (var peer in peers) EnqueueFrame(peer, data);
+            // Build the framed array ONCE and share it across every peer's queue (see EnqueueFrame).
+            var frame = new byte[4 + data.Length];
+            Buffer.BlockCopy(BitConverter.GetBytes(data.Length), 0, frame, 0, 4);
+            Buffer.BlockCopy(data, 0, frame, 4, data.Length);
+            foreach (var peer in peers) EnqueueBuiltFrame(peer, frame);
         }
 
         // Frame = 4-byte little-endian length prefix + payload, queued for the peer's writer thread.
-        // Never blocks the caller: queue overflow (the peer stopped reading for far too long — the
-        // bound comfortably fits a whole save-blob fan-out) drops the peer instead.
+        // Never blocks the caller.
+        //
+        // BACKPRESSURE DEGRADES THE PEER, IT NEVER REMOVES IT (N=50 mandate). A full queue used to mean
+        // DropPeer — a player on a bad link was thrown out of the session for being on a bad link, which
+        // is precisely the fight-to-be-able-to-play the mandate forbids. The honest bound instead: keep
+        // the newest frame and discard the OLDEST queued ones to make room. What is oldest is what is
+        // most stale, and the rail is built for exactly this — Apply is idempotent, delivery is seq'd,
+        // and a gap drives GenericApplier.RequestResync, so a peer that loses stale deltas is re-stated
+        // rather than lost. Ceiling, stated plainly: the queue does not know a stale delta from a save
+        // chunk, so a peer far enough behind to overflow can lose a chunk of an in-flight save transfer;
+        // that transfer fails its length/crc check and the peer is re-onboarded through the ordinary
+        // join path. It stays IN the session either way.
         private void EnqueueFrame(Peer peer, byte[] data)
         {
+            // ONE length prefix, ONE array — this used to allocate a fresh byte[4+len] per PEER, which at
+            // a 45 KB rail packet and 50 players is 2.25 MB of garbage per packet. The frame is read-only
+            // from here on (the writer thread only ever hands it to Stream.Write), so every peer's queue
+            // can hold the same instance.
             var frame = new byte[4 + data.Length];
             var lenBytes = BitConverter.GetBytes(data.Length);
             Buffer.BlockCopy(lenBytes, 0, frame, 0, 4);
             Buffer.BlockCopy(data, 0, frame, 4, data.Length);
-            bool overflow = false;
+            EnqueueBuiltFrame(peer, frame);
+        }
+
+        // The shared-frame entry point (see Broadcast): the caller has already prefixed the length.
+        private void EnqueueBuiltFrame(Peer peer, byte[] frame)
+        {
+            int dropped = 0; long droppedBytes = 0;
             lock (peer)
             {
                 if (peer.Dead || peer.CloseRequested) return;
-                if (peer.QueuedBytes + frame.Length > MaxQueuedBytesPerPeer)
-                    overflow = true;
-                else
+                while (peer.QueuedBytes + frame.Length > MaxQueuedBytesPerPeer && peer.Frames.Count > 0)
                 {
-                    peer.Frames.Enqueue(frame);
-                    peer.QueuedBytes += frame.Length;
-                    Monitor.Pulse(peer);
+                    var stale = peer.Frames.Dequeue();
+                    peer.QueuedBytes -= stale.Length;
+                    dropped++; droppedBytes += stale.Length;
                 }
+                peer.Frames.Enqueue(frame);
+                peer.QueuedBytes += frame.Length;
+                Monitor.Pulse(peer);
             }
-            if (overflow)
-            {
-                LogError($"[Multiplayer] DirectTransport: send queue to peer {peer.Id} overflowed " +
-                         $"({MaxQueuedBytesPerPeer} bytes) — dropping peer.");
-                DropPeer(peer, "send queue overflow");
-            }
+            if (dropped > 0)
+                LogError($"[Multiplayer] DirectTransport: send queue to peer {peer.Id} is full " +
+                         $"({MaxQueuedBytesPerPeer} bytes) — discarded {dropped} stale frame(s) " +
+                         $"({droppedBytes} bytes) to keep it. The peer stays in the session and reconverges " +
+                         "through the rail's resync.");
         }
 
         // Graceful close: no new frames accepted; the writer drains what is queued, then closes the

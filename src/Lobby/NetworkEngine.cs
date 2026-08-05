@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using Multiplayer.Network.MessageLayer;
 using Multiplayer.Network.Sync;
@@ -536,8 +536,10 @@ namespace Multiplayer.Network
             {
                 Session.AddClient(peerId, endpoint);
                 OnClientConnected?.Invoke(peerId);
-                // Canonical Steam-lobby capacity gate: the invite lobby stops being joinable once every
-                // client seat is filled. No-op when no lobby exists. This line WAS the 2-player cap —
+                // Steam-lobby VISIBILITY gate, and only that: it stops the invite lobby advertising once
+                // every declared seat is filled. NOT a join refusal — HandleConnectionRequest has no
+                // capacity branch at all, so nobody is ever told "server full" (N=50 mandate). Reads the
+                // ONE declared number (law L91's reader set). This line WAS the 2-player cap —
                 // `ClientCount == 0` closed the lobby on the FIRST connect, so nobody could be third.
                 try { SteamLobbySetJoinable?.Invoke(Session.ClientCount < MaxClients); } catch { }
             }
@@ -574,11 +576,28 @@ namespace Multiplayer.Network
 
             // Teardown window: a transport drop surfacing after Shutdown/TearDown nulled Session
             // (the null-check above only resolved the name) must not NRE the whole event drain.
-            Session?.RemoveClient(peerId);
+            //
+            // THE funnel for every INVOLUNTARY loss (N=50 mandate): a dead socket, a stalled write, a
+            // send channel that failed N times — they all arrive here, and none of them means the player
+            // left. PAUSE, do not remove: the roster row, slot, permissions and guid binding survive, so
+            // the peer resumes its own seat on reconnect instead of being a stranger who has to fight its
+            // way back in. A peer that genuinely LEFT sends ClientLeave, and SessionManager.HandleLeave
+            // still removes it there.
+            bool paused = false;
+            if (IsHost && Session != null && Session.Clients.ContainsKey(peerId))
+            {
+                Session.PausePeer(peerId, endpoint == null ? "connection lost" : "connection lost (" + endpoint + ")");
+                paused = true;
+            }
+            else Session?.RemoveClient(peerId); // client side, or a row already reclaimed — nothing to hold
             OnClientDisconnected?.Invoke(peerId);
-            OnClientDisconnectedNamed?.Invoke(peerId, droppedName, wasKnown);
+            // Suppress the "— X left —" notice for a PAUSED peer: it did not leave, and PausePeer already
+            // posted the accurate line. HostLeaveHandler still sees the raise (it needs it to detect a host
+            // loss on the CLIENT side, where nothing is ever paused).
+            OnClientDisconnectedNamed?.Invoke(peerId, droppedName, wasKnown && !paused);
 
-            // Host still hosting and a slot freed → the Steam invite lobby is joinable again.
+            // Advertising gate again (see OnPeerConnected). A PAUSED peer still holds its seat, so this
+            // deliberately does not free one — it is holding the seat that lets the peer come back.
             if (IsHost)
                 try { SteamLobbySetJoinable?.Invoke(Session.ClientCount < MaxClients); } catch { }
 

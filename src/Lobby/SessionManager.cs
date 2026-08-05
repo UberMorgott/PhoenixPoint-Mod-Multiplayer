@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using Multiplayer.Network.MessageLayer;
 using Multiplayer.Network.Parity;
@@ -169,27 +169,13 @@ namespace Multiplayer.Network
                     if (now - kvp.Value > HeartbeatTimeoutMs)
                         toRemove.Add(kvp.Key);
                 }
+                // A silent peer is PAUSED, never kicked (N=50 mandate — see PausePeer). The socket is
+                // left alone on purpose: a peer whose game hitched, whose ISP blipped or who is simply on
+                // a bad link is still there, and tearing its transport down is what turned a hiccup into
+                // "you were disconnected". The heartbeat row is kept too, so the resume edge is just the
+                // next heartbeat that arrives (HandleHeartbeat → ResumePeer).
                 foreach (var clientId in toRemove)
-                {
-                    Debug.LogWarning($"[Multiplayer] Client {clientId} timed out");
-                    // ONE disconnect path (same as a crash drop): kick the peer at the TRANSPORT — which
-                    // stops Broadcast writing to the dead id forever — and let its OnPeerDisconnected
-                    // raise funnel through NetworkEngine.OnPeerDisconnected → RemoveClient + the F1 drop
-                    // notice (SessionNotifier chat/toast). Direct/Stun marshal the event to the next
-                    // Update tick, so drop the heartbeat row NOW to keep this timeout from re-firing.
-                    bool kicked = false;
-                    try { kicked = _engine.Transport?.DisconnectPeer(clientId) ?? false; } catch { }
-                    if (kicked)
-                    {
-                        _lastHeartbeat.Remove(clientId);
-                        continue;
-                    }
-                    // Transport never knew the peer → no event will come; purge + notify directly
-                    // (the pre-DisconnectPeer legacy path). Capture the name before the purge.
-                    var timedOutNick = TryGetClientName(clientId, out var n) ? n : SessionLifecycle.UnknownPlayer;
-                    RemoveClient(clientId);
-                    SystemChat(SessionLifecycle.FormatPeerEvent(connected: false, timedOutNick));
-                }
+                    PausePeer(clientId, $"no heartbeat for {HeartbeatTimeoutMs / 1000}s");
             }
             // F3 (client side): host HEARTBEAT TIMEOUT. A wedged/half-open host socket may never send
             // FIN/RST, so OnPeerDisconnected (trigger b) never fires and the client would be stranded.
@@ -250,6 +236,44 @@ namespace Multiplayer.Network
                 _lastHeartbeat[steamId] = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
                 // SlotIndex is assigned in BuildPeerList (host), keyed by the client's persistent
                 // PlayerGuid so a reconnecting client reuses its slot.
+            }
+        }
+
+        /// <summary>
+        /// THE involuntary-loss rule (N=50 mandate, 2026-08-05): a peer that stops answering — heartbeat
+        /// silence, a dead socket, a send channel that failed — is PAUSED, not removed. Its roster row,
+        /// slot, permissions and guid binding all survive, so when it comes back it resumes the seat it
+        /// had instead of arriving as a stranger who must fight its way back in. Nothing in the mod counts
+        /// peers any more, so a paused peer costs the session nothing while it is away.
+        ///
+        /// <see cref="RemoveClient"/> is now reserved for a peer that LEFT: the ClientLeave packet, or a
+        /// stale row being reclaimed by its own returning owner.
+        /// </summary>
+        public void PausePeer(ulong steamId, string reason)
+        {
+            if (!_clients.TryGetValue(steamId, out var client)) return;
+            if (client.IsPaused) return;
+            client.IsPaused = true;
+            Debug.LogWarning($"[Multiplayer] Peer {steamId} ({client.PlayerName}) PAUSED: {reason}. " +
+                             "Roster row kept — it resumes its seat when it comes back.");
+            if (_engine.IsHost)
+            {
+                SystemChat($"— {client.PlayerName} lost connection ({reason}); holding their seat —");
+                BroadcastPeerList();
+            }
+        }
+
+        /// <summary>The peer is answering again. Its own seq-gap resync + the rail's CRC backstop pull it
+        /// back level; nothing here has to replay anything.</summary>
+        public void ResumePeer(ulong steamId)
+        {
+            if (!_clients.TryGetValue(steamId, out var client) || !client.IsPaused) return;
+            client.IsPaused = false;
+            Debug.Log($"[Multiplayer] Peer {steamId} ({client.PlayerName}) RESUMED.");
+            if (_engine.IsHost)
+            {
+                SystemChat($"— {client.PlayerName} is back —");
+                BroadcastPeerList();
             }
         }
 
@@ -457,40 +481,21 @@ namespace Multiplayer.Network
                 _engine.SaveTransfer?.ForgetPeer(staleId);
             }
 
-            // A JOIN landing while a save transfer is in flight (lobby-start / F2 reload window —
-            // sessionStarted may still be false, so the mid-session boundary below does not cover it)
-            // must NOT be onboarded: the transport connect already put the peer in _clients
-            // (OnPeerConnected → AddClient) and the LOADED barrier counts the LIVE roster
-            // (TryReleaseBarrier), so the newcomer would stall phase 1 for EVERYONE until the
-            // straggler timeout kicks it anyway. Reject politely and drop it from roster + transport;
-            // it can rejoin once the transfer settles.
-            if (_engine.SaveTransfer?.TransferActive == true)
-            {
-                Debug.LogWarning($"[Multiplayer] Rejecting JOIN from {clientId}: save transfer in flight.");
-                _engine.SendToClient(clientId, new NetworkMessage(PacketType.ConnectionRejected,
-                    NetworkMessage.BuildStringPayload(
-                        "The session is starting (save transfer in progress). Try again in a moment.")));
-                RemoveClient(clientId);
-                try { _engine.Transport?.DisconnectPeer(clientId); } catch { }
-                return;
-            }
 
-            // P1 mid-session join boundary: a peer that connects AFTER the session started can only be
-            // onboarded while the host is in the live GEOSCAPE (the joiner is reproduced from a geoscape
-            // save; the tactical deploy snapshot is turn-0, so an in-progress battle cannot be joined). If a
-            // battle is live (or the host is mid-load) reject with a user-visible reason instead of adding a
-            // stateless peer. Pre-start (lobby) this is false — the normal lobby join/start path owns it.
+            // NOBODY IS REFUSED AT THE DOOR (N=50 mandate). Two refusals used to live here — a JOIN that
+            // landed while a save transfer was in flight, and a mid-session JOIN while the host was in a
+            // battle or mid-load — and both ended in ConnectionRejected + DisconnectPeer, i.e. "come back
+            // later and hope". The first one's whole justification is gone with the LOADED quorum (there is
+            // no phase-1 to stall any more). The second names a real limitation — a joiner is reproduced
+            // from a GEOSCAPE save, and the host has none to hand mid-battle — but that is a reason to make
+            // the peer WAIT, not to throw it out. So: onboard the lobby row now (it already has one from
+            // OnPeerConnected), and DEFER only the save transfer until the host is somewhere it can serve
+            // one. The peer sits in the lobby holding its seat and is pulled in the moment the host is back
+            // on the geoscape — the same on-demand path every other joiner rides.
             bool sessionStarted = _engine.SaveTransfer?.SessionStarted == true;
-            if (SessionLifecycle.ShouldRejectMidSessionJoin(sessionStarted, Sync.GeoRuntime.Instance.IsGeoscapeActive))
-            {
-                Debug.LogWarning($"[Multiplayer] Rejecting mid-session JOIN from {clientId}: host is not on the " +
-                                 "Geoscape (a battle is in progress or the host is loading).");
-                var reject = new NetworkMessage(PacketType.ConnectionRejected,
-                    NetworkMessage.BuildStringPayload(
-                        "Cannot join right now — a battle is in progress. Try again once the host is back on the Geoscape."));
-                _engine.SendToClient(clientId, reject);
-                return;
-            }
+            bool deferOnboard = sessionStarted &&
+                                (_engine.SaveTransfer?.TransferActive == true ||
+                                 SessionLifecycle.ShouldRejectMidSessionJoin(true, Sync.GeoRuntime.Instance.IsGeoscapeActive));
 
             // FIX-4 (SOFT GATE): host/client parity check — the mismatched client still JOINS the lobby
             // normally, but the host stores the exact diff text on its roster row. The diff rides the
@@ -553,7 +558,17 @@ namespace Multiplayer.Network
             // it converges to the host's current state. Unicast + no barrier/counter reset, so the already-
             // connected peers are untouched. A lobby (pre-start) join is handled by the normal start path.
             if (sessionStarted)
-                _engine.SaveTransfer?.HostOnDemandJoin(clientId);
+            {
+                if (deferOnboard)
+                {
+                    Debug.Log($"[Multiplayer] JOIN from {clientId} accepted; save transfer DEFERRED (host is " +
+                              "mid-battle/mid-load or already transferring) — it will be served automatically.");
+                    SystemChat($"— {(string.IsNullOrEmpty(join.Nickname) ? "a player" : join.Nickname)} is waiting " +
+                               "for the host to return to the Geoscape —");
+                    _engine.SaveTransfer?.DeferOnDemandJoin(clientId);
+                }
+                else _engine.SaveTransfer?.HostOnDemandJoin(clientId);
+            }
         }
 
         public void HandleConnectionAccepted(NetworkMessage msg)
@@ -658,6 +673,7 @@ namespace Multiplayer.Network
                 // would keep its half-dead session believing it is connected.
                 if (!_clients.ContainsKey(msg.SenderSteamId)) return;
                 _lastHeartbeat[msg.SenderSteamId] = now;
+                ResumePeer(msg.SenderSteamId); // the resume edge — a paused peer is back (no-op otherwise)
                 // Respond with ack
                 var ack = new NetworkMessage(PacketType.HeartbeatAck,
                     BitConverter.GetBytes(now));
@@ -1084,6 +1100,10 @@ namespace Multiplayer.Network
         public string PlayerName { get; set; } = "Unknown";
         public int Permissions { get; set; }
         public bool IsReady { get; set; }             // mirror of _readyClients for PEER_LIST broadcast
+        // Host-local: this peer stopped answering and is being held, not removed (SessionManager.PausePeer).
+        // Deliberately NOT on the wire — the PEER_LIST format is unchanged; peers learn it from the
+        // system-chat notice PausePeer/ResumePeer post.
+        public bool IsPaused { get; set; }
         public string ParityDiffs { get; set; } = ""; // FIX-4 soft-gate: exact diff text ("" = parity OK)
         public int LatencyMs { get; set; }
         public byte SlotIndex { get; set; }           // host-assigned stable slot (echoed in PEER_LIST)

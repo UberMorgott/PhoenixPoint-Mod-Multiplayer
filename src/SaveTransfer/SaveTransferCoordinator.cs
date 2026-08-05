@@ -837,6 +837,33 @@ namespace Multiplayer.Network
         /// enforced the geoscape boundary; the guard is re-checked here as defense-in-depth. Returns true
         /// iff the capture+send coroutine launched.
         /// </summary>
+        /// <summary>
+        /// A peer that JOINED at a moment the host could not serve it (mid-battle, mid-load, or already
+        /// transferring). NOBODY IS REFUSED (N=50 mandate) — it keeps its lobby seat and is served the
+        /// instant the host can, one at a time. Sequencing is the point: fifty joiners arriving together
+        /// used to mean fifty simultaneous 5 MB captures, which is the same burst the start path had.
+        /// </summary>
+        public void DeferOnDemandJoin(ulong peerId)
+        {
+            if (!_deferredJoins.Contains(peerId)) _deferredJoins.Add(peerId);
+        }
+
+        private readonly List<ulong> _deferredJoins = new List<ulong>();
+
+        /// <summary>Serve ONE waiting joiner per pump, and only when the host is somewhere it can produce
+        /// a geoscape save with nothing else in flight. Driven from <see cref="Update"/>.</summary>
+        private void PumpDeferredJoins()
+        {
+            if (_deferredJoins.Count == 0 || !_engine.IsHost) return;
+            if (TransferActive || !Sync.GeoRuntime.Instance.IsGeoscapeActive) return;
+            var peer = _deferredJoins[0];
+            _deferredJoins.RemoveAt(0);
+            if (!_engine.Session.Clients.ContainsKey(peer)) return; // left while waiting
+            Debug.Log($"[Multiplayer] Deferred join: host is back on the Geoscape → onboarding peer={peer} " +
+                      $"({_deferredJoins.Count} still waiting).");
+            HostOnDemandJoin(peer);
+        }
+
         public bool HostOnDemandJoin(ulong peerId)
         {
             bool geoscape = Sync.GeoRuntime.Instance.IsGeoscapeActive;
@@ -1900,9 +1927,10 @@ namespace Multiplayer.Network
             // never be left holding the geoscape loading-screen input override (see RepairRevealInputLock).
             RepairRevealInputLock();
 
-            // Host: keep handing the start blob out, a few peers at a time (see PumpBlobQueue). Cheap
-            // no-op once every peer has been served.
-            if (_engine.IsHost) PumpBlobQueue();
+            // Host: keep handing the start blob out, a few peers at a time (see PumpBlobQueue), and
+            // serve anyone who joined at a moment we could not onboard them. Both are cheap no-ops once
+            // there is nothing left to hand out.
+            if (_engine.IsHost) { PumpBlobQueue(); PumpDeferredJoins(); }
 
             // Phase-1 (download) native bottom-bar driver — client only. While the save blob is arriving,
             // feed the game's own loading-screen bar the exact download fraction so it fills 0..100% under
