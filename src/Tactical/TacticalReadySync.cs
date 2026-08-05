@@ -275,18 +275,25 @@ namespace Multiplayer.Tactical
                 // do anything — and it also came across VISIBLY: the cloned subtree carries a "hotkey" node
                 // whose Image draws the platform glyph (live log: sprite "XboxOne_Windows", the Xbox View
                 // button — two panels in a circle), which is the stray icon players reported on our button.
-                // Hidden the GAME'S OWN way rather than by poking at Images: SetDisplayed(false) is what the
-                // native code itself calls to take a hotkey display down, and it covers HotkeyIcon, HotkeyText,
-                // HotkeyLabel and Background in one go (HotkeyController.cs:131-164). The component is then
-                // disabled so nothing re-displays it, and its GameObject deactivated so a glyph that is NOT
-                // one of those four links still cannot draw.
+                //
+                // EVERY LINE HERE ACTS ON THE CLONE AND ONLY ON THE CLONE (2026-08-05). The earlier version
+                // also called the native HotkeyController.SetDisplayed(false), on the reasoning that it is
+                // what the game itself calls to take a hotkey display down. It is — but it takes that display
+                // down through FOUR SERIALIZED LINKS (HotkeyIcon/HotkeyText/HotkeyLabel/Background,
+                // HotkeyController.cs:131-164), and Object.Instantiate only re-points a serialized reference
+                // when its target is INSIDE the copied subtree: a link the prefab aims at a shared HUD object
+                // survives the copy pointing at the ORIGINAL, so SetDisplayed would SetActive(false) a NATIVE
+                // object off OUR clone. Deactivating the controller's own GameObject removes the glyph without
+                // dereferencing anything — the glyph Image is a child of that node (live subtree dump:
+                // "hotkey | UI_ArrowRight<Image XboxOne_Windows>") — and it cannot reach outside the clone
+                // because GetComponentsInChildren cannot return anything outside it. Cosmetic either way; the
+                // difference is only whether a native widget can be caught in the blast radius.
                 // DISABLED, never destroyed: RailCheck L67 bans Object.Destroy from this namespace outright
                 // (v1 destroyed evacuating actors and wedged the battle summary), and a namespace-wide ban is
                 // worth more than the one line it costs here.
                 int hotkeys = 0;
                 foreach (var h in go.GetComponentsInChildren<HotkeyController>(true))
                 {
-                    h.SetDisplayed(false);
                     h.enabled = false;
                     // Never the clone ROOT: a prefab that put the controller on the button itself would
                     // otherwise take the whole button down with the glyph.
