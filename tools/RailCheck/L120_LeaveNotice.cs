@@ -384,6 +384,51 @@ namespace RailCheck
                                  "Every arm about WHICH notice a path emits stays green through this; the peer " +
                                  "must simply not change identity between two facts about the same departure";
 
+                // EXECUTED — BOTH OUTCOMES, EACH WITH THE WORDING IT MUST CARRY.
+                //
+                // The identity arm above proves one departure keeps one key. It does not say WHICH of the
+                // two facts reaches the screen, and that is a separate promise the developer has already
+                // had to ask for twice (commit 669126d): a player who closes the window CHOSE to go, and
+                // being told they "lost connection — holding their seat" is a wrong fact about them, not a
+                // clumsy phrasing. The two cases are separated by ORDER alone: the read loop has already
+                // queued a leaver's own ClientLeave by the time it notices the socket is gone, so draining
+                // packets before announcing the drop lets the voluntary fact win — while an involuntary
+                // drop has nothing queued behind it and still announces in the same Update. No wait, no
+                // grace window; if ordering could not separate them, nothing here would.
+                //
+                // So run the REAL pump and fold what it delivers through the REAL latch and the REAL
+                // formatters. Both halves must hold: neither may be bought with the other.
+                var voluntary = DepartureNotices(true, probe);
+                var involuntary = DepartureNotices(false, probe);
+                if (voluntary == null || involuntary == null)
+                    yield return "L120 premise-changed: DirectTransport's pump queues (_peerEventQueue / " +
+                                 "_incomingQueue) no longer resolve, so the packets-before-drops ordering " +
+                                 "that separates a deliberate quit from a dropped connection cannot be executed";
+                else
+                {
+                    if (voluntary.Count != 1 ||
+                        voluntary[0].IndexOf("left", StringComparison.OrdinalIgnoreCase) < 0 ||
+                        voluntary[0].IndexOf(probe, StringComparison.Ordinal) < 0)
+                        yield return "L120 voluntary-leave-misreported: a player who quit deliberately (window " +
+                                     "X / Alt+F4 — its ClientLeave already queued when the socket died) produced " +
+                                     voluntary.Count + " notice(s): [" + string.Join(" | ", voluntary) + "]. It " +
+                                     "must be exactly ONE, saying that player LEFT, by name. Announcing the " +
+                                     "transport drop before draining the packets already sitting in the queue " +
+                                     "reports the commonest way anyone leaves a game as a lost connection — a " +
+                                     "wrong fact about that player, and one the developer has already had to " +
+                                     "ask to have fixed once (669126d)";
+                    if (involuntary.Count != 1 ||
+                        involuntary[0].IndexOf("lost connection", StringComparison.OrdinalIgnoreCase) < 0 ||
+                        involuntary[0].IndexOf(probe, StringComparison.Ordinal) < 0)
+                        yield return "L120 involuntary-drop-misreported: a peer whose connection genuinely died " +
+                                     "with no farewell queued produced " + involuntary.Count + " notice(s): [" +
+                                     string.Join(" | ", involuntary) + "]. It must be exactly ONE, saying that " +
+                                     "player LOST CONNECTION, by name. This is the half that ordering can quietly " +
+                                     "buy off: deferring the drop far enough to let a farewell overtake it also " +
+                                     "defers the drop that has no farewell coming, and a crashed player then goes " +
+                                     "unannounced entirely — silence, which is this repo's dominant bug class";
+                }
+
                 // The OTHER departure fact — the host's — is announced by a different path onto the same
                 // native prompt (SessionEnd), and it carries its own one-shot latch. It is enumerated here
                 // rather than trusted: the graceful HostDisconnected packet and the host's transport drop
@@ -425,6 +470,59 @@ namespace RailCheck
                              "NetworkEngine.Shutdown is the drain that already exists (flush-then-close per " +
                              "peer, then Join under one bounded grace budget); without it the notice everyone " +
                              "gets is a lost connection for a player who deliberately quit";
+        }
+
+        /// <summary>Drive the REAL DirectTransport pump through ONE departure and fold what it delivers
+        /// through the REAL latch and the REAL formatters, wired exactly as the live code is: a ClientLeave
+        /// announces the voluntary line and then clears the roster row (SessionManager.HandleLeave →
+        /// RemoveClient), and a drop announces the involuntary line only while that row is still there
+        /// (NetworkEngine.OnPeerDisconnected → PausePeer). Everything that DECIDES is shipped code; the
+        /// roster row is the single bool stood in for, because standing up a SessionManager needs a live
+        /// NetworkEngine. <paramref name="farewellQueued"/> is the only difference between a player who
+        /// quit and a player whose connection died. Returns null if the pump's queues no longer resolve.</summary>
+        private static List<string> DepartureNotices(bool farewellQueued, string name)
+        {
+            const ulong peer = 1UL;
+            var transport = new DirectTransport();
+            var latch = new DepartureLatch();
+            var notices = new List<string>();
+            var rosterRow = true;
+
+            transport.OnPacketReceived += (id, data) =>
+            {
+                if (!rosterRow) return;
+                if (latch.TryAnnounce(id))
+                    notices.Add(SessionLifecycle.FormatLeaveNotice(SessionLifecycle.LeaverName(name, name)));
+                rosterRow = false; // HandleLeave removes the peer: a voluntary leave is the one thing that does
+            };
+            transport.OnPeerDisconnected += (id, ep) =>
+            {
+                if (!rosterRow) return; // the row is gone — there is nothing left to pause, and no news
+                if (latch.TryAnnounce(id))
+                    notices.Add(SessionLifecycle.FormatConnectionLostNotice(name));
+            };
+
+            if (farewellQueued && !Enqueue(transport, "_incomingQueue", new object[] { peer, new byte[] { 0 } }))
+                return null;
+            if (!Enqueue(transport, "_peerEventQueue", new object[] { false, peer, "connection lost" }))
+                return null;
+            transport.Update();
+            return notices;
+        }
+
+        /// <summary>Put one item straight into a private pump queue. Real sockets cannot be made to lose a
+        /// connection with a farewell already buffered behind it on demand, and that interleaving IS the
+        /// case under test, so the queues are seeded directly and the pump under them is the real one.</summary>
+        private static bool Enqueue(DirectTransport transport, string fieldName, object[] itemArgs)
+        {
+            var field = typeof(DirectTransport).GetField(fieldName, All);
+            if (field == null) return false;
+            var queue = field.GetValue(transport);
+            var enqueue = queue?.GetType().GetMethod("Enqueue");
+            if (enqueue == null) return false;
+            enqueue.Invoke(queue, new[] {
+                Activator.CreateInstance(field.FieldType.GetGenericArguments()[0], itemArgs) });
+            return true;
         }
 
         /// <summary>A bare peer source: the three raises CompositeTransport maps, and nothing else. Real

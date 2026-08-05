@@ -454,15 +454,6 @@ namespace Multiplayer.Transport
                 if (!_connectedPeers.Contains(id)) CloseSession(id);
             }
 
-            // Drain send-failure drops FIRST (deferred out of the send loops — see the field note).
-            if (_pendingSendFailureDrops.Count > 0)
-            {
-                var drops = _pendingSendFailureDrops.ToArray();
-                _pendingSendFailureDrops.Clear();
-                foreach (var peer in drops)
-                    OnPeerDisconnected?.Invoke(peer, $"Steam({peer})");
-            }
-
             while (IsP2PPacketAvailable())
             {
                 var packet = ReadP2PPacket();
@@ -476,6 +467,23 @@ namespace Multiplayer.Transport
             {
                 var (steamId, data) = _incomingQueue.Dequeue();
                 OnPacketReceived?.Invoke(steamId, data);
+            }
+
+            // Send-failure drops last, AFTER the packets (deferred out of the send loops — see the
+            // field note). Same reason DirectTransport.Update announces its drops last: a peer whose
+            // send channel died may still have its own ClientLeave sitting in the P2P queue we just
+            // drained, and reporting the death first turns a deliberate quit into "lost connection".
+            // NOTE this only orders the drops that funnel through Update. Steam's other disconnect
+            // raises (RegisterSendFailure's inline branch, DisconnectPeer, the P2P session-failure
+            // callback) fire OUTSIDE this pump and cannot be ordered against packets by moving code
+            // here — for those the guarantee is the CompositeTransport one: the peer keeps its id,
+            // so the latch still collapses the pair to a single NAMED notice.
+            if (_pendingSendFailureDrops.Count > 0)
+            {
+                var drops = _pendingSendFailureDrops.ToArray();
+                _pendingSendFailureDrops.Clear();
+                foreach (var peer in drops)
+                    OnPeerDisconnected?.Invoke(peer, $"Steam({peer})");
             }
         }
 

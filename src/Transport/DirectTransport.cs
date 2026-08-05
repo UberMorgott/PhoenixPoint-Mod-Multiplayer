@@ -459,14 +459,26 @@ namespace Multiplayer.Transport
         public void Update()
         {
             // Surface a completed client-connect on the main thread first (success → Connected +
-            // peer; failure/timeout → Failed), then drain peer connect/disconnect events (before
-            // packets, preserving the "connect precedes packets" ordering the composite relies on),
-            // then drain received packets — all on the main thread.
+            // peer; failure/timeout → Failed), then CONNECTS, then received packets, then the
+            // DISCONNECTS — all on the main thread.
+            //
+            // WHY THE DROP IS ANNOUNCED LAST. Connects must still precede packets (a peer's first
+            // frame cannot arrive before the peer exists — the composite maps ids on that edge). A
+            // DROP is the opposite case: by the time the read loop notices the socket is gone it has
+            // ALREADY read and queued everything that peer ever sent, including its own ClientLeave.
+            // Announcing the death before delivering those last words made a deliberate quit — the
+            // window X and Alt+F4, the two commonest ways anyone leaves — indistinguishable from a
+            // crash: the host paused the peer on the drop and told everyone "X lost connection",
+            // then read the farewell that said X had chosen to go. Draining packets first lets the
+            // voluntary path win the race it should win, so the notice reads "X left the game".
+            // Ordering only — no wait, no grace window, no "hold on in case a farewell shows up":
+            // an involuntary drop has nothing queued behind it and is announced in this same Update.
             SurfacePendingConnect();
 
-            // Drain peer events under the lock into a local list, then raise them WITHOUT the lock so a
-            // handler that calls back into Send/Broadcast can't deadlock and shared transport state isn't
-            // held while arbitrary handler code runs.
+            // Drain peer events under the lock, then raise them WITHOUT the lock so a handler that
+            // calls back into Send/Broadcast can't deadlock and shared transport state isn't held
+            // while arbitrary handler code runs.
+            List<(ulong peerId, string endpoint)> drops = null;
             while (true)
             {
                 bool connected;
@@ -478,7 +490,11 @@ namespace Multiplayer.Transport
                     (connected, peerId, endpoint) = _peerEventQueue.Dequeue();
                 }
                 if (connected) OnPeerConnected?.Invoke(peerId, endpoint);
-                else OnPeerDisconnected?.Invoke(peerId, endpoint);
+                else
+                {
+                    if (drops == null) drops = new List<(ulong, string)>();
+                    drops.Add((peerId, endpoint));
+                }
             }
 
             // Same pattern for packets: dequeue under the lock, dispatch outside it — handler code
@@ -495,6 +511,12 @@ namespace Multiplayer.Transport
             if (packets != null)
                 foreach (var (peerId, data) in packets)
                     OnPacketReceived?.Invoke(peerId, data);
+
+            // The peer's last words have been delivered; now report that it is gone. Still this same
+            // Update — a drop is never held over to a later frame.
+            if (drops != null)
+                foreach (var (peerId, endpoint) in drops)
+                    OnPeerDisconnected?.Invoke(peerId, endpoint);
         }
 
         private void ListenLoop()
