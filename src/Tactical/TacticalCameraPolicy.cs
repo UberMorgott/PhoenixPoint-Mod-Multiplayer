@@ -96,7 +96,20 @@ namespace Multiplayer.Tactical
             var faction = tlc.CurrentFaction;
             var view = tlc.View;
             var selected = ReferenceEquals(view, null) ? null : view.SelectedActor;
-            if (Allow(faction != null && faction.IsControlledByPlayer, actor, selected)) return true;
+            bool allowed = Allow(faction != null && faction.IsControlledByPlayer, actor, selected);
+
+            // L104(j) INSTRUMENTATION — THE PAIR THAT MEASURES THE WIND-UP, ON EVERY PEER INCLUDING THE OWNER.
+            // Shoot is pushed when the fire coroutine begins and ShootingStarted when the round leaves the
+            // barrel, so their delta IS the aim entry TacticalLevelController:1645 gates on CurrentlyAiming.
+            // Until now only SUPPRESSED hints were logged — and the hints that survive are exactly the ACTING
+            // peer's, so the one wind-up that had to be compared was the one invisible in every log we had.
+            // Two lines per shot per peer: the measurement is the point, and it is user-gesture rate.
+            if (hint == CameraDirectorHint.Shoot || hint == CameraDirectorHint.ShootingStarted)
+                Debug.Log("[Multiplayer][tac] " + hint + " " + actor.DisplayName + " t=" +
+                          Time.realtimeSinceStartup.ToString("0.000") + " " +
+                          (allowed ? "played here" : "suppressed here"));
+
+            if (allowed) return true;
 
             // Never silent: an unexplained camera that DOESN'T move is as confusing as one that does, and a
             // swallow with no log line is this repo's dominant bug class. One line per suppressed cinematic

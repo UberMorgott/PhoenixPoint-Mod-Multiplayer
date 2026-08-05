@@ -250,6 +250,98 @@ namespace RailCheck
                              "the move mid-walk and shoots early. That is not an anchor, it is the desync with " +
                              "its sign flipped.";
 
+            // ── (j) EVERY PEER TAKES THE SAME SIDE OF THE AIM BRANCH ───────
+            // TacticalLevelController:1645 gates the whole aim entry (:1647-1678, the measured 495-781 ms) on
+            // `shootAnimAction.UseAiming && !stepOutNeeded && !tacticalActor.CurrentlyAiming`. CurrentlyAiming
+            // is TacticalActor.cs:228 — Animator.GetInteger("TravelType")==7 || GetInteger("ShootSegmentType")
+            // ==5 — a LOCAL animator integer that is not in the order and cannot be. Two peers answering it
+            // differently take opposite sides of a half-second branch for the SAME shot: observers fire
+            // instantly while the acting peer plays the full aim. L104's own anchor (:1274) fixed the camera
+            // WAIT; this branch one layer down was never anchored.
+            //
+            // The branch's other two inputs (UseAiming off the shared anim-action def, stepOutNeeded off the
+            // relayed target) are the same on every peer already; CurrentlyAiming is the one that is purely
+            // local, so forcing it constant under an arm IS "every peer takes the same side". EXECUTED over
+            // the real predicate and the real postfix — a call-site test would stay green through the exact
+            // failure this arm exists for.
+            var aimPatch = typeof(RelayedAimBranchIsTheSameOnEveryPeer);
+            var aimPost = aimPatch.GetMethod("Postfix", All);
+            var aimToken = cmd.GetField("_relayedAim", All);
+            var underRelayed = cmd.GetMethod("IsRelayedAimKey", All);
+            var armAim = cmd.GetMethod("ArmRelayedAim", All);
+            var currentlyAiming = typeof(PhoenixPoint.Tactical.Entities.TacticalActor)
+                                  .GetProperty("CurrentlyAiming", All)?.GetGetMethod(true);
+            var fireCrt = typeof(TacticalLevelController).GetMethod("FireWeaponAtTargetCrt", All);
+
+            if (aimPost == null || aimToken == null || underRelayed == null || armAim == null ||
+                currentlyAiming == null)
+                yield return "L104(j): the aim anchor no longer resolves (RelayedAimBranchIsTheSameOnEveryPeer" +
+                             ".Postfix, TacticalCommandSync._relayedAim/IsRelayedAimKey/ArmRelayedAim, " +
+                             "TacticalActor.CurrentlyAiming). The aim entry is back to being decided by each " +
+                             "peer's own animator, so one window fires half a second before another on the " +
+                             "same order.";
+            else
+            {
+                // The patch must sit on the getter the game's own branch reads — not near it.
+                var aimAttr = Targeted(aimPatch);
+                if (aimAttr?.declaringType != typeof(PhoenixPoint.Tactical.Entities.TacticalActor) ||
+                    aimAttr?.methodName != "CurrentlyAiming")
+                    yield return "L104(j): the aim anchor no longer targets TacticalActor.CurrentlyAiming — it " +
+                                 "forces some other answer, or none, and :1645 goes back to reading a local " +
+                                 "animator integer that differs per peer.";
+                if (fireCrt != null && !Calls(MoveNextOf(fireCrt), currentlyAiming))
+                    yield return "L104(j): TacticalLevelController.FireWeaponAtTargetCrt no longer reads " +
+                                 "CurrentlyAiming — the anchor forces an answer nothing consults, which is the " +
+                                 "decorative-patch shape arm (f) already exists to catch once.";
+                // ARMED BY BOTH PATHS, exactly like the camera token: one path alone reproduces the desync
+                // with its sign flipped (the peer that armed plays one length, everyone else the other).
+                if (!Calls(onActivated, armAim))
+                    yield return "L104(j): OnAbilityActivated does not arm the aim anchor — the ACTING peer is " +
+                                 "the one peer left on its own animator's answer, and it is the peer that " +
+                                 "reported the desync.";
+                if (!Calls(applyActivate, armAim))
+                    yield return "L104(j): ApplyActivate does not arm the aim anchor — every MIRROR is left on " +
+                                 "its own animator, so a mirror still walking keeps AimLoop and fires with no " +
+                                 "wind-up at all while the acting peer plays the full one.";
+
+                // EXECUTED, part 1 — THE ARM PREDICATE ITSELF, which is what makes the branch constant.
+                var set = aimToken.GetValue(null) as HashSet<int>;
+                if (set == null)
+                    yield return "L104(j): _relayedAim is not a key set any more, so this arm cannot construct " +
+                                 "an armed order and the anchor is unverified.";
+                else
+                {
+                    set.Clear();
+                    bool unarmed = (bool)underRelayed.Invoke(null, new object[] { -7 });
+                    armAim.Invoke(null, new object[] { -7 });
+                    bool armed = (bool)underRelayed.Invoke(null, new object[] { -7 });
+                    bool other = (bool)underRelayed.Invoke(null, new object[] { -8 });
+                    bool keyless = (bool)underRelayed.Invoke(null, new object[] { 0 });
+                    armAim.Invoke(null, new object[] { 0 });
+                    bool keylessAfter = (bool)underRelayed.Invoke(null, new object[] { 0 });
+                    set.Clear();
+                    if (unarmed || !armed || other)
+                        yield return "L104(j): the aim arm does not answer per ORDER (unarmed=" + unarmed +
+                                     " armed=" + armed + " other-actor=" + other + "). It must be true for " +
+                                     "exactly the actors under a relayed activation: always-false leaves every " +
+                                     "peer on its own animator, always-true rewrites solo play as well.";
+                    if (keyless || keylessAfter)
+                        yield return "L104(j): key 0 answers armed. An actor no peer can NAME is one no peer " +
+                                     "can agree with either — forcing its branch changes one screen's animation " +
+                                     "and nobody else's, which is the desync with extra steps.";
+
+                    // EXECUTED, part 2 — THE POSTFIX IS ONE-DIRECTIONAL AND A NO-OP OUTSIDE THE ARM.
+                    if (!Verdict2(aimPost, true))
+                        yield return "L104(j): with NOTHING armed the anchor still forces the answer — solo " +
+                                     "play and every unrelayed ability lose vanilla's aim behaviour for no " +
+                                     "reason. The anchor is a co-op correction, not a rewrite.";
+                    if (Verdict2(aimPost, false))
+                        yield return "L104(j): the anchor turns a FALSE answer into TRUE — it may only ever " +
+                                     "force one direction (everybody plays the wind-up), never invent an aim " +
+                                     "nobody holds, which would make every peer skip a block the host played.";
+                }
+            }
+
             // ── (h) THE CATCH-UP MEASUREMENT SAYS IT ONCE PER BURST ────────
             // Executed, because "how often" is the measurement and one line per MESSAGE is the log volume that
             // buried a live run in 23642 lines of a single family.
@@ -279,6 +371,15 @@ namespace RailCheck
                         break;
                     }
             }
+        }
+
+        /// <summary>Same, for a postfix that also takes the patched instance. Null is the honest argument
+        /// here: an actor cannot be built headless, and with nothing armed the anchor must not consult it.</summary>
+        private static bool Verdict2(MethodInfo postfix, bool native)
+        {
+            object[] args = { null, native };
+            postfix.Invoke(null, args);
+            return (bool)args[1];
         }
 
         /// <summary>Drive the ref-bool postfix and read back what it left in the game's answer.</summary>

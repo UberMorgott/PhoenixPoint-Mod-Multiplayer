@@ -1130,6 +1130,7 @@ namespace Multiplayer.Tactical
             _deferred.Clear();   // a held order belongs to ONE battle; releasing it into the next is a ghost order
             _saidUncovered.Clear();
             _mirrorSkipsCameraWait.Clear();   // live ability refs: never let them outlive the battle
+            _relayedAim.Clear();              // L104(j): keys belong to ONE battle
             _saidKeyless.Clear();
             _replayOriginPeer = 0;
             _burstFrame = 0;
@@ -1237,7 +1238,8 @@ namespace Multiplayer.Tactical
             // gesture still belongs to somebody, and said out loud. A NULL target is NOT a refusal any more
             // (A5): the game legitimately activates with no payload — AIActionMoveAndEscape:46 evacuates with
             // ExecuteAndWait(null) — and the order is still meaningful, so the wire carries "no target" as
-            // itself rather than dropping the whole command.
+            // itself rather than dropping the whole command. (The aim arm below needs `key`, so it comes
+            // after this block, not before it.)
             string unkeyable = target == null ? null : FirstUnkeyableTargetField(target);
             if (key == 0 || string.IsNullOrEmpty(guid) || unkeyable != null)
             {
@@ -1272,6 +1274,9 @@ namespace Multiplayer.Tactical
             // itself does for every ability with TrackWithCamera == false. Same arm as the mirror's (:1803),
             // so the one-shot token is always consumed and never goes stale.
             if (ability.TrackWithCamera) _mirrorSkipsCameraWait.Add(ability);
+            // AND THE AIM BRANCH, one layer down (law L104(j)). Same arm point, deliberately NOT gated on
+            // TrackWithCamera: the aim entry has nothing to do with the camera.
+            ArmRelayedAim(key);
 
             if (relay == RelayMirror)
             {
@@ -1454,6 +1459,26 @@ namespace Multiplayer.Tactical
             if (!IsRider(ability)) return;
             HostSettle(ability.TacticalActorBase);
         }
+
+        /// <summary>L104(j) — ACTORS WHOSE AIM BRANCH IS NO LONGER LOCAL, by shared key. Armed at the SAME two
+        /// points as <c>_mirrorSkipsCameraWait</c> (the acting path and the mirror path), so every peer holds
+        /// the same set for the same order. Per-BATTLE, cleared in <see cref="Reset"/>; deliberately never
+        /// removed per-actor, because an actor can only get into vanilla's aim LOOP by having shot before,
+        /// and that shot was relayed — so by the moment the branch could disagree, every peer is armed.</summary>
+        private static readonly HashSet<int> _relayedAim = new HashSet<int>();
+
+        private static void ArmRelayedAim(int key) { if (key != 0) _relayedAim.Add(key); }
+
+        /// <summary>Is this actor's aim branch under a relayed order? Read by
+        /// <see cref="RelayedAimBranchIsTheSameOnEveryPeer"/>, on a getter the game calls per shot.</summary>
+        internal static bool UnderRelayedAim(TacticalActorBase actor) =>
+            _relayedAim.Count != 0 && IsRelayedAimKey(TacticalActorKey.Of(actor));
+
+        /// <summary>The arm predicate with the Unity half taken out, so RailCheck can execute the decision
+        /// itself rather than assert that a call to it exists — an actor cannot be built headless, a key can.
+        /// Key 0 = no shared identity: an actor no peer can name is one no peer can agree with either, so it
+        /// keeps the game's own answer.</summary>
+        internal static bool IsRelayedAimKey(int key) => key != 0 && _relayedAim.Contains(key);
 
         /// <summary>
         /// THE TURN-EDGE SWEEP (law L123) — settle EVERY keyed live actor, once per host faction turn.
@@ -1979,6 +2004,7 @@ namespace Multiplayer.Tactical
             // because that is exactly the arm that reaches WaitForCameraChase (TacticalAbility:971), so the
             // token is always consumed and never goes stale.
             if (ability.TrackWithCamera) _mirrorSkipsCameraWait.Add(ability);
+            ArmRelayedAim(key);   // law L104(j), same arm as the acting path's
             FillLiveTargetObject(ability, target);
             using (SyncApplyScope.Enter()) ability.Activate(target);
             // DID IT START, OR ONLY GET IN LINE? PlayingAction.SetState(Playing) calls StartPlayingAction
@@ -2578,6 +2604,54 @@ namespace Multiplayer.Tactical
             if (__result || !SyncApplyScope.Active) return;
             var faction = __instance == null ? null : __instance.CurrentFaction;
             if (faction != null && faction.IsControlledByAI) __result = true;
+        }
+    }
+
+    /// <summary>
+    /// THE AIM BRANCH, ONE LAYER BELOW THE CAMERA WAIT (law L104(j), 2026-08-05).
+    ///
+    /// MEASURED, not argued: order skew between peers is negligible (actor→host +18 ms, →peer2 +28 ms), and
+    /// there is no confirmation round trip to blame — <c>TacticalViewState.ActivateAbility</c>:270 calls
+    /// <c>ability.Activate</c> synchronously, and <c>HOST mission END outcome=Won</c> reached the KILLER
+    /// FIRST (+15 ms) against the non-killer's +37 ms. What differs is a 495-502 ms block (778-781 ms on a
+    /// heavy weapon) that mirror peers play and the acting peer skips, or the reverse: "in some windows
+    /// someone fires half a second earlier", and run-then-shoot makes observers fire INSTANTLY while the
+    /// acting peer plays the full aim.
+    ///
+    /// <c>TacticalLevelController</c>:1645 gates that entire block (:1647-1678) on
+    /// <c>TacticalActor.CurrentlyAiming</c> — which is
+    /// <c>Animator.GetInteger("TravelType") == 7 || Animator.GetInteger("ShootSegmentType") == 5</c>
+    /// (TacticalActor.cs:228). A LOCAL ANIMATOR INTEGER. It is not in the order, it cannot be, and two peers
+    /// answering it differently take opposite sides of a half-second branch for the same shot.
+    /// <c>TacticalAimPoseSync</c>:361 makes that certain rather than likely — it defers ANY stance message,
+    /// including the CLEAR, while <c>nav.IsNavigating</c>, so a mirror still walking keeps
+    /// <c>SetAimParams(AimLoop)</c> (:385) and fires with no wind-up at all, while :346 does not exempt the
+    /// emitter and the acting peer's own clear writes <c>SetNullNavParams</c> (:365) onto its own soldier,
+    /// which then plays the FULL wind-up.
+    ///
+    /// SO THE FIX IS NOT IN THE STANCE TABLE. A table that defers while walking can never be authoritative at
+    /// fire time; papering over it there would move the race, not end it. Instead the branch is forced to ONE
+    /// answer under a relayed activation — exactly the shape <see cref="MirroredPlayMatchesHostPacing"/>
+    /// already uses one layer up, and armed at the same two points as the L104 camera token. Universal, zero
+    /// wire bytes, and it demotes the aim table back to what it is: cosmetic.
+    ///
+    /// THE ACCEPTED COST, stated rather than hidden: forcing FALSE means every peer PLAYS the wind-up, so a
+    /// player who was already holding aim on a target loses vanilla's instant follow-up shot. That is the
+    /// price of one answer; forcing TRUE would be the opposite bug (nobody ever aims) and is worse.
+    ///
+    /// MISSION STATISTICS ARE THE SAME RULE, NOT A SECOND PATCH. The 2-3 s late summary on the peer that made
+    /// the killing blow is its own presentation queue being longer — its shot plus the kill cinematic that
+    /// <see cref="TacticalCameraPolicy"/> suppresses on watchers — and the native summary waits on
+    /// <c>TacticalView.IsWaitingForActiveAndQueuedAbilitiesAndMapUpdate</c>, already named by L104(f).
+    /// Shortening the shot to one shared length shortens that queue on every peer alike.
+    /// </summary>
+    [HarmonyPatch(typeof(TacticalActor), nameof(TacticalActor.CurrentlyAiming), MethodType.Getter)]
+    internal static class RelayedAimBranchIsTheSameOnEveryPeer
+    {
+        private static void Postfix(TacticalActor __instance, ref bool __result)
+        {
+            if (!__result) return;                                    // already the forced answer
+            if (TacticalCommandSync.UnderRelayedAim(__instance)) __result = false;
         }
     }
 
