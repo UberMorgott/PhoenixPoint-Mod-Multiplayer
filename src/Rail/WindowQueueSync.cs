@@ -1,10 +1,12 @@
 using System;
 using System.IO;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
 using PhoenixPoint.Common.Utils;
+using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewStates;
@@ -60,16 +62,26 @@ namespace Multiplayer.Network.Sync
     /// dismiss message, on purpose" is not contradicted: that argues against the HOST hard-closing a client's
     /// open window, which still never happens.
     ///
-    /// REACH TODAY, honestly stated: a peer can only answer a window the HOST RAISED TO IT, so this op
-    /// resolves exactly the mirrored notification modals of 0xB7 (research complete above all, "the single
-    /// most frequent window in a campaign"). It does NOT reach the brief / soldier-join / interception /
-    /// asset-deployment / cutscene kinds and never did: those are declared Gap or LocalOnly, they exist on
-    /// ONE screen, and a peer that does not have a window cannot close it — the ANSWER half is worthless
-    /// without the RAISE half, which is the hole <see cref="GeoWindowCoverage"/> already names.
+    /// REACH TODAY, honestly stated, and it is exactly the set 0xB7 RAISES — never more: a peer can only
+    /// answer a window the HOST RAISED TO IT. That is the mirrored notification modals (research complete
+    /// above all, "the single most frequent window in a campaign"), the brief / soldier-join family since the
+    /// generic EntityRef shape shipped, and — since 2026-08-05, through <see cref="OpDeploy"/> —
+    /// <c>UIStateAssetDeployment</c>, which 0xB7 gained a non-modal arm for. It still does NOT reach the
+    /// interception kinds (declared Gap: no rail identity for a GeoAirMission) or a cutscene (each peer holds
+    /// its own copy and closes it): the ANSWER half is worthless without the RAISE half, and where the raise
+    /// is missing <see cref="GeoWindowCoverage"/> names the hole rather than this file pretending to cover it.
     /// </summary>
     internal static class WindowQueueSync
     {
         internal const byte OpAdvance = 1;  // [identity:string][result:u8]
+
+        /// <summary>THE SECOND ANSWER SHAPE — a window whose resolution is not "which button" but "which
+        /// object": [identity:string][siteRef:string]. It exists because <c>UIStateAssetDeployment</c> gained a
+        /// mirrored copy (0xB7's non-modal arm) and its ONLY exit is <c>DeployAtSite(GeoSite)</c>:69, which
+        /// calls <c>GeoPhoenixFaction.DeployAsset</c> — host-authoritative, so a client's click may not run it
+        /// (law 3). Not folded into <see cref="OpAdvance"/>: that op's whole body is a <c>ModalResult</c> and a
+        /// window that answers with an ENTITY has nothing to put in it.</summary>
+        internal const byte OpDeploy = 2;   // [identity:string][siteRef:string]
 
         /// <summary>No answer recorded. A LOCAL sentinel for <see cref="_pendingResult"/> only — it never
         /// rides the wire, because every window this family can name is a modal and therefore always carries
@@ -89,7 +101,11 @@ namespace Multiplayer.Network.Sync
         internal static void RegisterIntents()
         {
             IntentRail.Register(SurfaceIds.GeoWindowIntent, "window",
-                new Dictionary<byte, IntentRail.OpHandler> { [OpAdvance] = HandleAdvance });
+                new Dictionary<byte, IntentRail.OpHandler>
+                {
+                    [OpAdvance] = HandleAdvance,
+                    [OpDeploy] = HandleDeploy,
+                });
         }
 
         // ─── WINDOW IDENTITY (pure; RailCheck L82 executes it) ─────────────
@@ -115,24 +131,42 @@ namespace Multiplayer.Network.Sync
         /// all LocalOnly, all opened by the clicking peer itself), and <c>Unsupported</c> refuses one whose
         /// data 0xB7 cannot describe and therefore never shipped (a mission brief's live <c>GeoMission</c>).
         ///
-        /// A window with no identity is neither sent nor advanced, and there is no non-modal arm any more.
-        /// That drops the plain-dismissal reach `81afe12` claimed for cutscenes and asset deployment; it was
-        /// never real, because those are declared Gap / LocalOnly, reach ONE screen, and a peer cannot close
-        /// a window it does not have. What it also drops is <c>UIStateGeoscapeEvent</c>, which needed no arm
+        /// A window with no identity is neither sent nor advanced. The blanket "is not a modal" arm that
+        /// `81afe12` gave cutscenes and asset deployment stays DEAD and must not come back — it named a KIND,
+        /// so it dismissed every peer's own tutorial and replenish screen too. What replaced it for asset
+        /// deployment is the opposite property, and only for that one state: the host now RAISES it (0xB7's
+        /// non-modal arm), so the peer's copy was built from the host's payload and re-describing the live
+        /// bind names the INSTANCE. What it also drops is <c>UIStateGeoscapeEvent</c>, which needed no arm
         /// here at all: an event answer already crosses as the 0xB4 intent keyed on the event's own
         /// <c>EventID</c> (<see cref="EventSync"/>), so all this op ever added there was the wrong-instance
         /// dismissal that made it a regression.
         /// </summary>
         internal static string IdentityOf(object state)
         {
-            var modal = state as UIStateGeoModal;
-            if (modal == null) return null;                                    // this peer's own local window
-            if (GeoWindowCoverage.RuleForModal(modal.ModalType)?.Sync != WindowSync.Mirrored) return null;
-            var p = GeoModalMirror.Describe(modal.ModalData);
-            if (p.Shape == GeoModalMirror.DataShape.Unsupported) return null;  // never rode the 0xB7 raise
-            return modal.ModalType + "|" + p.Shape + "|" + p.Ref + "|" +
-                   string.Join(",", p.Keys ?? new string[0]);
+            switch (state)
+            {
+                case UIStateGeoModal modal:
+                    if (GeoWindowCoverage.RuleForModal(modal.ModalType)?.Sync != WindowSync.Mirrored) return null;
+                    return Identity(modal.ModalType.ToString(), GeoModalMirror.Describe(modal.ModalData));
+                // The SAME argument, one state further: since 2026-08-05 the host raises this one to every
+                // peer through 0xB7's non-modal arm, so a peer's copy really was built out of the host's own
+                // payload and re-describing the live bind yields the same string on both sides. That is the
+                // property this method has always required — it is not "non-modal windows are nameable now".
+                case UIStateAssetDeployment deploy:
+                    if (GeoWindowCoverage.RuleFor(typeof(UIStateAssetDeployment))?.Sync != WindowSync.Mirrored)
+                        return null;
+                    return Identity("AssetDeployment", GeoModalMirror.Describe(deploy.DeployBind));
+                default:
+                    return null;                                               // this peer's own local window
+            }
         }
+
+        /// <summary>The identity string itself: the window KIND plus the 0xB7 payload that built it, minus
+        /// <c>Num</c> — that field is a presentation flag the client's rebuild deliberately overrides
+        /// (SwitchToResearchState) or a pair of display bits, and it names nothing.</summary>
+        private static string Identity(string kind, GeoModalMirror.Raise p) =>
+            p.Shape == GeoModalMirror.DataShape.Unsupported ? null   // never rode the 0xB7 raise
+                : kind + "|" + p.Shape + "|" + p.Ref + "|" + string.Join(",", p.Keys ?? new string[0]);
 
         // ─── THE VALIDATOR (pure — host facts only, law 3; RailCheck L82 executes it) ───
 
@@ -142,10 +176,10 @@ namespace Multiplayer.Network.Sync
         /// hypothetical, it is what this family did for one build on 2026-08-01.
         /// <paramref name="haveIdentity"/> is null/empty when the host's current window has no shared
         /// identity: no window up, or a window of the host's own that no peer ever saw.</summary>
-        internal static string Validate(string haveIdentity, string wantIdentity, byte result)
+        internal static string ValidateIdentity(string haveIdentity, string wantIdentity)
         {
             if (string.IsNullOrEmpty(wantIdentity))
-                return "the answer names no window — only a host-RAISED mirrored modal has an identity both " +
+                return "the answer names no window — only a host-RAISED mirrored window has an identity both " +
                        "peers can agree on, and nothing without one may advance anybody's queue";
             if (string.IsNullOrEmpty(haveIdentity))
                 return "the host is not on a window any peer shares — either its queue is not blocked at all, " +
@@ -153,6 +187,15 @@ namespace Multiplayer.Network.Sync
             if (!string.Equals(haveIdentity, wantIdentity, StringComparison.Ordinal))
                 return "the host holds '" + haveIdentity + "' but the answer names '" + wantIdentity +
                        "' — a different window INSTANCE, so advancing would dismiss something nobody answered";
+            return null;
+        }
+
+        /// <summary><see cref="ValidateIdentity"/> plus the one question only a MODAL answer raises. Split so
+        /// the deploy op can ask the identity half without inventing a <c>ModalResult</c> it does not have.</summary>
+        internal static string Validate(string haveIdentity, string wantIdentity, byte result)
+        {
+            string why = ValidateIdentity(haveIdentity, wantIdentity);
+            if (why != null) return why;
             if (result > (byte)ModalResult.Close)
                 return "a modal is a DECISION window and the answer carries none (result=" + result + ") — " +
                        "its DialogCallback would run against an undefined ModalResult";
@@ -199,6 +242,55 @@ namespace Multiplayer.Network.Sync
                       " for peer=" + senderPeerId + " nonce=" + nonce);
         }
 
+        /// <summary>The asset-deployment answer. Same identity gate as <see cref="HandleAdvance"/>, then the
+        /// host runs the GAME'S OWN <c>UIStateAssetDeployment.DeployAtSite</c>:69 over its OWN prompt — which
+        /// is <c>GeoPhoenixFaction.DeployAsset</c> plus <c>FinishQueriedState</c>, exactly what a host click
+        /// does. The client contributed two strings. The site is re-resolved on the host's graph and checked
+        /// against the prompt's OWN <c>DeploySites</c>, because a wire-named site is a client-supplied address
+        /// and the game's own list is the only definition of where this asset may go.</summary>
+        private static void HandleDeploy(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
+        {
+            string wantIdentity = r.ReadString();
+            string siteRef = r.ReadString();
+
+            var geo = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>();
+            var query = SwitchQueryField?.GetValue(geo?.View) as GeoscapeViewSwitchQuery;
+            if (geo == null || query == null)
+            {
+                Debug.Log("[MP][windows] deploy of '" + wantIdentity + "' from peer=" + senderPeerId +
+                          " ignored — this host has no live geoscape window queue right now");
+                return;
+            }
+
+            var current = CurrentRequestField?.GetValue(query) as GeoscapeViewStateSwitchRequest;
+            var deploy = current?.State as UIStateAssetDeployment;
+            string haveIdentity = IdentityOf(deploy);
+
+            string why = ValidateIdentity(haveIdentity, wantIdentity);
+            if (why != null)
+            {
+                Debug.Log("[MP][windows] deploy from peer=" + senderPeerId + " nonce=" + nonce +
+                          " did NOT apply — " + why);
+                return;
+            }
+
+            var site = IdentityResolver.Resolve(geo, siteRef, null) as GeoSite;
+            if (site == null || !deploy.DeploySites.Contains(site))
+            {
+                // LOUD, not a quiet return: the answering peer's own copy is already closed, so a swallow here
+                // leaves the asset undeployed AND the host's prompt up — the exact wedge this arm ends.
+                Debug.LogError("[MP][windows] deploy from peer=" + senderPeerId + " NOT applied — '" + siteRef +
+                               "' " + (site == null ? "resolves to no site on this host"
+                                                    : "is not one of the sites this prompt offers") +
+                               ". The host's asset-deployment prompt stays up and the asset is undeployed");
+                return;
+            }
+
+            deploy.DeployAtSite(site);
+            Debug.Log("[MP][windows] HOST deployed '" + haveIdentity + "' at " + siteRef +
+                      " for peer=" + senderPeerId + " nonce=" + nonce);
+        }
+
         // ─── CLIENT: the capture seam (law 4a, presentation) ───────────────
 
         /// <summary>The answer <see cref="FinishDialogAnswer"/> saw one call frame ago. <c>FinishDialog</c>:82
@@ -222,6 +314,11 @@ namespace Multiplayer.Network.Sync
             {
                 var query = SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
                 var state = (CurrentRequestField?.GetValue(query) as GeoscapeViewStateSwitchRequest)?.State;
+                // OpAdvance IS the modal answer — its whole body is a ModalResult. IdentityOf now also names
+                // the asset-deployment prompt (for OpDeploy), and that window closes through this same
+                // FinishQueriedState, so without this line every deploy would send a second, answerless
+                // message the host could only log as a mismatch.
+                if (!(state is UIStateGeoModal)) return;
                 string identity = IdentityOf(state);
                 // THE ORDINARY CASE, and the whole of the 2026-08-01 fix: this peer closed a window of its
                 // OWN — its event picker, its tutorial, its replenish screen, its ability prompt — or the
@@ -267,6 +364,47 @@ namespace Multiplayer.Network.Sync
         internal static class FinishQueriedStateCapture
         {
             private static void Prefix(GeoscapeView __instance) => SendAdvance(__instance);
+        }
+
+        /// <summary>Half three, and the ONLY blocking seam in this family: the asset-deployment prompt's one
+        /// exit. <c>DeployAtSite</c>:69 calls <c>GeoPhoenixFaction.DeployAsset</c> — a soldier joining a base,
+        /// a vehicle being created — which is authoritative, so on a client it is BLOCKED (law 3, block-first)
+        /// and becomes the 0xB9 deploy intent. This peer's own copy is then closed through the game's own
+        /// <c>FinishQueriedState</c>, exactly as the native tail at :79 does: closing one's own window is
+        /// presentation and must happen whatever the host makes of the intent. Host and solo run native.</summary>
+        [HarmonyPatch(typeof(UIStateAssetDeployment), nameof(UIStateAssetDeployment.DeployAtSite))]
+        internal static class DeployAtSiteCapture
+        {
+            private static bool Prefix(UIStateAssetDeployment __instance, GeoSite site)
+            {
+                if (IntentRail.ShouldRunNative()) return true;
+                try
+                {
+                    string identity = IdentityOf(__instance);
+                    string siteRef = IdentityResolver.RootRef(site);
+                    if (identity == null || string.IsNullOrEmpty(siteRef))
+                    {
+                        // Never fall through to native: that would deploy on this peer alone. The prompt stays
+                        // up here so the player can retry, and the reason is on the log.
+                        Debug.LogError("[MP][windows] asset-deploy click DROPPED — " +
+                                       (identity == null ? "this peer's prompt has no shared identity, so the host " +
+                                                           "could not tell which window is being answered"
+                                                         : "the chosen site has no rail root ref") +
+                                       ". Nothing was deployed locally either");
+                        return false;
+                    }
+                    IntentRail.Send(SurfaceIds.GeoWindowIntent, OpDeploy,
+                        "deploy " + identity + " at " + siteRef,
+                        w => { w.Write(identity); w.Write(siteRef); });
+                    GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.View?.FinishQueriedState();
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogError("[MP][windows] asset-deploy capture failed — the asset was NOT deployed on any " +
+                                   "peer and this prompt stays open: " + ex);
+                }
+                return false;
+            }
         }
     }
 }

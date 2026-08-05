@@ -161,20 +161,34 @@ namespace Multiplayer.Network.Sync
             },
             [typeof(UIStateAssetDeployment)] = new WindowRule
             {
-                Sync = WindowSync.LocalOnly,
+                Sync = WindowSync.Mirrored,
+                // VERDICT REVERSED 2026-08-05. The old LocalOnly reasoning — "a HOST decision on host-owned
+                // assets, mirroring would ask the client to decide something it cannot apply" — was answering
+                // the wrong question: a client cannot APPLY the placement, but it can NAME it, and the host
+                // applies. The 2026-08-01 amendment had already recorded the cost of getting it wrong ("left
+                // up on an idle host it blocks every later window ... a REAL and still-OPEN hole"), and the
+                // fix it named — "draining it needs a host→all raise" — is what shipped here.
                 Why = "\"where does this newly manufactured vehicle / recruited soldier go\" (GeoscapeView" +
-                      ".PrepareDeployAsset:1308, self-gated to faction == ViewerFaction). It is a HOST decision on " +
-                      "host-owned assets; the placement it produces reaches the client as ordinary value/structural " +
-                      "deltas, so mirroring the prompt would ask the client to decide something it cannot apply. " +
-                      "AMENDED 2026-08-01: LocalOnly used to imply the window was also HARMLESS to the other peer, " +
-                      "and it is not — this state sets no answer of its own but it does hold the queue slot " +
-                      "(ExitState:66 is its only way out), so left up on an idle host it blocks every later window " +
-                      "and pauses the shared clock. That is a REAL and still-OPEN hole. The same-day amendment " +
-                      "claiming 0xB9's advance op closed it is WITHDRAWN: that op's non-modal arm identified a " +
-                      "window only by \"is not a modal\", which is equally true of every peer's own tutorial and " +
-                      "replenish screen, so it dismissed unrelated windows on other peers and was removed. Since " +
-                      "this prompt reaches ONE screen, no peer holds a copy to close and no capture on a peer's " +
-                      "own FinishQueriedState could ever have named it — draining it needs a host→all raise",
+                      ".PrepareDeployAsset:1308, self-gated to faction == ViewerFaction). HOST-RAISED BY " +
+                      "CONSTRUCTION and that is why it was a one-screen window: both raisers sit behind gates a " +
+                      "client never passes — a manufacture completion (ItemManufacturing.FinishManufactureItem" +
+                      ":498 -> OnManufacture, reached only from Manufacture.Update() inside LevelHourlyUpdateCrt, " +
+                      "which ClientSimGate blocks WHOLE) and GeoPhoenixFaction.AddRecruit:708. Since 2026-08-05 " +
+                      "it rides the GENERIC non-modal arm of surface 0xB7 (GeoModalMirror.StateKind" +
+                      ".AssetDeployment): the payload names the asset by its own rail root ref, the aircraft and " +
+                      "related item by def guid, and the two flags as bits, and the peer rebuilds the " +
+                      "GeoDeployAssetFactionCharacterBind off ITS OWN graph and stamps its OWN faction exactly as " +
+                      "the game's save-restore does (RestoreContext:35) — nothing but addresses crosses. It parks " +
+                      "in the SAME ModalParkQueue when the asset has not landed yet (a manufactured ground " +
+                      "vehicle is minted by CreateCharacterFromTemplate in the same call stack as the prompt, so " +
+                      "the raise always beats its own structural create) and refuses LOUDLY when it never does. " +
+                      "The ANSWER is host-authoritative and travels back: DeployAtSite:69 is blocked on a client " +
+                      "and becomes the 0xB9 deploy intent, which the host validates against its OWN prompt's " +
+                      "DeploySites and then answers by calling the game's own DeployAtSite — so law 91 holds " +
+                      "(any peer can drain this window for everyone) and law 3 holds (only the host runs " +
+                      "GeoPhoenixFaction.DeployAsset). DECLARED REMAINDER: a client that cannot resolve the asset " +
+                      "gets NO copy and the host's own prompt still needs a click on the host — the raise is " +
+                      "refused loudly rather than rendered over a null, and the window is never replayed",
             },
             [typeof(UIStateReplenish)] = new WindowRule
             {
@@ -519,6 +533,10 @@ namespace Multiplayer.Network.Sync
             try
             {
                 GeoWindowCoverage.Announce(request?.State?.GetType());
+                // THE NON-MODAL RAISE, at the one queue every pushed window passes: a state that reached here
+                // is one the game is interrupting the player with, it carries its own priority and its own
+                // live data, and the modal family is already captured at its openers. Host-gated inside.
+                GeoModalMirror.HostBroadcastQueued(request);
                 // Same postfix, same chokepoint, and the same reason it is a postfix: the native insert must
                 // happen exactly as it always did, and only THEN is the list trimmed back to its bound.
                 GeoWindowCoverage.TrimQueue(__instance);

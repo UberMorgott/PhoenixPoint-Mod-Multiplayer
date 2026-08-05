@@ -180,6 +180,7 @@ namespace RailCheck
             laws.AddRange(L106_ModalEntityRaise.Check());
             laws.AddRange(L107_ModalRaiseDeferral.Check());
             laws.AddRange(L108_GameBuildParity.Check());
+            laws.AddRange(L109_QueuedStateRaise.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -9651,7 +9652,11 @@ namespace RailCheck
         /// operand-size table — a naive byte scan for the call opcodes would match operand bytes and invent
         /// edges, and a law that cries wolf is a law that gets ignored. Anything unparseable ABANDONS the
         /// method rather than guessing (under-reporting is survivable here; a false red is not).</summary>
-        private static IEnumerable<MethodBase> Callees(MethodBase m, Assembly asm, bool directCallsOnly = false)
+        // internal, not private: L109 asks the same question about a callee in the GAME assembly (a `newobj`
+        // of UIStateAssetDeployment, which a raw metadata-token scan cannot see across assemblies), and a
+        // second copy of this IL walker is the two-tables-disagree shape this repo keeps paying for. Nothing
+        // else about it changes.
+        internal static IEnumerable<MethodBase> Callees(MethodBase m, Assembly asm, bool directCallsOnly = false)
         {
             byte[] il = null;
             try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }

@@ -3,13 +3,17 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using Base.Defs;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
+using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Common.Utils;
+using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.Research;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.Levels.Factions;
 using PhoenixPoint.Geoscape.View;
+using PhoenixPoint.Geoscape.View.ViewControllers;
 using PhoenixPoint.Geoscape.View.ViewControllers.Modal;
 using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
@@ -17,10 +21,21 @@ using UnityEngine;
 namespace Multiplayer.Network.Sync
 {
     /// <summary>
-    /// Law 11 presentation for the geoscape MODAL family — the second window kind on the rail, after
+    /// Law 11 presentation for the geoscape QUEUED-WINDOW family — the second window kind on the rail, after
     /// <see cref="EventPopup"/>'s 0xB6 event picker, and the one <see cref="GeoWindowCoverage"/> carried as
     /// its biggest declared Gap. The host ships ONE PRESENTATION PAYLOAD per raise (surface
-    /// <see cref="SurfaceIds.GeoModalRaise"/> 0xB7) and the client rebuilds the REAL native modal from it.
+    /// <see cref="SurfaceIds.GeoModalRaise"/> 0xB7) and the client rebuilds the REAL native window from it.
+    ///
+    /// NOT ONLY MODALS SINCE 2026-08-05. The surface carries a <see cref="StateKind"/> byte, so the SAME
+    /// payload — seq, priority, data shape, refs — raises any DECLARED queued <c>GeoscapeViewState</c>, not
+    /// just <c>UIStateGeoModal</c>. That is the whole generic arm: <c>UIStateAssetDeployment</c> ("where does
+    /// this newly manufactured vehicle / recruited soldier go") was outside 0xB7 entirely because it is not a
+    /// modal, and being outside meant it reached ONE screen and held that peer's window queue until that
+    /// peer clicked (law 91). It now rides the seq stream, the park queue, the refusal contract, the coverage
+    /// gate and the priority ordering that already existed — the only per-kind code is one
+    /// <see cref="Describe"/> case, one <see cref="BuildData"/> case and one <c>new</c> in
+    /// <see cref="RaiseMirrored"/>. A raise is host→all only; the ANSWER (which base) rides back as
+    /// <see cref="WindowQueueSync"/>'s 0xB9 deploy op, because placing an asset is host-authoritative.
     ///
     /// WHY A PAYLOAD FAMILY AND NOT THE QUEUE REQUEST. <c>GeoscapeViewStateSwitchRequest</c> carries a live
     /// <c>IState</c> and nothing else, and the state behind it — <c>UIStateGeoModal</c> — is built from a
@@ -74,6 +89,26 @@ namespace Multiplayer.Network.Sync
 
         // ─── THE PAYLOAD (host→all, surface 0xB7) ──────────────────────────
 
+        /// <summary>WHICH queued <c>GeoscapeViewState</c> the peer builds. The generic axis of this surface:
+        /// the payload below describes the DATA, this says what to make with it. A kind is added by declaring
+        /// its state <c>Mirrored</c> in <see cref="GeoWindowCoverage.Declared"/>, giving its data object a
+        /// <see cref="Describe"/> case and adding its <c>new</c> to <see cref="RaiseMirrored"/> — never by
+        /// minting a second raise surface, which is how 0xBA (cutscenes) and this one ended up as two
+        /// mechanisms for one job.</summary>
+        internal enum StateKind : byte
+        {
+            /// <summary><c>UIStateGeoModal</c> — 43 <c>ModalType</c>s wearing one state, so this kind and
+            /// this kind alone reads <see cref="Raise.ModalType"/>.</summary>
+            Modal = 0,
+            /// <summary><c>UIStateAssetDeployment</c> — GeoscapeView.PrepareDeployAsset:1308, raised on the
+            /// host by a manufacture completion (<c>ItemManufacturing.FinishManufactureItem</c>:498 →
+            /// <c>OnManufacture</c>, reached only from <c>Manufacture.Update()</c> inside
+            /// <c>LevelHourlyUpdateCrt</c>, which <see cref="ClientSimGate"/> blocks WHOLE on a client) or by
+            /// a recruit with nowhere to go (<c>GeoPhoenixFaction.AddRecruit</c>:708). Host-only by
+            /// construction, therefore a one-screen window until this arm existed.</summary>
+            AssetDeployment = 1,
+        }
+
         /// <summary>How <c>modalData</c> is described on the wire. The shape is derived from the RUNTIME type
         /// of the host's own object, never from a static ModalType→class table: the game's own mapping is a
         /// fallback chain (<c>GetMissionBriefModal</c>:1723 ends in "anything else ⇒ BehemothAttackBrief"), so
@@ -102,6 +137,15 @@ namespace Multiplayer.Network.Sync
             /// type-specific code on either side; the next entity-shaped modal rides it with none
             /// either.</summary>
             EntityRef = 3,
+            /// <summary><c>GeoDeployAssetFactionCharacterBind</c> — the asset-deployment prompt's whole data
+            /// object (GeoDeployAssetFactionCharacterBind.cs). NOT an <see cref="EntityRef"/>: its entity is
+            /// OPTIONAL (a manufactured aircraft is named by a <c>ComponentSetDef</c> and has no
+            /// <c>GeoCharacter</c> at all — GeoscapeView.cs:1312 passes character null) and it carries two
+            /// defs and two flags beside it. Ref = the asset's root ref or "", Keys = {aircraftDefGuid,
+            /// relatedItemDefGuid} with "" for absent, Num = bit 1 Manufactured | bit 2 NotEnoughSpace. The
+            /// <c>Faction</c> field never rides: the game's own restore path stamps the LOCAL faction
+            /// (UIStateAssetDeployment.RestoreContext:35) and so does the rebuild here.</summary>
+            AssetDeploy = 4,
             /// <summary>The host holds an object this file has no description for. Never sent — the host
             /// refuses the raise and logs it, because a modal whose data cannot be rebuilt renders as an empty
             /// prefab full of the designers' baked placeholder text (the 0xB6 half-built-window lesson).</summary>
@@ -118,6 +162,9 @@ namespace Multiplayer.Network.Sync
         /// <see cref="EventPopup.WithWireTexts"/> exists to work around does not arise here at all.</summary>
         internal struct Raise
         {
+            /// <summary>Which view state this becomes on the peer. Default 0 = <see cref="StateKind.Modal"/>,
+            /// so every existing raiser keeps its meaning without saying so.</summary>
+            public StateKind Kind;
             /// <summary>The <c>ModalType</c> as its integer value — mod parity (law 10) makes the enum
             /// identical on every peer, and shipping the int keeps a value the local build does not know
             /// decodable and reportable instead of an exception.</summary>
@@ -136,15 +183,17 @@ namespace Multiplayer.Network.Sync
             public int Priority;
         }
 
-        /// <summary>[seq:u32][modalType:i32][shape:u8][ref][n:u16][key × n][num:i32][priority:i32]. Pure both
-        /// ways so RailCheck L49 can round-trip it headless — a wire that drops a field silently is a modal
-        /// rendered against the wrong faction or shown in the wrong order, and neither shows up in a log.</summary>
+        /// <summary>[seq:u32][kind:u8][modalType:i32][shape:u8][ref][n:u16][key × n][num:i32][priority:i32].
+        /// Pure both ways so RailCheck L49/L106/L109 can round-trip it headless — a wire that drops a field
+        /// silently is a window rendered against the wrong faction or shown in the wrong order, and neither
+        /// shows up in a log.</summary>
         internal static byte[] Encode(uint seq, Raise p)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
             {
                 w.Write(seq);
+                w.Write((byte)p.Kind);
                 w.Write(p.ModalType);
                 w.Write((byte)p.Shape);
                 w.Write(p.Ref ?? "");
@@ -163,7 +212,13 @@ namespace Multiplayer.Network.Sync
             using (var r = new BinaryReader(ms, Encoding.UTF8))
             {
                 seq = r.ReadUInt32();
-                var p = new Raise { ModalType = r.ReadInt32(), Shape = (DataShape)r.ReadByte(), Ref = r.ReadString() };
+                var p = new Raise
+                {
+                    Kind = (StateKind)r.ReadByte(),
+                    ModalType = r.ReadInt32(),
+                    Shape = (DataShape)r.ReadByte(),
+                    Ref = r.ReadString(),
+                };
                 var keys = new string[r.ReadUInt16()];
                 for (int i = 0; i < keys.Length; i++) keys[i] = r.ReadString();
                 p.Keys = keys;
@@ -201,6 +256,18 @@ namespace Multiplayer.Network.Sync
                         Keys = (d.Researches ?? Enumerable.Empty<ResearchElement>())
                                .Select(r => r?.ResearchID ?? "").ToArray(),
                         Num = d.DiplomacyShareLevel,
+                    };
+                case GeoDeployAssetFactionCharacterBind b:
+                    // No "unnameable asset" arm here on purpose: Asset is a GeoCharacter and RootRef always
+                    // names one (IdentityResolver.cs:145). The real hazard — a freshly minted character the
+                    // level has not registered — is caught by HostBroadcast resolving the name BACK on the
+                    // host's own graph, which is where every shape's naming is checked.
+                    return new Raise
+                    {
+                        Shape = DataShape.AssetDeploy,
+                        Ref = IdentityResolver.RootRef(b.Asset) ?? "",
+                        Keys = new[] { b.Aircraft?.Guid ?? "", b.RelatedItemDef?.Guid ?? "" },
+                        Num = (b.Manufactured ? 1 : 0) | (b.NotEnoughSpace ? 2 : 0),
                     };
                 default:
                     var named = EntityRefOf(modalData);
@@ -249,32 +316,81 @@ namespace Multiplayer.Network.Sync
         /// for the mission's structural create, so a peer resolving it walks the SAME member.</summary>
         internal const string MissionSlotPath = ".SerializationData.ActiveMission";
 
-        /// <summary>Host-side broadcast of ONE modal, called from the postfixes on the two native openers.
-        /// Never throws into game code: a raise this fails on is a window the client does not get, and it
-        /// says so.</summary>
-        internal static void HostBroadcast(ModalType modalType, object modalData, int priority)
+        /// <summary>PURE: does this payload name a rail ENTITY the peer must already hold before the window
+        /// can be built? The park queue and the host's own name-check both ask THIS, so a new shape opts into
+        /// both by answering here — <see cref="DataShape.AssetDeploy"/>'s ref is OPTIONAL (an aircraft has no
+        /// GeoCharacter), which is why the question is "is there a name" and not "is the shape EntityRef".</summary>
+        internal static bool NamesEntity(Raise p) =>
+            !string.IsNullOrEmpty(p.Ref) &&
+            (p.Shape == DataShape.EntityRef || p.Shape == DataShape.AssetDeploy);
+
+        /// <summary>The object a payload's <c>Ref</c> NAMES: the data object itself for
+        /// <see cref="DataShape.EntityRef"/>, the asset inside the bind for
+        /// <see cref="DataShape.AssetDeploy"/>. <see cref="HostBroadcast"/> resolves the derived name back to
+        /// exactly this on the HOST's graph before anything ships.</summary>
+        private static object NamedObject(object data) =>
+            data is GeoDeployAssetFactionCharacterBind b ? b.Asset : data;
+
+        /// <summary>The view-state type a non-modal kind builds — the type <see cref="GeoWindowCoverage"/>
+        /// declares it under, so one table decides "does the other peer get this window" for modals and
+        /// non-modals alike.</summary>
+        private static Type StateTypeOf(StateKind kind) =>
+            kind == StateKind.AssetDeployment ? typeof(UIStateAssetDeployment) : typeof(UIStateGeoModal);
+
+        /// <summary>How a window's kind reads in a log line: the ModalType for the modal family (43 windows
+        /// wear one state, so the state's name would say nothing), the StateKind otherwise.</summary>
+        private static string NameOf(StateKind kind, ModalType modalType) =>
+            kind == StateKind.Modal ? modalType.ToString() : kind.ToString();
+
+        /// <summary>THE NON-MODAL ARM'S HOST ENTRY, called from the coverage gate — i.e. from
+        /// <c>GeoscapeViewSwitchQuery.QueryStateSwitch</c>, the ONE queue every pushed window passes through.
+        /// A state that got there really was queued by the game (the <c>forceOnTop</c>/<c>replaceTop</c>
+        /// local-navigation branches never reach it) and carries its own priority and its own live data, so
+        /// there is nothing per-raiser to hook: adding a kind is one <c>case</c> here. Modals keep their own
+        /// two openers because <see cref="GeoWindowCoverage.AnnounceModal"/> must see the un-queued ones too.</summary>
+        internal static void HostBroadcastQueued(GeoscapeViewStateSwitchRequest request)
+        {
+            switch (request?.State)
+            {
+                case UIStateAssetDeployment s:
+                    HostBroadcast(StateKind.AssetDeployment, ModalType.None, s.DeployBind, request.Priority);
+                    break;
+            }
+        }
+
+        /// <summary>Host-side broadcast of ONE window, called from the postfixes on the two native modal
+        /// openers and from <see cref="HostBroadcastQueued"/>. Never throws into game code: a raise this
+        /// fails on is a window the client does not get, and it says so.</summary>
+        internal static void HostBroadcast(StateKind kind, ModalType modalType, object modalData, int priority)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
             if (SyncApplyScope.Active) return;   // law 8: an apply that reaches the view never re-broadcasts
-            var rule = GeoWindowCoverage.RuleForModal(modalType);
+            var rule = kind == StateKind.Modal
+                ? GeoWindowCoverage.RuleForModal(modalType)
+                : GeoWindowCoverage.RuleFor(StateTypeOf(kind));
             if (rule == null || rule.Sync != WindowSync.Mirrored) return;  // declared: the gate already announced it
+            string name = NameOf(kind, modalType);
             try
             {
                 var p = Describe(modalData);
+                p.Kind = kind;
                 p.ModalType = (int)modalType;
                 p.Priority = priority;
                 if (p.Shape == DataShape.Unsupported)
                 {
-                    Debug.LogError("[MP][modals] '" + modalType + "' is DECLARED Mirrored but its modalData is a " +
+                    Debug.LogError("[MP][modals] '" + name + "' is DECLARED Mirrored but its data is a " +
                                    (modalData == null ? "null" : modalData.GetType().FullName) + ", which " +
                                    "GeoModalMirror.Describe has no shape for — the client gets NO window. Add the " +
                                    "shape, or move the declaration to LocalOnly/Gap with the reason");
                     return;
                 }
-                if (p.Shape != DataShape.None && string.IsNullOrEmpty(p.Ref))
+                // AssetDeploy is exempt: its entity is optional by construction (a manufactured aircraft is
+                // named by a def, not by a GeoCharacter), and Describe already refused the case that matters
+                // — an asset that exists and cannot be named.
+                if (p.Shape != DataShape.None && p.Shape != DataShape.AssetDeploy && string.IsNullOrEmpty(p.Ref))
                 {
-                    Debug.LogError("[MP][modals] '" + modalType + "' NOT mirrored — its data has no rail root ref on " +
+                    Debug.LogError("[MP][modals] '" + name + "' NOT mirrored — its data has no rail root ref on " +
                                    "the host (shape=" + p.Shape + "), so the client would have nothing to resolve it " +
                                    "against and would render the prefab's placeholder text");
                     return;
@@ -284,10 +400,10 @@ namespace Multiplayer.Network.Sync
                 // level has not registered yet, or an id that means "nobody" (a fresh GeoTacUnitId is 0, and
                 // "U#0" resolves to no unit — or to somebody else's). Refusing here is the difference between
                 // a window that does not appear and a window built over the wrong soldier.
-                if (p.Shape == DataShape.EntityRef &&
-                    !ReferenceEquals(IdentityResolver.Resolve(GeoLevel(), p.Ref, null), modalData))
+                if (NamesEntity(p) &&
+                    !ReferenceEquals(IdentityResolver.Resolve(GeoLevel(), p.Ref, null), NamedObject(modalData)))
                 {
-                    Debug.LogError("[MP][modals] '" + modalType + "' NOT mirrored — the rail named its " +
+                    Debug.LogError("[MP][modals] '" + name + "' NOT mirrored — the rail named its " +
                                    modalData.GetType().Name + " '" + p.Ref + "', but that path does not " +
                                    "resolve back to that very object on the HOST's own graph, so it names " +
                                    "nothing (or something else) on a peer. The entity is not on the rail yet");
@@ -296,13 +412,13 @@ namespace Multiplayer.Network.Sync
                 uint seq = Seq.Next(SurfaceIds.GeoModalRaise);
                 var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoModalRaise, SyncKind.StateDelta, Encode(seq, p));
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
-                Debug.Log("[MP][modals] HOST raised '" + modalType + "' seq=" + seq + " shape=" + p.Shape +
-                          " ref=" + (p.Ref == "" ? "none" : p.Ref) + " keys=" + p.Keys.Length +
-                          " num=" + p.Num + " priority=" + p.Priority);
+                Debug.Log("[MP][modals] HOST raised '" + name + "' seq=" + seq + " kind=" + p.Kind +
+                          " shape=" + p.Shape + " ref=" + (p.Ref == "" ? "none" : p.Ref) +
+                          " keys=" + p.Keys.Length + " num=" + p.Num + " priority=" + p.Priority);
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][modals] HOST raise broadcast FAILED for '" + modalType + "' — no peer will see " +
+                Debug.LogError("[MP][modals] HOST raise broadcast FAILED for '" + name + "' — no peer will see " +
                                "this window: " + ex);
             }
         }
@@ -337,6 +453,21 @@ namespace Multiplayer.Network.Sync
                     return "the shipped path resolves to a DIFFERENT class on this peer than the host " +
                            "described (mod parity: law 10 should have blocked the join) — the data-bind's " +
                            "cast throws inside EnterState, which is the same half-built window by another route";
+                return null;
+            }
+            if (shape == DataShape.AssetDeploy)
+            {
+                // rootResolved is VACUOUSLY true when the host named no asset (the manufactured-aircraft
+                // case), so the only question left is whether everything it DID name exists here.
+                if (!rootResolved)
+                    return "the host named a newly created asset this peer's own graph cannot resolve — the " +
+                           "deploy screen reads bind.Asset.TemplateDef and bind.Asset.Progression unguarded " +
+                           "(UIModuleGeoAssetDeployment.ShowDeployDialog:105/:122), so a null there throws " +
+                           "inside EnterState and leaves a window nobody can answer";
+                if (keysResolved != keysWanted)
+                    return "only " + keysResolved + " of " + keysWanted + " defs the host named resolve on this " +
+                           "peer (mod parity: law 10 should have blocked the join) — the prompt would offer a " +
+                           "different asset than the host is actually deploying";
                 return null;
             }
             if (!rootResolved)
@@ -416,7 +547,7 @@ namespace Multiplayer.Network.Sync
         /// <see cref="RaiseMirrored"/> (mid-load / tactical), and a window is never replayed after the fact.</summary>
         private static bool NeedsPark(Raise p)
         {
-            if (p.Shape != DataShape.EntityRef) return false;   // only a NAME can be early; None/research resolve or never will
+            if (!NamesEntity(p)) return false;   // only a NAME can be early; None/research resolve or never will
             var geo = GeoLevel();
             return geo != null && IdentityResolver.Resolve(geo, p.Ref, null) == null;
         }
@@ -445,23 +576,26 @@ namespace Multiplayer.Network.Sync
         private static bool RaiseMirrored(Raise p, uint seq)
         {
             var modalType = (ModalType)p.ModalType;
+            string name = NameOf(p.Kind, modalType);
             var geo = GeoLevel();
             var view = geo?.View;
             if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery q))
             {
                 // Not "later": this peer has no geoscape to put a window in (tactical mission, mid-load), and
                 // there is no history to replay it from. Dropped, loudly — same contract as a 0xB6 raise.
-                Debug.LogWarning("[MP][modals] raise of '" + modalType + "' DROPPED — this peer has no live " +
+                Debug.LogWarning("[MP][modals] raise of '" + name + "' DROPPED — this peer has no live " +
                                  "GeoscapeView to show it in, and windows are not replayed after the fact");
                 return false;
             }
-            var rule = GeoWindowCoverage.RuleForModal(modalType);
+            var rule = p.Kind == StateKind.Modal
+                ? GeoWindowCoverage.RuleForModal(modalType)
+                : GeoWindowCoverage.RuleFor(StateTypeOf(p.Kind));
             if (rule == null || rule.Sync != WindowSync.Mirrored)
             {
                 // Both peers run the same DLL, so this means the SENDER's table and ours disagree — a mod/
                 // build mismatch law 10 should have caught. Refuse rather than open a window nobody reviewed.
-                Debug.LogError("[MP][modals] raise of '" + modalType + "' REFUSED — this peer's " +
-                               "GeoWindowCoverage.DeclaredModals does not declare it Mirrored (" +
+                Debug.LogError("[MP][modals] raise of '" + name + "' REFUSED — this peer's " +
+                               "GeoWindowCoverage does not declare it Mirrored (" +
                                (rule == null ? "undeclared" : rule.Sync.ToString()) + "), so the peers are not " +
                                "running the same coverage table");
                 return false;
@@ -470,15 +604,37 @@ namespace Multiplayer.Network.Sync
             var data = BuildData(geo, p, out string refusal);
             if (refusal != null)
             {
-                Debug.LogError("[MP][modals] raise of '" + modalType + "' REFUSED — " + refusal);
+                Debug.LogError("[MP][modals] raise of '" + name + "' REFUSED — " + refusal);
                 return false;
             }
 
-            // dialogHandler: null is THE safety property of this family (see the class doc) — with it, every
-            // button funnels into UIStateGeoModal.FinishDialog:82 -> `_dialogHandler?.Invoke` and does nothing
-            // but close this peer's own copy. Persistent stays FALSE (never set): a persistent modal is
-            // save-restored with the game's own authoritative ModalResultCallback closure (RestoreContext:36).
-            var state = new UIStateGeoModal(modalType, null, data);
+            GeoscapeViewState state;
+            if (p.Kind == StateKind.AssetDeployment)
+            {
+                // The prompt's data IS its constructor argument, so a null bind is not a blank window but an
+                // NRE on the first line of EnterState. Refused rather than queued: a queued state that throws
+                // holds this peer's queue slot forever, which is the wedge this arm exists to end.
+                var bind = data as GeoDeployAssetFactionCharacterBind;
+                if (bind == null)
+                {
+                    Debug.LogError("[MP][modals] raise of '" + name + "' REFUSED — shape " + p.Shape + " rebuilt " +
+                                   "no GeoDeployAssetFactionCharacterBind, and UIStateAssetDeployment reads it " +
+                                   "unguarded in EnterState:61");
+                    return false;
+                }
+                // NON-AUTHORITATIVE the same way a mirrored modal is, by a different mechanism: this copy's
+                // only button funnels into DeployAtSite:69, which WindowQueueSync's capture blocks on a client
+                // and converts into the 0xB9 deploy intent — the host runs the one DeployAsset there is.
+                state = new UIStateAssetDeployment(bind);
+            }
+            else
+            {
+                // dialogHandler: null is THE safety property of this family (see the class doc) — with it, every
+                // button funnels into UIStateGeoModal.FinishDialog:82 -> `_dialogHandler?.Invoke` and does nothing
+                // but close this peer's own copy. Persistent stays FALSE (never set): a persistent modal is
+                // save-restored with the game's own authoritative ModalResultCallback closure (RestoreContext:36).
+                state = new UIStateGeoModal(modalType, null, data);
+            }
             q.QueryStateSwitch(new GeoscapeViewStateSwitchRequest(state, p.Priority)
             // The GAME'S OWN flag, true as on the host: a mirrored modal must pause THIS peer, which is what
             // ProcessQueriedStateSwitch:67-70 -> RequestGamePause:1269 does. It used to be false on the theory
@@ -486,7 +642,7 @@ namespace Multiplayer.Network.Sync
             // Timing.Paused setter → no delta), which is how a client kept running under an open window.
             // A ONE-SHOT pause, not a hold: any peer resumes unconditionally, first-to-act-wins.
             { PauseGame = true });
-            Debug.Log("[MP][modals] raised '" + modalType + "' seq=" + seq + " shape=" + p.Shape +
+            Debug.Log("[MP][modals] raised '" + name + "' seq=" + seq + " kind=" + p.Kind + " shape=" + p.Shape +
                       " priority=" + p.Priority + " data=" + (data == null ? "none" : data.GetType().Name));
             return true;
         }
@@ -504,6 +660,7 @@ namespace Multiplayer.Network.Sync
             // and renders this peer's state in this peer's locale.
             if (p.Shape == DataShape.EntityRef)
                 return EntityData(p, IdentityResolver.Resolve(geo, p.Ref, null), out refusal);
+            if (p.Shape == DataShape.AssetDeploy) return DeployBind(geo, p, out refusal);
             var faction = IdentityResolver.Resolve(geo, p.Ref, null) as GeoFaction;
             var keys = p.Keys ?? new string[0];
             var found = new List<ResearchElement>(keys.Length);
@@ -539,6 +696,39 @@ namespace Multiplayer.Network.Sync
                     return null;
             }
         }
+
+        /// <summary>The <see cref="DataShape.AssetDeploy"/> arm's peer-side half: rebuild the prompt's whole
+        /// data object out of THIS peer's own graph and THIS peer's own def repository. Nothing is copied off
+        /// the wire but addresses — the asset is the peer's own mirrored <c>GeoCharacter</c>, the two defs are
+        /// its own, and the faction is stamped locally exactly as the game's own save-restore does
+        /// (UIStateAssetDeployment.RestoreContext:35), so the screen renders in this peer's locale.</summary>
+        private static object DeployBind(GeoLevelController geo, Raise p, out string refusal)
+        {
+            var keys = p.Keys ?? new string[0];
+            string aircraftGuid = keys.Length > 0 ? keys[0] : "";
+            string relatedGuid = keys.Length > 1 ? keys[1] : "";
+            var asset = string.IsNullOrEmpty(p.Ref)
+                ? null : IdentityResolver.Resolve(geo, p.Ref, null) as GeoCharacter;
+            var aircraft = ResolveDef<Base.Core.ComponentSetDef>(aircraftGuid);
+            var related = ResolveDef<ItemDef>(relatedGuid);
+            int wanted = (aircraftGuid == "" ? 0 : 1) + (relatedGuid == "" ? 0 : 1);
+            int got = (aircraft == null ? 0 : 1) + (related == null ? 0 : 1);
+            refusal = DataRefusal(DataShape.AssetDeploy,
+                                  string.IsNullOrEmpty(p.Ref) || asset != null, wanted, got);
+            if (refusal != null) return null;
+            return new GeoDeployAssetFactionCharacterBind
+            {
+                Faction = geo.PhoenixFaction,
+                Asset = asset,
+                Aircraft = aircraft,
+                RelatedItemDef = related,
+                Manufactured = (p.Num & 1) != 0,
+                NotEnoughSpace = (p.Num & 2) != 0,
+            };
+        }
+
+        private static T ResolveDef<T>(string guid) where T : BaseDef =>
+            string.IsNullOrEmpty(guid) ? null : Base.Core.GameUtl.GameComponent<DefRepository>()?.GetDef(guid) as T;
 
         private static GeoLevelController GeoLevel()
         {
@@ -635,7 +825,7 @@ namespace Multiplayer.Network.Sync
         {
             if (forceOnTop || replaceTop) return;   // local navigation, not a pushed window (see the class doc)
             GeoWindowCoverage.AnnounceModal(modalType);
-            GeoModalMirror.HostBroadcast(modalType, modalData, priority);
+            GeoModalMirror.HostBroadcast(GeoModalMirror.StateKind.Modal, modalType, modalData, priority);
         }
     }
 
@@ -655,7 +845,7 @@ namespace Multiplayer.Network.Sync
         private static void Postfix(ModalType modalType, object modalData, int priority)
         {
             GeoWindowCoverage.AnnounceModal(modalType);
-            GeoModalMirror.HostBroadcast(modalType, modalData, priority);
+            GeoModalMirror.HostBroadcast(GeoModalMirror.StateKind.Modal, modalType, modalData, priority);
         }
     }
 }
