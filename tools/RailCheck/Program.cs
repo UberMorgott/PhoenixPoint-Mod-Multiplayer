@@ -203,6 +203,7 @@ namespace RailCheck
             laws.AddRange(L128_BoundaryBaselineOwnsItsLevel.Check());
             laws.AddRange(L129_HintStillShows.Check(game));
             laws.AddRange(L130_HintReachesEveryPeer.Check(game));
+            laws.AddRange(L131_StatusSetIsRailed.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

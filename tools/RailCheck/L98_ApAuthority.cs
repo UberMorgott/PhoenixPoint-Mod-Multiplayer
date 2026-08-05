@@ -280,8 +280,8 @@ namespace RailCheck
             try
             {
                 const int key = 4242;
-                queue.Invoke(null, new object[] { key, new Vector3(1f, 0f, 1f), 9f, 5f, false });
-                queue.Invoke(null, new object[] { key, new Vector3(2f, 0f, 2f), 1f, 5f, false });
+                queue.Invoke(null, new object[] { key, new Vector3(1f, 0f, 1f), 9f, 5f, false, new List<string>() });
+                queue.Invoke(null, new object[] { key, new Vector3(2f, 0f, 2f), 1f, 5f, false, new List<string>() });
 
                 var entry = pending[key];
                 var ap = entry == null ? null : entry.GetType().GetField("Ap", AllMembers);

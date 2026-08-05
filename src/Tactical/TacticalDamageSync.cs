@@ -595,6 +595,10 @@ namespace Multiplayer.Tactical
                         w.Write(Stat(s.GetHealth()));
                         w.Write(Stat(s.GetArmor()));
                     }
+                    // The recovery path carries the same field class the settle does — hp/ap/wp/dead/slots
+                    // were never the whole of an actor, and a resnapshot that leaves the status set alone
+                    // cannot repair the one divergence nothing else can heal.
+                    TacticalStatusSet.Write(w, TacticalStatusSet.Collect(a));
                 }
             });
         }
@@ -788,6 +792,9 @@ namespace Multiplayer.Tactical
                         Correct(recv.GetHealth(), sh, actor.name + "/" + name + " hp");
                         Correct(recv.GetArmor(), sa, actor.name + "/" + name + " armor");
                     }
+                    // BEFORE the unresolvable-actor bail: the status set is this actor's share of a stream
+                    // every other actor is still queued behind, so its bytes are consumed either way.
+                    var statuses = TacticalStatusSet.Read(r);
                     if (actor == null) continue;
                     fixedUp++;
                     Correct(actor.Health, hp, actor.name + " health");
@@ -803,6 +810,10 @@ namespace Multiplayer.Tactical
                     // host's does instead of everything.
                     if (dead && !actor.IsDead) TacticalActorLifecycle.ForceDeath(actor, "the host's resnapshot");
                     if (dead) NoteNativeStatEvent();   // L105, same reason as ApplyDamage's
+                    // LAST, because a forced death runs the game's own status cascade (DieAbility unmounts,
+                    // VehicleComponent.OnActorDied empties the roster) and the host's set is what that cascade
+                    // must be reconciled AGAINST, not before.
+                    TacticalStatusSet.Reconcile(actor, tlc, statuses, "the host's resnapshot");
                 }
             _resnapRequested = false;
             Debug.LogWarning("[Multiplayer][tac] CLIENT applied the host's resnapshot: " + fixedUp + " actor(s) " +

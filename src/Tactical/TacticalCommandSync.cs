@@ -1077,6 +1077,12 @@ namespace Multiplayer.Tactical
             /// that ability never ends (a refused throw leaves one executing), forever, with only a periodic
             /// warning. A forced settle applies immediately and says so.</summary>
             public bool Forced;
+
+            /// <summary>The host's STATUS SET for that actor, as <see cref="TacticalStatusSet"/> keys. It rides
+            /// the settle rather than a surface of its own because the settle is already the host's closer for
+            /// one actor's state AND it already sweeps every keyed live actor at the turn edge — so the set is
+            /// re-asserted routinely instead of only when a peer notices a hole in the 0x84 stream.</summary>
+            public List<string> Statuses;
         }
 
         /// <summary>HOST: which peer's order started the ability an actor is currently executing — 0 = the
@@ -1542,10 +1548,11 @@ namespace Multiplayer.Tactical
             var pos = tacActor.Pos;
             float ap = stats.ActionPoints;
             float wp = stats.WillPoints;
+            var statuses = TacticalStatusSet.Collect(tacActor);
             Send(OpSettle, "settle " + tacActor.name + " @ " + Fmt(pos) + " ap=" + ap.ToString("0.##") +
                  " wp=" + wp.ToString("0.##") + (forced ? " FORCED" : ""), 0,
                  w => { w.Write(key); w.Write(pos.x); w.Write(pos.y); w.Write(pos.z); w.Write(ap); w.Write(wp);
-                        w.Write(forced); });
+                        w.Write(forced); TacticalStatusSet.Write(w, statuses); });
         }
 
         /// <summary>A5 adds the HAS-TARGET flag, and it is not thrift: the codec writes mask 0 for a null
@@ -1916,7 +1923,8 @@ namespace Multiplayer.Tactical
                     }
                     else if (op == OpSettle) QueueSettle(r.ReadInt32(),
                                                         new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
-                                                        r.ReadSingle(), r.ReadSingle(), r.ReadBoolean());
+                                                        r.ReadSingle(), r.ReadSingle(), r.ReadBoolean(),
+                                                        TacticalStatusSet.Read(r));
                     else if (op == OpSelectEquipment) ApplySelectEquipment(r.ReadInt32(), r.ReadString());
                     else
                     {
@@ -2149,10 +2157,10 @@ namespace Multiplayer.Tactical
             catch (Exception ex) { Debug.LogWarning("[Multiplayer][tac] mirror telemetry failed: " + ex.Message); }
         }
 
-        private static void QueueSettle(int key, Vector3 pos, float ap, float wp, bool forced)
+        private static void QueueSettle(int key, Vector3 pos, float ap, float wp, bool forced, List<string> statuses)
         {
             _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced,
-                                                Epoch = TacticalDamageSync.StatEpoch };
+                                                Statuses = statuses, Epoch = TacticalDamageSync.StatEpoch };
         }
 
         /// <summary>The standing settle applier (driven from <c>SyncEngine.Tick</c>, client-only inside). A
@@ -2300,6 +2308,16 @@ namespace Multiplayer.Tactical
                         stats.WillPoints.Set(s.Wp);
                     }
                 }
+                // AND THE TERMINAL STATE IS A DEFINED ONE. The cancel above is the game's own teardown and it
+                // is also a TEAR: a mirrored ability that never ended is killed wherever it happens to be
+                // standing (PlayingAction.SetState(Cancelled):56-61 stops the updateable outright), so its
+                // half of the work is done and the other half never runs — an EnterVehicleCrt torn between
+                // its nav-obstacle disable and its ApplyMountedStatus leaves an actor that is neither on foot
+                // nor aboard. Ending the ability was never the whole answer; ending it in the state the HOST
+                // is in is. The status set arrives on this same settle, so the repair lands in the same apply
+                // as the tear that needed it, and it is the same line that heals a status lost to a dropped
+                // order or a refused one.
+                TacticalStatusSet.Reconcile(actor, Tlc(), s.Statuses, "the host's settle");
                 RefreshVisionTowards(actor);
             }
             Debug.Log("[Multiplayer][tac] CLIENT settled " + actor.name + " @ " + Fmt(s.Pos) +
