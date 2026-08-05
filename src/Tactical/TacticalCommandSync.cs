@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text;
 using Base.Core;
 using Base.Entities;
@@ -137,11 +138,7 @@ namespace Multiplayer.Tactical
             keyless.Sort(CanonicalOrder);
             for (int i = 0; i < keyless.Count; i++)
             {
-                if (i > 0 && CanonicalOrder(keyless[i - 1], keyless[i]) == 0)
-                    Debug.LogError("[Multiplayer][tac] two key-less actors are indistinguishable at battle start (" +
-                                   keyless[i].name + " and " + keyless[i - 1].name + " at " + keyless[i].Pos +
-                                   ") — their derived keys depend on enumeration order and the peers may disagree " +
-                                   "about which is which. Every shot naming either of them is suspect.");
+                if (i > 0) ReportIfIndistinguishable(keyless[i - 1], keyless[i]);
                 int key = _nextDerived--;
                 _derived[keyless[i]] = key;
                 _byDerived[key] = keyless[i];
@@ -149,6 +146,31 @@ namespace Multiplayer.Tactical
             _built = true;
             Debug.Log("[Multiplayer][tac] derived battle keys for " + keyless.Count + " actor(s) the geoscape " +
                       "never named (ordinals over battle-start position).");
+        }
+
+        /// <summary>The battle-start tie diagnostic, deliberately in its OWN non-inlined method.
+        ///
+        /// Everything hazardous about <see cref="BuildBattleKeys"/> lives in here: <c>UnityEngine.Object.name</c>
+        /// and <c>Pos</c> are native ECalls, and so is every Unity <c>==</c>. They are perfectly safe in the
+        /// game, but an ECall that the JIT INLINES into its caller makes that CALLER un-compilable outside the
+        /// player ("ECall methods must be packaged into a system module"). Under <c>-c Debug</c> nothing
+        /// inlines, so an ECall behind a branch that never runs costs nothing; under <c>-c Release</c> the
+        /// whole enclosing method dies on entry. That is exactly how BuildBattleKeys took the Release harness
+        /// down while Debug stayed green — RailCheck L66 invokes it for real, and the crash named a method
+        /// whose first line had not executed.
+        ///
+        /// <c>NoInlining</c> is the fix rather than rewriting the diagnostic: it keeps the ECalls inside a
+        /// method that is only PREPARED when the tie actually happens (never in a headless run, where the
+        /// actor list is empty), while the message itself stays exactly as loud in-game. Same reasoning as
+        /// <c>RailCheck.Program.Run</c>, which carries the attribute for the same class of reason.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void ReportIfIndistinguishable(TacticalActorBase a, TacticalActorBase b)
+        {
+            if (CanonicalOrder(a, b) != 0) return;
+            Debug.LogError("[Multiplayer][tac] two key-less actors are indistinguishable at battle start (" +
+                           SafeName(b) + " and " + SafeName(a) + " at " + b.Pos +
+                           ") — their derived keys depend on enumeration order and the peers may disagree " +
+                           "about which is which. Every shot naming either of them is suspect.");
         }
 
         /// <summary>Position first (the peers' save-restored floats are bit-identical, so this is a total
