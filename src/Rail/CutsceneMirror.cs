@@ -103,6 +103,58 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        // ─── HOST: the co-op campaign INTRO, re-issued once the peers can see it ────────────
+
+        /// <summary>
+        /// The campaign intro, played by EVERY peer instead of only the host.
+        ///
+        /// The native intro fires from <c>GeoLevelController</c>:741-743 under
+        /// <c>IntroCinematicDef != null &amp;&amp; instanceData == null &amp;&amp; gameParams.PlayIntroCinematic</c>.
+        /// On a co-op bootstrap the host meets all three while the clients are still in the LOBBY, and the
+        /// clients never can: they load the campaign from the transferred autosave, so their
+        /// <c>instanceData</c> is non-null forever. The bootstrap therefore suppresses it at creation
+        /// (<c>NewCampaignInterceptPatch.ApplyCoopCampaignParams</c>) and the host re-issues it HERE, after
+        /// the barrier reveal, through the SAME funnel the mirror already postfixes — so the 0xBA raise
+        /// fans out and each peer plays its OWN local video off its OWN assets, in its own locale.
+        ///
+        /// NO-OP, CLEANLY, in every case that is not "there is an intro to play": no live view (still
+        /// loading, or the save landed in tactical), no <c>IntroCinematicDef</c> on this build, or the game
+        /// mode simply does not carry the flag — each says why and returns false. Nothing here gates
+        /// anything: <c>ToCutsceneState</c> queues a window and returns, a peer that skips the video or
+        /// whose playback fails keeps playing, and no peer is waited on.
+        /// </summary>
+        internal static bool ReplayCampaignIntro()
+        {
+            try
+            {
+                var view = View();
+                if (view == null)
+                {
+                    Debug.LogWarning("[MP][cutscene] campaign intro NOT re-issued — no live GeoscapeView at the " +
+                                     "reveal (the session did not come up on the geoscape); nobody sees it, " +
+                                     "and nothing is stuck waiting for it");
+                    return false;
+                }
+                var def = view.IntroCinematicDef;
+                if (def == null)
+                {
+                    Debug.Log("[MP][cutscene] campaign intro NOT re-issued — this build's GeoscapeView carries no " +
+                              "IntroCinematicDef, so there was never a video to share");
+                    return false;
+                }
+                // The game's own opener, never a video API: the 0xBA postfix hangs off exactly this call.
+                view.ToCutsceneState(def);
+                Debug.Log("[MP][cutscene] campaign intro re-issued after the reveal as '" + def.name +
+                          "' — mirrored to every peer");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MP][cutscene] campaign intro re-issue FAILED — the campaign starts without it: " + ex);
+                return false;
+            }
+        }
+
         // ─── CLIENT: replay the cinematic natively ─────────────────────────
 
         /// <summary>Returns true when the surface was consumed. Client-only: the host already played it.</summary>

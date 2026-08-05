@@ -115,7 +115,7 @@ namespace Multiplayer.Harmony
             return true;
         }
 
-        // ── Prefix: force the tutorial OFF on a co-op bootstrap campaign ────────────────────────
+        // ── Prefix: the co-op campaign-creation params ──────────────────────────────────────────
         // CreateSceneBinding(GeoscapeGameParams) builds the tutorial multi-level binding when
         // TutorialEnabled (UIStateNewGeoscapeGameSettings.cs:159-186) — a co-op campaign must reach
         // the GEOSCAPE (the bootstrap fires there, and the tutorial is a solo tactical mission), so
@@ -128,17 +128,41 @@ namespace Multiplayer.Harmony
             try
             {
                 var coord = NetworkEngine.Instance?.SaveTransfer;
-                if (coord == null || !coord.NewCampaignPending) return;
-                if (gameParams != null && gameParams.TutorialEnabled)
-                {
-                    gameParams.TutorialEnabled = false;
-                    Debug.Log("[Multiplayer] New-campaign bootstrap: tutorial forced OFF (co-op starts on the geoscape).");
-                }
+                if (coord == null || !coord.NewCampaignPending || gameParams == null) return;
+                bool introWasOn = gameParams.PlayIntroCinematic;
+                ApplyCoopCampaignParams(gameParams);
+                coord.NoteIntroCinematicOwed(introWasOn);
+                Debug.Log("[Multiplayer] New-campaign bootstrap: tutorial forced OFF (co-op starts on the " +
+                          "geoscape); intro cinematic suppressed at creation and " +
+                          (introWasOn ? "re-issued to EVERY peer after the reveal." : "not owed (the game mode does not play one)."));
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] new-campaign tutorial-off prefix failed: " + e.Message);
+                Debug.LogError("[Multiplayer] new-campaign params prefix failed: " + e.Message);
             }
+        }
+
+        /// <summary>
+        /// The two native options a co-op bootstrap campaign must be created with. PURE and public so
+        /// RailCheck EXECUTES it rather than describing it (L124).
+        ///
+        /// TutorialEnabled: the bootstrap fires at the first playable GEOSCAPE frame and the tutorial is a
+        /// solo tactical mission ahead of it.
+        ///
+        /// PlayIntroCinematic: the host creates the campaign while the clients are still in the lobby, so
+        /// the host would be the ONLY peer to see the intro — and no client can ever catch up, because the
+        /// native condition (GeoLevelController.cs:741-743) requires <c>instanceData == null</c> and every
+        /// client loads the campaign FROM the transferred autosave blob. <c>UIStateGeoCutscene</c> is not
+        /// <c>IGeoscapeRestorableViewState</c>, so it does not ride the save either. Suppressing it here and
+        /// re-issuing it after the barrier reveal (<c>CutsceneMirror.ReplayCampaignIntro</c>) is what makes
+        /// it a SHARED moment: one <c>ToCutsceneState</c> call on the host, fanned to every peer by the
+        /// 0xBA mirror that already postfixes that exact funnel.
+        /// </summary>
+        public static void ApplyCoopCampaignParams(GeoscapeGameParams gameParams)
+        {
+            if (gameParams == null) return;
+            gameParams.TutorialEnabled = false;
+            gameParams.PlayIntroCinematic = false;
         }
 
         // ── Postfix: BACK from the new-game settings → back to the lobby ────────────────────────

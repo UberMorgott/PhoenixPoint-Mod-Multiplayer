@@ -2248,6 +2248,7 @@ namespace Multiplayer.Network
                                  $"(loadedClients={_loadedPeers.Count}).");
                 PerformDeferredLift();
                 HostReseedAfterReveal(); // rca-4: this release path still re-seeds a reloaded session
+                HostReplayIntroCinematic(); // co-op campaign intro: AFTER the reveal, or the mirror drops it
             }
             // Per-peer self-reveal: this peer is holding (reached Playing) but no RevealAll came. The host
             // broadcasts a RosterProgress snapshot ≤20 Hz for the whole barrier (each one bumps
@@ -2313,6 +2314,7 @@ namespace Multiplayer.Network
                               $"(loadedClients={_loadedPeers.Count}).");
                     PerformDeferredLift(); // host reveals at the same instant
                     HostReseedAfterReveal(); // rca-4: every peer entered the loaded level → re-seed now
+                    HostReplayIntroCinematic(); // co-op campaign intro: AFTER the reveal, or the mirror drops it
                 }
             }
 
@@ -2345,6 +2347,38 @@ namespace Multiplayer.Network
             Debug.Log("[Multiplayer] post-reload re-seed → full wallet + all channels + time re-anchor (+ tactical seed if tactical)");
             _engine.Sync?.BroadcastFullWallet();
             _engine.Sync?.BroadcastAllChannels();
+        }
+
+        // ── The co-op campaign INTRO, owed from creation and paid at the reveal ───────────────
+        // Armed in NewCampaignInterceptPatch.CreateSceneBinding_Prefix (the only place that still knows
+        // whether the game mode wanted an intro at all — the flag is def data and the prefix clears it so
+        // the host does not play it alone into a lobby). ONE-SHOT: consumed here whatever happens next, so
+        // a failed or impossible replay can never re-fire on a later, unrelated reveal.
+        private bool _introCinematicOwed;
+
+        /// <summary>Record whether the suppressed campaign creation owed an intro cinematic. False is a
+        /// legitimate answer (the game mode does not carry one) and must clear any stale arm.</summary>
+        public void NoteIntroCinematicOwed(bool owed) => _introCinematicOwed = owed;
+
+        /// <summary>True while an intro replay is outstanding — read by RailCheck's one-shot arm.</summary>
+        public bool IntroCinematicOwed => _introCinematicOwed;
+
+        /// <summary>Consume the arm and return whether it was set (one-shot, same shape as
+        /// <see cref="ReseedOnceGate"/>).</summary>
+        public bool ConsumeIntroCinematicOwed()
+        {
+            bool owed = _introCinematicOwed;
+            _introCinematicOwed = false;
+            return owed;
+        }
+
+        // AFTER the reveal, and that ordering is the whole risk: CutsceneMirror drops a raise with "no live
+        // GeoscapeView", and before the reveal the peers are not in the level yet. Called from the same two
+        // host reveal branches as HostReseedAfterReveal, right behind PerformDeferredLift.
+        private void HostReplayIntroCinematic()
+        {
+            if (!_engine.IsHost || !ConsumeIntroCinematicOwed()) return;
+            Sync.CutsceneMirror.ReplayCampaignIntro();
         }
 
         // Serialize the host's current per-slot aggregate and broadcast it unreliably to all peers.
