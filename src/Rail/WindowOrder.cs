@@ -46,6 +46,21 @@ namespace Multiplayer.Network.Sync
     /// Once <see cref="SettleExpired"/> is true it stays true forever, so the drain resumes unconditionally
     /// and the worst case for any window is one <see cref="SettleSeconds"/> delay, once.
     ///
+    /// THE CEILING, STATED RATHER THAN HIDDEN. Every peer that receives a window agrees with every other
+    /// peer that receives it, because both read the same host-minted key. The HOST agrees too for every
+    /// family whose window and whose message are produced in the SAME call — the mirrored raises (0xB6
+    /// events, 0xB7 modals, 0xBA cutscenes, 0xBB outcomes, 0xBF marketplace), where the broadcast postfix
+    /// mints exactly the ordinal <see cref="RailOrdinal.ForNewWindow"/> handed the window a moment earlier.
+    /// It does NOT yet agree for a window whose cause rides the PERIODIC value rail: research-complete is
+    /// the one today. The host raises that modal natively at completion, a whole diff cycle before the 0xAC
+    /// batch carrying the research field goes out, so it claims the same provisional ordinal as a raise that
+    /// beat that batch to the wire and the tie falls back to the host's own insert order — while the clients
+    /// order it by the batch that actually produced it. Host and clients can therefore still swap those two.
+    /// ponytail: closing it means the host must not present a window until the message carrying its cause is
+    /// on the wire (a real design change: the host would have to defer its own modals). Do it when a live
+    /// session shows the host/client swap actually mattering — the peer-to-peer half, which is what the
+    /// 2026-08-05 report measured between two clients, is closed here.
+    ///
     /// COST, STATED: in a co-op session every queued window opens up to 150 ms later than native. Solo is
     /// untouched (the prefix returns immediately without an active session), and an UNSTAMPED request —
     /// one restored from the save through <c>RestoreData</c>, which bypasses <c>QueryStateSwitch</c> —
