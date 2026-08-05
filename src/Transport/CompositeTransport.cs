@@ -282,6 +282,12 @@ namespace Multiplayer.Transport
 
         private void HandleChildConnected(ITransport child, ulong rawId, string endpoint)
         {
+            // Retire the PREVIOUS incarnation of this raw id before minting, because the reverse entry
+            // now deliberately outlives the socket (see HandleChildDisconnected). Transports whose raw
+            // ids recur across reconnects — SteamTransport keys peers by SteamID64, the same number
+            // every time — would otherwise hand a returning player the outward id of its own dead
+            // connection, whose send maps are already gone, so nothing could be sent to it.
+            lock (_lock) { _rawToOutward[child].Remove(rawId); }
             var outwardId = MapOrGet(child, rawId);
             OnPeerConnected?.Invoke(outwardId, endpoint);
         }
@@ -301,8 +307,26 @@ namespace Multiplayer.Transport
             {
                 var reverse = _rawToOutward[child];
                 if (!reverse.TryGetValue(rawId, out outwardId)) return;
-                reverse.Remove(rawId);
-                _peerToChild.Remove(outwardId);
+
+                // SEND-SIDE MAPS ONLY. The peer is unreachable, so Send / DisconnectPeer must stop
+                // resolving it (both no-op on an unknown outward id). The RECEIVE-SIDE translation
+                // `reverse[rawId]` deliberately STAYS.
+                //
+                // WHY IT OUTLIVES THE SOCKET: a child reports the drop BEFORE it delivers the bytes it
+                // has already read. DirectTransport.Update drains peer events ahead of packets by
+                // design (connect must precede packets), so a peer that sends ClientLeave and then
+                // closes arrives here with its own farewell still sitting in the incoming queue.
+                // Dropping the translation at this point meant that farewell reached HandleChildPacket
+                // unmapped, and MapOrGet minted it a BRAND-NEW outward id — an id no roster row, no
+                // last-known-name entry and no DepartureLatch has ever seen. The host then announced
+                // the SAME departure a second time under an id it could not resolve a name for, so the
+                // second prompt read "— a player left the game —": two stacked native modals for one
+                // player leaving, the second one anonymous. Four fixes at the notice layer could not
+                // reach it because the notice layer was never wrong — the peer changed identity
+                // between the two facts about it. A dead peer's trailing packets keep the id it lived
+                // under; the entry is overwritten on reconnect (HandleChildConnected) and cleared
+                // wholesale by Shutdown, so what it retains is one id per accepted connection.
+                if (!_peerToChild.Remove(outwardId)) return; // this drop has already been reported
                 _outwardToRaw.Remove(outwardId);
             }
             OnPeerDisconnected?.Invoke(outwardId, endpoint);

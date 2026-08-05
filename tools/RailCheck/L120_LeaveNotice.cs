@@ -340,6 +340,50 @@ namespace RailCheck
                                      "peer for the whole session, or a reconnecting player leaves in silence";
                 }
 
+                // EXECUTED — THE KEY THE LATCH IS KEYED ON MUST SURVIVE THE DEPARTURE.
+                //
+                // The arm above proves the latch collapses two announcements OF THE SAME PEER. It says
+                // nothing about whether the two announcers are handed the same peer, and that is where this
+                // defect actually lived — through four fixes, all of them at the notice layer, all of them
+                // correct and all of them useless. CompositeTransport mints the peer ids the whole mod keys
+                // on, and it tore the (child, rawId) -> outwardId translation down on the DISCONNECT while
+                // that peer's already-received ClientLeave was still queued behind it. The farewell then
+                // arrived unmapped and was minted a NEW outward id, so PausePeer announced peer 1 and
+                // HandleLeave announced peer 3 — same player, same millisecond, two latch keys, two prompts,
+                // and the second one anonymous because no roster row or name cache has ever heard of peer 3.
+                //
+                // Verified against the live host log of 2026-08-05 (t=15242): "departure notice from
+                // pause(...) for peer 1: — Morgott lost connection — holding their seat —" immediately
+                // followed by "departure notice from leave for peer 3: — a player left the game —".
+                //
+                // So drive the real composite through that exact interleaving — connect, drop, then the
+                // trailing farewell — and demand ONE identity throughout. A structural arm cannot see this:
+                // every call in it is correct.
+                var child = new RawPeerSource();
+                var composite = new CompositeTransport(new ITransport[] { child });
+                ulong connectedAs = 0, droppedAs = 0, trailingAs = 0;
+                composite.OnPeerConnected += (id, ep) => connectedAs = id;
+                composite.OnPeerDisconnected += (id, ep) => droppedAs = id;
+                composite.OnPacketReceived += (id, data) => trailingAs = id;
+                const ulong rawLeaver = 7UL;
+                child.RaiseConnected(rawLeaver);
+                child.RaiseDisconnected(rawLeaver);   // the socket FIN, surfaced first
+                child.RaisePacket(rawLeaver);         // the ClientLeave the read loop already held
+                if (droppedAs != connectedAs || trailingAs != connectedAs)
+                    yield return "L120 two-notices-per-departure: one peer went away and the transport gave " +
+                                 "it " + (new[] { connectedAs, droppedAs, trailingAs }.Distinct().Count()) +
+                                 " different identities — connected as " + connectedAs + ", dropped as " +
+                                 droppedAs + ", its trailing farewell delivered as " + trailingAs + ". " +
+                                 "CompositeTransport unmaps a peer on the DISCONNECT, but a child reports the " +
+                                 "drop before it delivers the bytes it has already read (DirectTransport.Update " +
+                                 "drains peer events ahead of packets), so the leaver's own ClientLeave lands " +
+                                 "unmapped and is minted a fresh outward id. The two announcers then latch on " +
+                                 "DIFFERENT keys, so DepartureLatch cannot collapse them however correct it is, " +
+                                 "and the farewell's id resolves against no roster row and no last-known name — " +
+                                 "which is where the anonymous '— a player left the game —' prompt comes from. " +
+                                 "Every arm about WHICH notice a path emits stays green through this; the peer " +
+                                 "must simply not change identity between two facts about the same departure";
+
                 // The OTHER departure fact — the host's — is announced by a different path onto the same
                 // native prompt (SessionEnd), and it carries its own one-shot latch. It is enumerated here
                 // rather than trusted: the graceful HostDisconnected packet and the host's transport drop
@@ -382,6 +426,40 @@ namespace RailCheck
                              "peer, then Join under one bounded grace budget); without it the notice everyone " +
                              "gets is a lost connection for a player who deliberately quit";
         }
+
+        /// <summary>A bare peer source: the three raises CompositeTransport maps, and nothing else. Real
+        /// sockets cannot be driven through the connect / drop / trailing-packet interleaving on demand,
+        /// and that interleaving IS the defect, so the child is a stub and the composite under it is the
+        /// real one.</summary>
+#pragma warning disable 0067 // OnStateChanged is part of ITransport; this stub never raises it
+        private sealed class RawPeerSource : ITransport
+        {
+            public TransportType TransportType => TransportType.DirectIP;
+            public ConnectionState State => ConnectionState.Connected;
+            public bool IsHost => true;
+            public string LocalEndpoint => "railcheck";
+            public System.Net.IPEndPoint PublicEndPoint => null;
+
+            public event Action<ConnectionState> OnStateChanged;
+            public event Action<ulong, byte[]> OnPacketReceived;
+            public event Action<ulong, string> OnPeerConnected;
+            public event Action<ulong, string> OnPeerDisconnected;
+
+            public void Initialize() { }
+            public void Shutdown() { }
+            public void Host(int port = 0) { }
+            public void Connect(string address, int port) { }
+            public void Disconnect() { }
+            public void Send(ulong peerId, byte[] data, bool reliable = true) { }
+            public void Broadcast(byte[] data, bool reliable = true) { }
+            public bool DisconnectPeer(ulong peerId) => true;
+            public void Update() { }
+
+            internal void RaiseConnected(ulong raw) => OnPeerConnected?.Invoke(raw, "railcheck");
+            internal void RaiseDisconnected(ulong raw) => OnPeerDisconnected?.Invoke(raw, "connection lost");
+            internal void RaisePacket(ulong raw) => OnPacketReceived?.Invoke(raw, new byte[] { 0 });
+        }
+#pragma warning restore 0067
 
         /// <summary>The path must format ITS OWN notice and must not be able to reach the other one — a
         /// crossed pair is not a missing notice, it is a confident wrong one.</summary>
