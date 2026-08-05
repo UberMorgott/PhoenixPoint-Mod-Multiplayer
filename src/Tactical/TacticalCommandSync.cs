@@ -114,6 +114,22 @@ namespace Multiplayer.Tactical
             if (key != 0 && !string.IsNullOrEmpty(why)) _refused[key] = why;
         }
 
+        /// <summary>L67e — THE OUTCOME ARM. Every refusal above is, by construction, an actor that is alive on
+        /// the host and absent here: the two peers' rosters have diverged and this peer is fighting a smaller
+        /// battle. L67's other arms assert the MECHANISM (a key is minted, a spawn op ships on 0x84, the client
+        /// rebuilds through the game's spawner) and that is exactly why they stayed green through the Umbra bug
+        /// — every mechanism fired, and the actor still existed on one screen only. So the ledger is read at the
+        /// turn edge and a non-empty one is a FAILURE announced as such, not a shrug logged once at arrival and
+        /// scrolled past. Returns null when the rosters agree, so the caller has nothing to decide.</summary>
+        internal static string RosterDivergence()
+        {
+            if (_refused.Count == 0) return null;
+            var parts = new List<string>(_refused.Count);
+            foreach (var kv in _refused) parts.Add("key " + kv.Key + " — " + kv.Value);
+            parts.Sort(StringComparer.Ordinal);
+            return string.Join("; ", parts.ToArray());
+        }
+
         /// <summary>Build the derived-key map for THIS battle. Idempotent by design — it runs at the FIRST
         /// turn edge and never again, because after that the peers' alien positions legitimately diverge (the
         /// AI turn is host-only, A2's <c>ClientAiGate</c>, so aliens never move on a client at all). Rebuilding

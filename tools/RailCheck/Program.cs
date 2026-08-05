@@ -7634,7 +7634,19 @@ namespace RailCheck
         ///       rule, the client rebuilds through the GAME'S spawner, and a death is FORCED rather than
         ///       merely complained about — which is exactly what A3b left vacuous.
         ///   (d) THE CORPSE'S CONTENTS ARE THE HOST'S ROLL. The manifest arbiter is pure and is executed here,
-        ///       subsequence rule included, and the gate consults it BEFORE deciding anybody may draw.</summary>
+        ///       subsequence rule included, and the gate consults it BEFORE deciding anybody may draw.
+        ///   (e) THE OUTCOME, added 2026-08-05 after (a)-(d) stayed GREEN through TFTV's Umbra existing on the
+        ///       host's screen alone: BOTH PEERS HOLD THE SAME ROSTER. Every one of (a)-(d) asserts a CALL, and
+        ///       every call fired. The address on the wire was the defect — a ComponentSetDef guid that
+        ///       TacActorData.GenerateInstanceComponentSetDef mints per-peer — so (e) asserts that the host
+        ///       ships an address another peer can resolve (the authored SourceTemplate), that the client
+        ///       REBUILDS from it, and that any key still refused is enumerable and is READ at the turn edge as
+        ///       a failure. NOT IN SCOPE, and deliberately: HulkDieAbility:61 spawns an ItemContainer that the
+        ///       enter-play seam ignores as a non-TacticalActor. It needs no key — the hulk is produced on
+        ///       EVERY peer by the same native DropItems the mirrored death runs locally, from an AUTHORED
+        ///       HulkDieAbilityDef.Hulk (not a generated def), its contents are already governed by (d)'s
+        ///       manifest, and no op in the arc addresses a container by actor key. Keying it would open a key
+        ///       space to name something nothing ever names.</summary>
         private static IEnumerable<string> ActorLifecycleLaw(Assembly game)
         {
             var sync = typeof(Multiplayer.Tactical.TacticalDamageSync);
@@ -7994,6 +8006,72 @@ namespace RailCheck
                              "(declare@" + iLoot + ", apply@" + iApply + "). That hit is what starts the death, and " +
                              "DieAbility.DropItems asks its questions inside the same synchronous chain — a " +
                              "declaration afterwards changes nothing at all";
+
+            // ─── (e) THE OUTCOME: BOTH PEERS HOLD THE SAME ROSTER ───
+            // Arms (a)-(d) all assert the MECHANISM, and on 2026-08-05 that is exactly why they stayed GREEN
+            // while TFTV's Umbra existed on the host's screen alone: a key WAS minted, a spawn op DID ship on
+            // 0x84, the client DID reach the game's own spawner. Every mechanism fired and the roster still
+            // diverged, because the payload's only address was a ComponentSetDef guid that
+            // TacActorData.GenerateInstanceComponentSetDef mints per-peer through DefRepository.CreateRuntimeDef
+            // (Guid.NewGuid, registered in that peer's _guid2Def alone). This arm asserts the OUTCOME instead.
+            var genSetDef = HarmonyLib.AccessTools.Method(
+                typeof(PhoenixPoint.Tactical.Entities.ActorsInstance.TacActorData), "GenerateInstanceComponentSetDef");
+            var createRuntime = HarmonyLib.AccessTools.Method(typeof(Base.Defs.DefRepository), "CreateRuntimeDef",
+                new[] { typeof(Base.Defs.BaseDef), typeof(Type), typeof(string) });
+            if (genSetDef == null || createRuntime == null ||
+                !CalleeSequence(genSetDef).Any(c => c.Name == "CreateRuntimeDef") ||
+                !CalleeSequence(createRuntime).Any(c => c.Name == "NewGuid"))
+                yield return "L67 roster-premise-stale: TacActorData.GenerateInstanceComponentSetDef no longer mints " +
+                             "its ComponentSetDef through DefRepository.CreateRuntimeDef + Guid.NewGuid. That per-peer " +
+                             "guid is the WHOLE reason a spawn ships its authored SourceTemplate; if the def became " +
+                             "shareable the template field is dead weight, and if this check merely broke, the one " +
+                             "premise under the roster arm is unverified";
+            // THE HOST SHIPS AN ADDRESS ANOTHER PEER CAN RESOLVE. Restoring the runtime-guid-only keying deletes
+            // exactly this call, which is what makes that regression RED instead of silently green.
+            if (!Reaches(entered, "TacticalActorLifecycle", "SourceTemplateGuid") ||
+                !Reaches(ModMethod(life, "SourceTemplateGuid"), "InstanceDataComponent", "GetInstanceData"))
+                yield return "L67 roster-spawn-unaddressable: the host spawn capture no longer reads the actor's " +
+                             "authored ActorInstanceData.SourceTemplate, so the only address on the wire is a " +
+                             "ComponentSetDef guid minted by THIS peer's DefRepository. It is non-empty, so nothing " +
+                             "warns — and it resolves to nothing on every other peer, so the actor fights on the " +
+                             "host's screen alone. That is the TFTV Umbra bug, and it is the whole family: every " +
+                             "reinforcement wave, summon, revive, hatchling and death belcher takes the same funnel";
+            if (!Reaches(applySpawn, "TacticalActorLifecycle", "RebuildSetDef") ||
+                !Reaches(ModMethod(life, "RebuildSetDef"), "TacActorData", "GenerateInstanceComponentSetDef"))
+                yield return "L67 roster-spawn-not-rebuilt: the client does not regenerate the host's ComponentSetDef " +
+                             "from the authored template through the game's own GenerateInstanceComponentSetDef, so " +
+                             "it is back to looking up a guid that was never shared and every mid-battle arrival is " +
+                             "refused on arrival";
+            // AND A REFUSAL IS A FAILURE, ANNOUNCED AT THE TURN EDGE — not a line logged once and scrolled past.
+            var divergence = ModMethod(keyer, "RosterDivergence");
+            var refuse = ModMethod(keyer, "Refuse");
+            if (divergence == null || refuse == null || resetKeys == null)
+                yield return "L67 roster-ledger-gone: TacticalActorKey.RosterDivergence / Refuse no longer exist, so a " +
+                             "peer that refused a host spawn has no way to say its roster diverged";
+            else
+            {
+                resetKeys.Invoke(null, null);
+                if (divergence.Invoke(null, null) != null)
+                    yield return "L67 roster-ledger-invents: RosterDivergence complains about an untouched battle";
+                refuse.Invoke(null, new object[] { -11, "cannot be rebuilt here" });
+                var reported = divergence.Invoke(null, null) as string;
+                if (reported == null || reported.IndexOf("-11", StringComparison.Ordinal) < 0 ||
+                    reported.IndexOf("cannot be rebuilt here", StringComparison.Ordinal) < 0)
+                    yield return "L67 roster-ledger-silent: a REFUSED host key (-11) does not come back out of " +
+                                 "RosterDivergence with its reason (got: " + (reported ?? "<null>") + "). A refusal " +
+                                 "that cannot be enumerated is a logged shrug, which is how the whole spawn family " +
+                                 "hid behind a green L67 for a full day";
+                resetKeys.Invoke(null, null);
+                if (divergence.Invoke(null, null) != null)
+                    yield return "L67 roster-ledger-sticks: the refusal ledger survives Reset, so the NEXT battle " +
+                                 "opens already reporting the last one's divergence";
+                if (!Reaches(ModMethod(mod.GetType("Multiplayer.Tactical.TacNewTurnHook"), "Postfix"),
+                             "TacticalActorKey", "RosterDivergence"))
+                    yield return "L67 roster-unchecked-at-the-edge: the turn edge does not read the refusal ledger. " +
+                                 "The turn boundary is the one moment both peers provably cross together, and it is " +
+                                 "where 'the host has an actor I do not' has to be stated as a failure — otherwise " +
+                                 "the arc is green while one screen is missing a monster";
+            }
 
             // ─── ONE STREAM, NO NEW SURFACE ───
             var opFields = new Dictionary<string, byte>(StringComparer.Ordinal);

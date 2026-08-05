@@ -175,13 +175,15 @@ namespace Multiplayer.Tactical
             var faction = actor.TacticalFaction;
             var set = actor.GetComponent<ComponentSet>();
             string setGuid = set == null || set.SetDef == null ? "" : set.SetDef.Guid;
+            string templateGuid = SourceTemplateGuid(actor);
             string factionGuid = faction == null || faction.TacticalFactionDef == null ? "" : faction.TacticalFactionDef.Guid;
             var zone = actor.Source as TacticalDeployZone;
 
-            if (string.IsNullOrEmpty(setGuid))
+            if (string.IsNullOrEmpty(templateGuid) && string.IsNullOrEmpty(setGuid))
                 SayOnce("spawn-defless-" + SafeName(actor),
-                    "[Multiplayer][tac] " + SafeName(actor) + " entered play with no shared ComponentSetDef guid " +
-                    "(a runtime-generated def — the shape a deployed GeoCharacter or a mod-built template has). " +
+                    "[Multiplayer][tac] " + SafeName(actor) + " entered play with NEITHER an authored source " +
+                    "template NOR a shared ComponentSetDef guid — the shape a deployed GeoCharacter has (its real " +
+                    "identity is its geoscape character, and the geoscape level is not loaded during a battle). " +
                     "The spawn record still ships so the other peers say so too, but they cannot rebuild it and " +
                     "this actor will exist on the host alone.");
 
@@ -191,6 +193,7 @@ namespace Multiplayer.Tactical
                 {
                     w.Write(key);
                     w.Write(setGuid);
+                    w.Write(templateGuid);
                     w.Write(factionGuid);
                     w.Write((byte)(faction == null ? TacMissionParticipant.None : faction.ParticipantKind));
                     var p = actor.Pos;
@@ -199,6 +202,29 @@ namespace Multiplayer.Tactical
                     w.Write(r.x); w.Write(r.y); w.Write(r.z); w.Write(r.w);
                     w.Write(zone == null ? "" : zone.name);
                 });
+        }
+
+        /// <summary>THE ADDRESS A SPAWN IS REBUILDABLE FROM (law L67e). A <c>ComponentSetDef</c> guid is NOT one:
+        /// EVERY mid-battle arrival in the assembly builds its set def through
+        /// <c>TacActorData.GenerateInstanceComponentSetDef</c>:52 -> <c>DefRepository.CreateRuntimeDef</c>:234,
+        /// which stamps <c>Guid.NewGuid()</c> and registers it in THAT PEER'S <c>_guid2Def</c> alone. The guid is
+        /// therefore non-empty and perfectly valid on the host and pure noise everywhere else — which is why the
+        /// old "no guid at all" warning never fired and the host looked healthy while the actor existed on one
+        /// screen only (TFTV's Umbra, live 3-instance test 2026-08-05).
+        ///
+        /// The AUTHORED template is: <c>ActorInstanceData.SourceTemplate</c> (Base.Entities:19) is a repo def
+        /// with a stable guid, and it is stamped by every arrival path that matters —
+        /// <c>DeathBelcherAbility</c>:91 (the Umbra), <c>SpawnActorAbility</c>:93 (summons) and
+        /// <c>ActorDeployData.InitializeInstanceData</c>:101/117, which is the one funnel behind reinforcement
+        /// waves, <c>ResurrectAbility</c>:139-156 and <c>SpawnChildActorStatus</c>:88-98. It is always a
+        /// <c>TacActorDef</c>, whose <c>InstanceData</c> (abstract, :16) regenerates the very same set def
+        /// locally. Read exactly the way the game reads it in <c>ActorComponent.DoEnterPlay</c>:116, so the
+        /// component is guaranteed present at our postfix.</summary>
+        private static string SourceTemplateGuid(TacticalActor actor)
+        {
+            var data = InstanceDataComponent.GetInstanceData<ActorInstanceData>(actor.gameObject);
+            var template = data == null ? null : data.SourceTemplate as TacActorDef;
+            return template == null ? "" : template.Guid;
         }
 
         /// <summary>Rebuild the host's actor with the game's OWN spawner. <c>TacticalDeployZone.SpawnActor</c>
@@ -211,6 +237,7 @@ namespace Multiplayer.Tactical
         {
             int key = r.ReadInt32();
             string setGuid = r.ReadString();
+            string templateGuid = r.ReadString();
             string factionGuid = r.ReadString();
             var participant = (TacMissionParticipant)r.ReadByte();
             var pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
@@ -218,23 +245,25 @@ namespace Multiplayer.Tactical
             string zoneName = r.ReadString();
 
             var repo = GameUtl.GameComponent<DefRepository>();
-            var setDef = string.IsNullOrEmpty(setGuid) || repo == null ? null : repo.GetDef(setGuid) as ComponentSetDef;
+            var setDef = RebuildSetDef(repo, templateGuid, setGuid);
             var factionDef = string.IsNullOrEmpty(factionGuid) || repo == null ? null : repo.GetDef(factionGuid) as TacticalFactionDef;
             if (setDef == null || factionDef == null)
             {
-                // A5 — A FIRST-CLASS REFUSAL, not a log line and a shrug. The commonest cause is a
-                // RUNTIME-GENERATED ComponentSetDef (a deployed GeoCharacter, a mod-built template): it has no
-                // guid any other peer can look up, and it cannot be rebuilt from here at all — the actor's real
-                // identity is its geoscape character, and the geoscape level is not loaded during a battle. So
-                // the key is REGISTERED as unresolvable WITH THIS REASON, and every later record naming it says
-                // so, instead of the generic "a spawn record never arrived" that sends the next reader hunting
-                // a lost packet. The refusal is the boundary; the silence would be the bug.
+                // A5 — A FIRST-CLASS REFUSAL, not a log line and a shrug. The key is REGISTERED as unresolvable
+                // WITH THIS REASON, and every later record naming it says so, instead of the generic "a spawn
+                // record never arrived" that sends the next reader hunting a lost packet. Since L67e this is
+                // also NARROW: the only spawn that can still land here is one the host had no authored
+                // SourceTemplate for — a deployed GeoCharacter, whose real identity is its geoscape character
+                // and whose geoscape level is not loaded during a battle. Everything the game builds from a def
+                // (reinforcements, summons, revives, hatchlings, death belchers, TFTV's Umbra) now rebuilds.
                 string why = "the host spawned this actor with " +
                              (setDef == null
-                                ? (string.IsNullOrEmpty(setGuid)
-                                    ? "a RUNTIME-GENERATED ComponentSetDef (no shared guid at all — the shape a " +
-                                      "deployed GeoCharacter or a mod-built template has), which no peer can look up"
-                                    : "ComponentSetDef guid '" + setGuid + "', which resolves to nothing here")
+                                ? (string.IsNullOrEmpty(templateGuid)
+                                    ? "NO authored source template at all (SourceTemplate was null — the shape a " +
+                                      "deployed GeoCharacter has) and a ComponentSetDef guid '" + setGuid + "' that " +
+                                      "is runtime-generated on the host, so no peer can look either of them up"
+                                    : "source template guid '" + templateGuid + "' / ComponentSetDef guid '" + setGuid +
+                                      "', and NEITHER resolves here — the two peers are running different def sets")
                                 : "TacticalFactionDef guid '" + factionGuid + "', which resolves to nothing here") +
                              ", so it exists on the host alone and can never be rebuilt on this peer";
                 TacticalActorKey.Refuse(key, why);
@@ -272,6 +301,26 @@ namespace Multiplayer.Tactical
             }
             TacticalActorKey.Adopt(spawned, key);
             Debug.Log("[Multiplayer][tac] CLIENT spawned the host's " + setDef.name + " key=" + key + " @ " + pos);
+        }
+
+        /// <summary>The client half of law L67e: REGENERATE the host's set def from the authored template rather
+        /// than looking up a guid that was minted per-peer. <c>TacActorData.GenerateInstanceComponentSetDef</c>
+        /// is the game's own call and the very one the host made, so this is the same def by construction — both
+        /// peers run the same build, which the version gate already enforces. The shipped
+        /// <c>ComponentSetDef</c> guid stays as the FALLBACK for the case where the host's set def really was an
+        /// authored repo def, which is the only case it was ever able to serve.
+        ///
+        /// It regenerates the DEF, not the instance state: <c>ApplySpawn</c> deliberately passes a null instance
+        /// template to the spawner, because everything that moves after the spawn (health, AP, statuses, and the
+        /// summoner's donated equipment in <c>SpawnActorAbility</c>:75-90) is already 0x84's damage and
+        /// resnapshot business. A template rebuild is the def's fresh state, exactly as before.</summary>
+        private static ComponentSetDef RebuildSetDef(DefRepository repo, string templateGuid, string setGuid)
+        {
+            if (repo == null) return null;
+            var template = string.IsNullOrEmpty(templateGuid) ? null : repo.GetDef(templateGuid) as TacActorDef;
+            if (template != null && template.InstanceData != null)
+                return template.InstanceData.GenerateInstanceComponentSetDef();
+            return string.IsNullOrEmpty(setGuid) ? null : repo.GetDef(setGuid) as ComponentSetDef;
         }
 
         // ─── DEATH + THE CORPSE'S CONTENTS ─────────────────────────────────
