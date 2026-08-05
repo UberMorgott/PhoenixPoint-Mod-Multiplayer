@@ -85,7 +85,16 @@ namespace Multiplayer.Network.Sync
                     // sender's socket can still be up and would otherwise drive it unthrottled.
                     if (engine != null && engine.IsHost && engine.Session != null
                         && engine.Session.Clients.ContainsKey(senderPeerId))
-                        DiffEngine.RequestFullResend();
+                    {
+                        // SCOPE FIRST. The request optionally names the root the client lost (payload
+                        // byte 1..: a length-prefixed string); a named root is answered with the scoped
+                        // re-emit that already exists rather than with the whole graph. Only a request
+                        // that knows no scope falls back to the full resend — which is itself globally
+                        // coalesced host-side (DiffEngine.FullResendCooldownSec).
+                        string root = ReadResyncRoot(payload);
+                        if (!string.IsNullOrEmpty(root)) DiffEngine.ForceReemit(root);
+                        else DiffEngine.RequestFullResend();
+                    }
                     return true;
                 }
                 if (payload[0] == DiffEngine.MsgCrcReport)
@@ -313,7 +322,9 @@ namespace Multiplayer.Network.Sync
                     using (SyncApplyScope.Enter())
                         UiEventMap.Fire(touched, geo); // law 11: open roster/equip screens repaint NOW
                 if (created)
-                    RequestResync(engine, "structural create backfill"); // ref-lists shipped pre-create reconverge
+                    // The ONE resync caller that knows its scope: the ref-lists that need reconverging all
+                    // hang off the root just created, so this costs a scoped re-emit, not the whole graph.
+                    RequestResync(engine, "structural create backfill", rootKey); // ref-lists shipped pre-create reconverge
             }
         }
 
@@ -1265,11 +1276,31 @@ namespace Multiplayer.Network.Sync
         /// caused the rhythmic freezes) — a backstop's job is to notice within a minute, not within a frame.
         /// Why it must exist: the host diff compares host-NOW to host-BEFORE, so nothing the host DELETES ever
         /// reaches us — a vanished path emits no entry and no tombstone. Only a subtree compare can see it.</summary>
+        /// <summary>How many peers the host last told us about (PEER_LIST), floored at 1. The ONE number the
+        /// client half needs to keep the host's aggregate backstop cost independent of the roster.</summary>
+        private static float RosterScale(NetworkEngine engine)
+        {
+            try
+            {
+                int n = engine?.Session?.GetLobbyRoster()?.Count ?? 0;
+                return n < 1 ? 1f : n;
+            }
+            catch { return 1f; }
+        }
+
         public static void ClientCrcTick(NetworkEngine engine)
         {
             if (engine == null || engine.IsHost || !engine.IsActiveSession) return;
             if (Time.realtimeSinceStartup < _crcNextAt) return;
-            _crcNextAt = Time.realtimeSinceStartup + CrcInterval;
+            // ROSTER-SCALED interval (N=50 mandate). Every client reports on its own clock and the HOST pays
+            // one subtree walk per report, so a fixed 1 s interval makes the host's backstop cost grow
+            // linearly with the roster while each client's own cost stays flat — the peer that suffers is
+            // the one that asked for nothing. Stretch the interval by the roster size the host already
+            // broadcast to us (PEER_LIST → SessionManager.GetLobbyRoster), so the AGGREGATE inbound rate
+            // stays ≈ one report per second whatever N is. Backstop semantics survive: at N=50 a root is
+            // still swept well inside the "notice within a minute, not within a frame" contract because
+            // the roots are swept round-robin across all peers, not by each peer alone.
+            _crcNextAt = Time.realtimeSinceStartup + CrcInterval * RosterScale(engine);
             var geo = GeoLevel();
             if (geo == null) return;
             string key = null; object obj = null;
@@ -1292,7 +1323,8 @@ namespace Multiplayer.Network.Sync
                 // cannot come back a second later. Backstop semantics are unharmed — it notices within a
                 // minute, not within a frame (see the summary above).
                 if (crcMs > DiffEngine.SliceBudgetMs)
-                    _crcNextAt = Time.realtimeSinceStartup + (float)(CrcInterval * crcMs / DiffEngine.SliceBudgetMs);
+                    _crcNextAt = Time.realtimeSinceStartup +
+                                 (float)(CrcInterval * RosterScale(engine) * crcMs / DiffEngine.SliceBudgetMs);
                 RailCost.Charge("crc:" + key, crcMs);
                 using (var ms = new MemoryStream())
                 using (var w = new BinaryWriter(ms, Encoding.UTF8))
@@ -1311,18 +1343,41 @@ namespace Multiplayer.Network.Sync
         /// <summary>ONE throttled gate onto the law-7 resync path, whatever noticed the divergence (seq gap,
         /// unknown kind def, torn batch). The throttle is global on purpose: a systematic miss hits every
         /// entry of every packet, and one full resend answers all of them.</summary>
-        private static void RequestResync(NetworkEngine engine, string reason)
+        /// <param name="rootKey">The one root this client knows it lost, when it knows one — the host then
+        /// answers with a SCOPED re-emit instead of the whole covered graph (see HandleInbound). Null = no
+        /// scope known (a seq gap or a torn batch can have touched anything).</param>
+        private static void RequestResync(NetworkEngine engine, string reason, string rootKey = null)
         {
             if (engine == null || Time.realtimeSinceStartup < _nextResyncReqAt) return;
             _nextResyncReqAt = Time.realtimeSinceStartup + 5f;
-            Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + reason + " — requesting full resend");
+            Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + reason + " — requesting resend" +
+                             (string.IsNullOrEmpty(rootKey) ? " (full)" : " of root '" + rootKey + "'"));
             try
             {
-                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoRail, SyncKind.ActionRequest,
-                                                      new[] { DiffEngine.MsgResyncRequest });
+                byte[] body;
+                if (string.IsNullOrEmpty(rootKey)) body = new[] { DiffEngine.MsgResyncRequest };
+                else
+                    using (var ms = new MemoryStream())
+                    using (var w = new BinaryWriter(ms, Encoding.UTF8))
+                    { w.Write(DiffEngine.MsgResyncRequest); w.Write(rootKey); body = ms.ToArray(); }
+                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoRail, SyncKind.ActionRequest, body);
                 engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][rail] GenericApplier resync request failed: " + ex.Message); }
+        }
+
+        /// <summary>Host half of the optional scope above. A legacy one-byte request (or any unreadable
+        /// tail) reads as "no scope" and falls back to the full resend — the pre-scope behaviour.</summary>
+        private static string ReadResyncRoot(byte[] payload)
+        {
+            if (payload == null || payload.Length <= 1) return null;
+            try
+            {
+                using (var ms = new MemoryStream(payload, 1, payload.Length - 1))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                    return r.ReadString();
+            }
+            catch { return null; }
         }
     }
 }

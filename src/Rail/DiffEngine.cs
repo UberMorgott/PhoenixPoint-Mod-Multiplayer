@@ -75,6 +75,18 @@ namespace Multiplayer.Network.Sync
         // has no uncommitted input in flight (RunSlice) — that drag is the one thing the 3 ms floor was
         // bought for. Field, not const, for the same reason as SliceBudgetMs: RailCheck L74 must SEE the read.
         internal static readonly double UrgentSliceBudgetMs = 8.0;
+        // HOST-SIDE COALESCING BUDGET for the full resend (N=50 mandate). A full resend re-emits EVERY
+        // covered pair (~22k entries, ~1 MB chunked at MaxPacketBytes) and fans out to ALL peers, so its
+        // cost is O(N) bytes per request while the REQUESTS are O(N) too — N clients each asking once per
+        // their own 5 s client throttle is N²/5 MB/s of host uplink, which is the single loudest way this
+        // rail collapses as the roster grows. The answer is not a per-requester throttle (that is what the
+        // client half already has and it does not compose): one resend re-states the whole graph to
+        // EVERYONE, so it answers every outstanding requester at once. Coalesce globally instead — at most
+        // one per this window whoever asked — and never DROP a request: one that lands inside the window
+        // sets _fullResendPending and fires from HostTick the moment the window expires. Cost at N=50 is
+        // then ~1 MB per window regardless of N, and a joiner's re-seed (SyncEngineStub.BroadcastAllChannels)
+        // still always arrives, at worst one window late.
+        internal static readonly float FullResendCooldownSec = 10f;
 
         internal struct Entry
         {
@@ -99,6 +111,8 @@ namespace Multiplayer.Network.Sync
         private static readonly HashSet<byte> _sentKinds = new HashSet<byte>();
         private static bool _baselined;
         private static bool _forceFull;
+        private static float _lastFullResendAt = float.NegativeInfinity; // see FullResendCooldownSec
+        private static bool _fullResendPending;                          // a request arrived inside the window
         private static readonly List<string> _forcePrefixes = new List<string>(); // scoped forced re-emit, see ForceReemit
         private static float _nextTickAt;
         private static bool _cycleUrgent;   // a FlushNow is outstanding — see RunSlice / UrgentSliceBudgetMs
@@ -309,6 +323,15 @@ namespace Multiplayer.Network.Sync
         private static readonly Dictionary<string, uint> _rootTouchedSeq = new Dictionary<string, uint>(StringComparer.Ordinal);
         private static readonly Dictionary<string, int> _crcHeals = new Dictionary<string, int>(StringComparer.Ordinal); // "<peer>|<root>" → re-emits spent
         private static bool _crcWalk;   // inside RootCrc: the walk must ship NOTHING and touch no tick state
+        // INBOUND CRC BUDGET (N=50 mandate). HandleCrcReport answers each report with a SYNCHRONOUS full
+        // subtree walk on the packet drain — unbudgeted, on the main thread, once per report. The client
+        // half already rate-limits itself against SliceBudgetMs (GenericApplier.ClientCrcTick); the host
+        // half had nothing, so N clients reporting cost the host N walks per frame-batch and the whole
+        // session hitched as the roster grew. Charge inbound walks against the SAME per-frame budget and
+        // SKIP the rest of the frame's reports. Skipping loses nothing: the client re-reports that root on
+        // its next rotation, and a backstop's contract is to notice within a minute, not within a frame.
+        private static int _crcInFrame;         // Time.frameCount of the accumulator below
+        private static double _crcInFrameMs;    // inbound CRC ms already spent this frame
         // RootCrc's own scratch — see there. Separate from the periodic walk's set on purpose: a CRC may be
         // taken on the host mid-cycle (HandleCrcReport) and must not disturb the cycle in progress.
         private static readonly List<Entry> _crcOrdered = new List<Entry>();
@@ -358,15 +381,31 @@ namespace Multiplayer.Network.Sync
             _baselined = false;
             _forceFull = false;
             _forcePrefixes.Clear();
+            _fullResendPending = false;
+            _lastFullResendAt = float.NegativeInfinity; // post-boundary re-seed must not wait out a pre-boundary window
             _crcHeals.Clear(); // the clients' state was wholesale replaced by the save transfer — re-arm the heal
             ArmChangeDrivenFlush(null); // drop the old level's Timing; the next HostTick arms the new one
             TimeAnchor.Reset();         // post-load the clock jumped: re-latch rather than re-publish the old anchor
             DefOwnership.Invalidate();  // a loaded save can mint runtime defs — rebuild the ownership set
         }
 
-        /// <summary>Client lost the stream (seq gap): resend EVERYTHING covered — it is just a big delta.</summary>
+        /// <summary>Client lost the stream (seq gap): resend EVERYTHING covered — it is just a big delta.
+        /// COALESCED globally (<see cref="FullResendCooldownSec"/>): one resend answers every outstanding
+        /// requester because it fans to all peers anyway. A request inside the window is DEFERRED, never
+        /// dropped — HostTick fires it when the window expires.</summary>
         public static void RequestFullResend()
         {
+            float now = Time.realtimeSinceStartup;
+            if (now - _lastFullResendAt < FullResendCooldownSec)
+            {
+                if (!_fullResendPending)
+                    Debug.Log("[Multiplayer][rail] DiffEngine: full resend coalesced — one is already in this " +
+                              FullResendCooldownSec + "s window; deferred to its end");
+                _fullResendPending = true;
+                return;
+            }
+            _lastFullResendAt = now;
+            _fullResendPending = false;
             _forceFull = true;
             _sentKinds.Clear();
             // A resend re-emits the STORED anchor; re-latch first so the client is not rewound to whenever
@@ -487,7 +526,14 @@ namespace Multiplayer.Network.Sync
                 return;
             }
             if (_rootTouchedSeq.TryGetValue(rootKey, out var touched) && touched > clientSeq) return; // behind, not diverged
+            // Per-frame budget gate (see _crcInFrameMs): the walk below is the expensive part, and it is
+            // the ONLY thing this method does that scales with the roster.
+            if (_crcInFrame != Time.frameCount) { _crcInFrame = Time.frameCount; _crcInFrameMs = 0; }
+            if (_crcInFrameMs >= SliceBudgetMs) return; // over budget this frame — the client re-reports
+            var crcSw = Stopwatch.StartNew();
             uint hostCrc = RootCrc(rootKey, mine);
+            _crcInFrameMs += crcSw.Elapsed.TotalMilliseconds;
+            RailCost.Charge("crc-in:" + rootKey, crcSw.Elapsed.TotalMilliseconds);
             if (hostCrc == clientCrc) { _crcHeals.Remove(tag); return; }
             _crcHeals.TryGetValue(tag, out var heals);
             _crcHeals[tag] = heals + 1;
@@ -601,6 +647,9 @@ namespace Multiplayer.Network.Sync
         {
             if (engine == null || !engine.IsHost || !engine.IsActiveSession) return;
             float now = Time.realtimeSinceStartup;
+            // A resend deferred by the coalescing window (see RequestFullResend) fires here, so a request
+            // that lost the race is answered one window late instead of being silently swallowed.
+            if (_fullResendPending && now - _lastFullResendAt >= FullResendCooldownSec) RequestFullResend();
             // A force NEVER abandons a cycle in progress any more. It cannot: abandoning is what let a
             // gesture storm cost one whole-graph walk per gesture, and it also had a silent starvation
             // mode (forces arriving faster than a cycle completes ⇒ every cycle restarted ⇒ nothing ever
