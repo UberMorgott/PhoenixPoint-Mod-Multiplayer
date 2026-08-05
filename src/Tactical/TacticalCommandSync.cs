@@ -15,6 +15,7 @@ using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.Entities.Abilities;
 using PhoenixPoint.Tactical.Entities.Equipments;
+using PhoenixPoint.Tactical.Entities.Statuses;
 using PhoenixPoint.Tactical.Levels;
 using UnityEngine;
 
@@ -2162,10 +2163,33 @@ namespace Multiplayer.Tactical
         /// the rail cost line, narrow it to the settled actor with the public
         /// <c>CheckVisibleLineBetweenActors</c> + <c>IncrementKnownCounter</c> pair.
         ///
-        /// DECLARED CEILING: <c>KnownState.Located</c> (in detection range, no line of sight — the orange
-        /// beacon) is unreachable from here, because <c>ReUpdateVisibilityTowardsActorImpl</c>:651-662 only
-        /// ever raises <c>Revealed</c>. Located is repaired at the next faction turn edge by the game's own
-        /// full recompute (<c>OnFactionStartTurn</c>:154-175), which every peer runs.
+        /// THE CEILING THIS USED TO DECLARE IS RAISED. <c>KnownState.Located</c> — in detection range, no
+        /// line of sight, the orange "something is there" beacon — really is unreachable through
+        /// <c>UpdateVisibilityOfAllTowardsActor</c>:546, whose whole body is
+        /// <c>ReUpdateVisibilityTowardsActorImpl</c>:651-662 and which raises <c>Revealed</c> and nothing
+        /// else. So the beacon was simply LOST between settles: a mirroring peer knew an enemy was there
+        /// only once it could SEE it. <see cref="LocateByDistance"/> adds the missing half, transcribed from
+        /// the game's own rule rather than invented — <c>GatherKnowableActors</c>:640-647 locates an actor
+        /// when it is a live, uncloaked <c>TacticalActor</c> within
+        /// <c>TacticalLevelControllerDef.DetectionRange</c>, and the raise is the same public
+        /// <c>IncrementKnownCounter(actor, Located, 1, notify)</c>:444 that
+        /// <c>UpdateVisibilityForImpl</c>:576-579 uses for exactly that list. Hearing
+        /// (<c>ReUpdateHearingImpl</c>:664-684, per-soldier <c>HearingRange</c>) stays out: it is a second,
+        /// independent rule and this repair is not the place to grow one.
+        ///
+        /// THE REVERSE RISK — a beacon that outlives its enemy — IS BOUNDED, AND THE BOUND IS THE GAME'S OWN,
+        /// not a hope. Two facts make it so. (1) The counter is a MAX, not a tally:
+        /// <c>KnownCounters.IncrementCounterTo</c>:55-67 is <c>if (num &lt; counter) _counters[type] =
+        /// counter</c>, so raising Located to 1 twice leaves 1, and a mirrored raise landing on top of this
+        /// peer's own native one adds nothing to decay. (2) The decay is the faction-turn edge —
+        /// <c>OnFactionStartTurn</c>:154-165 runs <c>DecrementMyCountersForFaction</c> then a full
+        /// <c>UpdateVisibilityAll</c> — and EVERY peer runs it. Vanilla's own beacon is raised by precisely
+        /// the same monotone call on <c>OnActorMoved</c>:281 and cannot be lowered mid-turn either. So this
+        /// arm does not make a peer's beacon staler than a single-player one; it makes it exist.
+        /// ponytail: the LOS re-test that would make the raise strictly "located INSTEAD of revealed"
+        /// (<c>GatherKnowableActors</c>'s else-if chain) is skipped — it is a second full visibility cast per
+        /// pair, and Located+Revealed together is a state vanilla reaches all the time (one soldier in range
+        /// without sight, another with it).
         /// </summary>
         /// <summary>THE toActor MUST BE A PERCEIVABLE ONE, AND THE GAME DOES NOT CHECK (2026-08-04 RCA — this is what
         /// killed the whole settle path). <c>UpdateVisibilityOfAllTowardsActor</c>:549-554 guards only the
@@ -2192,10 +2216,38 @@ namespace Multiplayer.Tactical
             {
                 if (faction == own || faction.Vision == null) continue;
                 faction.Vision.UpdateVisibilityOfAllTowardsActor(actor, range, notifyChange: true);
+                LocateByDistance(faction, actor, range);
                 if (own == null || own.Vision == null) continue;
                 foreach (var foreign in faction.Actors)
                     if (CanBeSeen(foreign))
+                    {
                         own.Vision.UpdateVisibilityOfAllTowardsActor(foreign, range, notifyChange: true);
+                        LocateByDistance(own, foreign, range);
+                    }
+            }
+        }
+
+        /// <summary>The DISTANCE half of knowing where somebody is, transcribed from
+        /// <c>TacticalFactionVision.GatherKnowableActors</c>:640-647: a live, uncloaked, non-evacuated
+        /// <c>TacticalActor</c> within <c>DetectionRange</c> of ANY of the looking faction's actors is
+        /// LOCATED by that faction. The raise is the game's own public counter call, at the same value
+        /// <c>UpdateVisibilityForImpl</c>:576-579 uses.
+        ///
+        /// It returns on the FIRST locator on purpose: <c>IncrementCounterTo</c>:55-67 takes a maximum, not
+        /// a sum, so a second locator would change nothing — and walking the rest of the faction per foreign
+        /// actor is the cost this settle path is already careful about.</summary>
+        private static void LocateByDistance(TacticalFaction looking, TacticalActorBase target, float range)
+        {
+            if (looking == null || looking.Vision == null || !CanBeSeen(target)) return;
+            var ta = target as TacticalActor;
+            if (ta == null || !ta.IsAlive || ta.IsCloaked) return;
+            if (ta.Status != null && ta.Status.HasStatus<EvacuatedStatus>()) return;
+            foreach (var looker in looking.Actors)
+            {
+                if (!CanBeSeen(looker) || looker.IsDead || ReferenceEquals(looker, ta)) continue;
+                if (!Utl.LesserThanOrEqualTo((looker.Pos - ta.Pos).magnitude, range)) continue;
+                looking.Vision.IncrementKnownCounter(ta, KnownState.Located, 1, notifyChange: true);
+                return;
             }
         }
     }

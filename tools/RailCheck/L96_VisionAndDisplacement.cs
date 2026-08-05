@@ -93,6 +93,45 @@ namespace RailCheck
                                  "faction's Actors. The own-faction half has no public native entry " +
                                  "(UpdateVisibilityForImpl is private), so it exists ONLY as the inverted sweep over " +
                                  "the foreign actors — without that enumeration whatever is left cannot be it.";
+
+                // ─── the LOCATED half: distance, not sight ───
+                // UpdateVisibilityOfAllTowardsActor raises Revealed and ONLY Revealed
+                // (ReUpdateVisibilityTowardsActorImpl:651-662), so without a second arm a mirroring peer knows
+                // an enemy is there only once it can SEE it — the orange beacon is lost between settles.
+                var locate = cmd.GetMethod("LocateByDistance", AllMembers);
+                if (locate == null || !callees.Any(c => c.Name == "LocateByDistance"))
+                    yield return "L96 settle-located-gone: the settle repair no longer reaches LocateByDistance, so " +
+                                 "it raises Revealed and nothing else. KnownState.Located — in DetectionRange, no " +
+                                 "line of sight — is then unreachable on every peer whose only word about the " +
+                                 "authoritative position is this settle, and the 'something is there' beacon simply " +
+                                 "does not appear until the next faction turn edge recomputes it.";
+                else
+                {
+                    var lc = Calls(locate);
+                    if (!lc.Any(c => c.Name == "IncrementKnownCounter"))
+                        yield return "L96 located-not-raised: LocateByDistance never calls " +
+                                     "TacticalFactionVision.IncrementKnownCounter. It is the ONLY public entry that " +
+                                     "can raise Located (UpdateVisibilityForImpl, which the game uses for exactly " +
+                                     "this list, is private) — without it the method computes a distance and " +
+                                     "throws the answer away.";
+                    else if (!LoadsInt(locate, (int)16 /* KnownState.Located */))
+                        yield return "L96 located-wrong-state: LocateByDistance calls IncrementKnownCounter but " +
+                                     "never loads KnownState.Located (16). Raising Revealed by distance alone would " +
+                                     "show an enemy through walls, which is precisely what law L81 bans; raising " +
+                                     "Hidden would do nothing at all.";
+                    if (!lc.Any(c => c.Name == "LesserThanOrEqualTo") || !lc.Any(c => c.Name == "get_magnitude"))
+                        yield return "L96 located-ungated: LocateByDistance no longer compares a MAGNITUDE with " +
+                                     "Utl.LesserThanOrEqualTo, so the Located raise is not gated on range at all. " +
+                                     "The game's own rule is GatherKnowableActors:640-647 — within " +
+                                     "TacticalLevelControllerDef.DetectionRange — and an ungated raise beacons every " +
+                                     "enemy on the map to every peer, which is a worse lie than the missing beacon " +
+                                     "this arm was added to fix.";
+                }
+                if (!ReadsField(refresh, "DetectionRange") && !callees.Any(c => c.Name == "get_DetectionRange"))
+                    yield return "L96 settle-range-not-native: RefreshVisionTowards no longer reads " +
+                                 "TacticalLevelControllerDef.DetectionRange, so whatever range it now hands to the " +
+                                 "native vision calls and to LocateByDistance is this mod's number rather than the " +
+                                 "game's — two peers on different numbers see different boards.";
             }
 
             var vision = game.GetType("PhoenixPoint.Tactical.Levels.TacticalFactionVision");
@@ -206,6 +245,27 @@ namespace RailCheck
                 try { f = m.Module.ResolveField(BitConverter.ToInt32(step.Key, step.Value.Pos),
                                                 typeArgs, methodArgs); } catch { }
                 if (f != null && f.Name == name) return true;
+            }
+            return false;
+        }
+
+        /// <summary>Does this method ever push <paramref name="value"/> as an int constant? Enum arguments
+        /// are invisible to a callee list — <c>IncrementKnownCounter(actor, Located, 1, true)</c> and
+        /// <c>(actor, Revealed, 1, true)</c> are the same edge — so the constant is the only place the
+        /// STATE being raised is written down.</summary>
+        private static bool LoadsInt(MethodBase m, int value)
+        {
+            foreach (var step in Walk(m))
+            {
+                var op = step.Value.Op;
+                int got;
+                if (op == OpCodes.Ldc_I4) got = BitConverter.ToInt32(step.Key, step.Value.Pos);
+                else if (op == OpCodes.Ldc_I4_S) got = (sbyte)step.Key[step.Value.Pos];
+                else if (op == OpCodes.Ldc_I4_M1) got = -1;
+                else if (op.Value >= OpCodes.Ldc_I4_0.Value && op.Value <= OpCodes.Ldc_I4_8.Value)
+                    got = op.Value - OpCodes.Ldc_I4_0.Value;
+                else continue;
+                if (got == value) return true;
             }
             return false;
         }
