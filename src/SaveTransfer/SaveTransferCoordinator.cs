@@ -1793,6 +1793,15 @@ namespace Multiplayer.Network
             // tactical Playing never reaches TacDeployReadyCapture's consume, so without this the arm outlives
             // its own entry and the NEXT battle — loaded from a save every peer already holds — consumes it.
             Multiplayer.Tactical.TacLaunchGate.DisarmSessionEntry();
+            // …and so does the on-demand JOIN arm, for exactly the same reason (law L122's pattern, c46d920).
+            // _onDemandJoiner is cleared ONLY in OnSaveChunk's first-chunk branch, i.e. only by a transfer.
+            // But the tac→geo RETURN and the native tactical entry (L103) arm through ArmSelfLoadBarrier and
+            // ship NO save at all, so a peer that joined mid-session carried this flag into every later load
+            // boundary — and OnReachedPlaying's join branch lifts ALONE, by design. One mid-session joiner is
+            // therefore enough to reproduce the report verbatim at the end of the very next battle: its
+            // screen comes down while the other two still load. The arm's lifetime is its OWN entry, which
+            // this reveal is the end of.
+            _onDemandJoiner = false;
             Debug.Log("[Multiplayer] PerformDeferredLift → reveal (native LiftCurtain + hide overlay)");
             // Restore the native loading label ("Waiting for players…" → original) before the lift runs.
             // Setting _revealed above already opened the curtain gate, so any PARKED lift resumes now.

@@ -421,7 +421,206 @@ namespace RailCheck
                                      "mid-load must find its seat, its slot and its permissions exactly where it " +
                                      "left them when it comes back";
                 }
+
+            // ─── (l) THE COVERAGE ARM. NO PEER'S SCREEN COMES DOWN BEFORE THE REVEAL — ANY OF THEM. ───
+            foreach (var v in TakedownCoverage()) yield return v;
         }
+
+        /// <summary>
+        /// ARM (l) — EVERY WAY THE LOADING SCREEN CAN COME DOWN IS GATED, NOT JUST THE ONE WE FOUND.
+        ///
+        /// Every arm above asserts the AGGREGATE and the MATH: (c) executes AllDone, (d) executes
+        /// HoldCurtain, (k) checks the _loadPhaseActive writers. All of them were GREEN through five
+        /// successive "fixes" of the same report — one peer playing while two still load — because none of
+        /// them asks the only question that was actually wrong: WHICH WRITERS DOES THE GATE COVER. In the
+        /// freshest captured run the aggregate worked perfectly (three peers released within one hop, host
+        /// last), and the screen still came down early, because what the player calls "the loading screen"
+        /// is THREE independent GameObjects and the barrier held one:
+        ///   1. the ink curtain, via LevelSwitchCurtainController.LiftCurtainCrt — gated all along;
+        ///   2. the "LoadingScreen" child, via SceneFadeController.SetLoadingScreenVisible(false) — a plain
+        ///      SetActive nobody had ever looked at;
+        ///   3. InGameLoadingCurtain.CurtainObject, via HideCurtain — likewise, and self-driven per peer off
+        ///      purely LOCAL state (WaitForView:50 spins on this peer's own Playing + ViewInitialized), which
+        ///      is the shape the report describes exactly.
+        ///
+        /// L125 asserts that the targets we DECLARE bind. It cannot assert the target SET is complete — a
+        /// patch list that is missing an entry binds perfectly. This arm is that missing half, and it is the
+        /// one that makes a sixth regression cost a red harness instead of another live session.
+        ///
+        /// THE SET IS DERIVED, NEVER LISTED. A hand list of methods is the same failure one indirection
+        /// later: it goes stale the day the game adds a fourth path, silently, which is precisely how this
+        /// bug survived. So the writers are read structurally off the SHIPPED Assembly-CSharp — every method
+        /// on the three curtain components (including their compiler-generated iterator bodies) that calls
+        /// GameObject.SetActive with anything other than a literal `true`, while referencing a curtain /
+        /// loading-screen member of those components. Deactivating the loading TIPS or the progress text is
+        /// not taking the screen down, which is why the member the SetActive rides on is part of the rule.
+        ///
+        /// COVERED means gated, not necessarily patched: a writer whose only entries inside the components
+        /// are themselves covered is covered (SceneFadeController.LiftCurtain is reached solely through
+        /// LevelSwitchCurtainController.LiftCurtainCrt, which our gate wraps). A writer with NO entry inside
+        /// the components is called from the outside world — PhoenixSaveManager, GeoLevelController,
+        /// PhoenixGame — and must be gated on itself. Ceiling: the dominator search stops at the component
+        /// boundary, so gating a caller OUTSIDE the three types does not count as coverage. That is
+        /// deliberate; a gate on one of many external callers is not coverage.
+        ///
+        /// FALSIFIED (observed 2026-08-05, before the fix): with paths 2 and 3 unpatched this arm reports
+        /// takedown-uncovered for SceneFadeController.SetLoadingScreenVisible and
+        /// InGameLoadingCurtain.HideCurtain and RailCheck goes RED. Adding the two gates turns it green,
+        /// while the ink-curtain writer stays green throughout because it always was covered.
+        /// </summary>
+        private static IEnumerable<string> TakedownCoverage()
+        {
+            var roots = new[] { "Base.Utils.SceneFadeController",
+                                "Base.Utils.LevelSwitchCurtainController",
+                                "Base.UI.InGameLoadingScreen.InGameLoadingCurtain" }
+                        .Select(AccessTools.TypeByName).ToList();
+            var setActive = AccessTools.Method(typeof(UnityEngine.GameObject), "SetActive", new[] { typeof(bool) });
+            if (roots.Any(t => t == null) || setActive == null)
+            {
+                yield return "L94 premise-changed: the shipped assembly no longer carries all of " +
+                             "SceneFadeController / LevelSwitchCurtainController / InGameLoadingCurtain / " +
+                             "GameObject.SetActive, so this law can no longer enumerate the ways the loading " +
+                             "screen comes down — and an enumeration it cannot compute is the exact blind spot " +
+                             "that let one peer play while two were still loading, five fixes running";
+                yield break;
+            }
+
+            // Every body that belongs to a curtain component, iterator state machines included: a lift is an
+            // IEnumerator, so its real instructions live in a nested <Name>d__N::MoveNext.
+            var bodies = roots.SelectMany(t => new[] { t }.Concat(t.GetNestedTypes(AllMembers)))
+                              .SelectMany(SafeMethods).ToList();
+            var writers = bodies.Where(m => HidesCurtainGameObject(m, setActive, roots))
+                                .Select(Owner).Distinct().ToList();
+            var patched = new HashSet<string>(OurPatchTargets().Select(Key));
+
+            if (writers.Count == 0)
+                yield return "L94 takedown-set-empty: not one method on the curtain components reads as able to " +
+                             "hide the loading screen. The derivation has stopped matching the shipped assembly, " +
+                             "so this arm is now green for the reason that makes a law worthless — it is not " +
+                             "looking at anything";
+
+            foreach (var w in writers.OrderBy(Describe, StringComparer.Ordinal))
+                if (!Covered(w, patched, bodies, new HashSet<string>()))
+                    yield return "L94 takedown-uncovered: " + Describe(w) + " takes the loading screen down and " +
+                                 "no patch of ours gates it. It runs on each peer's OWN clock, so the first peer " +
+                                 "to get there is looking at the world and can act in it while the others are " +
+                                 "still loading — the report, verbatim, for the sixth time. Every take-down must " +
+                                 "ask the ONE shared hold predicate (CurtainTakedownGate.Hold) and be re-issued " +
+                                 "when the synchronized reveal or a teardown opens it";
+        }
+
+        /// <summary>
+        /// Structural take-down probe: does this body deactivate a CURTAIN GameObject? Two halves, both
+        /// required. (1) A SetActive whose argument is not the literal `true` — a `false`, or a parameter,
+        /// which is what SetLoadingScreenVisible(bool) passes. (2) The body also touches a curtain /
+        /// loading-screen member of the components, so hiding the loading TIPS container or the progress
+        /// text — real SetActive(false) calls that live right next door — is not mistaken for hiding the
+        /// screen. Same flat token scan, and the same ceiling, as the probes above.
+        /// </summary>
+        private static bool HidesCurtainGameObject(MethodBase m, MethodBase setActive, List<Type> roots)
+        {
+            var il = Il(m);
+            if (il == null) return false;
+            bool hides = false, curtain = false;
+            for (int i = 1; i + 4 < il.Length; i++)
+            {
+                var op = il[i];
+                if (op != 0x28 && op != 0x6F && op != 0x7B && op != 0x7C) continue;  // call/callvirt/ldfld/ldflda
+                var tok = BitConverter.ToInt32(il, i + 1);
+                MemberInfo member = null;
+                try
+                {
+                    member = (op == 0x28 || op == 0x6F) ? (MemberInfo)m.Module.ResolveMethod(tok)
+                                                        : m.Module.ResolveField(tok);
+                }
+                catch { }
+                if (member == null) continue;
+                if (member is MethodBase mb && mb.MetadataToken == setActive.MetadataToken &&
+                    mb.Module == setActive.Module && il[i - 1] != 0x17)   // 0x17 = ldc.i4.1, i.e. a SHOW
+                    hides = true;
+                if (roots.Contains(member.DeclaringType) && IsCurtainMember(member.Name)) curtain = true;
+            }
+            return hides && curtain;
+        }
+
+        private static bool IsCurtainMember(string name)
+        {
+            var n = name.ToLowerInvariant();
+            return n.Contains("curtain") || n.Contains("loadingscreen");
+        }
+
+        /// <summary>A compiler-generated iterator body IS its declaring method — Harmony gates the lift by
+        /// wrapping the enumerator the kickoff returns, so coverage has to be asked of the kickoff.</summary>
+        private static MethodBase Owner(MethodBase m)
+        {
+            var t = m.DeclaringType;
+            if (t == null || !t.IsNested || !t.Name.StartsWith("<")) return m;
+            var close = t.Name.IndexOf('>');
+            if (close <= 1) return m;
+            var kickoff = t.DeclaringType.GetMethods(AllMembers)
+                           .FirstOrDefault(k => k.Name == t.Name.Substring(1, close - 1));
+            return kickoff ?? m;
+        }
+
+        /// <summary>Gated on itself, or reached only through entries that are themselves gated. No entry
+        /// inside the components at all means the outside world calls it directly, so it must be gated on
+        /// itself; a cycle is not a hole.</summary>
+        private static bool Covered(MethodBase m, HashSet<string> patched, List<MethodBase> bodies, HashSet<string> seen)
+        {
+            if (patched.Contains(Key(m))) return true;
+            if (!seen.Add(Key(m))) return true;
+            var callers = bodies.Where(c => CallsMethod(c, m)).Select(Owner)
+                                .Where(c => Key(c) != Key(m)).GroupBy(Key).Select(g => g.First()).ToList();
+            return callers.Count > 0 && callers.All(c => Covered(c, patched, bodies, seen));
+        }
+
+        /// <summary>The methods our Harmony patch classes actually attach to, resolved the way Harmony
+        /// itself resolves them (Prepare runs first, TargetMethod/TargetMethods run for real) — a
+        /// hand-maintained mirror of the patch list would rot exactly like a hand list of targets.</summary>
+        private static IEnumerable<MethodBase> OurPatchTargets()
+        {
+            var mod = typeof(SaveTransferCoordinator).Assembly;
+            var harmony = new HarmonyLib.Harmony("railcheck.L94");
+            var pcpType = typeof(PatchClassProcessor);
+            var getBulk = AccessTools.Method(pcpType, "GetBulkMethods");
+            var containerField = AccessTools.Field(pcpType, "containerAttributes");
+            var patchMethodsField = AccessTools.Field(pcpType, "patchMethods");
+            var getOriginal = AccessTools.Method(typeof(HarmonyLib.Harmony).Assembly.GetType("HarmonyLib.PatchTools"),
+                                                 "GetOriginalMethod");
+
+            foreach (var type in AccessTools.GetTypesFromAssembly(mod))
+            {
+                var pcp = new PatchClassProcessor(harmony, type);
+                if (containerField.GetValue(pcp) == null) continue;   // not a patch class
+
+                var prepare = AccessTools.GetDeclaredMethods(type)
+                                         .FirstOrDefault(p => p.Name == "Prepare" && p.GetParameters().Length == 0);
+                List<MethodBase> targets = null;
+                try
+                {
+                    if (prepare == null || Equals(prepare.Invoke(null, null), true))
+                        targets = (List<MethodBase>)getBulk.Invoke(pcp, null);
+                }
+                catch { }
+                if (targets == null) continue;                        // gated off this run
+
+                if (targets.Count == 0)
+                    foreach (var ap in (IEnumerable<object>)patchMethodsField.GetValue(pcp))
+                    {
+                        var info = (HarmonyMethod)AccessTools.Field(ap.GetType(), "info").GetValue(ap);
+                        MethodBase resolved = null;
+                        try { resolved = (MethodBase)getOriginal.Invoke(null, new object[] { info }); } catch { }
+                        if (resolved != null) targets.Add(resolved);
+                    }
+
+                foreach (var t in targets) if (t != null) yield return t;
+            }
+        }
+
+        private static string Key(MethodBase m) => m.Module.FullyQualifiedName + "#" + m.MetadataToken;
+
+        private static string Describe(MethodBase m) =>
+            (m.DeclaringType == null ? "?" : m.DeclaringType.FullName.Replace('+', '/')) + "." + m.Name;
 
         // ── Harmony target, read off the attribute's own constructor arguments so this does not depend on
         //    any Harmony-internal field name (a renamed field must not silently turn the arm green). ──

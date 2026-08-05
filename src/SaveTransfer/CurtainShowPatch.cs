@@ -151,22 +151,20 @@ namespace Multiplayer.Harmony
                 }
                 Debug.Log("[Multiplayer] curtain lift RELEASED — reveal/teardown opened the gate");
             }
+            else
+            {
+                // EVIDENCE, UNCONDITIONALLY. Until this line, a lift that sailed straight through the gate
+                // and a lift that never happened at all produced the SAME log — nothing. PARKED/RELEASED
+                // appear zero times across all three captured runs, so five successive fixes were written
+                // blind. One line, at the one place the decision is made, naming the three inputs.
+                Debug.Log("[Multiplayer] curtain lift PASSED gate unheld — " + CurtainTakedownGate.State());
+            }
             while (original.MoveNext()) yield return original.Current;
         }
 
-        // Live per-frame hold decision; never throws (a gate exception must never strand the curtain).
-        private static bool Hold()
-        {
-            try
-            {
-                var engine = NetworkEngine.Instance;
-                var coord = engine?.SaveTransfer;
-                return SaveTransferMath.HoldCurtain(
-                    engineActive: engine != null && engine.IsActive,
-                    sessionStarted: coord != null && coord.SessionStarted,
-                    revealed: coord == null || coord.Revealed);
-            }
-            catch { return false; }
-        }
+        // Live per-frame hold decision. THE shared predicate now lives in CurtainTakedownGate so all three
+        // take-down paths (this lift, SetLoadingScreenVisible, InGameLoadingCurtain.HideCurtain) ask exactly
+        // one question — a second copy is how the enumeration grows a hole again.
+        private static bool Hold() => CurtainTakedownGate.Hold();
     }
 }
