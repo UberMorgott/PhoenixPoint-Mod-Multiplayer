@@ -819,4 +819,6 @@ null-on-construct containers (L20 — the decoder MUST materialize these, never 
 
 summary: covered=454 excluded=80 blobbable=30 geoItemDicts=1
 
-known law violations (0) — each one is a rail bug, not a harness limit:
+known law violations (2) — each one is a rail bug, not a harness limit:
+  ! L104(m): <ReturnFire>d__321.MoveNext still parks on the map-global projectile wait — that fire path stalls behind ANOTHER peer's shot, which is the zero-blocking mandate broken with no log line at all.
+  ! L104(m): <ShootAndWaitRF>d__323.MoveNext still parks on the map-global projectile wait — that fire path stalls behind ANOTHER peer's shot, which is the zero-blocking mandate broken with no log line at all.

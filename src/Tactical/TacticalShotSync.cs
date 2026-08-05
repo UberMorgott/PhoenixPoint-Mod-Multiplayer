@@ -297,7 +297,38 @@ namespace Multiplayer.Tactical
         {
             var wait = NativeWait();
             foreach (var m in Bodies())
-                if (Reads(m, wait)) yield return m;
+            {
+                if (!Reads(m, wait)) continue;
+                if (!Emittable(m))
+                {
+                    Debug.LogError("[Multiplayer][tac] " + m.DeclaringType.Name + "." + m.Name + " parks on the " +
+                                   "map-global projectile wait but CANNOT BE PATCHED — its body is closed by a " +
+                                   "fault/filter handler. It keeps the game's own global wait, so a shot there " +
+                                   "still waits on every peer's projectiles (law L104(m), reported by L125).");
+                    continue;
+                }
+                yield return m;
+            }
+        }
+
+        /// <summary>Can Harmony rebuild this body at all? It re-emits the target into a <c>DynamicMethod</c>
+        /// and MonoMod replays the original's exception clauses verbatim (<c>_DMDEmit</c>:217/233 call
+        /// <c>BeginExceptFilterBlock</c>/<c>BeginFaultBlock</c>), neither of which a DynamicMethod ILGenerator
+        /// implements — so a target closed by a <c>fault</c> or <c>filter</c> throws at BIND time, out of
+        /// PatchAll, for reasons that have nothing to do with what this transpiler wants to do to it. A
+        /// C# iterator whose source has a <c>try/finally</c> compiles to exactly that shape, and two of the
+        /// three waits found here are in one: <c>ReturnFire</c>:1464 and <c>ShootAndWaitRF</c>:1797 (measured
+        /// against the shipped Assembly-CSharp). Only <c>FireWeaponAtTargetCrt</c>:1759 is narrowed, so
+        /// return fire and the overwatch wait still park on the map-global flag — a narrower fix than the
+        /// law wants, and the honest one: the alternative was the whole mod not loading.</summary>
+        private static bool Emittable(MethodBase m)
+        {
+            var body = m.GetMethodBody();
+            if (body == null) return false;
+            foreach (ExceptionHandlingClause c in body.ExceptionHandlingClauses)
+                if (c.Flags == ExceptionHandlingClauseOptions.Fault ||
+                    c.Flags == ExceptionHandlingClauseOptions.Filter) return false;
+            return true;
         }
 
         private static IEnumerable<MethodBase> Bodies()
@@ -328,15 +359,28 @@ namespace Multiplayer.Tactical
             var wait = NativeWait();
             var narrowed = AccessTools.Method(typeof(TacticalShotSync),
                                               nameof(TacticalShotSync.HasActiveProjectilesForShot));
+            int hits = 0;
             foreach (var ins in instructions)
             {
                 if (ins.Calls(wait))
                 {
-                    yield return new CodeInstruction(OpCodes.Ldarg_0);   // the waiter: the coroutine's own state
+                    hits++;
+                    // The call is REPLACED, so anything anchored to it moves onto the first instruction that
+                    // takes its place — a branch to the wait must not land past the narrowing, and a handler
+                    // boundary must not shift. Today's three sites carry neither; a future game build is not
+                    // owed that luck, and this is two lines.
+                    var waiter = new CodeInstruction(OpCodes.Ldarg_0);   // the waiter: the coroutine's own state
+                    waiter.labels.AddRange(ins.labels);
+                    waiter.blocks.AddRange(ins.blocks);
+                    yield return waiter;
                     yield return new CodeInstruction(OpCodes.Call, narrowed);
                 }
                 else yield return ins;
             }
+            if (hits == 0)
+                Debug.LogError("[Multiplayer][tac] a method was patched for the map-global projectile wait and " +
+                               "then did not contain one — the shot wait is NOT narrowed there and every peer " +
+                               "waits on every other peer's projectiles (law L104(m)).");
         }
     }
 }

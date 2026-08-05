@@ -197,6 +197,7 @@ namespace RailCheck
             laws.AddRange(L122_OneEntryOneLoad.Check());
             laws.AddRange(L123_SettleAndRefusalReach.Check(game));
             laws.AddRange(L124_WindowOrdinalAndCampaignIntro.Check());
+            laws.AddRange(L125_EveryPatchBinds.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

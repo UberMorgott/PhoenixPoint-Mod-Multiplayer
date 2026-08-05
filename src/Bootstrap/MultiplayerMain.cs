@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
 using Multiplayer.Network;
@@ -20,6 +21,10 @@ namespace Multiplayer
 
         private MultiplayerUI _ui;
 
+        /// <summary>Patch classes that did NOT bind this run, "&lt;class&gt;: &lt;reason&gt;". Empty is the
+        /// only good answer — anything in here is a feature silently missing from the running game.</summary>
+        public static readonly List<string> UnboundPatches = new List<string>();
+
         public override void OnModEnabled()
         {
             Instance = this;
@@ -29,8 +34,7 @@ namespace Multiplayer
             try
             {
                 var harmony = (HarmonyLib.Harmony)HarmonyInstance;
-                harmony.PatchAll(Assembly.GetExecutingAssembly());
-                Logger.LogInfo("[Multiplayer] PatchAll done");
+                PatchEveryClass(harmony);
 
                 // Same deferral for the TFTV UI/aircraft/tactical-script GUARD patches: they too gate on a
                 // TFTV type in Prepare(), so PatchAll silently skipped them (TFTV loads after us) and every
@@ -42,7 +46,7 @@ namespace Multiplayer
             }
             catch (System.Exception e)
             {
-                Logger.LogWarning("[Multiplayer] PatchAll failed: " + e.Message);
+                Logger.LogError("[Multiplayer] mod init failed AFTER patching: " + e, e);
             }
 
             _ui = ModGO.AddComponent<MultiplayerUI>();
@@ -51,6 +55,34 @@ namespace Multiplayer
             // Parity auto-apply: wire the teardown restore hook (delegate field — NetworkEngine must not
             // reference ParityConfigSync's game types directly, same JIT-safety rule as SteamLobbyCleanup).
             NetworkEngine.ParityConfigRestore = ParityConfigSync.RestoreOriginals;
+        }
+
+        /// <summary>What <c>Harmony.PatchAll(assembly)</c> is, with a try inside the loop. Its whole body is
+        /// <c>GetTypesFromAssembly(asm).Do(t =&gt; CreateClassProcessor(t).Patch())</c> — ONE unguarded loop, so
+        /// the first class that throws abandons every class after it and the mod runs on half-patched. On
+        /// 2026-08-05 that cost the entire mod: one tactical transpiler picked up a coroutine body Harmony
+        /// cannot re-emit, and the main-menu button, both late binders and the whole rail went with it, under
+        /// a single LogWarning that printed <c>e.Message</c> and dropped the InnerException holding the cause.
+        /// Now a broken patch costs its own class, says so as an error with the full exception, and leaves a
+        /// list of what is missing. Half a mod beats no mod — but only if it admits which half. (law L125)</summary>
+        private void PatchEveryClass(HarmonyLib.Harmony harmony)
+        {
+            UnboundPatches.Clear();
+            foreach (var type in AccessTools.GetTypesFromAssembly(Assembly.GetExecutingAssembly()))
+            {
+                try { harmony.CreateClassProcessor(type).Patch(); }
+                catch (System.Exception e)
+                {
+                    UnboundPatches.Add(type.FullName + ": " + e.Message);
+                    Logger.LogError("[Multiplayer] PATCH CLASS DID NOT BIND: " + type.FullName + " — " + e, e);
+                }
+            }
+            if (UnboundPatches.Count == 0)
+                Logger.LogInfo("[Multiplayer] PatchAll done — every patch class bound");
+            else
+                Logger.LogError("[Multiplayer] PatchAll done with " + UnboundPatches.Count + " patch class(es) " +
+                                "NOT BOUND; those features are ABSENT this session: " +
+                                string.Join(" | ", UnboundPatches.ToArray()));
         }
 
         public override void OnModDisabled()
