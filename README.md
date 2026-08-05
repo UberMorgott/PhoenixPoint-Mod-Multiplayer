@@ -117,7 +117,7 @@ Overwatch, return fire and zone control · falls and no-support collapse · came
 - Captured aliens never appear in a mirrored reward list: a generated recruit has no id in any registry, so there's nothing to address.
 - The client's clock trails the host by one-way latency, roughly 20–80 ms of game time; the network leg itself is not compensated.
 - Shared-seed determinism is a separate future project, and nothing in the current design assumes it.
-- Version `0.9.0`, and beta means beta. Several subsystems are verified by the harness and by two-player sessions, but not by a long soak. Expect rough edges, and file bugs.
+- Version `0.9.3`, and beta means beta. Several subsystems are verified by the harness and by two-player sessions, but not by a long soak. Expect rough edges, and file bugs.
 
 ## Requirements
 
