@@ -27,8 +27,9 @@ namespace RailCheck
     ///
     /// THE ARMS:
     ///   (a) PREMISE — the entry family resolves.
-    ///   (b) THE ARM IS AT THE TRANSITION: <c>TacLaunchGate.Prefix</c> arms, on the same host branch that
-    ///       opens the reveal barrier.
+    ///   (b) THE ARM IS AT THE TRANSITION: <c>TacLaunchGate.Prefix</c> opens the reveal barrier, and the
+    ///       barrier arms. Same moment, same host branch — but with an OWNER that also knows when the entry
+    ///       ended, which is what arm (f) is about.
     ///   (c) THE CAPTURE GUARDS ON IT, AND GUARDS FIRST: <c>TacDeployReadyCapture.Postfix</c> consumes the
     ///       arm BEFORE it hands the deploy-ready coroutine to Timing. The second blob is written by that
     ///       coroutine, so a guard behind it decides nothing.
@@ -41,10 +42,17 @@ namespace RailCheck
     ///       (<c>HostSerializeAndSendCrt</c>, the FIRST and entirely correct blob in the report) must NOT be
     ///       among the callers, because the cure for a duplicate load must not be reached by suppressing the
     ///       load.
+    ///   (f) EXECUTED: AN ARM NOBODY CONSUMED EXPIRES. Arm (d) only covers entries that SUCCEEDED. A launch
+    ///       that never reaches tactical <c>Playing</c> — aborted deployment, refused launch, failed level
+    ///       load — is never consumed at all, and the flag is a static: it survives for the process. The next
+    ///       battle loaded from a save then consumes it and ships the duplicate blob, which is this exact bug
+    ///       returning through the door the fix left open. The expiry rides the reveal (and the abort), the
+    ///       one moment that ends an entry however it ended.
     ///
     /// Falsify (verified to go RED, then restored):
     ///   • drop the ConsumeSessionEntry() guard from TacDeployReadyCapture.Postfix → capture-not-guarded-by-entry
     ///   • make ConsumeSessionEntry() return the flag without clearing it   → entry-arm-not-one-shot
+    ///   • make DisarmSessionEntry() a no-op                                → entry-arm-never-expires
     /// </summary>
     internal static class L122_OneEntryOneLoad
     {
@@ -60,32 +68,38 @@ namespace RailCheck
             var prefix = launch?.GetMethod("Prefix", All);
             var postfix = capture?.GetMethod("Postfix", All);
             var arm = launch?.GetMethod("ArmSessionEntry", All);
+            var disarm = launch?.GetMethod("DisarmSessionEntry", All);
             var consume = launch?.GetMethod("ConsumeSessionEntry", All);
             var crt = capture?.GetMethod("CaptureWhenPlayableCrt", All);
             var openBarrier = typeof(SaveTransferCoordinator).GetMethod("OpenTacticalEntryBarrier", All);
+            var lift = typeof(SaveTransferCoordinator).GetMethod("PerformDeferredLift", All);
+            var abort = typeof(SaveTransferCoordinator).GetMethod("AbortTacticalEntryTransfer", All);
             var beginTransfer = typeof(SaveTransferCoordinator).GetMethod("HostBeginTacticalEntryTransfer", All);
 
-            if (prefix == null || postfix == null || arm == null || consume == null || crt == null ||
-                openBarrier == null || beginTransfer == null)
+            if (prefix == null || postfix == null || arm == null || disarm == null || consume == null ||
+                crt == null || openBarrier == null || lift == null || abort == null || beginTransfer == null)
             {
                 yield return "L122 premise-changed: the tactical-entry family no longer resolves " +
-                             "(TacLaunchGate.Prefix/ArmSessionEntry/ConsumeSessionEntry, " +
+                             "(TacLaunchGate.Prefix/ArmSessionEntry/DisarmSessionEntry/ConsumeSessionEntry, " +
                              "TacDeployReadyCapture.Postfix/CaptureWhenPlayableCrt, SaveTransferCoordinator." +
-                             "OpenTacticalEntryBarrier/HostBeginTacticalEntryTransfer). Every arm below would " +
+                             "OpenTacticalEntryBarrier/PerformDeferredLift/AbortTacticalEntryTransfer/" +
+                             "HostBeginTacticalEntryTransfer). Every arm below would " +
                              "pass vacuously, so 'one entry, one load' is UNCHECKED rather than satisfied";
                 yield break;
             }
 
-            // ═══ (b) THE ARM IS AT THE TRANSITION ═══
-            if (!Reaches(prefix, arm, mod))
-                yield return "L122 entry-not-armed-at-the-transition: TacLaunchGate.Prefix no longer arms the " +
-                             "session entry. LaunchTacticalGame is the ONLY moment that knows this battle is " +
-                             "being CREATED rather than loaded; without the arm the capture below either fires " +
-                             "for every Playing (the double load) or for none (clients never get the battle)";
+            // ═══ (b) THE ARM IS AT THE TRANSITION — via the barrier, which is what OWNS its lifetime ═══
             if (!Reaches(prefix, openBarrier, mod))
-                yield return "L122 premise-changed: TacLaunchGate.Prefix no longer opens the tactical entry " +
-                             "barrier, so the arm is no longer sitting on the host branch of the geo→tac seam " +
-                             "this law reasons about";
+                yield return "L122 entry-not-armed-at-the-transition: TacLaunchGate.Prefix no longer opens the " +
+                             "tactical entry barrier. LaunchTacticalGame is the ONLY moment that knows this " +
+                             "battle is being CREATED rather than loaded; without that call neither the reveal " +
+                             "hold nor the entry arm exists, and the capture below either fires for every " +
+                             "Playing (the double load) or for none (clients never get the battle)";
+            if (!Reaches(openBarrier, arm, mod))
+                yield return "L122 entry-not-armed-at-the-transition: OpenTacticalEntryBarrier no longer arms " +
+                             "the session entry. The arm and the reveal hold have exactly the same lifetime — " +
+                             "one entry — which is why the barrier owns both ends of it; armed anywhere else " +
+                             "it acquires an owner who does not know when the entry ENDED (arm f)";
 
             // ═══ (c) THE CAPTURE GUARDS ON IT, AND GUARDS FIRST ═══
             // Callees comes back in IL order, so "before" is answerable without a second walker.
@@ -117,6 +131,31 @@ namespace RailCheck
                              "tactical level to reach Playing — the one every peer loaded from one blob — " +
                              "passes it and ships the duplicate transfer this law exists to stop, one beat " +
                              "later and with nothing in the log to say why";
+
+            // ═══ (f) EXECUTED: AN ARM NOBODY CONSUMED EXPIRES ═══
+            // Arm (d) proves the arm is one-shot ONCE SOMETHING CONSUMES IT. Nothing consumes it when the
+            // launch never reaches tactical Playing — an aborted deployment, a refused launch, a level load
+            // that fails — and the flag is a static, so it then survives for the whole process. The next
+            // battle LOADED FROM A SAVE (every peer already holds it) reaches TacDeployReadyCapture, consumes
+            // the stale arm and ships the duplicate ~996 KB blob: exactly the reported bug, one battle later
+            // and with the guard that exists to stop it doing the shipping.
+            if (!Reaches(lift, disarm, mod))
+                yield return "L122 entry-arm-never-expires: SaveTransferCoordinator.PerformDeferredLift does " +
+                             "not expire the entry arm. The reveal is the moment an entry ENDS however it " +
+                             "ended, and it is the only such moment — a consume covers only the entries that " +
+                             "succeeded, so without this an arm from a battle that never started is still " +
+                             "sitting there when the NEXT one is loaded from a save";
+            if (!Reaches(abort, disarm, mod))
+                yield return "L122 entry-arm-never-expires: AbortTacticalEntryTransfer does not expire the " +
+                             "entry arm. Its PerformDeferredLift is once-guarded on _revealed, so an abort " +
+                             "that lands after something else already lifted skips the expiry — the one path " +
+                             "that exists BECAUSE the entry failed is the one that must not leak its arm";
+            arm.Invoke(null, null);
+            disarm.Invoke(null, null);
+            if ((bool)consume.Invoke(null, null))
+                yield return "L122 entry-arm-never-expires: ArmSessionEntry() followed by " +
+                             "DisarmSessionEntry() still answers true on consume, so the expiry is wired but " +
+                             "does not expire anything and the stale arm survives into the next battle";
 
             // ═══ (e) THE GUARDED PATH IS THE ONLY PATH ═══
             var callers = mod.GetTypes()

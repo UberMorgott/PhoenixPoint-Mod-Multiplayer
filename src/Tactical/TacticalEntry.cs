@@ -46,9 +46,20 @@ namespace Multiplayer.Tactical
         /// (loadedClients=2)</c>) and then a second ~996 KB blob went out on top of it, reloading only the
         /// CLIENTS while the host stayed in the level it was already in. Only the geo→tac seam knows the
         /// difference, and it is this method.</summary>
+        // OWNED BY THE BARRIER, NOT BY THIS PATCH (2026-08-05). Both ends are the reveal hold's:
+        // SaveTransferCoordinator.OpenTacticalEntryBarrier arms it, PerformDeferredLift /
+        // AbortTacticalEntryTransfer expire it — so ONE reveal ends ONE entry no matter how the launch died.
+        // It used to be armed here and cleared ONLY by a consume, which meant a launch that never reached
+        // tactical Playing (aborted deployment, refused launch, failed level load) left the arm set for the
+        // whole process lifetime, and the next battle LOADED FROM A SAVE consumed it: the double transfer
+        // this law exists to stop, one battle later.
         private static bool _entryLaunched;
 
         internal static void ArmSessionEntry() => _entryLaunched = true;
+
+        /// <summary>The arm expires with the reveal that ended its entry — an arm nobody consumed must not
+        /// outlive the barrier that raised it.</summary>
+        internal static void DisarmSessionEntry() => _entryLaunched = false;
 
         /// <summary>One-shot BY CONSTRUCTION: it clears. A guard that only reads would pass again on the
         /// next <c>Playing</c> — which, for a level nobody re-entered, is the same double transfer one beat
@@ -93,7 +104,8 @@ namespace Multiplayer.Tactical
 
             // THIS is the entry. Everything TacDeployReadyCapture is allowed to ship hangs off this one line
             // having run (law L122) — a battle reached any other way is a battle every peer already holds.
-            ArmSessionEntry();
+            // The arm rides INSIDE the barrier now (see _entryLaunched): same moment, same host branch, but
+            // with an expiry, because the barrier is the only thing that knows when the entry ended.
             coord.OpenTacticalEntryBarrier();
             // Native mode ships no save, so nothing else opens the LOADED barrier or starts the host's
             // reveal aggregation (HostTacticalEntryTransferCrt's OpenBarrier is the save path's job). Arm the

@@ -147,11 +147,24 @@ namespace Multiplayer.Network
         // non-null level), cleared on Playing/Loaded + OpenBarrier. The pump prefers this over the
         // coarse lp.Progress so peers see the same smooth bar the source player sees.
         private UnityEngine.Component _liveProgressBar;
-        // True from Begin() (barrier closes, phase-2 world-load starts) until the roster is all-done.
-        // Keeps the host's RosterProgress snapshot broadcast alive through phase-2: _barrierOpen is
-        // cleared in Begin() BEFORE FinishLevel runs phase-2, so without this every peer's tracker
-        // would freeze at the phase-1 value. Does NOT re-block FinishLevel (the Harmony gate keys on
-        // IsBarrierPending, not _barrierOpen). Cleared on all-done and reset in OpenBarrier.
+        // A REVEAL HOLD IS ARMED AND UNRELEASED. ONE meaning, and the reason it is now only one: it used to
+        // ALSO stand in for "the previous load's aggregation has ended", which made OpenTacticalEntryBarrier
+        // set it FALSE — while BOTH reveal-release branches in Update() (the AllDone reveal and the
+        // BarrierLivenessGraceMs give-up) were gated ON it. So for the whole host geo→tac entry load, and
+        // FOREVER if the L122 guard returned early or the deploy-ready coroutine never reached the transfer,
+        // an armed hold had NO release path at all, while the clients' self-reveal belt stayed shut because
+        // the host was demonstrably alive. A three-peer hang with no way out, which the standing mandate
+        // forbids: mission loading is the only legitimate synchronous wait, and even it must time out and
+        // leave the stuck peer behind.
+        //
+        // So: TRUE wherever _revealed is re-armed to false (OpenBarrier, OpenTacticalEntryBarrier,
+        // ArmSelfLoadBarrier, OnSaveChunk's first chunk), FALSE at PerformDeferredLift — the one release —
+        // and the liveness timeout therefore covers EVERY barrier window for every caller, instead of one
+        // more per-path belt. RailCheck L94 arm (k) executes that invariant. It keeps its second job for
+        // free: while a hold is armed, the host's RosterProgress snapshot broadcast stays alive (_barrierOpen
+        // is cleared in Begin() BEFORE FinishLevel runs phase-2, so without it every peer's tracker would
+        // freeze at the phase-1 value). Does NOT re-block FinishLevel (the Harmony gate keys on
+        // IsBarrierPending, not _barrierOpen).
         private bool _loadPhaseActive;
 
         // ─── Second barrier: synchronized geoscape reveal (BUG D) ─────────
@@ -725,9 +738,9 @@ namespace Multiplayer.Network
             // the previous load's LoadCompletes were still landing in a barrier nobody owned. Opening here
             // means every ack that arrives during the write is already keyed to THIS entry: the tracker is
             // clean, and AllDone cannot fire because the host does not mark itself done until the write
-            // finishes (SendLoadComplete). _loadPhaseActive on top of OpenBarrier's reset makes the two
-            // reveal-release paths in Update() (liveness give-up, AllDone) reachable for the whole entry —
-            // they were dead when Begin() early-returned, which is the second half of the same live bug.
+            // finishes (SendLoadComplete). _loadPhaseActive is re-stated on top of OpenBarrier's own arm
+            // because THIS is the method the law pins for it: the hold must be armed synchronously here, not
+            // one save-write later, or the liveness give-up in Update() has no window to cover.
             OpenBarrier();
             _loadPhaseActive = true;
             timing.Start(HostTacticalEntryTransferCrt(saveManager));
@@ -797,6 +810,10 @@ namespace Multiplayer.Network
             // and make every LATER mission refuse to start — the abort must not outlive itself.
             _barrierOpen = false;
             _loadPhaseActive = false;
+            // The entry this abort ends must not leave its arm behind for the next battle (law L122). Stated
+            // here as well as in PerformDeferredLift because that one is once-guarded on _revealed: an abort
+            // arriving after something else already lifted would otherwise skip the expiry.
+            Multiplayer.Tactical.TacLaunchGate.DisarmSessionEntry();
             PerformDeferredLift();
         }
 
@@ -1165,7 +1182,7 @@ namespace Multiplayer.Network
             _lastReportedLoadPct = -1; // fresh session: phase-2 driver not reporting yet
             _loadingLevel = null;      // fresh session: no level captured yet
             _liveProgressBar = null;   // fresh session: live native bar not captured yet
-            _loadPhaseActive = false; // fresh session: phase-2 not started yet
+            _loadPhaseActive = true;  // a reveal hold is armed on the next line — and stays armed until it lifts
             // Second barrier (reveal) state — fresh session.
             _reachedPlaying = false;
             _revealed = false;
@@ -1204,15 +1221,27 @@ namespace Multiplayer.Network
             _slotAdvancedMs.Clear();
             _lastSnapshotMs = -1;
             _lastReportedLoadPct = -1;
-            // …and END the PREVIOUS load's aggregation, or it reveals THIS entry for us. _tracker.Reset()
-            // above is not enough: a peer still loading the lobby/F2 save keeps sending LoadComplete after
-            // it, re-filling the set, and Update()'s AllDone branch (gated on _loadPhaseActive alone) then
-            // fires RevealAll + PerformDeferredLift mid-entry — which lifts the host's curtain ALONE and
-            // drops _hostEntryHold. That is exactly the 2026-08-05 live run: host revealed at frame 2705,
-            // clients parked for 3 minutes. From here the reveal belongs to the ENTRY transfer, which arms
-            // its own load phase at deploy-ready (HostBeginTacticalEntryTransfer). The host's own entry load
-            // keeps broadcasting through HostEntryLoad, which is what that predicate exists for.
-            _loadPhaseActive = false;
+            // THE HOLD IS ARMED, SO SAY SO — this used to be `false`, and that is what made the hang possible.
+            // The write was standing in for "the PREVIOUS load's aggregation has ended", because with the
+            // aggregation still running its AllDone reveals THIS entry for us (the 2026-08-05 live run: host
+            // revealed at frame 2705, clients parked for 3 minutes). But both release branches in Update()
+            // were gated on this same flag, so clearing it here left the hold armed with nothing able to
+            // release it — for the whole ~13 s entry load, and permanently whenever the L122 guard returns
+            // early or the deploy-ready coroutine never reaches the transfer.
+            //
+            // The stale-aggregation half is NOT lost: _tracker.Reset() above drops the previous load's done
+            // set, and the AllDone branch below is gated on the HOST'S OWN done-mark, which this path clears
+            // and does not restore until deploy-ready (SendLoadComplete in HostTacticalEntryTransferCrt). A
+            // peer still finishing the previous load may re-fill its own row all it likes; AllDone cannot
+            // hold while slot 0 is missing from it.
+            _loadPhaseActive = true;
+            // ONE REVEAL ENDS ONE ENTRY (law L122). The arm used to live on TacLaunchGate.Prefix and be
+            // cleared ONLY by a consume, so a launch that never reached tactical Playing — aborted
+            // deployment, refused launch, failed level load — left it set for the rest of the process and the
+            // NEXT battle loaded from a save consumed it, which is the double-load bug returning by the back
+            // door. Its lifetime is exactly this barrier's, so the barrier owns both ends of it (armed here,
+            // expired in PerformDeferredLift).
+            Multiplayer.Tactical.TacLaunchGate.ArmSessionEntry();
             Debug.Log($"[Multiplayer] host reveal-hold armed (tac-entry): sessionStarted={SessionStarted} " +
                       $"revealed={_revealed} — host holds its loading screen until all clients load-complete.");
 
@@ -1358,6 +1387,7 @@ namespace Multiplayer.Network
                 _loadCompleteSent = false;
                 _reachedPlaying = false;
                 _revealed = false;
+                _loadPhaseActive = true;   // this re-arms the reveal hold, so the hold is armed and unreleased
                 _revealAllSent = false;
                 _onDemandJoiner = false;   // P1: fresh transfer; set true only if this SaveDone tags a join
                 _pendingResult = null;
@@ -1757,7 +1787,12 @@ namespace Multiplayer.Network
             if (_revealed) return;
             _revealed = true;
             _revealedAtMs = NowMs();
+            _loadPhaseActive = false; // THE one release of the hold this flag names (see its declaration)
             _hostEntryHold = false; // Batch 2: reveal done → drop the entry-hold flag (next Begin re-guards on _begun)
+            // …and the entry arm expires with the reveal that ended it (law L122). A launch that died before
+            // tactical Playing never reaches TacDeployReadyCapture's consume, so without this the arm outlives
+            // its own entry and the NEXT battle — loaded from a save every peer already holds — consumes it.
+            Multiplayer.Tactical.TacLaunchGate.DisarmSessionEntry();
             Debug.Log("[Multiplayer] PerformDeferredLift → reveal (native LiftCurtain + hide overlay)");
             // Restore the native loading label ("Waiting for players…" → original) before the lift runs.
             // Setting _revealed above already opened the curtain gate, so any PARKED lift resumes now.
@@ -2231,11 +2266,10 @@ namespace Multiplayer.Network
             }
 
             // Snapshots must flow through BOTH phases: the LOADED barrier window (_barrierOpen) AND
-            // the phase-2 world-load (_loadPhaseActive, set in Begin() where _barrierOpen is cleared).
+            // the phase-2 world-load (_loadPhaseActive — an armed, unreleased reveal hold, which spans it).
             // Without _loadPhaseActive every peer's tracker would freeze the instant phase-2 begins.
-            // …and through the host's OWN entry load, which is neither: at that point _barrierOpen is
-            // still false (OpenBarrier runs at deploy-ready, ~13 s later) and _loadPhaseActive was
-            // cleared by the previous load's all-done. Sampling without broadcasting is still silence.
+            // HostEntryLoad stays in the disjunction on its own merits: it is the one window the host's
+            // native level-load owns, and sampling without broadcasting is still silence.
             if (!_engine.IsHost || (!_barrierOpen && !_loadPhaseActive && !HostEntryLoad)) return;
 
             // Broadcast the aggregated per-slot snapshot at ≤5 Hz. This runs ABOVE the timeout return
@@ -2251,7 +2285,18 @@ namespace Multiplayer.Network
             // During phase-2, end the load-phase broadcast once every roster slot has reported
             // LoadComplete (consumes the existing done-set + LoadComplete mechanism). Send one final
             // snapshot so peers see the terminal state, then stop.
-            if (_loadPhaseActive && _tracker.AllDone(_engine.Session.GetRosterSlots()))
+            //
+            // GATED ON THE HOST'S OWN DONE-MARK, NOT ON _loadPhaseActive — and it already is, without a
+            // second term: GetRosterSlots() yields slot 0 first (the host), so AllDone cannot hold until the
+            // host has marked ITSELF done via SendLoadComplete — which, on the tac-entry path, cannot happen
+            // before deploy-ready: OpenTacticalEntryBarrier clears the tracker but deliberately leaves
+            // _loadCompleteSent SET (see InPhase2/HostEntryLoad), so the host's OnReachedPlaying at tactical
+            // Playing early-returns and only HostBeginTacticalEntryTransfer's `_loadCompleteSent = false` +
+            // SendLoadComplete pair puts slot 0 back in the set. That is the property the old
+            // `_loadPhaseActive &&` was standing in for after the 2026-08-05 mid-entry reveal, and reading it
+            // off the roster instead frees the flag to mean one thing (see its declaration) so the liveness
+            // give-up above can cover every barrier window instead of none of the entry's.
+            if (_tracker.AllDone(_engine.Session.GetRosterSlots()))
             {
                 BroadcastSnapshot();
                 _loadPhaseActive = false;

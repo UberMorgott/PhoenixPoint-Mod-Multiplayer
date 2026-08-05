@@ -59,6 +59,19 @@ namespace RailCheck
     /// BARRIER is not leaving the SESSION. The peer keeps its row, slot, permissions and guid binding (law L84)
     /// and re-converges through the on-demand join when it returns.
     ///
+    /// ARM (k) IS THE REACHABILITY ARM, AND IT IS THE ONE THAT WAS MISSING (added 2026-08-05, second pass).
+    /// Arms (d)/(e) execute the release RULE and (h) proves BEGIN still fires — and all three stayed green
+    /// through a run in which nobody was ever released, because none of them can see whether the release code
+    /// is REACHED. Both branches in <c>Update()</c> are gated on <c>_loadPhaseActive</c>, and
+    /// <c>OpenTacticalEntryBarrier</c> set it FALSE (it was doubling as "the previous load's aggregation has
+    /// ended"), so the host's entire geo→tactical entry ran with a reveal hold armed and NO path able to lift
+    /// it — permanently when the L122 guard returns early or the deploy-ready coroutine never reaches the
+    /// transfer, with the clients' self-reveal belt shut by design because the host was alive and talking.
+    /// The flag now means exactly one thing, "a reveal hold is armed and unreleased", and arm (k) executes
+    /// that: every method that arms a hold (<c>_revealed = false</c>) must set it, and
+    /// <c>PerformDeferredLift</c> — the one release — must clear it. Checking the VALUE and not merely the
+    /// write is the whole arm; the write-exists probe arms (f)/(i) use passes on the bug itself.
+    ///
     /// ARM (f) IS A PREMISE ARM. Re-arming <c>_revealed</c> alone looks correct and is not: with
     /// <c>_reachedPlaying</c> left latched, <c>OnReachedPlaying</c> returns on its first line, no peer ever
     /// reports <c>LoadComplete</c>, <c>AllDone</c> never holds, and the barrier releases only on the liveness
@@ -304,19 +317,65 @@ namespace RailCheck
                              "all exist, so this law can no longer prove the tactical entry owns its own reveal";
             else
             {
-                if (!WritesField(armEntry, phase))
-                    yield return "L94 stale-phase-survives-arm: OpenTacticalEntryBarrier does not clear " +
-                                 "_loadPhaseActive. _tracker.Reset() alone is NOT enough — peers still finishing " +
-                                 "the previous load keep sending LoadComplete after it and re-fill the set, so " +
-                                 "Update()'s AllDone branch reveals the HOST alone in the middle of the entry and " +
-                                 "clears _hostEntryHold on its way out (live 2026-08-05, host frame 2705)";
-
+                // (The "OpenTacticalEntryBarrier must touch _loadPhaseActive" half of this arm moved into arm
+                // (k) below, which checks the VALUE. It used to demand the flag be CLEARED here — the write
+                // that made the entry's own hold unreleasable. The stale-aggregation danger it was aimed at
+                // is now held where it belongs: the AllDone branch is gated on the host's own done-mark, and
+                // the entry path leaves _loadCompleteSent set so slot 0 cannot re-enter the done set before
+                // deploy-ready.)
                 if (!CallsMethod(beginEntry, openBarrier) || !WritesField(beginEntry, phase))
                     yield return "L94 entry-armed-too-late: HostBeginTacticalEntryTransfer does not open the " +
                                  "barrier AND arm _loadPhaseActive synchronously. Armed inside the coroutine " +
                                  "instead, the arm lands ~1.15 s later (live: bytes=1580544 ms=1151) and every " +
                                  "ack that arrives during the mid-tactical save write belongs to a barrier that " +
                                  "does not exist yet";
+            }
+
+            // ─── (k) EVERY ARMED HOLD HAS A REACHABLE RELEASE. ───
+            // Arms (d)/(e) prove the release RULE is right and (h) proves BEGIN still fires. All three were
+            // green through a hang, because none of them can see REACHABILITY: both release branches in
+            // Update() are gated on _loadPhaseActive, and OpenTacticalEntryBarrier SET IT FALSE — it was
+            // doubling as "the previous load's aggregation has ended". So the host's whole geo→tac entry ran
+            // with a hold armed and no path able to lift it, permanently whenever the L122 guard returned
+            // early or the deploy-ready coroutine never reached the transfer; the clients' self-reveal belt
+            // stays shut in that window by design, because the host is alive and talking. Three peers, no way
+            // out, and nothing red anywhere.
+            //
+            // Stated as the invariant that makes the mandated liveness timeout cover EVERY barrier window
+            // instead of one belt per path: _loadPhaseActive means "a reveal hold is armed and unreleased",
+            // so ARMING the hold (_revealed = false) must set it, and the one release must clear it. The
+            // VALUE is the whole content of the arm — a write-exists probe (WritesField, used by arms f/i)
+            // passes just as happily on the write that caused the hang.
+            var revealedF = coord.GetField("_revealed", AllMembers);
+            var phaseK = coord.GetField("_loadPhaseActive", AllMembers);
+            var liftK = coord.GetMethod("PerformDeferredLift", AllMembers);
+            if (revealedF == null || phaseK == null || liftK == null)
+                yield return "L94 premise-changed: SaveTransferCoordinator._revealed / _loadPhaseActive / " +
+                             "PerformDeferredLift no longer all exist, so this law can no longer prove that a " +
+                             "hold which was armed can ever be lifted";
+            else
+            {
+                foreach (var m in SafeMethods(coord))
+                {
+                    if (!WritesBool(m, revealedF, false)) continue;   // does not arm a hold
+                    if (WritesBool(m, phaseK, true)) continue;        // …and says so
+                    yield return "L94 hold-armed-with-no-release: SaveTransferCoordinator." + m.Name +
+                                 " re-arms the reveal hold (_revealed = false) without setting " +
+                                 "_loadPhaseActive = true. Both reveal-release branches in Update() — the " +
+                                 "AllDone reveal and the BarrierLivenessGraceMs give-up — are gated on that " +
+                                 "flag, so from this call on the curtain is held by something no timeout and " +
+                                 "no all-done can reach. The peer's own self-reveal belt does not cover it " +
+                                 "either: that one fires only when the HOST goes silent, and a host stuck " +
+                                 "behind its own entry load is talking the whole time. Mission loading is the " +
+                                 "one wait the mandate allows, and even it must time out and leave the stuck " +
+                                 "peer behind";
+                }
+                if (!WritesBool(liftK, phaseK, false))
+                    yield return "L94 hold-never-released: PerformDeferredLift does not clear " +
+                                 "_loadPhaseActive. It is the ONE release of the hold, so a flag left set " +
+                                 "after the reveal keeps the host broadcasting a finished load's snapshots " +
+                                 "and leaves the next barrier's arm indistinguishable from the last one's " +
+                                 "residue — the ambiguity this flag was collapsed to one meaning to end";
             }
 
             // ─── (j) ABSENCE OF DATA IS "NOT STARTED", NEVER DEATH. ───
@@ -425,6 +484,26 @@ namespace RailCheck
         }
 
         private static bool WritesField(MethodBase m, FieldInfo f) => TouchesField(m, f, 0x7D, 0x80); // stfld / stsfld
+
+        /// <summary>Does this method store the LITERAL <paramref name="value"/> into a bool field? Arm (k)
+        /// needs the value and not merely the write: `_loadPhaseActive = false` and `= true` are the bug and
+        /// the fix, and <see cref="WritesField"/> cannot tell them apart. A literal bool assignment is always
+        /// `ldc.i4.0|1` immediately before the `stfld`, so the byte before the opcode IS the value. Same flat
+        /// scan (and same ceiling) as the probes above: an unaligned hit fails ResolveField and is skipped.</summary>
+        private static bool WritesBool(MethodBase m, FieldInfo f, bool value)
+        {
+            var il = Il(m);
+            if (il == null) return false;
+            byte want = value ? (byte)0x17 : (byte)0x16;   // ldc.i4.1 / ldc.i4.0
+            for (int i = 1; i + 4 < il.Length; i++)
+            {
+                if (il[i] != 0x7D || il[i - 1] != want) continue;   // stfld preceded by the literal
+                FieldInfo c = null;
+                try { c = m.Module.ResolveField(BitConverter.ToInt32(il, i + 1)); } catch { }
+                if (c != null && c.MetadataToken == f.MetadataToken && c.Module == f.Module) return true;
+            }
+            return false;
+        }
 
         /// <summary>
         /// OpenReturnBarrier plus the same-type helpers it delegates to. Both latches must still be re-armed on
