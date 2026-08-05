@@ -876,14 +876,53 @@ namespace Multiplayer.Network.Sync
             name == "DestinationSites" || name == "Travelling" || name == "CurrentSite" ||
             name == "StartExplorationTime";
 
+        /// <summary>The per-faction site leaf: <c>GeoSite.FactionsData</c> is the EntityList whose elements
+        /// carry <c>Inspected</c>/<c>Visible</c>/<c>Raided</c> (GeoSite.cs:71/:398/:403, baseline row
+        /// "EntityList FactionsData -> live _factionsData"). It is the AUTHORITATIVE-DONE leaf for the
+        /// exploration derivation and the notify-gap for every site marker at once — see
+        /// <see cref="MarkSiteAuthority"/>.</summary>
+        private static bool IsSiteAuthorityLeaf(string name) => name == "FactionsData";
+
         private static void MarkOrderChange(object entity, string fieldName)
         {
-            if (IsOrderLeaf(fieldName) && entity is GeoVehicle v) _reseed.Add(v);
+            if (IsOrderLeaf(fieldName) && entity is GeoVehicle v) { _reseed.Add(v); return; }
+            if (IsSiteAuthorityLeaf(fieldName) && entity is GeoSite s) MarkSiteAuthority(s);
         }
+
+        /// <summary>
+        /// A DERIVED PRESENTATION'S "DONE" DOES NOT ALWAYS LAND ON THE ENTITY THAT IS PRESENTING, and that
+        /// asymmetry is this whole seam. Navigation's completion lands on the MOVER — <c>Travelling</c> /
+        /// <c>CurrentSite</c> are <see cref="IsOrderLeaf"/> names on the very <c>GeoVehicle</c> whose local
+        /// <c>NavigateRoutine</c> is running — so the arrival case has always re-seeded itself. Exploration's
+        /// completion lands on the SITE (<c>GeoFaction.OnVehicleSiteExplored</c> → <c>SetInspected</c>,
+        /// GeoSite.cs:403) while the thing presenting is the vehicle's <c>GeoActorProgressionVisualController</c>,
+        /// so NOTHING marked the vehicle and the client's spinner ran on to its own local end while the host
+        /// was already done — the ~0.5 s the user measured, and it never self-corrected.
+        ///
+        /// So this marks BOTH consequences of one authoritative site write, and neither is exploration-specific:
+        ///   • every vehicle parked at the site is re-seeded, so any derivation keyed on that site re-decides
+        ///     against the state that just arrived instead of against its own clock. <c>GeoSite.Vehicles</c>:239
+        ///     is the game's own accessor (<c>Map.Vehicles.Where(veh =&gt; veh.CurrentSite == this)</c>).
+        ///   • the site's own marker is repainted, because the value rail writes <c>_factionsData</c> ELEMENTS
+        ///     directly and therefore never runs <c>SetInspected</c>/<c>SetVisible</c> — so
+        ///     <c>SetProperty</c> never fires <c>PropertyChanged</c>, and
+        ///     <c>GeoSiteVisualsController</c> (subscribed at :152, refreshed only when <c>_refresh</c> is set)
+        ///     kept the <c>Unknown</c> material its <c>RefreshSiteVisuals</c>:239 picks for an un-inspected
+        ///     site. That is why the site still read UNEXPLORED on the clients after the event window closed.
+        /// </summary>
+        private static void MarkSiteAuthority(GeoSite site)
+        {
+            if (site == null) return;
+            _siteRepaint.Add(site);
+            var vehicles = site.Vehicles;   // GeoSite.cs:239 — the game's own "parked here" accessor
+            if (vehicles == null) return;
+            foreach (var v in vehicles) if (v != null) _reseed.Add(v);
+        }
+
+        private static readonly HashSet<GeoSite> _siteRepaint = new HashSet<GeoSite>();
 
         private static void FlushOrderReseed()
         {
-            if (_reseed.Count == 0) return;
             foreach (var v in _reseed)
             {
                 try { ReseedNavigation(v); }
@@ -894,6 +933,16 @@ namespace Multiplayer.Network.Sync
                 { LogMissOnce("exploration re-seed failed for " + (IdentityResolver.RootRef(v) ?? "?") + ": " + ex.Message); }
             }
             _reseed.Clear();
+            foreach (var s in _siteRepaint)
+            {
+                // The game's OWN refresh entry (GeoSiteVisualsController.Refresh:202 — sets _refresh, which
+                // Update:690 consumes into RefreshSiteVisuals). Never a hand-rolled material swap: law 11's
+                // repaint always comes from the decompile.
+                try { s.GetComponent<PhoenixPoint.Geoscape.View.GeoSiteVisualsController>()?.Refresh(); }
+                catch (Exception ex)
+                { LogMissOnce("site visuals refresh failed for " + (IdentityResolver.RootRef(s) ?? "S#?") + ": " + ex.Message); }
+            }
+            _siteRepaint.Clear();
         }
 
         // GeoVehicle.cs:73 / :448 / :460 — the private store and the two private halves the game's OWN
@@ -933,6 +982,26 @@ namespace Multiplayer.Network.Sync
         /// <c>SiteExploredOutcomeGate</c>. Its other half, <c>EndExploreCurrentSite</c>, is presentation
         /// (destroy the visuals, drop the handle) and runs.
         /// </summary>
+        /// <summary>
+        /// THE EXPLORATION DECISION, kept pure so RailCheck L115 can execute it case by case (the same shape
+        /// <c>OpenUiRepaint.ExplorationJustStarted</c> uses for L102).
+        ///
+        /// <paramref name="inspected"/> is the AUTHORITATIVE DONE and it OUTRANKS THE LOCAL CLOCK — the whole
+        /// point. The fill is closed-form off a PER-ACTOR epoch (<c>ActorComponent.Timing</c>:85), so the
+        /// peers' spinners never agree to the frame; the host finished ~0.5 s before the clients, and with
+        /// the clock as the only end test (<c>now &lt; end</c>) a client that already KNEW the site was
+        /// inspected still had to wait out its own timer. State that says "finished" must beat an animation
+        /// still playing, so the inspected test is asked FIRST and short-circuits the clock entirely.
+        /// <c>ExploreSiteAbility.GetTargetDisabledStateInternal</c>:42-49 already refuses to explore an
+        /// inspected site, so this can never cancel a legitimate second exploration — there is no such thing.
+        /// </summary>
+        internal static bool ShouldBeExploring(bool underTravelOrder, bool inspected,
+                                               TimeUnit start, TimeUnit explorationTime, TimeUnit now)
+        {
+            if (underTravelOrder || inspected) return false;
+            return start > TimeUnit.Zero && explorationTime != TimeUnit.Zero && now < start + explorationTime;
+        }
+
         private static void ReseedExploration(GeoVehicle v)
         {
             if (v == null || ExplorationStartField == null ||
@@ -952,8 +1021,9 @@ namespace Multiplayer.Network.Sync
             var site = v.CurrentSite;
             var start = (TimeUnit)ExplorationStartField.GetValue(v);
             var end = site == null ? TimeUnit.Zero : start + site.ExplorationTime;
-            bool should = site != null && !UnderTravelOrder(v) && start > TimeUnit.Zero &&
-                          site.ExplorationTime != TimeUnit.Zero && timing.Now < end;
+            bool inspected = site != null && v.Owner != null && site.GetInspected(v.Owner);
+            bool should = site != null && ShouldBeExploring(UnderTravelOrder(v), inspected, start,
+                                                            site.ExplorationTime, timing.Now);
             if (should == v.IsExploringSite)
             {
                 // SILENT AGREEMENT IS THE ONE CASE THIS SEAM COULD NOT EXPLAIN (user report 2026-08-01 item 4:
@@ -964,8 +1034,7 @@ namespace Multiplayer.Network.Sync
                 // decided it: this peer is PARKED at a site that is explorable and not yet inspected — i.e.
                 // the player is looking at a spinner — and the mirrored order still says "not exploring".
                 // Log-once per (vehicle, reason): exploration is a per-site event, not a per-frame one.
-                if (!should && site != null && site.ExplorationTime != TimeUnit.Zero &&
-                    v.Owner != null && !site.GetInspected(v.Owner))
+                if (!should && site != null && site.ExplorationTime != TimeUnit.Zero && !inspected)
                 {
                     string why = UnderTravelOrder(v) ? "the mirrored order still holds a destination (in flight)"
                                : start <= TimeUnit.Zero ? "StartExplorationTime is still zero — no host delta has " +
@@ -988,9 +1057,15 @@ namespace Multiplayer.Network.Sync
             }
             else
             {
+                // THE GAME'S OWN COMPLETION TEARDOWN, not a hand-rolled one: EndExploreCurrentSite:460 is
+                // exactly what SiteExplorationCompleted:473 calls when the timer runs out naturally, so
+                // forcing it here ends the local presentation the same way the host's did — the spinner is
+                // destroyed at the AUTHORITATIVE instant instead of finishing on this peer's own clock.
                 EndExploreCurrentSiteMethod.Invoke(v, null);
-                Debug.Log("[Multiplayer][rail] exploration re-seed " + root +
-                          " → cleared (the mirrored order no longer says exploring)");
+                Debug.Log("[Multiplayer][rail] exploration re-seed " + root + " → cleared (" +
+                          (inspected ? "the site is now INSPECTED on the host — authoritative DONE forced this " +
+                                       "peer's in-flight spinner to completion rather than letting it run out locally"
+                                     : "the mirrored order no longer says exploring") + ")");
             }
         }
 
