@@ -309,6 +309,27 @@ namespace Multiplayer.Network
         public bool InPhase2 => RosterProgressTracker.InPhase2(_begun, _loadCompleteSent);
 
         /// <summary>
+        /// THE HOST, LOADING ITS OWN geo→tactical LEVEL — the window <see cref="InPhase2"/> cannot see.
+        /// <c>OpenTacticalEntryBarrier</c> does not reset <c>_loadCompleteSent</c> (the host is already
+        /// SessionStarted and its last load marked it done), so <c>InPhase2</c> is FALSE for the whole
+        /// ~13 s the host spends building the mission: the phase-2 pump never sampled and the snapshot
+        /// broadcast gate returned early. The host was radio-silent through its own load and every client
+        /// stared at a bar nothing was driving. This is that window, and it ends the moment the curtain
+        /// hands over (<see cref="LoadPhaseStarted"/> → false at Playing/Loaded).
+        /// </summary>
+        private bool HostEntryLoad => _engine.IsHost && _hostEntryHold && LoadPhaseStarted;
+
+        /// <summary>
+        /// The phase number the host's own entry load publishes under — 0, never 1 and never 2.
+        /// <see cref="RosterProgressTracker.Merge"/> is MONOTONE ON PHASE, and
+        /// <c>HostTacticalEntryTransferCrt</c> writes the terminal <c>(1, 100)</c> at deploy-ready; a
+        /// higher number here makes that terminal unreachable, so the host row would freeze mid-load on
+        /// every client forever. A field and not a const so RailCheck L118 can see the value is actually
+        /// read by the publisher.
+        /// </summary>
+        internal static readonly byte HostEntryPhase = 0;
+
+        /// <summary>
         /// True once the NATIVE loading curtain has actually entered "Loading" (mission load-start) and
         /// not yet handed off to Playing/Loaded — i.e. a loading Level is captured (<see cref="_loadingLevel"/>).
         /// This is the real "mission loading started" seam, distinct from <see cref="TransferActive"/>
@@ -1157,6 +1178,16 @@ namespace Multiplayer.Network
             _hostEntryHold = true;
             _revealed = false;        // ordering-critical: arm the hold before Loaded→Playing
             _reachedPlaying = false;  // so OnReachedPlaying fires again at the tactical Playing (label + host done-mark)
+            // A NEW load starts HERE, so the LAST one's terminal rows must not survive into it. Merge is
+            // monotone: a stale slot-0 (1,100) rejects every phase-0 sample the pump is about to publish,
+            // and a client merging nothing renders the host row FULL from the first frame of a load that
+            // has not begun. Same reset OpenBarrier / ArmSelfLoadBarrier already do at their own arm
+            // points — this path had none, because it never published anything to go stale before.
+            _slotProgress.Clear();
+            _tracker.Reset();
+            _slotAdvancedMs.Clear();
+            _lastSnapshotMs = -1;
+            _lastReportedLoadPct = -1;
             Debug.Log($"[Multiplayer] host reveal-hold armed (tac-entry): sessionStarted={SessionStarted} " +
                       $"revealed={_revealed} — host holds its loading screen until all clients load-complete.");
 
@@ -1194,6 +1225,10 @@ namespace Multiplayer.Network
             Debug.Log("[Multiplayer] tac-entry BEGUN on the host — dropping the curtain now (no bytes yet).");
             _downloadCurtain = true;
             _rxStarted = false;   // (a): the curtain is up and NOT one byte has been sent yet
+            // The client half of the host's reset above: our tracker still carries the LAST load's
+            // terminal (1,100) for slot 0, and Merge would reject every phase-0 host sample against it —
+            // the bar would read 100% before the host had loaded a thing.
+            _tracker.Reset();
             Multiplayer.UI.MultiplayerUI.Instance?.EnterTacLoadCurtain("Waiting for host…");
         }
 
@@ -1319,6 +1354,13 @@ namespace Multiplayer.Network
                 _downloadCurtain = true;
                 _rxStarted = true;   // (b): bytes are moving — from here the wait is ours, then the players'
                 Multiplayer.UI.MultiplayerUI.Instance?.EnterDownloadLoadingScreen();
+                // PHASE EDGE — the mirrored host load hands over to OUR download, and the new phase starts
+                // at 0%. The native controller only ever RAISES fillAmount (ProgressBarController.Update:71
+                // `ProgressFill.fillAmount < num`), so without this the bar keeps the host's last fill and
+                // sits there until the download passes it. BeginDownloadBar above only zeroes the SOURCE.
+                // (The next edge, download→level-load, resets itself: native SetLoadingLevel:52 writes
+                // fillAmount = LowestProgress.)
+                Multiplayer.UI.NativeWidgetFactory.ResetBarFill();
                 // Chunks are emitted at fixed ChunkSize offsets (SendBlob), so the index is exact.
                 var chunkCount = (int)((chunk.TotalBytes + ChunkSize - 1) / ChunkSize);
                 _rxChunkSeen = new bool[chunkCount];
@@ -1878,10 +1920,26 @@ namespace Multiplayer.Network
         }
 
         // ══════════════════════════════════════════════════════════════════
-        //  Progress reporting (download exact; load is a coarse phase flag)
-        //  Real in-game load % is an OPEN SDK item — no 0..1 float is exposed
-        //  (docs/specs/03-open-questions-sdk.md "Loading Progress Hook").
+        //  Progress reporting — download AND load are both exact 0..1.
+        //  (The "no 0..1 float is exposed" note that used to sit here was wrong:
+        //   Base.Levels.Level.LoadingProgress is a LoadingProgressWithSteps with a
+        //   real float Progress, live from Level.cs:134 until it is nulled at :146.)
         // ══════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// HOST, geo→tactical entry: publish its OWN native level-load percent into the roster snapshot
+        /// so clients can mirror it. Slot 0 (the host's) at <see cref="HostEntryPhase"/>, which the
+        /// terminal <c>(1, 100)</c> written at deploy-ready can still overtake. Writing into
+        /// <c>_slotProgress</c> + <c>NoteSlotAdvance</c> is also what keeps the host's own slot visibly
+        /// ALIVE to the reveal barrier's liveness clock instead of merely silent.
+        /// Not <see cref="ReportLoadProgress"/>: that one is hard-wired to phase 1.
+        /// </summary>
+        private void PublishHostEntryLoad(byte percent)
+        {
+            var slot = _engine.Session.LocalSlotIndex;
+            _slotProgress[slot] = (HostEntryPhase, percent);
+            if (_tracker.Merge(slot, HostEntryPhase, percent)) NoteSlotAdvance(slot);
+        }
 
         private void ReportDownloadProgress()
         {
@@ -2035,17 +2093,31 @@ namespace Multiplayer.Network
                     Multiplayer.UI.NativeWidgetFactory.SetDownloadBar(
                         _rxTotalBytes > 0 ? (float)_rxReceived / _rxTotalBytes : 0f);
                 }
+                else if (_rxStarted)
+                {
+                    Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel("Waiting for players…");
+                    Multiplayer.UI.NativeWidgetFactory.SetDownloadBar(1f);
+                }
                 else
                 {
-                    Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel(
-                        _rxStarted ? "Waiting for players…" : "Waiting for host…");
-                    if (_rxStarted) Multiplayer.UI.NativeWidgetFactory.SetDownloadBar(1f);
+                    // (a) NOT ONE BYTE EXISTS YET — the host is still building the mission. This branch used
+                    // to write a label and nothing else, so the bar stayed on BeginDownloadBar's
+                    // UpdateProgress(0f) for the whole wait: an EMPTY bar, the reported bug. MIRROR THE
+                    // HOST'S OWN BAR instead — it publishes its real eased fillAmount into slot 0 / phase 0
+                    // at ≤20 Hz (HostEntryLoad pump below), so this is the host's actual load and not an
+                    // animation. A stale host simply parks the bar at the last mirrored value; it can never
+                    // claim 100% (only the host's terminal (1,100) does that), and EntryTransferAbort is the
+                    // belt.
+                    Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel("Host is loading…");
+                    Multiplayer.UI.NativeWidgetFactory.SetDownloadBar(_tracker.Get(0).percent / 100f);
                 }
             }
 
             // Phase-2 progress pump — runs on EVERY peer (host + clients) regardless of overlay visibility.
             // Decoupled from the UI: the overlay being hidden must NOT stall progress/done reporting.
-            if (InPhase2)
+            // …AND on the host through its OWN geo→tactical entry load, which InPhase2 cannot see
+            // (see HostEntryLoad). Same sampling, same widget, different phase number.
+            if (InPhase2 || HostEntryLoad)
             {
                 // Read the captured loading Level (NOT GameUtl.CurrentLevel(), which is null mid-load
                 // — see _loadingLevel). _loadingLevel goes null either when its LoadingProgress ends
@@ -2075,7 +2147,8 @@ namespace Multiplayer.Network
                         NoteProgress(); // own phase-2 load advancing = progress
                         Debug.Log($"[Multiplayer] phase-2 pump: slot={_engine.Session.LocalSlotIndex} " +
                                   $"pct={pct} (src={(_liveProgressBar != null ? "nativeBar" : "levelProgress")})");
-                        ReportLoadProgress(pct);
+                        if (InPhase2) ReportLoadProgress(pct);
+                        else PublishHostEntryLoad(pct);
                     }
                 }
                 else if (_lastReportedLoadPct >= 0)
@@ -2125,7 +2198,10 @@ namespace Multiplayer.Network
             // Snapshots must flow through BOTH phases: the LOADED barrier window (_barrierOpen) AND
             // the phase-2 world-load (_loadPhaseActive, set in Begin() where _barrierOpen is cleared).
             // Without _loadPhaseActive every peer's tracker would freeze the instant phase-2 begins.
-            if (!_engine.IsHost || (!_barrierOpen && !_loadPhaseActive)) return;
+            // …and through the host's OWN entry load, which is neither: at that point _barrierOpen is
+            // still false (OpenBarrier runs at deploy-ready, ~13 s later) and _loadPhaseActive was
+            // cleared by the previous load's all-done. Sampling without broadcasting is still silence.
+            if (!_engine.IsHost || (!_barrierOpen && !_loadPhaseActive && !HostEntryLoad)) return;
 
             // Broadcast the aggregated per-slot snapshot at ≤5 Hz. This runs ABOVE the timeout return
             // below so snapshots keep flowing for the whole load (done-tracking is event-driven via

@@ -406,6 +406,27 @@ namespace Multiplayer.UI
         }
 
         /// <summary>
+        /// Force the live native bar back to EMPTY. The controller is monotone — its Update only ever
+        /// raises fillAmount (decompile Base.Utils/ProgressBarController.cs:71,
+        /// <c>ProgressFill.fillAmount &lt; num</c>) — so a new phase that starts at 0% inherits the
+        /// previous phase's fill and stands still until it is passed. Lowering the SOURCE
+        /// (<see cref="SetDownloadBar"/>, <see cref="BeginDownloadBar"/>) cannot do this; only writing the
+        /// Image can. Used at the mirrored-host-load → own-download edge. The next edge needs nothing:
+        /// the game's own <c>ProgressBarController.SetLoadingLevel</c>:52 writes fillAmount itself.
+        /// </summary>
+        public static void ResetBarFill()
+        {
+            var fill = GetProgressFill(CaptureLiveProgressBar());
+            if (fill == null)
+            {
+                Debug.LogWarning("[Multiplayer] ResetBarFill: no live ProgressFill — the bar keeps the " +
+                                 "previous phase's fill (native controller never lowers it).");
+                return;
+            }
+            fill.fillAmount = 0f;
+        }
+
+        /// <summary>
         /// Set the native loading-screen label (SceneFadeController.LoadingText). Captures the pre-mod
         /// text ONCE (until RestoreCurtainLabel) so the native string always comes back. Safe per-frame:
         /// uGUI's Text.text setter early-outs on an identical string. No-op if the label isn't found.

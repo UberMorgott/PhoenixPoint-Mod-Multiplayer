@@ -356,7 +356,10 @@ namespace Multiplayer.UI
                 // so the instant loopback download (phase 0, 100%) shows a HALF bar and the bar only fills
                 // completely when the peer is actually loaded. The raw percent still labels the current phase.
                 var fillAmount = RosterProgressTracker.CombinedFill(phase, percent);
-                string phaseLabel = phase == 0 ? "Downloading" : "Loading";
+                // Phase 0 is "downloading" for a CLIENT row only. The host (slot 0) never downloads
+                // anything — it publishes its own geo→tactical level load under phase 0
+                // (SaveTransferCoordinator.HostEntryPhase), so labelling that row "Downloading" is a lie.
+                string phaseLabel = (phase == 0 && p.SlotIndex != 0) ? "Downloading" : "Loading";
 
                 if (row.Native && row.NativeFill != null)
                 {

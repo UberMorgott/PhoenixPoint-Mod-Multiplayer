@@ -190,6 +190,7 @@ namespace RailCheck
             laws.AddRange(L115_AuthoritativeDoneBeatsAnimation.Check(game));
             laws.AddRange(L116_EveryOpenContainerPanel.Check(game));
             laws.AddRange(L117_RestoredSubjectStillLive.Check(game));
+            laws.AddRange(L118_MirroredHostLoad.Check(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -9754,7 +9755,7 @@ namespace RailCheck
         /// <summary>True when the method's IL actually READS the given static field. This is why
         /// <c>DiffEngine.SliceBudgetMs</c> is a static readonly field and not a const: a const is inlined as
         /// a literal, so "does this loop consult a budget?" would be unanswerable from IL.</summary>
-        private static bool ReadsField(MethodBase m, FieldInfo target)
+        internal static bool ReadsField(MethodBase m, FieldInfo target)
         {
             if (m == null || target == null) return false;
             byte[] il = null;
