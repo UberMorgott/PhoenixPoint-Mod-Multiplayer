@@ -231,12 +231,17 @@ namespace Multiplayer.Tactical
         private static Image _green;
         private static bool _loggedBuildFailure;
 
+        /// <summary>Sibling index (under the clone's root) of the shallowest label-bearing child — where the
+        /// ready tint is inserted so it lands above the frame and below the caption. -1 = no label found.</summary>
+        private static int _labelDepth = -1;
+
         /// <summary>Battle teardown: the clone died with the tactical scene, so drop every handle to it.
         /// A retained setter would write into a destroyed object on the next battle's first repaint.</summary>
         internal static void Forget()
         {
             _setters.Clear();
             _green = null;
+            _labelDepth = -1;
         }
 
         /// <summary>
@@ -275,11 +280,11 @@ namespace Multiplayer.Tactical
 
                 PlaceBelow(template.GetComponent<RectTransform>(), go.GetComponent<RectTransform>());
                 WireClick(go);
+                CollectLabels(go);      // before the overlay: the overlay's depth is derived from the labels'
                 BuildGreenOverlay(go);
-                CollectLabels(go);
                 Repaint();
                 Debug.Log("[Multiplayer][tac] co-op ready button built under the native End Turn button (" +
-                          _setters.Count + " label target(s)).");
+                          _setters.Count + " label target(s)). Cloned subtree: " + Describe(template.transform));
             }
             catch (Exception ex)
             {
@@ -298,30 +303,34 @@ namespace Multiplayer.Tactical
         private const float RowGapPx = 6f;
 
         /// <summary>
-        /// STRICTLY BELOW, AND NATIVE UI MOVES FOR NOBODY. Reported live: the clone landed on top of / to the
-        /// right of End Turn and shoved the native buttons left, and the panel resized every time the counter
-        /// changed digits. Copying anchors and subtracting a height cannot cause either — a LAYOUT GROUP can,
-        /// and does both: a new child in the End Turn container's row is placed BY the group (our
-        /// anchoredPosition is overwritten, the row re-flows and the natives shift), and the group sizes that
-        /// child from its preferred width, which is the label's text width, which is why "1/3" and "10/3"
-        /// gave different widths.
+        /// STRICTLY BELOW, AND NATIVE UI MOVES FOR NOBODY.
         ///
-        /// So the fix is not a better offset, it is LEAVING THE LAYOUT: <c>LayoutElement.ignoreLayout</c> is
-        /// Unity's own opt-out (<c>ILayoutIgnorer</c>) — the group skips the child entirely, stops reserving
-        /// a cell for it and re-flows the natives back to exactly where they were, and our RectTransform
-        /// values are ours again. WIDTH IS THEN FIXED BY CONSTRUCTION: it is the native button's own sizeDelta,
-        /// copied once, with any <c>ContentSizeFitter</c> on the clone switched off so nothing can re-derive
-        /// it from the caption. The number of digits cannot change the geometry, because no live measurement
-        /// of the caption is left in the path. (Deliberately NOT a monospace/tabular font: the clone's font
-        /// comes from the prefab, and swapping it would be the one part of this button that stops looking
-        /// native — the caption is centred, so digit widths only move the text inside a rect that no longer
-        /// moves.)
+        /// WHY THE LAST TWO ATTEMPTS LANDED ON TOP OF END TURN AND LOST THE FRAME — one cause, both symptoms.
+        /// Both wrote the clone's rect ONCE, from inside <c>UIModuleEndTurnContainer.Awake</c>. At that instant
+        /// the canvas has not laid the row out yet, so <c>src.rect.height</c> is still the raw prefab number;
+        /// for a button whose size is driven by the row's layout group that number is ~0. Subtracting ~0 puts
+        /// the clone ON the native button (symptom 1). And the previous fix's <c>ignoreLayout = true</c> then
+        /// FROZE the clone at that same collapsed prefab size, so the frame Image — a sliced sprite that fills
+        /// the button rect — had no rect left to fill and drew nothing, while the caption, which sits on its
+        /// own child rect, kept drawing: "text floating in the air" (symptom 2). The group diagnosis was right;
+        /// opting out and freezing was the wrong half of the fix.
         ///
-        /// AND READ THE SOURCE AFTER THE LAYOUT HAS RUN, NOT BEFORE. This is called from the module's Awake,
-        /// where <c>src.anchoredPosition</c>/<c>rect</c> are still the raw prefab values; a group would move
-        /// the native button at the end of the frame and leave our clone measured against a position it no
-        /// longer occupies. <c>ForceRebuildLayoutImmediate</c> settles the row first — after our opt-out, so
-        /// the rebuild it performs is already the final, clone-free one.
+        /// SO MIRROR THE SOURCE INSTEAD OF COPYING IT ONCE (<see cref="TacticalReadyRowFollower"/>). Every
+        /// LateUpdate the clone takes the native button's CURRENT anchors, pivot, scale and sizeDelta and sits
+        /// one height + <see cref="RowGapPx"/> below its current anchoredPosition. The clone is then rect-
+        /// identical to End Turn — same frame art at the same size, drawn by the same prefab components — in
+        /// its own row, at every resolution, however late the layout settles.
+        ///
+        /// <c>ignoreLayout</c> STAYS, and now only does the job it is good at: the group neither places our
+        /// clone nor reserves a cell for it, so the native buttons never shift sideways to make room. What it
+        /// no longer does is decide our size — the mirror re-injects the group's own computed size each frame.
+        ///
+        /// SIZED FOR EVERY LANGUAGE, BY DEFINITION. The width is the native End Turn button's width, live —
+        /// and that button is already sized for every language the game ships. It is also the reason the digit
+        /// jump cannot come back: our caption is never measured by anything, so "1/3" and "10/3" cannot move a
+        /// pixel. A translation longer than the frame shrinks and wraps INSIDE it (see
+        /// <see cref="FitLabel"/>) rather than widening it. Deliberately NOT a monospace swap: the prefab font
+        /// is what makes the clone read as native.
         ///
         /// Sibling, still: making the clone a CHILD of the End Turn button would also dodge the group, but
         /// Unity's pointer enter/exit walks the whole parent chain, so hovering ours would light the native
@@ -329,7 +338,13 @@ namespace Multiplayer.Tactical
         /// </summary>
         private static void PlaceBelow(RectTransform src, RectTransform clone)
         {
-            if (src == null || clone == null) return;
+            if (src == null || clone == null)
+            {
+                Debug.LogError("[Multiplayer][tac] ready button NOT placed — the native End Turn button or the " +
+                               "clone has no RectTransform, so the clone stays wherever Instantiate left it " +
+                               "(on top of the native button).");
+                return;
+            }
 
             var ignore = clone.GetComponent<LayoutElement>();
             if (ignore == null) ignore = clone.gameObject.AddComponent<LayoutElement>();
@@ -337,15 +352,29 @@ namespace Multiplayer.Tactical
 
             foreach (var fitter in clone.GetComponents<ContentSizeFitter>()) fitter.enabled = false;
 
-            var parent = src.parent as RectTransform;
-            if (parent != null) LayoutRebuilder.ForceRebuildLayoutImmediate(parent);
+            var follower = clone.gameObject.AddComponent<TacticalReadyRowFollower>();
+            follower.Source = src;
+            follower.GapPx = RowGapPx;
+            follower.Apply(); // first frame already looks right if the row happens to be settled
+        }
 
-            clone.anchorMin = src.anchorMin;
-            clone.anchorMax = src.anchorMax;
-            clone.pivot = src.pivot;
-            clone.sizeDelta = src.sizeDelta;
-            clone.localScale = src.localScale;
-            clone.anchoredPosition = src.anchoredPosition - new Vector2(0f, src.rect.height + RowGapPx);
+        /// <summary>One line naming every node of the CLONED subtree with the drawable it carries, logged once
+        /// per battle. The End Turn prefab is an asset — its child names are not in any source we can read — so
+        /// this is the only way to confirm from a log that the frame really came across with the clone.</summary>
+        private static string Describe(Transform root)
+        {
+            if (root == null) return "(none)";
+            var sb = new System.Text.StringBuilder();
+            foreach (var t in root.GetComponentsInChildren<Transform>(true))
+            {
+                if (sb.Length > 0) sb.Append(" | ");
+                sb.Append(t.name);
+                var img = t.GetComponent<Image>();
+                if (img != null) sb.Append("<Image ").Append(img.sprite == null ? "no-sprite" : img.sprite.name)
+                                   .Append(' ').Append(img.type).Append('>');
+                if (t.GetComponent<Text>() != null) sb.Append("<Text>");
+            }
+            return sb.ToString();
         }
 
         /// <summary>Re-wire the click exactly as <c>NativeWidgetFactory.CloneMenuButton</c> does: strip the
@@ -373,6 +402,11 @@ namespace Multiplayer.Tactical
             if (pgb != null) pgb.SetInteractable(true);
         }
 
+        /// <summary>The ready tint, stretched over the whole button and DEPTH-PLACED FROM THE REAL SUBTREE
+        /// rather than guessed: directly beneath the shallowest label-bearing child, i.e. above every frame /
+        /// background child and below the caption. Sibling index 0 (the previous choice) is the BOTTOM of the
+        /// draw order, so an opaque frame child would have hidden the tint completely — and the prefab's child
+        /// names are asset-only, so the order has to be derived at runtime, not assumed.</summary>
         private static void BuildGreenOverlay(GameObject go)
         {
             var overlay = new GameObject("MP_ReadyGreen", typeof(Image));
@@ -382,7 +416,7 @@ namespace Multiplayer.Tactical
             rt.anchorMax = Vector2.one;
             rt.offsetMin = Vector2.zero;
             rt.offsetMax = Vector2.zero;
-            rt.SetAsFirstSibling(); // over the frame, under the label
+            rt.SetSiblingIndex(_labelDepth < 0 ? go.transform.childCount - 1 : _labelDepth);
             _green = overlay.GetComponent<Image>();
             _green.color = new Color(0.16f, 0.70f, 0.24f, 0.55f);
             _green.raycastTarget = false;
@@ -400,6 +434,7 @@ namespace Multiplayer.Tactical
                 foreach (var c in go.GetComponentsInChildren(localize, true))
                     if (c is Behaviour b) b.enabled = false;
 
+            _labelDepth = -1;
             foreach (var c in go.GetComponentsInChildren<Component>(true))
             {
                 if (c == null || c is Image) continue;
@@ -409,10 +444,58 @@ namespace Multiplayer.Tactical
                 var target = c;
                 var prop = p;
                 _setters.Add(s => { try { prop.SetValue(target, s, null); } catch { } });
+                FitLabel(c);
+                int depth = DirectChildIndex(go.transform, c.transform);
+                if (depth >= 0 && (_labelDepth < 0 || depth < _labelDepth)) _labelDepth = depth;
             }
             if (_setters.Count == 0)
                 Debug.LogWarning("[Multiplayer][tac] ready button found NO text component to label — the button " +
                                  "will show the cloned End Turn caption instead of the ready count.");
+        }
+
+        /// <summary>Sibling index of the ancestor of <paramref name="node"/> that is a DIRECT child of
+        /// <paramref name="root"/>, or -1 if the node is the root itself / unrelated.</summary>
+        private static int DirectChildIndex(Transform root, Transform node)
+        {
+            // ReferenceEquals, not `==`: this asks "is this the same object", which is an IDENTITY question
+            // (L113) — Unity's operator would answer "is the native half alive" and quietly compare ids.
+            while (node != null && node.parent != null && !ReferenceEquals(node.parent, root)) node = node.parent;
+            return node != null && ReferenceEquals(node.parent, root) ? node.GetSiblingIndex() : -1;
+        }
+
+        /// <summary>
+        /// LOCALIZATION SAFETY VALVE. The frame's width is the native End Turn button's (see
+        /// <see cref="PlaceBelow"/>), which is already sized for every language the game ships — so the only
+        /// thing left to decide is what a translation that is STILL longer does. It shrinks and wraps inside
+        /// the frame; it never widens it, because a widening label is exactly the digit-jump bug wearing a
+        /// Portuguese hat.
+        ///
+        /// uGUI <c>Text</c> directly (the End Turn caption is that stack), TMP by reflection — the mod does
+        /// not reference TextMeshPro, and the two auto-size APIs are not the same shape.
+        /// </summary>
+        private static void FitLabel(Component c)
+        {
+            if (c is Text t)
+            {
+                t.resizeTextForBestFit = true;
+                t.resizeTextMaxSize = t.fontSize > 0 ? t.fontSize : 24;
+                t.resizeTextMinSize = 8;
+                t.horizontalOverflow = HorizontalWrapMode.Wrap;
+                t.verticalOverflow = VerticalWrapMode.Truncate;
+                return;
+            }
+            try
+            {
+                var type = c.GetType();
+                type.GetProperty("enableAutoSizing")?.SetValue(c, true, null);
+                type.GetProperty("fontSizeMin")?.SetValue(c, 8f, null);
+                type.GetProperty("enableWordWrapping")?.SetValue(c, true, null);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[Multiplayer][tac] ready label auto-size not applied to " + c.GetType().Name +
+                                 " — a long translation will be clipped rather than shrunk: " + ex.Message);
+            }
         }
 
         /// <summary>
@@ -437,6 +520,56 @@ namespace Multiplayer.Tactical
                            TacticalReadySync.TotalCount;
             for (int i = 0; i < _setters.Count; i++) _setters[i](label);
             if (_green != null) _green.enabled = mine;
+        }
+    }
+
+    /// <summary>
+    /// THE ROW. Keeps the cloned button rect-identical to the native End Turn button and exactly one row
+    /// below it, every frame, forever.
+    ///
+    /// A ONE-SHOT COPY CANNOT DO THIS, and that is the whole reason this component exists. The clone is built
+    /// from <c>UIModuleEndTurnContainer.Awake</c>, before the canvas has laid the row out: the numbers read
+    /// there are raw prefab values (a layout-driven button measures ~0 high), which is how the last two
+    /// attempts put the clone ON the native button and left it collapsed to a size with no room for the frame
+    /// art. Reading in LateUpdate reads the size the layout actually settled on.
+    ///
+    /// It is also the localization guarantee and the anti-digit-jump guarantee in one line: the width is
+    /// ALWAYS the native button's width — already sized for every shipped language — and our own caption is
+    /// never measured by anything, so no string we write can move a pixel of geometry.
+    ///
+    /// Cost is four assignments a frame on one object. The alternative (a coroutine that settles once) breaks
+    /// again the moment the row re-flows — resolution change, HUD scale, a module the game shows or hides.
+    /// </summary>
+    internal sealed class TacticalReadyRowFollower : MonoBehaviour
+    {
+        /// <summary>The native End Turn button's rect. Unity-null when the battle tears down.</summary>
+        internal RectTransform Source;
+
+        /// <summary>Gap between the native button's bottom edge and ours, so "its own row" is a number.</summary>
+        internal float GapPx = 6f;
+
+        private void LateUpdate() => Apply();
+
+        internal void Apply()
+        {
+            var me = transform as RectTransform;
+            if (Source == null || me == null)
+            {
+                // Teardown, or a prefab shape we cannot follow. Stop rather than write into a dead rect —
+                // and say so once, because a silently frozen button is this repo's dominant bug class.
+                if (enabled)
+                    Debug.LogWarning("[Multiplayer][tac] ready button stopped following the native End Turn " +
+                                     "button (source rect gone). It keeps its last position for the rest of " +
+                                     "this battle; nothing else is affected.");
+                enabled = false;
+                return;
+            }
+            me.anchorMin = Source.anchorMin;
+            me.anchorMax = Source.anchorMax;
+            me.pivot = Source.pivot;
+            me.localScale = Source.localScale;
+            me.sizeDelta = Source.sizeDelta;
+            me.anchoredPosition = Source.anchoredPosition - new Vector2(0f, Source.rect.height + GapPx);
         }
     }
 
