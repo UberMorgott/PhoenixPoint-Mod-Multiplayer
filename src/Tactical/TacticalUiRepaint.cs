@@ -8,6 +8,8 @@ using Base.UI;
 using HarmonyLib;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
+using PhoenixPoint.Common.Entities;
+using PhoenixPoint.Common.View.ViewModules;
 using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.Entities.Abilities;
 using PhoenixPoint.Tactical.Levels;
@@ -194,7 +196,14 @@ namespace Multiplayer.Tactical
                                                     // the REAL current state's own Update repaints next frame
                 _dirty = false;
                 if (IsAbilityBarState(__instance)) Repaint(__instance);
-                else RepaintModules(view);
+                else
+                {
+                    RepaintModules(view);
+                    // Re-arm rather than drop: a container view that declined because the player is
+                    // mid-drag is repainted on a later frame, never "never" (the same difference
+                    // OpenUiRepaint.FlushIfDirty draws for the geoscape).
+                    if (!RepaintContainerView(__instance, view)) _dirty = true;
+                }
             }
         }
 
@@ -427,6 +436,115 @@ namespace Multiplayer.Tactical
                     Debug.LogWarning("[Multiplayer][tac] module repaint threw — bottom bar may be stale " +
                                      "(logged once per battle): " + ex);
             }
+        }
+
+        // ─── The open CONTAINER view: every panel it shows, not the one the change named ────────────────
+        // UIStateInventory is the only screen in the assembly that shows TWO actors at once, and the second
+        // one is exactly the adjacency the user described: _secondaryActor:249 is set in EnterState:289 from
+        // GetTacticalActors():679-693, which filters by TacUtil.CanTradeWith. Every handle below is the
+        // game's own; the rebuild pair is the one UndoInventoryActions:912/:915 already uses.
+        private static readonly Type InventoryState =
+            AccessTools.TypeByName("PhoenixPoint.Tactical.View.ViewStates.UIStateInventory");
+        private static readonly FieldInfo InvSecondary = AccessTools.Field(InventoryState, "_secondaryActor");
+        private static readonly FieldInfo InvIsVehicle = AccessTools.Field(InventoryState, "_isVehicleInventory");
+        private static readonly FieldInfo InvIsSecondaryVehicle = AccessTools.Field(InventoryState, "_isSecondaryVehicleInventory");
+        private static readonly PropertyInfo InvPrimary = AccessTools.Property(InventoryState, "PrimaryActor");
+        private static readonly MethodInfo InvBackpack = AccessTools.Method(InventoryState, "GetSoldierBackpackItems");
+        private static readonly MethodInfo InvReady = AccessTools.Method(InventoryState, "GetSoldierReadyItems");
+        private static readonly MethodInfo InvVehicleReady = AccessTools.Method(InventoryState, "GetVehicleReadyItems");
+        private static readonly MethodInfo InvGround = AccessTools.Method(InventoryState, "GetGroundItems");
+        private static readonly MethodInfo InvContainers = AccessTools.Method(InventoryState, "GetItemContainers");
+        private static readonly MethodInfo InvRefreshUi = AccessTools.Method(InventoryState, "RefreshUI");
+
+        /// <summary>
+        /// REBUILD EVERY PANEL THE OPEN CONTAINER VIEW SHOWS — not the one the click belonged to.
+        ///
+        /// THE REPORT (2026-08-05): two soldiers standing next to each other, both their inventories on
+        /// screen at once, an item moved between them shows on ONE side only and the other side needs a full
+        /// close-and-reopen. The personnel bar flickering was the tell that a repaint really was firing:
+        /// <see cref="PaintSquadBar"/> runs, and so does <see cref="RepaintModules"/> — but the latter
+        /// refreshes the two BOTTOM-BAR modules and nothing else, so no item slot on either panel was ever
+        /// rebuilt. <c>UIStateInventory</c> is deliberately absent from <see cref="AbilityBarStates"/>
+        /// (its <c>ExitState</c>:428-453 COMMITS the staged batch and destroys containers, so Exit+Enter
+        /// would confirm a drag nobody confirmed) — correct, and it left this screen with no repaint at all.
+        ///
+        /// THE REBUILD IS THE GAME'S OWN BOTH-PANEL PAIR. <c>UndoInventoryActions</c>:905-918 is the native
+        /// precedent for redrawing the whole screen without transitioning it: <c>UpdateData</c>:626 for the
+        /// primary, <c>UpdateSecondaryData</c>:767 for the secondary, then <c>RefreshUI</c>:802. This calls
+        /// exactly those three — the only difference is that it reads the LIVE items instead of the visit's
+        /// baseline, because a repaint must show what the model says now.
+        ///
+        /// AN IN-PROGRESS DRAG SURVIVES IT, and that is a property of the source rather than a guard bolted
+        /// on: every getter here reads <c>InventoryComponent.GetInventoryQuery().Items</c> — the STAGED list
+        /// (<c>InventoryQuery._currentItems</c>), the very thing the screen itself renders from — so a drag
+        /// the player has staged but not confirmed is re-rendered, not discarded. The one case that does
+        /// lose staged edits is the game's OWN desync reset: a mirrored <c>ApplyLayout</c> writes the
+        /// <c>InventoryComponent</c> directly, which trips <c>IsValidQuery</c> on the next
+        /// <c>GetInventoryQuery()</c> and resets the query with a native LogError. That happens whether or
+        /// not this repaint exists — it is the mirrored write's doing, not the rebuild's.
+        ///
+        /// The cursor-held drag is still deferred, for the same reason the geoscape defers
+        /// (<c>OpenUiRepaint.LocalInputInFlight</c>): rebuilding the lists under a held icon yanks the item
+        /// out of the player's hand. Same widget, literally — <c>UIModuleSoldierEquip</c> is the shared
+        /// Common module and its <c>ItemDragIcon</c>:159 is the same field the geoscape asks.
+        ///
+        /// Returns FALSE only when it declined and wants another frame.
+        /// </summary>
+        private static bool RepaintContainerView(TacticalViewState state, TacticalView view)
+        {
+            if (InventoryState == null || !InventoryState.IsInstanceOfType(state)) return true;
+            if (InvPrimary == null || InvBackpack == null || InvReady == null ||
+                InvGround == null || InvContainers == null) return true;   // resolve-all-first: decline whole
+            // The screen's own `_soldierEquipModule`:271 is a private PROPERTY that just reads this — the
+            // module is shared, so taking it from TacticalModulesData needs no reflection and cannot go
+            // stale against the state. (RailCheck L116 caught the field lookup this replaced: there is no
+            // such FIELD on the state, only on its two nested command classes, so it resolved to null and
+            // the whole repaint declined forever, silently.)
+            var module = view.TacticalModules == null ? null : view.TacticalModules.TacticalSoldierEquipModule;
+            var primary = InvPrimary.GetValue(state, null) as TacticalActor;
+            if (module == null || primary == null) return true;
+            var drag = module.ItemDragIcon;
+            if (drag != null && drag.IsBeingDragged()) return false;   // retry next frame, never drop
+            try
+            {
+                // Law 8: a module re-read fires native UI events our own intent-capture seams listen to.
+                using (SyncApplyScope.Enter())
+                {
+                    bool primaryIsVehicle = InvIsVehicle != null && (bool)InvIsVehicle.GetValue(state);
+                    module.UpdateData(
+                        InvBackpack.Invoke(state, new object[] { primary }) as IEnumerable<ICommonItem>,
+                        ReadyItems(state, primary, primaryIsVehicle),
+                        null,
+                        InvGround.Invoke(state, new[] { InvContainers.Invoke(state, null) }) as IEnumerable<ICommonItem>);
+                    var secondary = InvSecondary == null ? null : InvSecondary.GetValue(state) as TacticalActor;
+                    if (secondary != null)
+                    {
+                        bool secondaryIsVehicle = InvIsSecondaryVehicle != null && (bool)InvIsSecondaryVehicle.GetValue(state);
+                        module.UpdateSecondaryData(
+                            InvBackpack.Invoke(state, new object[] { secondary }) as IEnumerable<ICommonItem>,
+                            ReadyItems(state, secondary, secondaryIsVehicle));
+                    }
+                    if (InvRefreshUi != null) InvRefreshUi.Invoke(state, null);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Same non-destructive posture as the other two repaints: a partial refresh, not a lost
+                // screen — and never a demotion to Exit+Enter, which on THIS state would commit the batch.
+                if (_loggedFailures.Add("containers"))
+                    Debug.LogWarning("[Multiplayer][tac] container-view repaint threw — an open inventory panel " +
+                                     "may be stale until it is reopened (logged once per battle): " + ex);
+            }
+            return true;
+        }
+
+        /// <summary>A mounted actor's "ready" list is its three vehicle slots, not its equipment
+        /// (UIStateInventory.InitVehicleInventory:474-480 draws exactly that distinction).</summary>
+        private static IEnumerable<ICommonItem> ReadyItems(TacticalViewState state, TacticalActor actor, bool isVehicle)
+        {
+            var m = isVehicle ? InvVehicleReady : InvReady;
+            if (m == null) return null;
+            return m.Invoke(state, new object[] { actor }) as IEnumerable<ICommonItem>;
         }
 
         private static bool IsAbilityBarState(TacticalViewState state)
