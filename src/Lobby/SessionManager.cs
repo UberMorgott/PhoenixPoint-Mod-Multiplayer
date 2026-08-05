@@ -726,14 +726,12 @@ namespace Multiplayer.Network
                 // the geoscape model is live; versioned per channel, so current peers drop stale echoes.
                 _engine.Sync?.BroadcastAllChannels();
 
-                // AllClientsReady only fires when EVERY connected client is ready. An unready that drops
-                // the count below the bar must NOT broadcast it (the gate de-arms via the roster flags).
-                if (_readyClients.Count >= _clients.Count && _clients.Count > 0)
-                {
-                    var allReady = new NetworkMessage(PacketType.AllClientsReady);
-                    _engine.BroadcastToAll(allReady);
-                    OnAllClientsReady?.Invoke();
-                }
+                // NO READY QUORUM (N=50 mandate). This used to compare _readyClients.Count against
+                // _clients.Count and only then announce — a peer count decision, i.e. exactly the shape
+                // that lets one slow/AFK/parity-blocked player hold fifty shut. Nothing downstream needs
+                // the announcement any more: the start gate is LobbyController.CanStart (>=1 peer + save
+                // chosen) and the roster's per-row Ready flags ride the PEER_LIST broadcast above.
+                // PacketType.AllClientsReady stays a tombstone for wire compatibility with older peers.
             }
             else
             {

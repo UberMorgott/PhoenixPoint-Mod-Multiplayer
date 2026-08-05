@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using Base.Core;
 using Base.Serialization;
 using Base.UI.MessageBox;
@@ -353,8 +353,8 @@ namespace Multiplayer.UI
             if (engine?.Session == null) return;
 
             // Host has NO Ready toggle (it is the starter, not a ready-gated player — spec §5). Only a
-            // CLIENT readies/unreadies; the host's own start gate is LobbyController.CanStart (all
-            // non-host peers ready + save chosen), projected via RefreshGateFacts.
+            // CLIENT readies/unreadies; the host's own start gate is LobbyController.CanStart
+            // (>=1 peer + save chosen — no ready quorum), projected via RefreshGateFacts.
             if (engine.IsHost) return;
 
             // Client → host ClientReady / ClientUnready per the local intent (keyed by sender; the host
@@ -407,9 +407,9 @@ namespace Multiplayer.UI
             // race, Bug B H2): never trust the Play button's lit visual alone. Project the live roster
             // facts into the FSM through the SINGLE shared projection point (RefreshGateFacts — the
             // exact same one the Play-button VISUAL uses), then attempt CommitStart — which only
-            // succeeds when >=1 client is connected, ALL connected clients are ready, and a save is
-            // chosen, and which LOCKS the lobby on success so no mid-start ready flip can race in.
-            RefreshGateFacts(out int clientCount, out bool allClientsReady, out bool saveChosen);
+            // succeeds when >=1 client is connected and a save is chosen, and which LOCKS the lobby on
+            // success so no mid-start join can race in. NO ready quorum — see LobbyController.
+            RefreshGateFacts(out int clientCount, out bool saveChosen);
 
             // Shared reopen path: the gate passed and we LOCKED the lobby, but the start could not
             // proceed (HostStartSession returned false OR threw in its synchronous portion —
@@ -487,22 +487,21 @@ namespace Multiplayer.UI
         // LobbyController.AllClientsReady) — both the Play-button VISUAL (EvaluateStartGate) and the
         // press-time guard (OnLobbyPlay) call through here, so they can never derive a different gate.
         //   • clientCount      = connected NON-host peers (host self-entry excluded).
-        //   • allClientsReady  = LobbyController.AllClientsReady over the non-host ready flags.
         //   • saveChosen       = the AUTHORITATIVE broadcast value Session.ChosenSaveName is non-empty
         //                        (single source of truth; see the gate-vs-rail divergence note below).
+        // Ready flags are NOT projected any more: the start gate carries no ready quorum (N=50 mandate —
+        // see LobbyController's class summary). They are still rendered per row by the lobby panel.
         // UpdateLobby ignores updates while the FSM is locked, so this is safe to call every frame.
-        private void RefreshGateFacts(out int clientCount, out bool allClientsReady, out bool saveChosen)
+        private void RefreshGateFacts(out int clientCount, out bool saveChosen)
         {
             var engine = NetworkEngine.Instance;
             var roster = engine?.Session?.GetLobbyRoster();
 
-            var nonHostReady = new List<bool>();
+            clientCount = 0;
             if (roster != null)
                 foreach (var p in roster)
-                    if (!p.IsHost) nonHostReady.Add(p.Ready);
+                    if (!p.IsHost) clientCount++;
 
-            clientCount = nonHostReady.Count;
-            allClientsReady = LobbyController.AllClientsReady(nonHostReady);
             // SINGLE SOURCE OF TRUTH for "a save is chosen": the AUTHORITATIVE broadcast value
             // (Session.ChosenSaveName, set only by SetChosenSave which also broadcasts SetSave + drives
             // the rail), NOT the local _pendingChosenSave field. A stale _pendingChosenSave surviving a
@@ -511,7 +510,7 @@ namespace Multiplayer.UI
             // broadcast value makes them converge: PLAY can never arm unless a save was really broadcast.
             saveChosen = !string.IsNullOrEmpty(engine?.Session?.ChosenSaveName);
 
-            _lobbyController.UpdateLobby(clientCount, allClientsReady, saveChosen);
+            _lobbyController.UpdateLobby(clientCount, saveChosen);
         }
 
         // Refresh the FSM from the live roster, then return the FULL start gate (clients>=1 && all
@@ -520,7 +519,7 @@ namespace Multiplayer.UI
         // the post-commit lock — not just the all-ready dimension.
         public bool EvaluateStartGate()
         {
-            RefreshGateFacts(out _, out _, out _);
+            RefreshGateFacts(out _, out _);
             return _lobbyController.CanStart;
         }
 

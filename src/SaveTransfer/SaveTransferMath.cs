@@ -1,4 +1,4 @@
-namespace Multiplayer.Network
+﻿namespace Multiplayer.Network
 {
     /// <summary>
     /// Pure, Unity-free save-transfer load-barrier + chunk-grid predicates. Extracted from the
@@ -9,14 +9,15 @@ namespace Multiplayer.Network
     public static class SaveTransferMath
     {
         /// <summary>
-        /// Barrier-release predicate (fix #1/#2): the LOADED barrier releases iff the host has prepared
-        /// AND every currently-expected client has acked. The host is counted via a dedicated flag, never
-        /// an id in <paramref name="loadedClientCount"/>, so a peerId-0 client can never masquerade as the
-        /// host. When a not-yet-loaded peer drops, the caller passes the reduced live
-        /// <paramref name="expectedClientCount"/>, so the barrier releases early with the rest.
+        /// Barrier-release predicate. NO QUORUM (N=50 mandate, 2026-08-05): the session begins the moment
+        /// the HOST has prepared its own entry. It used to also require <c>loadedClientCount &gt;=
+        /// expectedClientCount</c> — a peer-count decision, and the reason a single slow download made
+        /// fifty players sit behind a loading screen for up to three minutes and then watch someone get
+        /// kicked. Every client that has not finished converges on its own clock through the ordinary
+        /// per-peer join path; SessionBegin is reliable and ordered, so one that is still downloading
+        /// simply enters later. Nobody waits for anybody, and there is no straggler to kick.
         /// </summary>
-        public static bool BarrierReleased(bool hostLoaded, int loadedClientCount, int expectedClientCount)
-            => hostLoaded && loadedClientCount >= expectedClientCount;
+        public static bool BarrierReleased(bool hostLoaded) => hostLoaded;
 
         /// <summary>
         /// Chunk-grid validator (fix #4): a well-formed chunk sits exactly on the

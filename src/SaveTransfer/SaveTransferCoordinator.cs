@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using Base.Core;
@@ -57,14 +57,6 @@ namespace Multiplayer.Network
         // stuck heartbeat-suspension) or commits a huge buffer. A real PP save is well under this.
         public const long MaxTransferBytes = 64L * 1024 * 1024;
 
-        // Phase-1 (LOADED barrier) timeout: time the host waits, after the barrier opens, for every
-        // connected peer to download + prepare its save (ack LOADED) before kicking the stragglers and
-        // beginning with whoever is ready. This window covers the chunked transfer AND the in-memory
-        // PrepareEntryFromBlobCrt (metadata/level-param read of a 1–5 MB geoscape blob), which on a slow
-        // disk can take well over a minute — so it is deliberately generous (3 min). It does NOT cover
-        // the native world-load (that is phase-2). Splitting this off the old single 60 s constant
-        // stops a slow-but-healthy client being kicked mid-prepare (review fix #3).
-        private const long Phase1LoadTimeoutMs = 180_000;
 
         // Phase-2 reveal deadline: how long the held (opaque) overlay stays up — i.e. how long both
         // reveal fallbacks wait for every peer to finish its NATIVE world-load and report done — before
@@ -91,6 +83,8 @@ namespace Multiplayer.Network
         // _loadedPeers — see above. Set when the host finishes preparing its own entry, reset in
         // OpenBarrier.
         private bool _hostLoaded;
+        // CLIENT: a SessionBegin that arrived before this peer had prepared its save. See EnterLevel.
+        private bool _beginPending;
 
         // ─── Client reassembly state ──────────────────────────────────────
         private Guid _rxTransferId;
@@ -410,15 +404,15 @@ namespace Multiplayer.Network
             }
 
             // Defense-in-depth (Bug B): the lobby start gate must also hold HERE, not only in the
-            // caller — no path may start a session while the host is alone or any client is un-ready.
-            // We re-derive the gate from the authoritative roster (host self-entry excluded).
-            var roster = _engine.Session?.GetLobbyRoster();
+            // caller — no path may start a session while the host is alone. NO ready quorum any more
+            // (N=50 mandate): the host starts on its OWN readiness and every peer converges through the
+            // per-peer join path, so an un-ready peer costs that peer a later arrival, never everyone
+            // else the session.
             int clientCount = _engine.Session?.ClientCount ?? 0;
-            bool gateOpen = clientCount >= 1 && AllClientsReadyRoster(roster);
-            if (!gateOpen)
+            if (clientCount < 1)
             {
-                Debug.LogWarning("[Multiplayer] HostStartSession blocked: start gate closed " +
-                    $"(clients={clientCount}, allReady={AllClientsReadyRoster(roster)}); ignoring start.");
+                Debug.LogWarning("[Multiplayer] HostStartSession blocked: host is alone " +
+                    $"(clients={clientCount}); ignoring start.");
                 return false;
             }
 
@@ -516,18 +510,6 @@ namespace Multiplayer.Network
             return true;
         }
 
-        // Start-gate helper: project the roster to non-host ready flags and delegate to the ONE shared
-        // rule (LobbyController.AllClientsReady) — >=1 NON-host peer AND every non-host peer ready. The
-        // host self-entry is the starter, not a ready-gated player, so it is excluded. Single source of
-        // truth shared with the lobby VISUAL + press-time guard so no copy can drift.
-        private static bool AllClientsReadyRoster(List<PeerListEntry> roster)
-        {
-            if (roster == null) return false;
-            var nonHostReady = new List<bool>();
-            foreach (var p in roster)
-                if (!p.IsHost) nonHostReady.Add(p.Ready);
-            return LobbyController.AllClientsReady(nonHostReady);
-        }
 
         // Coroutine: read the save to bytes, then chunk+send, then prepare host entry + open barrier.
         private IEnumerator<NextUpdate> HostSerializeAndSendCrt(PhoenixGame game, SavegameMetaData metaData)
@@ -562,10 +544,59 @@ namespace Multiplayer.Network
         {
             var crc = Crc32(blob);
             var chunkCount = (int)((blob.Length + ChunkSize - 1) / ChunkSize);
-            Debug.Log($"[Multiplayer] SendBlob: bytes={blob.Length} chunks={chunkCount} crc=0x{crc:X8}");
-            SendBlobCore(blob, ext, _transferId, crc, onDemandJoin: false, m => _engine.BroadcastToAll(m));
-            Debug.Log("[Multiplayer] SendBlob: all chunks + SaveDone broadcast sent");
+            _blobPending.Clear();
+            _blobInFlight.Clear();
+            foreach (var peer in _engine.Session.GetConnectedClients()) _blobPending.Enqueue(peer);
+            _blob = blob; _blobExt = ext; _blobCrc = crc; _blobTransferId = _transferId;
+            Debug.Log($"[Multiplayer] SendBlob: bytes={blob.Length} chunks={chunkCount} crc=0x{crc:X8} " +
+                      $"peers={_blobPending.Count} concurrency={MaxConcurrentBlobPeers}");
+            PumpBlobQueue();
         }
+
+        // How many peers may have the save blob sitting in their send queue at once. BroadcastToAll used
+        // to enqueue the WHOLE blob for EVERY peer in a single synchronous burst: at a 5 MB save and 50
+        // players that is 250 MB of host-side send queue committed in one frame — the memory spike, the
+        // uplink stall that makes everyone's first minute feel like a dead connection, and the only
+        // realistic way DirectTransport's per-peer queue cap is ever reached. Staggering changes NOTHING
+        // on the wire per peer (same chunks, same order, same SaveDone) and nothing on any client; it only
+        // stops the host committing the whole roster's bytes at once. Four is a plain bound, not a tuned
+        // one: it keeps the host's uplink saturated while capping the commitment at ~4 blobs.
+        private const int MaxConcurrentBlobPeers = 4;
+        private readonly Queue<ulong> _blobPending = new Queue<ulong>();
+        private readonly List<ulong> _blobInFlight = new List<ulong>();
+        private byte[] _blob; private string _blobExt; private uint _blobCrc; private Guid _blobTransferId;
+
+        /// <summary>Hand the start blob to the next few peers. Driven from <see cref="Update"/>, so a peer
+        /// that joins/leaves mid-distribution needs no special case: a departed peer settles out of the
+        /// in-flight set on the next pump and a new one arrives through the ordinary on-demand join.</summary>
+        private void PumpBlobQueue()
+        {
+            if (_blob == null) return;
+            _blobInFlight.RemoveAll(BlobSettled);
+            while (_blobInFlight.Count < MaxConcurrentBlobPeers && _blobPending.Count > 0)
+            {
+                var peer = _blobPending.Dequeue();
+                if (!_engine.Session.Clients.ContainsKey(peer)) continue; // left before its turn
+                SendBlobCore(_blob, _blobExt, _blobTransferId, _blobCrc, onDemandJoin: false,
+                             m => _engine.SendToClient(peer, m));
+                _blobInFlight.Add(peer);
+                Debug.Log($"[Multiplayer] SendBlob: blob queued for peer={peer} " +
+                          $"(inFlight={_blobInFlight.Count} pending={_blobPending.Count})");
+            }
+            if (_blobPending.Count == 0 && _blobInFlight.Count == 0)
+            {
+                Debug.Log("[Multiplayer] SendBlob: every peer served — releasing the blob.");
+                _blob = null; _blobExt = null; // the bytes are the biggest thing this class holds
+            }
+        }
+
+        /// <summary>A peer stops occupying a concurrency slot once it has the whole blob (download 100%),
+        /// has acked LOADED, or is no longer on the roster. Never a timeout: a slow peer keeps its slot
+        /// and keeps downloading — the mandate forbids giving up on it (N=50).</summary>
+        private bool BlobSettled(ulong peer)
+            => !_engine.Session.Clients.ContainsKey(peer)
+               || _loadedPeers.Contains(peer)
+               || (_peerDownloadPct.TryGetValue(peer, out var pct) && pct >= 100);
 
         // Shared chunking loop for the broadcast (SendBlob) and unicast (SendBlobTo) transfers: split blob
         // into SaveChunk messages (sequenced by offset) then a SaveDone(crc), routing each through `send`.
@@ -1364,8 +1395,11 @@ namespace Multiplayer.Network
             Debug.Log($"[Multiplayer] ClientLoadCrt: prepared ok={ok} → SendPrepared");
             // Ack the barrier AFTER the load is prepared but BEFORE FinishLevel.
             SendPrepared(transferId, ok);
-            // Prepare failed: the barrier will never get our LOADED(true). Don't strand us on the curtain.
-            if (!ok) AbortDownloadCurtain("prepare");
+            // Prepare failed: nothing will get our LOADED(true). Don't strand us on the curtain.
+            if (!ok) { AbortDownloadCurtain("prepare"); yield break; }
+            // The host no longer waits for us, so its BEGIN may already have come and gone (see
+            // EnterLevel's latch). Enter now rather than waiting for a broadcast that will not repeat.
+            if (_beginPending) { Debug.Log("[Multiplayer] ClientLoadCrt: latched BEGIN → EnterLevel"); EnterLevel(); }
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -1518,35 +1552,21 @@ namespace Multiplayer.Network
             }
         }
 
-        // Host: release the barrier once the host AND every currently-connected client has reported
-        // LOADED. Expected-client count is read LIVE from the roster, so a peer that dropped mid-load is
-        // already absent (Session.RemoveClient ran before the disconnect event) → release happens with
-        // whoever remains (fix #1). Host vs client counting is kept structurally separate (fix #2).
+        // Host: release the barrier the moment the HOST has prepared its own entry. NO peer quorum
+        // (N=50 mandate) — see SaveTransferMath.BarrierReleased. _loadedPeers is still tracked, but only
+        // as progress telemetry for the roster overlay; nothing reads its COUNT to make a decision.
         private void TryReleaseBarrier()
         {
             if (!_engine.IsHost || !_barrierOpen) return;
-
-            // Expected CLIENTS = all currently connected clients (host is counted via _hostLoaded).
-            var expectedClients = 0;
-            foreach (var _ in _engine.Session.GetConnectedClients()) expectedClients++;
-
-            var release = BarrierReleased(_hostLoaded, _loadedPeers.Count, expectedClients);
+            if (!BarrierReleased(_hostLoaded)) return;
             Debug.Log($"[Multiplayer] TryReleaseBarrier: hostLoaded={_hostLoaded} " +
-                      $"loadedClients={_loadedPeers.Count} expectedClients={expectedClients} release={release}.");
-
-            if (release)
-                Begin();
+                      $"(loadedClients={_loadedPeers.Count}, no quorum) → begin.");
+            Begin();
         }
 
-        /// <summary>
-        /// Pure barrier-release predicate (fix #1/#2, unit-testable): the LOADED barrier releases iff the
-        /// host has prepared AND every currently-expected client has acked. The host is counted via a
-        /// dedicated flag, never an id in <paramref name="loadedClientCount"/>, so a peerId-0 client can
-        /// never masquerade as the host. When a not-yet-loaded peer drops, the caller passes the reduced
-        /// live <paramref name="expectedClientCount"/>, so the barrier releases early with the rest.
-        /// </summary>
-        internal static bool BarrierReleased(bool hostLoaded, int loadedClientCount, int expectedClientCount)
-            => SaveTransferMath.BarrierReleased(hostLoaded, loadedClientCount, expectedClientCount);
+        /// <summary>Pure barrier-release predicate (unit-testable): the host's own readiness, nothing
+        /// else. See <see cref="SaveTransferMath.BarrierReleased"/> for why no peer is counted.</summary>
+        internal static bool BarrierReleased(bool hostLoaded) => SaveTransferMath.BarrierReleased(hostLoaded);
 
         /// <summary>This peer's load is truly finished (event-driven done) — tell the host, reliably.</summary>
         public void SendLoadComplete()
@@ -1776,9 +1796,18 @@ namespace Multiplayer.Network
             if (_begun) return;
             if (_pendingResult == null)
             {
-                Debug.LogWarning("[Multiplayer] BEGIN received but no save was prepared; cannot enter level.");
+                // LATCH, do not drop. With the LOADED quorum gone (N=50 mandate) the host begins on its
+                // OWN readiness, so SessionBegin routinely overtakes a slower peer's download+prepare —
+                // and this branch used to just log and return, stranding that peer behind its curtain
+                // forever with no retry anywhere. Remember the BEGIN instead; ClientLoadCrt re-enters the
+                // moment its prepare lands. This is what "nobody is kicked, a slow peer catches up"
+                // actually costs: one bool.
+                _beginPending = true;
+                Debug.Log("[Multiplayer] BEGIN received before this peer's save was prepared — latched; " +
+                          "entering as soon as the prepare finishes.");
                 return;
             }
+            _beginPending = false;
 
             NoteProgress(); // flag edge (BEGIN released this peer into the level)
             _begun = true;
@@ -1870,6 +1899,10 @@ namespace Multiplayer.Network
             // Converge the reveal input-lock invariant before anything else: a peer that has revealed must
             // never be left holding the geoscape loading-screen input override (see RepairRevealInputLock).
             RepairRevealInputLock();
+
+            // Host: keep handing the start blob out, a few peers at a time (see PumpBlobQueue). Cheap
+            // no-op once every peer has been served.
+            if (_engine.IsHost) PumpBlobQueue();
 
             // Phase-1 (download) native bottom-bar driver — client only. While the save blob is arriving,
             // feed the game's own loading-screen bar the exact download fraction so it fills 0..100% under
@@ -2004,44 +2037,11 @@ namespace Multiplayer.Network
                 }
             }
 
-            // Timeout/kick + Begin only apply while the LOADED barrier is still open (phase-1).
-            // Uses the generous phase-1 load timeout so a slow-but-healthy download/prepare is not kicked
-            // (fix #3).
-            if (!_barrierOpen) return;
-            // Deadline re-arms on transfer progress (LastProgressMs advances on every client
-            // download-percent report and LOADED ack): async sends put wire time inside this window,
-            // so a slow-but-moving WAN download (64 MB at <~370 KB/s) must NOT be straggler-kicked.
-            // Kick only after the timeout passes with NO progress from anyone.
-            if (NowMs() - Math.Max(_barrierOpenedAtMs, LastProgressMs) <= Phase1LoadTimeoutMs) return;
-
-            // Timeout: kick every connected peer that has not reported LOADED, then begin with the rest.
-            var stragglers = new List<ulong>();
-            foreach (var clientId in _engine.Session.GetConnectedClients())
-                if (!_loadedPeers.Contains(clientId))
-                    stragglers.Add(clientId);
-
-            foreach (var clientId in stragglers)
-            {
-                Debug.LogWarning($"[Multiplayer] Peer {clientId} did not load in time — kicking.");
-                // Terminal notice BEFORE roster removal + Begin(): RemoveClient does NOT disconnect the
-                // peer at transport, so the still-connected straggler would otherwise receive the
-                // reliable SessionBegin and either strand behind the held load curtain or enter as an
-                // un-commandable ghost. Send the SAME ConnectionRejected the host uses for every other
-                // rejection (SessionManager.HandleConnectionRequest); the client's HandleConnectionRejected
-                // → ReportConnectionRejected → OnConnectionFailed tears its session down (dialog + lobby
-                // return), keeping roster removal and transport state consistent.
-                _engine.SendToClient(clientId, new NetworkMessage(PacketType.ConnectionRejected,
-                    NetworkMessage.BuildStringPayload("Load timed out — you were dropped from the session.")));
-                _engine.Session.RemoveClient(clientId);
-                // Sever the transport link too: without this the kicked peer stays connected and its
-                // traffic keeps arriving (roster removal alone does not close the socket/session). The
-                // heartbeat-membership gate is the second line; this is the real disconnect.
-                try { _engine.Transport?.DisconnectPeer(clientId); } catch { }
-            }
-
-            // The host's own loaded-state is tracked by _hostLoaded (never keyed in _loadedPeers), so it
-            // is unaffected by the straggler kicks above; begin with whoever remains (at least the host).
-            Begin();
+            // NO STRAGGLER KICK (N=50 mandate). This used to wait three minutes for every peer to
+            // report LOADED and then ConnectionRejected + DisconnectPeer everyone who had not — the single
+            // most user-hostile line in the mod, and pure collateral: the barrier it protected is gone
+            // (TryReleaseBarrier releases on the host alone), so there is nothing left to be late FOR. A
+            // peer whose download is slow keeps downloading and enters when it lands.
         }
 
         // ══════════════════════════════════════════════════════════════════
