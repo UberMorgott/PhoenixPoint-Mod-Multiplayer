@@ -88,7 +88,8 @@ namespace Multiplayer.Transport
                 if (!SteamClient.IsValid) { Stage("Steam not running — cannot create invite lobby", true); return; }
                 LeaveHostLobby();
                 Stage("creating Steam lobby…");
-                var made = await SteamMatchmaking.CreateLobbyAsync(2); // 2-player co-op: host + 1 client
+                // The seat count is NetworkEngine's, not a second opinion — see NetworkEngine.MaxPlayers.
+                var made = await SteamMatchmaking.CreateLobbyAsync(NetworkEngine.MaxPlayers);
                 if (!made.HasValue) { Stage("Steam lobby creation failed (no lobby returned)", true); return; }
 
                 var lobby = made.Value;

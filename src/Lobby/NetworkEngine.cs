@@ -11,6 +11,25 @@ namespace Multiplayer.Network
     {
         public static NetworkEngine Instance { get; private set; }
 
+        /// <summary>THE CO-OP SEAT COUNT, and the only place it is written down.
+        ///
+        /// Nothing in this repo actually capped a session at two: <c>SlotAllocator</c> has no ceiling at
+        /// all, <c>SteamTransport</c> keys peers in a <c>HashSet</c>, and a join is a DIRECT P2P connect to
+        /// the host's SteamID — the Steam lobby is discovery only. DirectIP has been running three for that
+        /// reason. What capped it was two numbers written down twice: <c>CreateLobbyAsync(2)</c> in
+        /// <c>SteamInvite</c>, and this class's own capacity gate below, which closed the lobby the moment
+        /// the FIRST client connected.
+        ///
+        /// STATIC READONLY, NOT const, and deliberately: a <c>const</c> is inlined at every call site, so
+        /// the two places that read it become two magic numbers again the instant the assembly is compiled
+        /// — indistinguishable, to any check, from someone typing the digit. A field emits an
+        /// <c>ldsfld</c>, which is a REFERENCE, and that is what RailCheck L91's single-source arm asserts.
+        /// The runtime cost is one field load per lobby event.</summary>
+        public static readonly int MaxPlayers = 4;
+
+        /// <summary>Seats for CLIENTS — the host holds one. Derived, never typed twice.</summary>
+        public static readonly int MaxClients = MaxPlayers - 1;
+
         public ITransport Transport { get; private set; }
         public bool IsActive { get; private set; }
         public bool IsHost { get; private set; }
@@ -505,9 +524,10 @@ namespace Multiplayer.Network
             {
                 Session.AddClient(peerId, endpoint);
                 OnClientConnected?.Invoke(peerId);
-                // Canonical Steam-lobby capacity gate: 2-player co-op (host + 1 client) → the invite
-                // lobby stops being joinable the moment the slot fills. No-op when no lobby exists.
-                try { SteamLobbySetJoinable?.Invoke(Session.ClientCount == 0); } catch { }
+                // Canonical Steam-lobby capacity gate: the invite lobby stops being joinable once every
+                // client seat is filled. No-op when no lobby exists. This line WAS the 2-player cap —
+                // `ClientCount == 0` closed the lobby on the FIRST connect, so nobody could be third.
+                try { SteamLobbySetJoinable?.Invoke(Session.ClientCount < MaxClients); } catch { }
             }
             else
             {
@@ -546,9 +566,9 @@ namespace Multiplayer.Network
             OnClientDisconnected?.Invoke(peerId);
             OnClientDisconnectedNamed?.Invoke(peerId, droppedName, wasKnown);
 
-            // Host still hosting and the slot freed → the Steam invite lobby is joinable again.
+            // Host still hosting and a slot freed → the Steam invite lobby is joinable again.
             if (IsHost)
-                try { SteamLobbySetJoinable?.Invoke(Session.ClientCount == 0); } catch { }
+                try { SteamLobbySetJoinable?.Invoke(Session.ClientCount < MaxClients); } catch { }
 
         }
 

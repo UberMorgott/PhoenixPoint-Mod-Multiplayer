@@ -4,7 +4,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using Multiplayer.Network;
 using Multiplayer.Network.Sync;
+using Multiplayer.Transport;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewStates;
@@ -147,6 +149,101 @@ namespace RailCheck
                                  "screen teardown would be skipped with it and the declining peer is trapped on " +
                                  "the deployment screen — the gate itself producing a player who cannot act. " +
                                  "Split the teardown back out, or turn the gate into an intent";
+
+            // ─── (e) THE SEAT COUNT IS ONE NUMBER, AND BOTH SITES READ IT ───
+            // Law 91 says any player must at any moment be able to play everything. A player who cannot
+            // JOIN is the degenerate case, and it is what a second hard-coded capacity produced: nothing in
+            // this repo capped a session at two (SlotAllocator has no ceiling, SteamTransport keys peers in
+            // a HashSet, a join is a direct P2P connect and the lobby is discovery only) — two literals did.
+            // A `const` would be inlined at both sites and become indistinguishable from someone typing the
+            // digit, so the seats are static readonly fields and this arm asserts the ldsfld.
+            foreach (var v in SeatCountArm()) yield return v;
+        }
+
+        private static IEnumerable<string> SeatCountArm()
+        {
+            var engine = typeof(NetworkEngine);
+            var maxPlayers = engine.GetField("MaxPlayers", All);
+            var maxClients = engine.GetField("MaxClients", All);
+            var create = typeof(SteamInvite).GetMethod("HostPublish", All);
+            var connected = engine.GetMethod("OnPeerConnected", All);
+            var disconnected = engine.GetMethods(All)
+                .FirstOrDefault(m => m.Name.StartsWith("OnPeerDisconnected", StringComparison.Ordinal));
+            if (maxPlayers == null || maxClients == null || create == null || connected == null || disconnected == null)
+            {
+                yield return "L91 seat-count-premise-changed: NetworkEngine.MaxPlayers / MaxClients, " +
+                             "SteamInvite.HostPublish or NetworkEngine's peer connect/disconnect handlers no " +
+                             "longer all resolve. Whether the co-op seat count is still ONE number is now " +
+                             "unprovable — re-find the sites before assuming a third player can join";
+                yield break;
+            }
+
+            // The two fields agree, by derivation and not by luck. Read live: they are static readonly, so
+            // the values here ARE the shipped ones.
+            int players = (int)maxPlayers.GetValue(null);
+            int clients = (int)maxClients.GetValue(null);
+            if (clients != players - 1)
+                yield return "L91 seat-count-inconsistent: MaxClients is " + clients + " but MaxPlayers is " +
+                             players + ". The host holds one seat, so clients must be MaxPlayers - 1 — with " +
+                             "these two the lobby advertises room it will not let anyone into (or lets in one " +
+                             "more than it advertised), and the player who is refused has no way to tell why";
+            if (players < 2)
+                yield return "L91 seat-count-degenerate: MaxPlayers is " + players + ", which is not a co-op " +
+                             "session at all";
+
+            // Both capacity sites REFERENCE the field rather than carrying their own number.
+            if (!ReadsField(create, maxPlayers))
+                yield return "L91 lobby-size-hardcoded: SteamInvite.HostPublish does not read " +
+                             "NetworkEngine.MaxPlayers. It creates the Steam lobby with a number of its own, so " +
+                             "the advertised capacity and the capacity the host will actually accept are two " +
+                             "independent facts — and the one that refuses a friend's Join Game is the lobby's";
+            foreach (var site in new[] { connected, disconnected })
+                if (!ReadsField(site, maxClients))
+                    yield return "L91 joinable-gate-hardcoded: NetworkEngine." + site.Name + " does not read " +
+                                 "MaxClients. That gate is what opens and closes the invite lobby as peers come " +
+                                 "and go — with its own literal it is exactly the bug this arm exists for: " +
+                                 "`ClientCount == 0` closed the lobby on the FIRST connect, so a third player " +
+                                 "could never be invited no matter what the lobby was created with";
+        }
+
+        /// <summary>Does <paramref name="m"/> load <paramref name="field"/> (ldsfld/ldfld)? A FIELD read, not
+        /// a constant: an inlined const is a magic number by the time the IL exists, which is the whole
+        /// reason the seat count is a static readonly.</summary>
+        private static bool ReadsField(MethodBase m, FieldInfo field)
+        {
+            if (ReadsFieldDirect(m, field)) return true;
+            // An `async void` body is a stub that starts a compiler-generated state machine — the real IL
+            // lives in that machine's MoveNext, nested under the SAME type. SteamInvite.HostPublish is one,
+            // so without this the arm would report a hard-coded lobby size for a method that has no IL of
+            // its own at all: a FALSE red, which this harness treats as worse than a missed one.
+            foreach (var t in m.DeclaringType.GetNestedTypes(All))
+                foreach (var mn in t.GetMethods(All))
+                    if (mn.Name == "MoveNext" && ReadsFieldDirect(mn, field)) return true;
+            return false;
+        }
+
+        private static bool ReadsFieldDirect(MethodBase m, FieldInfo field)
+        {
+            byte[] il = null;
+            try { il = m?.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) return false;
+            int i = 0;
+            while (i < il.Length)
+            {
+                short code = il[i++];
+                if (code == 0xFE) { if (i >= il.Length) return false; code = (short)(0xFE00 | il[i++]); }
+                if (!OpCodeByValue.TryGetValue(code, out var op)) return false;
+                int size = OperandSize(op.OperandType, il, i);
+                if (size < 0 || i + size > il.Length) return false;
+                if (op.OperandType == OperandType.InlineField)
+                {
+                    FieldInfo f = null;
+                    try { f = m.Module.ResolveField(BitConverter.ToInt32(il, i)); } catch { }
+                    if (f != null && f.MetadataToken == field.MetadataToken && f.Module == field.Module) return true;
+                }
+                i += size;
+            }
+            return false;
         }
 
         /// <summary>Is <paramref name="t"/> a collection of PEER IDS — <c>ulong[]</c>, or a generic
