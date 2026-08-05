@@ -246,16 +246,6 @@ namespace Multiplayer.Network.Sync
 
             // ── MIRRORED: host-side campaign-progress notifications, acknowledgement-only ──
             Modal(d, WindowSync.Mirrored,
-                "research completed — raised HOST-side by GeoscapeView.OnFactionResearchCompleted:1975 off the " +
-                "faction's own event, which a client's gated sim never fires (research reaches it as 0xAC value " +
-                "deltas, not as Research.CompleteResearch), so today it is the single most frequent window in a " +
-                "campaign that exists on one screen only. Data = GeoResearchCompleteData{ResearchElement, bool}: " +
-                "shipped as the element's faction root ref + its ResearchID, re-fetched LIVE on the client " +
-                "(Research.GetResearchById:762) so the renderer's own walk over UnlocksResearches/ManufactureRewards " +
-                "answers from this peer's mirror. Callback is local navigation only " +
-                "(ResearchCompleteModalHandler:2107 ignores the ModalResult entirely)",
-                ModalType.GeoResearchComplete);
-            Modal(d, WindowSync.Mirrored,
                 "diplomacy research share — raised HOST-side by GeoscapeView.PxFaction_ResearchShared:1990 with a " +
                 "NULL DialogCallback in the shipped game, so there is nothing authoritative to lose. Data = " +
                 "DiplomacyResearchRewardData{Faction, Researches, DiplomacyShareLevel}: faction root ref + the " +
@@ -361,6 +351,26 @@ namespace Multiplayer.Network.Sync
                 ModalType.LoadPrompt, ModalType.SiteEncounter, ModalType.SiteRecruit, ModalType.ResourcePayment);
 
             // ── LOCALONLY: correct NOT to replicate ──
+            Modal(d, WindowSync.LocalOnly,
+                "research completed — VERDICT REVERSED 2026-08-05 (Mirrored until today), because this window " +
+                "had TWO producers on a client and the player got it TWICE: the 0xB7 raise here and " +
+                "ResearchSync.PresentFromMirror:242, which invokes the game's OWN " +
+                "GeoscapeView.OnFactionResearchCompleted:1980 off the mirrored research state. Measured on " +
+                "Instance2: the 0xB7 raise at t=530.898, the native present at t=531.123 — two UIStateGeoModal " +
+                "queue entries, two closes 225 ms apart. The FALSIFIED CLAIM this entry used to carry was that " +
+                "the client's copy is \"re-fetched LIVE ... so the renderer's own walk over UnlocksResearches " +
+                "answers from this peer's mirror\": the element is live, but the RAISE is not ordered against " +
+                "the deltas that fill it. The host broadcasts at its own OpenModal, BEFORE the 0xAC values that " +
+                "unlock the follow-up researches land, so GeoReseatchCompleteDataBind.SetResearchRewards:171-181 " +
+                "reads an EMPTY ResearchElement.UnlocksResearches and hides NewResearchesGroup — the early copy " +
+                "is the one WITHOUT the \"new research available\" blink. The surviving producer is the correct " +
+                "one on both counts: it is the more NATIVE path (the game's own handler, not a rebuilt " +
+                "GeoResearchCompleteData) and it is DELTA-DRIVEN — UiEventMap:79 calls it from inside the rail's " +
+                "own apply, i.e. after the batch that describes what the window is about to draw. Nothing is " +
+                "lost by not replicating the WINDOW: every peer raises its own off its own mirrored state, and " +
+                "the callback was never authoritative anyway (ResearchCompleteModalHandler:2107 ignores the " +
+                "ModalResult entirely)",
+                ModalType.GeoResearchComplete);
             Modal(d, WindowSync.LocalOnly,
                 "ability CONFIRMATION — raised by the clicking peer's own ability view " +
                 "(ActivateBaseAbilityView.cs:19/:28, ExcavateAbilityView.cs:16, AncientGuardianGuardAbilityView.cs:16) " +

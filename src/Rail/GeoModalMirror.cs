@@ -124,7 +124,12 @@ namespace Multiplayer.Network.Sync
             /// <c>ResearchID</c>, Num = <c>SwitchToResearchState</c>. The client re-fetches the LIVE element
             /// off its own mirrored research container — the renderer walks
             /// <c>UnlocksResearches</c>/<c>ManufactureRewards</c> off it
-            /// (GeoReseatchCompleteDataBind.cs:97-125), which a synthesized element could not answer.</summary>
+            /// (GeoReseatchCompleteDataBind.cs:97-125), which a synthesized element could not answer.
+            /// NO LIVE PRODUCER since 2026-08-05: <c>ModalType.GeoResearchComplete</c> is declared LocalOnly
+            /// (GeoWindowCoverage — the raise raced ahead of the 0xAC deltas and the window arrived twice), so
+            /// <see cref="HostBroadcast"/> returns before <see cref="Describe"/> ever sees one. Kept, not
+            /// deleted: the wire value stays reserved, and RailCheck L49's shape-derivation and refusal arms
+            /// execute this shape by name.</summary>
             ResearchComplete = 1,
             /// <summary><c>DiplomacyResearchRewardData</c>: Ref = <c>Faction</c>, Keys = every
             /// <c>ResearchID</c> in <c>Researches</c>, Num = <c>DiplomacyShareLevel</c>.</summary>

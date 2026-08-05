@@ -4356,8 +4356,178 @@ namespace RailCheck
                                                             .GeoResearchCompleteData());
             if (researchShape.Shape != GeoModalMirror.DataShape.ResearchComplete)
                 yield return "L49 research-shape-wrong: Describe(GeoResearchCompleteData) is not " +
-                             "DataShape.ResearchComplete — the one modal this family exists for stops being " +
-                             "describable and the host silently declines every research-complete window";
+                             "DataShape.ResearchComplete — the shape stops being describable, and with it the " +
+                             "wire value this family reserves for a research-complete payload";
+
+            foreach (var v in OneProducerPerWindow()) yield return v;
+        }
+
+        /// <summary>L49's OUTCOME arm — ONE WINDOW PER COMPLETION PER PEER, and the surviving producer is the
+        /// DELTA-DRIVEN one.
+        ///
+        /// MEASURED (Instance2, 2026-08-05): a research-complete window arrived TWICE on every client — the
+        /// 0xB7 raise at t=530.898 and the game's own <c>OnFactionResearchCompleted</c>, invoked from
+        /// <c>ResearchSync.PresentFromMirror</c> inside the rail's apply, at t=531.123. Two
+        /// <c>UIStateGeoModal</c> queue entries, two closes (nonce 24, nonce 25). Every arm above was green
+        /// throughout, and correctly so: each producer did exactly what it was written to do. What no law
+        /// said was that only ONE of them may — a coverage table can only ever answer "should the other peer
+        /// see this window", never "how many times".
+        ///
+        /// AND THE EARLY COPY WAS THE WRONG ONE. The blink is native and state-derived —
+        /// <c>GeoReseatchCompleteDataBind.ModalShowHandler</c>:124 reads
+        /// <c>ResearchElement.UnlocksResearches</c> and <c>SetResearchRewards</c>:171-181 toggles
+        /// <c>NewResearchesGroup</c> off an EMPTY list. The 0xB7 raise is broadcast at the host's own
+        /// <c>OpenModal</c>, before the 0xAC value deltas that unlock the follow-ups land, so the copy it
+        /// builds is the one WITHOUT the "new research available" group. That is the ordering half of this
+        /// arm: a mirrored raise carries no ordering against the state it draws, while a producer driven FROM
+        /// the delta apply is ordered by construction.
+        ///
+        /// DERIVED, NOT LISTED. The mod's own static reflection handles ARE its set of native window
+        /// raisers: a handle onto a game method that opens a modal is a producer of that modal on this peer,
+        /// whatever the wire does. The <c>ModalType</c> each one opens is read out of the GAME's IL (the
+        /// constant pushed for <c>OpenModal</c>'s first parameter), so a new native-present path inherits
+        /// this arm without anybody adding a line to it.
+        ///
+        /// Falsify: declare <c>ModalType.GeoResearchComplete</c> Mirrored again → two-producers-one-window;
+        /// drop the <c>PresentFromMirror</c> call from <c>UiEventMap.Fire</c> → producer-not-delta-driven.</summary>
+        private static IEnumerable<string> OneProducerPerWindow()
+        {
+            var mod = typeof(GeoModalMirror).Assembly;
+            var gameAsm = typeof(GeoscapeView).Assembly;
+            var openers = new[] { typeof(GeoscapeView).GetMethod("OpenModal", AllMembers),
+                                  typeof(GeoscapeView).GetMethod("OpenModalPersistent", AllMembers) }
+                          .Where(m => m != null).Cast<MethodBase>().ToList();
+            if (openers.Count != 2)
+            {
+                yield return "L49 one-producer-openers-gone: GeoscapeView.OpenModal / OpenModalPersistent did " +
+                             "not both resolve, so this arm cannot tell which native methods raise a modal at " +
+                             "all — it would report 'one producer' for a game it cannot see";
+                yield break;
+            }
+
+            // Every static reflection handle the mod holds onto a GAME method that opens a modal. Reading the
+            // field is what makes this the REAL set: a handle that failed to resolve is not a producer.
+            var raisers = new Dictionary<MethodBase, FieldInfo>();
+            foreach (var t in DeclaredTypes(mod))
+            {
+                FieldInfo[] fields;
+                try { fields = t.GetFields(AllMembers); } catch { continue; }
+                foreach (var f in fields)
+                {
+                    if (!f.IsStatic || !typeof(MethodBase).IsAssignableFrom(f.FieldType)) continue;
+                    MethodBase handle = null;
+                    try { handle = f.GetValue(null) as MethodBase; } catch { }
+                    if (handle == null || handle.Module.Assembly != gameAsm) continue;
+                    if (!Callees(handle, gameAsm).Any(c => openers.Any(o => Same(c, o)))) continue;
+                    raisers[handle] = f;
+                }
+            }
+            if (raisers.Count == 0)
+            {
+                yield return "L49 one-producer-arm-blind: not one static MethodBase handle in the mod resolves " +
+                             "to a game method that opens a modal, yet ResearchSync drives " +
+                             "GeoscapeView.OnFactionResearchCompleted through exactly such a handle. The sweep " +
+                             "is broken, so 'no window has two producers' is asserted about the empty set";
+                yield break;
+            }
+
+            var uiEventMap = mod.GetType("Multiplayer.Network.Sync.UiEventMap");
+            foreach (var kv in raisers)
+            {
+                var raiser = kv.Key;
+                var where = (raiser.DeclaringType?.Name ?? "?") + "." + raiser.Name + " (held by " +
+                            (kv.Value.DeclaringType?.Name ?? "?") + "." + kv.Value.Name + ")";
+                var opened = ModalTypesOpenedBy(raiser, openers).ToList();
+                if (opened.Count == 0)
+                {
+                    yield return "L49 one-producer-arm-blind: " + where + " calls an opener, but no ModalType " +
+                                 "constant could be read off its call site — the derivation this arm rests on " +
+                                 "failed, so the window it produces is compared against nothing";
+                    continue;
+                }
+                foreach (var t in opened)
+                {
+                    var rule = GeoWindowCoverage.RuleForModal(t);
+                    if (rule != null && rule.Sync == WindowSync.Mirrored)
+                        yield return "L49 two-producers-one-window: ModalType." + t + " is declared Mirrored — " +
+                                     "so GeoModalMirror.HostBroadcast ships a 0xB7 raise for it — while this mod " +
+                                     "ALSO drives the game's own raiser " + where + ", which opens that very " +
+                                     "window off this peer's mirrored state. The peer gets TWO windows for one " +
+                                     "completion and closes both, and the wire copy is the WORSE of the pair: it " +
+                                     "is built at the host's OpenModal, ahead of the value deltas that fill what " +
+                                     "the prefab draws. One of the two must go, and it is this one — declare the " +
+                                     "ModalType LocalOnly and leave the native, delta-ordered producer";
+                }
+
+                // THE ORDERING HALF. What is left must be driven FROM the rail's apply, or 'the delta-ordered
+                // producer survived' is a claim about nothing: a native raise invoked from anywhere else is
+                // just an un-mirrored raise with no ordering against the state it draws either.
+                var invokers = DeclaredTypes(mod)
+                    .SelectMany(t => { try { return t.GetMethods(AllMembers).Cast<MethodBase>(); }
+                                       catch { return Enumerable.Empty<MethodBase>(); } })
+                    .Where(m => { try { return m.GetMethodBody() != null; } catch { return false; } })
+                    .Where(m => FieldRefs(m).Any(fl => fl == kv.Value))
+                    .ToList();
+                bool deltaDriven = uiEventMap != null && invokers.Count > 0 &&
+                    uiEventMap.GetMethods(AllMembers).Cast<MethodBase>()
+                              .Where(m => { try { return m.GetMethodBody() != null; } catch { return false; } })
+                              .Any(m => Callees(m, mod).Any(c => invokers.Any(i => Same(c, i))));
+                if (!deltaDriven)
+                    yield return "L49 producer-not-delta-driven: " + where + " is invoked by " +
+                                 (invokers.Count == 0 ? "nothing this sweep can see" :
+                                  string.Join("/", invokers.Select(i => i.DeclaringType?.Name + "." + i.Name).Distinct())) +
+                                 ", and no UiEventMap method reaches that. A native window raised OUTSIDE the " +
+                                 "rail's apply has exactly the defect the mirrored copy had — it renders before " +
+                                 "the deltas that describe its state, and the player is shown a window whose " +
+                                 "list is empty for a reason nothing logs";
+            }
+        }
+
+        /// <summary>The <c>ModalType</c>s a native raiser opens, read off the GAME's own IL: an opener is an
+        /// INSTANCE call whose first parameter is the ModalType, so the constant is the one pushed
+        /// immediately after the <c>ldarg.0</c> that starts the call sequence. Narrow on purpose — every
+        /// other <c>ldc.i4</c> in such a method is a priority or a bool, and 0/1 are perfectly good ModalType
+        /// values (GeoHavenAttackBrief/Outcome), so a loose sweep would accuse the two most-mirrored windows
+        /// in the game. An empty result is reported by the caller as BLIND, never as "no producer".</summary>
+        private static IEnumerable<ModalType> ModalTypesOpenedBy(MethodBase raiser, List<MethodBase> openers)
+        {
+            byte[] il = null;
+            try { il = raiser.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) yield break;
+            int i = 0;
+            bool afterThis = false;
+            int? pending = null;   // the ModalType constant pushed for the call currently being built
+            while (i < il.Length)
+            {
+                short code = il[i++];
+                if (code == 0xFE)
+                {
+                    if (i >= il.Length) yield break;
+                    code = (short)(0xFE00 | il[i++]);
+                }
+                if (!OpCodeByValue.TryGetValue(code, out var op)) yield break;
+                int size = OperandSize(op.OperandType, il, i);
+                if (size < 0 || i + size > il.Length) yield break;
+                if (afterThis)
+                {
+                    int? v = null;
+                    if (code >= 0x16 && code <= 0x1E) v = code - 0x16;          // ldc.i4.0 .. ldc.i4.8
+                    else if (code == 0x15) v = -1;                              // ldc.i4.m1
+                    else if (code == 0x1F) v = (sbyte)il[i];                    // ldc.i4.s
+                    else if (code == 0x20) v = BitConverter.ToInt32(il, i);     // ldc.i4
+                    if (v.HasValue && Enum.IsDefined(typeof(ModalType), v.Value)) pending = v;
+                }
+                if (code == 0x28 || code == 0x6F) // call / callvirt — the call this constant belonged to
+                {
+                    MethodBase callee = null;
+                    try { callee = raiser.Module.ResolveMethod(BitConverter.ToInt32(il, i)); } catch { }
+                    if (pending.HasValue && callee != null && openers.Any(o => Same(callee, o)))
+                        yield return (ModalType)pending.Value;
+                    pending = null;
+                }
+                afterThis = code == 0x02; // ldarg.0 — `this`, the instance an opener is called on
+                i += size;
+            }
         }
 
         /// <summary>Fields an IL body touches (InlineField operands), optionally narrowed to given opcodes —
