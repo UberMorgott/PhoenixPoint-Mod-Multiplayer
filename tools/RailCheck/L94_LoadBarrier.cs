@@ -241,6 +241,102 @@ namespace RailCheck
                                  "'fight to be able to play' the N=50 mandate forbids";
             }
 
+            // ─── (h) A BARRIER THAT OPENED MUST PRODUCE ITS BEGIN. ───
+            // The 2026-08-05 blocker, as an OUTCOME arm. Arm (e) above only ever asked whether Update CALLS
+            // NoLiveLoaderLeft — and it did, all the way through a run where nobody was ever released, because
+            // the call site was UNREACHABLE: Begin() early-returned, so _loadPhaseActive stayed false and both
+            // release paths were gated off. The reachability of a call is not something a caller-check can see,
+            // so the decision itself is now a pure predicate and this arm EXECUTES it, the same way (d)/(e) do.
+            var suppressed = typeof(SaveTransferMath).GetMethod("BeginSuppressed", AllMembers);
+            var begin = coord.GetMethod("Begin", AllMembers);
+            if (suppressed == null || begin == null)
+                yield return "L94 premise-changed: SaveTransferMath.BeginSuppressed / SaveTransferCoordinator" +
+                             ".Begin no longer both exist, so the rule that decides whether SessionBegin is " +
+                             "broadcast is back to being an inline condition no law can execute";
+            else
+            {
+                if (!CallsMethod(begin, suppressed))
+                    yield return "L94 begin-not-the-predicate: Begin() does not call SaveTransferMath" +
+                                 ".BeginSuppressed, so the rule this arm executes is not the rule the host runs. " +
+                                 "A second copy of the guard is how this law goes green while every client sits " +
+                                 "outside the battle";
+
+                // THE LIVE ROW. Host still in its tactical level (begun), reveal-hold already dropped by a
+                // PerformDeferredLift the PREVIOUS load triggered, barrier for THIS entry open.
+                if (SaveTransferMath.BeginSuppressed(begun: true, hostEntryHold: false, barrierOpen: true))
+                    yield return "L94 begin-suppressed-with-barrier-open: a barrier that has been OPENED does not " +
+                                 "produce its BEGIN. SessionBegin is never broadcast, so every client stays at " +
+                                 "SessionStarted=false, TacticalCommandSync.LiveEngine() returns null and every " +
+                                 "move, shot and kill that client makes is dropped before it reaches the rail — " +
+                                 "and _loadPhaseActive is never set either, so BOTH reveal-release paths in " +
+                                 "Update() become unreachable and nobody is ever let in (live 2026-08-05: three " +
+                                 "minutes of RosterProgress, a client killing enemies nobody else saw)";
+
+                if (SaveTransferMath.BeginSuppressed(begun: true, hostEntryHold: true, barrierOpen: true))
+                    yield return "L94 entry-hold-cannot-begin: the tac-entry relaxation is gone — a host that is " +
+                                 "ALREADY live in its tactical level (begun stays true by design there) can no " +
+                                 "longer broadcast the SessionBegin that lets the client enter the level it just " +
+                                 "downloaded";
+
+                if (SaveTransferMath.BeginSuppressed(begun: false, hostEntryHold: false, barrierOpen: true))
+                    yield return "L94 first-start-suppressed: the very first session start is suppressed. Nothing " +
+                                 "would ever begin at all";
+
+                if (!SaveTransferMath.BeginSuppressed(begun: true, hostEntryHold: false, barrierOpen: false))
+                    yield return "L94 begin-refires: with no barrier open and no entry hold there is nothing to " +
+                                 "begin, yet BEGIN would fire again — a second SessionBegin mid-play re-enters " +
+                                 "the level on every peer";
+            }
+
+            // ─── (i) THE ENTRY OWNS ITS OWN LOAD PHASE, AND ENDS THE PREVIOUS ONE. ───
+            // Two writes, one mechanism, both of them the second half of the same live bug. The previous load's
+            // aggregation must stop the moment a tactical entry arms (or its AllDone reveals the host ALONE
+            // mid-entry and drops _hostEntryHold), and the entry's own barrier must be armed SYNCHRONOUSLY at
+            // deploy-ready — not inside the coroutine, behind a ~1.15 s save write during which acks arrive
+            // for a barrier nobody owns.
+            var phase = coord.GetField("_loadPhaseActive", AllMembers);
+            var armEntry = coord.GetMethod("OpenTacticalEntryBarrier", AllMembers);
+            var beginEntry = coord.GetMethod("HostBeginTacticalEntryTransfer", AllMembers);
+            var openBarrier = coord.GetMethod("OpenBarrier", AllMembers);
+            if (phase == null || armEntry == null || beginEntry == null || openBarrier == null)
+                yield return "L94 premise-changed: SaveTransferCoordinator._loadPhaseActive / " +
+                             "OpenTacticalEntryBarrier / HostBeginTacticalEntryTransfer / OpenBarrier no longer " +
+                             "all exist, so this law can no longer prove the tactical entry owns its own reveal";
+            else
+            {
+                if (!WritesField(armEntry, phase))
+                    yield return "L94 stale-phase-survives-arm: OpenTacticalEntryBarrier does not clear " +
+                                 "_loadPhaseActive. _tracker.Reset() alone is NOT enough — peers still finishing " +
+                                 "the previous load keep sending LoadComplete after it and re-fill the set, so " +
+                                 "Update()'s AllDone branch reveals the HOST alone in the middle of the entry and " +
+                                 "clears _hostEntryHold on its way out (live 2026-08-05, host frame 2705)";
+
+                if (!CallsMethod(beginEntry, openBarrier) || !WritesField(beginEntry, phase))
+                    yield return "L94 entry-armed-too-late: HostBeginTacticalEntryTransfer does not open the " +
+                                 "barrier AND arm _loadPhaseActive synchronously. Armed inside the coroutine " +
+                                 "instead, the arm lands ~1.15 s later (live: bytes=1580544 ms=1151) and every " +
+                                 "ack that arrives during the mid-tactical save write belongs to a barrier that " +
+                                 "does not exist yet";
+            }
+
+            // ─── (j) ABSENCE OF DATA IS "NOT STARTED", NEVER DEATH. ───
+            // EXECUTED against the real production method. HoldsBarrier above is only as honest as the clocks
+            // fed to it, and LastSeenMsForSlot used to answer 0 on both miss paths — an epoch timestamp, so
+            // `now - 0` is ~1.78e12 ms, past every conceivable grace. A roster slot with no _clients row (a
+            // PAUSED or re-registering peer, whose row law L84 keeps) was therefore pronounced dead on the very
+            // first sample, before it had been given one chance to be slow.
+            var session = new SessionManager(null);
+            var nowMs = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+            foreach (var probe in new[] { (byte)0, (byte)1, (byte)7 })
+                if (nowMs - session.LastSeenMsForSlot(probe) > 60_000)
+                    yield return "L94 unheard-reads-as-dead: SessionManager.LastSeenMsForSlot(" + probe + ") " +
+                                 "answers a clock older than a minute for a slot nothing has ever been heard " +
+                                 "from. NoLiveLoaderLeft subtracts that from now and hands the result to " +
+                                 "HoldsBarrier, so the peer fails the grace instantly and the reveal barrier " +
+                                 "abandons a player who has not been given a single chance to load. Absence of " +
+                                 "data is NOT STARTED; only a clock that was once fresh and has since aged past " +
+                                 "the grace may mean dead";
+
             // ─── (g) DROPPING OUT OF THE BARRIER IS NOT LEAVING THE SESSION (L84's line, restated here). ───
             // The release above gives up on a peer. That must cost it the WAIT and nothing else: its row, slot,
             // permissions and guid binding stay, and it re-converges through the on-demand join. If a barrier

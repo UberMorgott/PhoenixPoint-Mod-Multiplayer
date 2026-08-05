@@ -1893,7 +1893,7 @@ namespace Multiplayer.Network
             // THIS transfer and cleared on the next line. TryReleaseBarrier (the only caller) bails on
             // !_barrierOpen, so today this makes the early return unreachable — deliberately: a barrier that
             // was opened must always produce its BEGIN.
-            if (_begun && !_hostEntryHold && !_barrierOpen) return;
+            if (SaveTransferMath.BeginSuppressed(_begun, _hostEntryHold, _barrierOpen)) return;
             _barrierOpen = false;
             // Phase-2 (world load) starts now; keep snapshots flowing until the roster is all-done.
             _loadPhaseActive = true;

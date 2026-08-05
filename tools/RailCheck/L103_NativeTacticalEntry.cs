@@ -227,6 +227,90 @@ namespace RailCheck
                 yield return "L103 surface-unclaimed: NativeTacticalEntry.HandleInbound is gone, so 0x" +
                              SurfaceIds.TacEntryParams.ToString("X2") + " falls through the tactical hook to " +
                              "the geoscape chain — the exact cross-band mis-route law L62 exists to stop.";
+
+            // ── (h) OUTCOME: THE ENTRY ENDS WITH EVERY PEER IN THE BATTLE ──
+            // Arms (c)/(e) above assert only that the call CHAIN resolves — HostBeginTacticalEntryTransfer
+            // exists, the deploy-ready coroutine calls it — and they were green through a live run in which
+            // the entry produced nothing at all. So replay the sequence and demand the RESULT.
+            //
+            // WHY THIS IS A REPLAY AND NOT A SECOND COPY OF THE LOGIC: every decision below is taken by the
+            // production predicate itself (SaveTransferMath.BeginSuppressed / BarrierReleased), and the state
+            // transitions between them are the ones the harness has just PROVEN the coordinator performs (the
+            // IL checks in this block). Nothing here restates a rule the game does not run.
+            foreach (var v in EntryOutcome()) yield return v;
+        }
+
+        private static IEnumerable<string> EntryOutcome()
+        {
+            var coord = typeof(SaveTransferCoordinator);
+            var armEntry = coord.GetMethod("OpenTacticalEntryBarrier", All);
+            var beginEntry = coord.GetMethod("HostBeginTacticalEntryTransfer", All);
+            var openBarrier = coord.GetMethod("OpenBarrier", All);
+            var lift = coord.GetMethod("PerformDeferredLift", All);
+            var tryRelease = coord.GetMethod("TryReleaseBarrier", All);
+            var begin = coord.GetMethod("Begin", All);
+            var enter = coord.GetMethod("EnterLevel", All);
+            var hold = coord.GetField("_hostEntryHold", All);
+            var open = coord.GetField("_barrierOpen", All);
+            var begun = coord.GetField("_begun", All);
+            var phase = coord.GetField("_loadPhaseActive", All);
+            var serialize = typeof(Multiplayer.Network.MessageLayer.MessageSerializer)
+                .GetMethod("SerializeSessionBegin", All);
+            if (armEntry == null || beginEntry == null || openBarrier == null || lift == null ||
+                tryRelease == null || begin == null || enter == null || hold == null || open == null ||
+                begun == null || phase == null || serialize == null)
+            {
+                yield return "L103 entry-premise: the tactical-entry barrier state machine no longer has all of " +
+                             "OpenTacticalEntryBarrier / HostBeginTacticalEntryTransfer / OpenBarrier / " +
+                             "PerformDeferredLift / TryReleaseBarrier / Begin / EnterLevel / _hostEntryHold / " +
+                             "_barrierOpen / _begun / _loadPhaseActive / SerializeSessionBegin, so this law can " +
+                             "no longer replay an entry and demand that it ends with everyone in the battle.";
+                yield break;
+            }
+
+            // The transitions this replay leans on, each proven against the shipped IL first.
+            if (!Touches(lift, hold))
+                yield return "L103 entry-hold-not-dropped: PerformDeferredLift no longer touches _hostEntryHold. " +
+                             "This law's whole premise is that the reveal CAN drop the entry hold from under the " +
+                             "entry — that is why Begin must not depend on it alone.";
+            if (!Touches(beginEntry, open) && !Calls(beginEntry, openBarrier))
+                yield return "L103 entry-opens-nothing: HostBeginTacticalEntryTransfer neither opens the barrier " +
+                             "nor delegates to OpenBarrier, so the client's download has no barrier to be acked " +
+                             "against and nothing will ever release it.";
+            if (!Calls(tryRelease, begin))
+                yield return "L103 entry-release-unwired: TryReleaseBarrier no longer calls Begin — the entry can " +
+                             "satisfy every condition it likes and still never broadcast anything.";
+            if (!Calls(begin, serialize))
+                yield return "L103 entry-no-session-begin: Begin no longer builds a SessionBegin payload. A client " +
+                             "that downloaded and prepared the host's battle is released by exactly that one " +
+                             "message; without it, it sits behind its curtain with a fully loaded level.";
+            if (!Calls(begin, enter) || !Touches(enter, begun))
+                yield return "L103 entry-never-starts: Begin does not reach EnterLevel, or EnterLevel no longer " +
+                             "sets _begun. SessionStarted stays false on the peer, so TacticalCommandSync" +
+                             ".LiveEngine() returns null and its whole battle is dropped command by command.";
+
+            // ── the replay ──
+            // 1. LAUNCH: OpenTacticalEntryBarrier arms the hold. Host is already live in its tactical level,
+            //    so _begun stays TRUE by design (this is what makes the entry path different from F2/lobby).
+            bool begunF = true, holdF = true, openF = false;
+            // 2. THE PREVIOUS LOAD'S AllDone lands mid-entry — the live 2026-08-05 race, during the 1151 ms
+            //    mid-tactical save write. PerformDeferredLift reveals and, on its way out, clears the hold.
+            holdF = false;
+            // 3. DEPLOY-READY: this entry opens its own barrier and the host counts as loaded.
+            openF = true;
+            // 4. TryReleaseBarrier → Begin.
+            if (!SaveTransferMath.BarrierReleased(hostLoaded: true))
+                yield return "L103 entry-host-never-ready: the host being loaded no longer releases the barrier, " +
+                             "so a tactical entry cannot begin even when nothing at all has gone wrong.";
+            else if (SaveTransferMath.BeginSuppressed(begunF, holdF, openF))
+                yield return "L103 entry-produces-nothing: replaying a real geo→tactical entry whose reveal was " +
+                             "stolen by the PREVIOUS load's AllDone (live 2026-08-05), the host reaches " +
+                             "TryReleaseBarrier with its barrier OPEN and Begin refuses to fire. No SessionBegin " +
+                             "is broadcast, so every prepared client ends the entry with SessionStarted == false: " +
+                             "it holds a fully built battle it may not act in, its every move/shot/kill is " +
+                             "swallowed at TacticalCommandSync.LiveEngine(), and _loadPhaseActive is never set " +
+                             "so neither reveal-release path can ever let it in. The call chain arms (c)/(e) " +
+                             "check was green for this entire run.";
         }
 
         // ─── IL helpers (same technique as L97: real operand-size table, never a byte scan) ───

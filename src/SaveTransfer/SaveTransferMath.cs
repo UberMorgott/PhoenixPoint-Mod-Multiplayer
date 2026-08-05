@@ -62,5 +62,23 @@ namespace Multiplayer.Network
         /// </summary>
         public static bool HoldsBarrier(bool loadComplete, long msSinceProgress, long msSinceHeard, long graceMs)
             => !loadComplete && msSinceProgress <= graceMs && msSinceHeard <= graceMs;
+
+        /// <summary>
+        /// BEGIN'S SINGLE-FIRE GUARD — true means "do NOT broadcast SessionBegin". A BARRIER THAT WAS
+        /// OPENED MUST ALWAYS PRODUCE ITS BEGIN, so <paramref name="barrierOpen"/> vetoes the suppression
+        /// outright: it is the only one of the three flags that belongs to the transfer currently in
+        /// flight, and it is cleared by Begin itself on the very next line.
+        ///
+        /// Live 2026-08-05, the row this predicate exists for: (begun, !hostEntryHold, barrierOpen). The
+        /// host is already in its tactical level so <c>_begun</c> stays true across a tac-entry transfer,
+        /// and <c>_hostEntryHold</c> is NOT the entry's to hold — <c>PerformDeferredLift</c> clears it, and
+        /// the PREVIOUS load's AllDone fired during the 1151 ms mid-tactical save write. The old guard
+        /// (<c>begun &amp;&amp; !hostEntryHold</c>) therefore suppressed the BEGIN of a barrier that had
+        /// just opened; both clients had already reset <c>_begun=false</c> on the new transfer's first
+        /// chunk and parked for the whole battle, so <c>SessionStarted</c> stayed false and every client
+        /// tactical command was dropped, silently, at <c>TacticalCommandSync.LiveEngine()</c>.
+        /// </summary>
+        public static bool BeginSuppressed(bool begun, bool hostEntryHold, bool barrierOpen)
+            => begun && !hostEntryHold && !barrierOpen;
     }
 }
