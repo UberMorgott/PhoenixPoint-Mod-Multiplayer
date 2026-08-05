@@ -63,6 +63,10 @@ namespace Multiplayer.Network.Sync
     /// rail). These two did not, and REPAIR is the serious one — <c>GeoCharacter.RepairItem</c>:1387 does
     /// <c>Faction.Wallet.Take</c> + <c>RestoreBodyPart</c>, so a client's repair click spent the SHARED
     /// wallet locally and never crossed: a law-3 violation that also silently diverged every peer's money.
+    /// RELOAD had the SAME leak through a second door until 2026-08-05 — the capture sat on the row-click
+    /// wrapper while the OK button's <c>ReplenishAll</c> called the mutation one level down. It now sits on
+    /// that shared choke point (<see cref="ReloadCapturePatch"/>), which is the only place in
+    /// <c>UIModuleReplenish</c> that calls <c>Wallet.Take</c> at all — RailCheck L110 keeps that true.
     /// </summary>
     internal static class ReplenishSync
     {
@@ -186,37 +190,74 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>THE seam for the single-item reload. Captured at <c>UIModuleReplenish
-        /// .SingleItemReloadAndRefresh</c>:224 rather than at <c>SingleItemReload</c>:234, because only the
-        /// outer one still knows WHICH SOLDIER (<c>ReplenishmentElementController.Character</c>) — the inner
-        /// one has just the <c>GeoItem</c>, which no peer can address. Not captured at
-        /// <c>CommonItemData.ModifyCharges</c>: that is a general charge write reached from everywhere, and
-        /// blocking it would neuter far more than this screen.
-        /// ponytail: `ReplenishAll` (the OK button) calls `SingleItemReload` DIRECTLY and so bypasses this —
-        /// its manufacturing and SetItems halves already cross, only its reloads do not. Wire it when the
-        /// batch button is reported wrong; it needs the per-instance item address EquipSync already has for
-        /// scrap, not another op here.</summary>
-        [HarmonyPatch(typeof(UIModuleReplenish), "SingleItemReloadAndRefresh")]
+        /// <summary>THE seam for the reload, and it is the SHARED CHOKE POINT — <c>UIModuleReplenish
+        /// .SingleItemReload</c>:234, the ONE method on this screen that calls <c>Wallet.Take</c> (:248) and
+        /// <c>CommonItemData.ModifyCharges</c> (:250). It has exactly two callers and BOTH are covered here:
+        /// <c>SingleItemReloadAndRefresh</c>:224 (one row's button) and <c>ReplenishAll</c>:288 (the OK
+        /// button's batch loop).
+        ///
+        /// MOVED DOWN 2026-08-05, and the move IS the fix. The capture used to sit on the OUTER
+        /// <c>SingleItemReloadAndRefresh</c> because only that one still knew WHICH SOLDIER — and
+        /// <c>ReplenishAll</c> calls the inner method DIRECTLY, so a client's OK button ran the mutation
+        /// locally: <c>_faction.Wallet.Take(cost, Purchase)</c> out of the SHARED wallet plus a local
+        /// <c>ModifyCharges</c>, on every un-full magazine in the returning squad at once. That is the same
+        /// law-3 leak <c>GeoCharacter.RepairItem</c> has (the wallet diverges silently and no delta can
+        /// correct it, because host state never changed), and patching only the row-click path left every
+        /// sibling caller broken — the reason the ceiling was DECLARED rather than fixed was the missing
+        /// character, and that turned out to be one lookup away.
+        ///
+        /// THE SOLDIER, without reflection: the module's own public <c>Items</c> list holds one row per
+        /// reloadable item and <c>AddMissingAmmo</c>:576 stamps each row's
+        /// <c>ReplenishmentElementController</c> with the character AND the very <c>GeoItem</c> instance the
+        /// model list holds (<c>RemoveFromList</c>:365 removes by that same reference, so the identity is the
+        /// game's own assumption, not ours). Matching by REFERENCE and not by value is deliberate: GeoItem
+        /// overrides <c>Equals</c> by def (GeoItem.cs:124), so two soldiers carrying the same magazine would
+        /// otherwise both answer to the first one's row.
+        ///
+        /// Still NOT captured at <c>CommonItemData.ModifyCharges</c>: that is a general charge write reached
+        /// from everywhere, and blocking it would neuter far more than this screen.
+        /// ponytail: the OK button now emits one intent per un-full item rather than one batch message. It is
+        /// user-gesture rate and bounded by the squad's loadout; give it a batch op only if a live session
+        /// shows the burst mattering.</summary>
+        [HarmonyPatch(typeof(UIModuleReplenish), "SingleItemReload")]
         internal static class ReloadCapturePatch
         {
-            private static bool Prefix(GeoManufactureItem item)
+            private static bool Prefix(UIModuleReplenish __instance, GeoItem geoItem, ref bool __result)
             {
                 if (IntentRail.ShouldRunNative()) return true;
-                var ctrl = item?.GetComponent<ReplenishmentElementController>();
-                var character = ctrl?.Character;
-                string guid = ctrl?.Item?.ItemDef?.Guid;
+                // FALSE = "this peer reloaded nothing", which is the truth: the row stays in the list and in
+                // _missingItems until the host's own reload comes back down the value rail. Reporting true
+                // would strike the item off a screen whose model never changed.
+                __result = false;
+                var character = OwnerOf(__instance, geoItem);
+                string guid = geoItem?.ItemDef?.Guid;
                 if (character == null || string.IsNullOrEmpty(guid))
                 {
-                    Debug.LogWarning("[MP][replenish] client reload DROPPED — the clicked row named no " +
-                                     "character or no item def; nothing was written locally either.");
+                    Debug.LogWarning("[MP][replenish] client reload DROPPED — this item names no character on " +
+                                     "the open resupply screen or has no item def, so no peer could address it; " +
+                                     "nothing was written locally either.");
                     return false;
                 }
                 int charId = (int)character.Id;
                 IntentRail.Send(SurfaceIds.GeoReplenishIntent, OpReload,
-                    "reload U#" + charId + " " + ctrl.Item.ItemDef.name,
+                    "reload U#" + charId + " " + geoItem.ItemDef.name,
                     w => { w.Write(charId); w.Write(guid); });
                 return false;
             }
+        }
+
+        /// <summary>Which soldier carries the item the screen is reloading. See the seam's doc: the row
+        /// controllers already hold the pairing, by the same reference the model list uses.</summary>
+        private static GeoCharacter OwnerOf(UIModuleReplenish module, GeoItem geoItem)
+        {
+            var rows = module?.Items;
+            if (rows == null || geoItem == null) return null;
+            foreach (var row in rows)
+            {
+                var ctrl = row == null ? null : row.GetComponent<ReplenishmentElementController>();
+                if (ctrl != null && ReferenceEquals(ctrl.Item, geoItem)) return ctrl.Character;
+            }
+            return null;
         }
 
         // ─── S2 host: validate off REPLICATED state, then run the game's own write ───
