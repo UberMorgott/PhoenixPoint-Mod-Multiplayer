@@ -161,7 +161,10 @@ namespace RailCheck
             return set;
         }
 
-        private static IEnumerable<string> Patches(Type t)
+        // internal, not private: L130 asks the same "which game method does this patch class target"
+        // question to LOCATE the hint mirror by its seam rather than by its name, and a second copy of the
+        // attribute walker is the two-tables-disagree shape this repo keeps paying for.
+        internal static IEnumerable<string> Patches(Type t)
         {
             Type declaring = null;
             string method = null;

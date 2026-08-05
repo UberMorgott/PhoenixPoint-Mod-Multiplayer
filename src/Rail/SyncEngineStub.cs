@@ -67,7 +67,11 @@ namespace Multiplayer.Network.Sync
                 // 0x89 native tactical entry (law L103, EXPERIMENT — NativeTacticalEntry.Enabled defaults to
                 // false). Registered unconditionally so the id is CLAIMED in the tactical band whether the
                 // experiment is on or off: an unclaimed 0x89 would fall through to the geoscape hook.
-                || Multiplayer.Tactical.NativeTacticalEntry.HandleInbound(_engine, peer, surfaceId, payload);
+                || Multiplayer.Tactical.NativeTacticalEntry.HandleInbound(_engine, peer, surfaceId, payload)
+                // 0x8A context-help hint (law L130). The ONE tactical surface that is genuinely
+                // bidirectional: a hint fires off each peer's own vision, so any peer may be the sender and
+                // the host relays what a client cannot address (its fellow clients).
+                || Multiplayer.Tactical.HintMirror.HandleInbound(_engine, peer, surfaceId, payload);
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
                 ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || EventPopup.HandleInbound(_engine, peer, surfaceId, payload)

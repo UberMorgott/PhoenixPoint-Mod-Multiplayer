@@ -87,6 +87,7 @@ namespace Multiplayer.Tactical
             LeftBattle = false;
             _pendingSweepWhen = null;          // a sweep owed to a battle that is over must not fire in the next
             ClientMissionStartHints.Reset();   // the next battle gets its own mission-start replay
+            HintMirror.Reset();                // ditto for the 0x8A mirror: a name held over silences it next time
             TacticalUiRepaint.Reset();         // drop the paint memo: it names an actor of the dead battle
             TacticalReadySync.Reset();         // advisory ready flags + the cloned button's handles
         }
