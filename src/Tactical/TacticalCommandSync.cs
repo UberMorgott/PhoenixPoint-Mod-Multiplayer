@@ -1140,6 +1140,7 @@ namespace Multiplayer.Tactical
             _deferred.Clear();   // a held order belongs to ONE battle; releasing it into the next is a ghost order
             _saidUncovered.Clear();
             _mirrorSkipsCameraWait.Clear();   // live ability refs: never let them outlive the battle
+            _queuedMirrors.Clear();           // same: a watched record belongs to the battle it queued in
             _relayedAim.Clear();              // L104(j): keys belong to ONE battle
             _saidKeyless.Clear();
             _replayOriginPeer = 0;
@@ -2027,12 +2028,79 @@ namespace Multiplayer.Tactical
             // busy one — which is why a run of six orders on idle soldiers showed nothing. Deliberately NOT
             // deduplicated: how OFTEN this fires is the measurement, and it costs one line only when broken.
             if (!actor.ExecutingAbilities.Contains(ability))
+            {
                 Debug.LogError("[Multiplayer][tac] MIRROR QUEUED, not played — " + actor.name + " " +
                                (ability.AbilityDef == null ? "?" : ability.AbilityDef.name) + " is waiting behind " +
                                (actor.ExecutingAbilities.Count == 0
                                     ? "<nothing — it never started at all>"
                                     : actor.ExecutingAbilities[0].GetType().Name) +
                                " and will begin only when that ends (law L78).");
+                // AND SOMETHING WATCHES THAT PROMISE (2026-08-05). "Will begin when that ends" was the whole
+                // guarantee and nothing checked it: on 2026-08-05 a mirrored Overwatch queued behind an
+                // IdleAbility that never ended and was simply gone, with this one line as its only trace and
+                // the player's screen stuck behind it. A record now carries a deadline.
+                WatchQueuedMirror(actor, ability);
+            }
+        }
+
+        /// <summary>A mirrored order the engine ENQUEUED instead of playing, with the frames it has waited.
+        /// Live ability refs, so it is cleared with the battle exactly like <c>_mirrorSkipsCameraWait</c>.</summary>
+        private struct QueuedMirror
+        {
+            internal TacticalActor Actor;
+            internal TacticalAbility Ability;
+            internal string Name;
+            internal int WaitedFrames;
+        }
+
+        private static readonly List<QueuedMirror> _queuedMirrors = new List<QueuedMirror>();
+
+        // ~10 s at 60 fps — the same ceiling a held settle gets, and for the same reason: past it, "it is
+        // still waiting its turn" has stopped being a credible description of a record that is never coming.
+        // ponytail: DIAGNOSTIC ONLY, deliberately. The obvious "then force-play it" is wrong here — the
+        // 2026-08-05 record was a DUPLICATE (the acting client shipped a second intent behind its own
+        // EndTurn), and re-activating a duplicate Overwatch is the second shot from one actor that L83
+        // exists to prevent. Unwedging the ACTOR is the recovery, and that already exists:
+        // <see cref="ClientTick"/>'s SettleHoldCeilingFrames forces the settle, and <see cref="ApplySettle"/>
+        // cancels the actor's action channel, which is what hands the soldier back to input.
+        private const int QueuedMirrorCeilingFrames = 600;
+
+        private static void WatchQueuedMirror(TacticalActor actor, TacticalAbility ability)
+        {
+            if (actor == null || ability == null) return;
+            _queuedMirrors.Add(new QueuedMirror
+            {
+                Actor = actor, Ability = ability, WaitedFrames = 0,
+                Name = ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name,
+            });
+        }
+
+        /// <summary>Pumped from <see cref="ClientTick"/> — mirrors only ever queue on a receiving peer, and
+        /// the host receives none. A record that starts is dropped silently; one that does not is named.</summary>
+        private static void TickQueuedMirrors()
+        {
+            for (int i = _queuedMirrors.Count - 1; i >= 0; i--)
+            {
+                var q = _queuedMirrors[i];
+                // Unity's == is the right operator here: this is a LIVENESS question, not the identity one
+                // L113 reserves ReferenceEquals for. A destroyed actor's queued order is nobody's problem.
+                if (q.Actor == null || q.Actor.ExecutingAbilities.Contains(q.Ability))
+                {
+                    _queuedMirrors.RemoveAt(i);
+                    continue;
+                }
+                if (++q.WaitedFrames < QueuedMirrorCeilingFrames) { _queuedMirrors[i] = q; continue; }
+                _queuedMirrors.RemoveAt(i);
+                Debug.LogError("[Multiplayer][tac] a mirrored " + q.Name + " on " + q.Actor.name + " NEVER " +
+                               "STARTED — it has been queued for " + (q.WaitedFrames / 60) + "s behind " +
+                               (q.Actor.ExecutingAbilities.Count == 0
+                                    ? "<nothing, so it was dropped rather than queued>"
+                                    : q.Actor.ExecutingAbilities[0].GetType().Name) +
+                               ", which means this peer never played an action every other peer did (law " +
+                               "L78). It is NOT force-played: it may be a duplicate, and replaying one is a " +
+                               "second shot from one actor. The actor is the thing to unwedge — the settle " +
+                               "ceiling in ClientTick does that, and this line is the evidence that it had to.");
+            }
         }
 
         /// <summary>ONE line, measured at the moment a mirrored order is about to play, answering the three
@@ -2093,7 +2161,12 @@ namespace Multiplayer.Tactical
         /// a single log line.</summary>
         internal static void ClientTick(NetworkEngine engine)
         {
-            if (engine == null || !engine.IsActiveSession || engine.IsHost || _pending.Count == 0) return;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return;
+            // BEFORE the settle guard, not inside it: a queued mirror and a pending settle are independent,
+            // and gating the watchdog on _pending would make it run only while a settle happened to be in
+            // flight — which is precisely when the bug it watches for does NOT need reporting.
+            TickQueuedMirrors();
+            if (_pending.Count == 0) return;
             var tlc = Tlc();
             if (tlc == null) { _pending.Clear(); return; }   // left the battle: nothing left to correct
 

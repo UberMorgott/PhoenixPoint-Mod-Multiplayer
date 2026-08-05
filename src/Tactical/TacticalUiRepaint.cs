@@ -102,6 +102,19 @@ namespace Multiplayer.Tactical
 
         private static readonly HashSet<string> _loggedFailures = new HashSet<string>();
 
+        // HOW LONG THE PAINTED ACTOR HAS BEEN BUSY, in frames. An Exit+Enter re-READS the model; it cannot
+        // end an ability, so once an actor is wedged mid-execution every repaint of an ability-bar state is
+        // the same six pointless Exit+Enters the 2026-08-05 client log shows against a stuck
+        // UIStateOverwatchAbilitySelected. Past the ceiling the repaint is skipped and SAID, because a
+        // repaint that re-enters a stuck state is not a repaint — it is this repo's silent-swallow shape
+        // wearing a refresh costume.
+        private static int _busyFrames;
+
+        // ~10 s at 60 fps, the same ceiling TacticalCommandSync gives a held settle. ponytail: a frame
+        // count, not a measured deadline — the line it prints names the actor and the seconds, so the
+        // evidence for changing it arrives with the bug.
+        private const int BusyCeilingFrames = 600;
+
         /// <summary>Something changed that the open tactical screen may be painting. Coalesced — the flush
         /// is once per frame at most, no matter how many marks land in it.</summary>
         internal static void MarkDirty() => _dirty = true;
@@ -113,6 +126,7 @@ namespace Multiplayer.Tactical
             _dirty = false;
             _squadBarDirty = false;
             _painted = null;
+            _busyFrames = 0;
             _loggedFailures.Clear();
         }
 
@@ -175,6 +189,10 @@ namespace Multiplayer.Tactical
                 // and Unity's == answers liveness — with _painted still null it reports a DESTROYED actor as
                 // the painted one and marks the bar dirty for a corpse (L113).
                 if (ReferenceEquals(actor, _painted) && (ap != _paintedAp || wp != _paintedWp)) _dirty = true;
+                // The busy memo rides the SAME identity test: a different actor is a different question, so
+                // selecting somebody else always starts the count again.
+                _busyFrames = ReferenceEquals(actor, _painted) && actor != null && actor.HasExecutingAbility()
+                                  ? _busyFrames + 1 : 0;
                 _painted = actor;
                 _paintedAp = ap;
                 _paintedWp = wp;
@@ -195,6 +213,22 @@ namespace Multiplayer.Tactical
                 if (stack == null || !ReferenceEquals(stack.CurrentState, __instance)) return;  // keep _dirty:
                                                     // the REAL current state's own Update repaints next frame
                 _dirty = false;
+                if (IsAbilityBarState(__instance) && _busyFrames >= BusyCeilingFrames)
+                {
+                    // Re-arm nothing: the mark is spent. When the ability finally ends the busy memo resets
+                    // and the next real change repaints normally — this only refuses to Exit+Enter a state
+                    // whose actor cannot answer, and it refuses OUT LOUD.
+                    if (_loggedFailures.Add("busy:" + __instance.GetType().Name))
+                        Debug.LogError("[Multiplayer][tac] repaint of " + __instance.GetType().Name +
+                                       " SKIPPED — " + (actor == null ? "<none>" : actor.name) + " has been " +
+                                       "executing an ability for " + (_busyFrames / 60) + "s, so this screen " +
+                                       "is not stale, it is STUCK: an Exit+Enter re-reads the model and " +
+                                       "cannot end an ability, and re-entering an ability-selected state " +
+                                       "re-subscribes AbilityConfirmed on the shared confirmation button. " +
+                                       "The actor is wedged mid-execution; that is the bug to chase, and " +
+                                       "TacticalCommandSync's settle ceiling is what hands it back.");
+                    return;
+                }
                 if (IsAbilityBarState(__instance)) Repaint(__instance);
                 else
                 {
