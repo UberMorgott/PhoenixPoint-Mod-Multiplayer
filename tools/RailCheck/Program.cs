@@ -198,6 +198,8 @@ namespace RailCheck
             laws.AddRange(L123_SettleAndRefusalReach.Check(game));
             laws.AddRange(L124_WindowOrdinalAndCampaignIntro.Check());
             laws.AddRange(L125_EveryPatchBinds.Check());
+            laws.AddRange(L126_TranspilerSubstitutesNeverStores.Check());
+            laws.AddRange(L127_ConfirmSpeaksOrActivates.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

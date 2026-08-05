@@ -176,7 +176,8 @@ namespace RailCheck
                              " byte-for-byte unchanged — it is bound to a method its pattern no longer matches";
         }
 
-        private static bool IsTranspiler(MethodInfo m)
+        /// <summary>Internal: L126 resolves the same transpilers to diff what they emit.</summary>
+        internal static bool IsTranspiler(MethodInfo m)
         {
             var ps = m.GetParameters();
             return ps.Length == 1 && ps[0].ParameterType == typeof(IEnumerable<CodeInstruction>) &&
