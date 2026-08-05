@@ -18,6 +18,13 @@ $root = $PSScriptRoot
 $proj = Join-Path $root "Multiplayer.csproj"
 $out  = Join-Path $root "bin\Release"
 
+# Extra "<install>\Mods" folders to mirror the build into (co-op test instances). Missing ones are
+# skipped with a warning, so this script still works on a machine without them.
+$extraModRoots = @(
+    "D:\PP-Instance2\Mods"
+    "D:\PP-Instance3\Mods"
+)
+
 if (-not $GameDir) {
     $GameDir = @(
         "${env:ProgramFiles(x86)}\Steam\steamapps\common\Phoenix Point"
@@ -34,13 +41,22 @@ if (-not $GameDir -or -not (Test-Path $GameDir)) {
 dotnet build $proj -c Release -p:PhoenixPointDir="$GameDir"
 if ($LASTEXITCODE) { throw "build failed ($LASTEXITCODE)" }
 
-$dest = Join-Path $GameDir "Mods\Multiplayer"
-New-Item -ItemType Directory -Force -Path $dest | Out-Null
-Copy-Item "$out\Multiplayer.dll" $dest -Force
-if (Test-Path "$out\Multiplayer.pdb") { Copy-Item "$out\Multiplayer.pdb" $dest -Force }
-# Single self-contained assembly: PP's mod loader loads the entry DLL via Assembly.Load(byte[])
-# with no AssemblyResolve handler, so sibling DLLs would never resolve at enable time.
-Copy-Item (Join-Path $root "meta.json") $dest -Force
-$assets = Join-Path $root "Assets"
-if (Test-Path $assets) { Copy-Item $assets $dest -Recurse -Force }
-Write-Host "Deployed Multiplayer to $dest"
+$mainModRoot = Join-Path $GameDir "Mods"
+New-Item -ItemType Directory -Force -Path $mainModRoot | Out-Null  # main root is never skipped
+$modRoots = @($mainModRoot) + $extraModRoots
+foreach ($modRoot in $modRoots) {
+    if (-not (Test-Path $modRoot)) {
+        Write-Host "SKIPPED (not found): $modRoot" -ForegroundColor Yellow
+        continue
+    }
+    $dest = Join-Path $modRoot "Multiplayer"
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    Copy-Item "$out\Multiplayer.dll" $dest -Force
+    if (Test-Path "$out\Multiplayer.pdb") { Copy-Item "$out\Multiplayer.pdb" $dest -Force }
+    # Single self-contained assembly: PP's mod loader loads the entry DLL via Assembly.Load(byte[])
+    # with no AssemblyResolve handler, so sibling DLLs would never resolve at enable time.
+    Copy-Item (Join-Path $root "meta.json") $dest -Force
+    $assets = Join-Path $root "Assets"
+    if (Test-Path $assets) { Copy-Item $assets $dest -Recurse -Force }
+    Write-Host "Deployed Multiplayer to $dest"
+}
