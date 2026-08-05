@@ -204,6 +204,55 @@ namespace RailCheck
                                  "and go — with its own literal it is exactly the bug this arm exists for: " +
                                  "`ClientCount == 0` closed the lobby on the FIRST connect, so a third player " +
                                  "could never be invited no matter what the lobby was created with";
+
+            // ─── THE SEAT COUNT HAS EXACTLY ONE CONSUMER SET ───
+            // The three arms above prove the three known sites READ the field. They cannot prove there is no
+            // FOURTH site, and that is the half that matters for "raise MaxPlayers and you are done": a new
+            // consumer that re-derives its own bound would leave the policy number editable in two places
+            // again — the precise shape of the two-literal bug that capped this repo at two players. So the
+            // reader set is CLOSED here: exactly the declared three, no more and no fewer.
+            var declared = new HashSet<string>(StringComparer.Ordinal)
+            {
+                "SteamInvite.HostPublish", "NetworkEngine.OnPeerConnected", "NetworkEngine.OnPeerDisconnected",
+                // The DERIVATION, not a gate: the static ctor is where `MaxClients = MaxPlayers - 1` runs.
+                // It is the one read that must exist — it is what stops the two numbers being typed twice.
+                "NetworkEngine..cctor",
+            };
+            var actual = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var t in engine.Assembly.GetTypes())
+                foreach (var m in t.GetMethods(All).Cast<MethodBase>().Concat(t.GetConstructors(All)))
+                {
+                    if (m.IsAbstract || m.ContainsGenericParameters) continue;
+                    if (!ReadsFieldDirect(m, maxPlayers) && !ReadsFieldDirect(m, maxClients)) continue;
+                    actual.Add(OwnerName(t, m));
+                }
+
+            foreach (var extra in actual.Except(declared).OrderBy(x => x, StringComparer.Ordinal))
+                yield return "L91 seat-count-second-consumer: " + extra + " reads NetworkEngine.MaxPlayers/" +
+                             "MaxClients and is not one of the three declared capacity sites. Either it is a " +
+                             "second capacity gate — in which case the seat count is once again a fact written " +
+                             "in more than one place, and raising it is no longer a one-line change — or the " +
+                             "declared list above is stale. Resolve it; do not widen the list to silence this";
+            foreach (var missing in declared.Except(actual).OrderBy(x => x, StringComparer.Ordinal))
+                yield return "L91 seat-count-consumer-vanished: " + missing + " no longer reads the seat count " +
+                             "at all, so a capacity site this arm believes is covered is now deciding admission " +
+                             "on something else (or has stopped deciding it)";
+        }
+
+        /// <summary>The method a reader really belongs to. An <c>async</c> body compiles to a
+        /// <c>&lt;Name&gt;d__N.MoveNext</c> state machine, so the field read shows up on a generated type;
+        /// naming it raw would make the closed-set arm above report noise instead of a second gate.</summary>
+        private static string OwnerName(Type t, MethodBase m)
+        {
+            var owner = t;
+            var name = m.Name;
+            while (owner != null && owner.Name.Length > 0 && owner.Name[0] == '<' && owner.DeclaringType != null)
+            {
+                int close = owner.Name.IndexOf('>');
+                if (close > 1) name = owner.Name.Substring(1, close - 1);
+                owner = owner.DeclaringType;
+            }
+            return (owner?.Name ?? t.Name) + "." + name;
         }
 
         /// <summary>Does <paramref name="m"/> load <paramref name="field"/> (ldsfld/ldfld)? A FIELD read, not

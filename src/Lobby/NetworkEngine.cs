@@ -25,7 +25,19 @@ namespace Multiplayer.Network
         /// — indistinguishable, to any check, from someone typing the digit. A field emits an
         /// <c>ldsfld</c>, which is a REFERENCE, and that is what RailCheck L91's single-source arm asserts.
         /// The runtime cost is one field load per lobby event.</summary>
-        public static readonly int MaxPlayers = 4;
+        ///
+        /// EIGHT IS POLICY, NOT STRUCTURE. Nothing in the stack is built around this number and nothing
+        /// needs editing beside it — RailCheck L91's seat-count arms assert that mechanically: the three
+        /// capacity sites READ this field, and the set of methods that read it is exactly those three, so
+        /// there is no second place a bound could hide. Measured headroom, 2026-08-05: slots are a
+        /// <c>byte</c> in <c>SlotAllocator</c> and on the wire (ceiling 255), peers are keyed by
+        /// <c>ulong</c> SteamID in dictionaries and hash sets with no fixed arrays anywhere, the roster
+        /// ships with an <c>Int32</c> count, the lobby roster UI is a <c>List</c> and the load overlay a
+        /// <c>Dictionary&lt;byte, Row&gt;</c>, and the Steam invite lobby — which is DISCOVERY ONLY, since a
+        /// join is a direct P2P connect — tops out at Steam's own documented 250 members. So the structure
+        /// holds ~50 comfortably; the first real ceiling is 255 slots, and the practical one before that is
+        /// bandwidth, because the host sends each delta once PER PEER.
+        public static readonly int MaxPlayers = 8;
 
         /// <summary>Seats for CLIENTS — the host holds one. Derived, never typed twice.</summary>
         public static readonly int MaxClients = MaxPlayers - 1;
