@@ -154,6 +154,7 @@ namespace Multiplayer.Network.Sync
             Multiplayer.Tactical.TacticalCommandSync.Reset();  // 0x82 seq + pending settles + the per-battle "not covered" notices
             Multiplayer.Tactical.TacticalDamageSync.Reset();   // 0x84 seq + gap cursor + the mirror-apply scope depth
             GeoWindowCoverage.Reset();  // per-session "announced once" set, so a gap is loud in EVERY session
+            RailOrdinal.Reset();        // the cross-surface order key stream, same per-session contract as the seqs
             // Rail statics that survive an engine teardown and had no home in this aggregate until the
             // SessionEnd seam went in. Kept HERE, not in SessionEnd: this is the one full-teardown reset
             // list, and TearDown (which SessionEnd drives) is what calls it.

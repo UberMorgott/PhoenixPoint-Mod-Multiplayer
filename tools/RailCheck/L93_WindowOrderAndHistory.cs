@@ -45,6 +45,20 @@ namespace RailCheck
     /// History (arm H) is carried by re-holding the peer's own unanswered 0xB6 raises after
     /// <c>GeoscapeView.RestoreState</c>, replayed by the drain that already existed.
     ///
+    /// RECONCILED WITH L124's CROSS-SURFACE ORDINAL (2026-08-05), AND BOTH STAY. L124 adds the host→client
+    /// ordering key this law's own header says does not exist — <c>RailOrdinal</c>, minted per outbound
+    /// envelope at the single encoder and inherited by a window born inside an apply — so the second half of
+    /// the false claim above ("the client's inserts are the host's own order") is now closed by a key rather
+    /// than only by a decision. It does NOT retire arm G, because the two answer different questions and
+    /// neither can express the other: <c>RankFor</c> decides ACROSS priorities (the resupply screen outranks
+    /// the event family — a DEVELOPER DECISION, deliberately not native order), while the ordinal decides
+    /// only BETWEEN EQUAL priorities (<c>WindowOrder.Compare</c> consults it exclusively on a priority tie,
+    /// and L124 executes that dominance). Retiring the rank would silently give the 2026-08-04 decision back
+    /// to whichever message happened to be minted first; retiring the ordinal would leave every equal-priority
+    /// pair — the three-window post-mission batch included — ordered by local arrival again. The rank table
+    /// therefore stays one kind wide and <c>rank-table-overreaches</c> still forbids widening it: the general
+    /// case is the ordinal's job now, which is exactly why the table never has to grow.
+    ///
     /// THE SUB-SCREEN QUESTION, ANSWERED BY ARM D: there is no generic sub-screen criterion to derive because
     /// the game has no sub-screen concept. <c>ProcessQueriedStateSwitch</c>:71 pushes with
     /// <c>StateStackAction.PushOnTop</c> onto the single <c>_statesStack</c> — a window opens on top of

@@ -109,8 +109,14 @@ namespace Multiplayer.Network.Sync
 
         // ─── S1 + S3 capture: ONE prefix on the game's only queue entry point ───
 
-        /// <summary>Every window in the game is queued through here, so this is where the rank applies.
-        /// NEVER blocks — it only re-ranks, and only the kinds <see cref="Rank"/> names.</summary>
+        /// <summary>Every window in the game is queued through here, so this is where the rank applies —
+        /// and, for the same reason, where <see cref="WindowOrder"/> stamps its cross-surface order key.
+        /// NEVER blocks — it only re-ranks, and only the kinds <see cref="Rank"/> names.
+        ///
+        /// The two are ORTHOGONAL and share this prefix only because they share the chokepoint: the rank
+        /// decides ACROSS priorities (the resupply screen outranks the event family — a product decision),
+        /// the ordinal decides WITHIN one priority (which of two equally-ranked windows the host produced
+        /// first). Neither can express the other; see <see cref="WindowOrder"/>.</summary>
         [HarmonyPatch(typeof(GeoscapeViewSwitchQuery), nameof(GeoscapeViewSwitchQuery.QueryStateSwitch))]
         internal static class QueueRankPatch
         {
@@ -123,14 +129,16 @@ namespace Multiplayer.Network.Sync
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession) return;
                 int? rank = RankFor(original.State.GetType());
-                if (rank == null || rank.Value == original.Priority) return;
-                // Priority is readonly: hand the game a new request through its OWN constructor rather than
-                // reflecting into the field. Same State instance, so TryGetStateSwitchRequestForState and
-                // every identity check downstream still see the window they expect.
-                request = new GeoscapeViewStateSwitchRequest(original.State, rank.Value)
-                {
-                    PauseGame = original.PauseGame,
-                };
+                if (rank != null && rank.Value != original.Priority)
+                    // Priority is readonly: hand the game a new request through its OWN constructor rather
+                    // than reflecting into the field. Same State instance, so TryGetStateSwitchRequestForState
+                    // and every identity check downstream still see the window they expect.
+                    request = new GeoscapeViewStateSwitchRequest(original.State, rank.Value)
+                    {
+                        PauseGame = original.PauseGame,
+                    };
+                // AFTER the possible rebuild: the stamp must key the instance that actually reaches the list.
+                WindowOrder.Stamp(request);
             }
         }
 
