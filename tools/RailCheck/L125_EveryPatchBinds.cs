@@ -21,19 +21,25 @@ namespace RailCheck
     /// abandoned every patch class after it. The harness could not see any of it because nothing in it ever
     /// resolved a patch target against the shipped <c>Assembly-CSharp</c>.
     ///
-    /// ARM (a) — <c>unemittable-target</c>. THE ROOT CAUSE, GENERALISED. Harmony rebuilds the target's body
-    /// into a <c>DynamicMethod</c>, and MonoMod replays the original body's exception clauses verbatim
-    /// (<c>_DMDEmit</c>:217/233 call <c>BeginExceptFilterBlock</c> / <c>BeginFaultBlock</c>). A
-    /// <c>DynamicMethod</c>'s ILGenerator supports NEITHER, so a target closed by a <c>fault</c> or
-    /// <c>filter</c> handler cannot be patched at all — by us or anyone — and the attempt throws at bind
-    /// time. C# never writes those handlers by hand; the compiler does, and the shape that matters here is
-    /// an ITERATOR whose source carries a <c>try/finally</c>: its <c>MoveNext</c> comes out wrapped in a
-    /// <c>fault</c> that calls <c>Dispose</c>. That is exactly <c>&lt;ReturnFire&gt;d__321</c>, and exactly
-    /// why its two siblings — <c>&lt;FireWeaponAtTargetCrt&gt;d__322</c>,
-    /// <c>&lt;ShootAndWaitRF&gt;d__323</c> — bound cleanly: same wait, no handler. A patch class that
-    /// derives its own targets structurally (the right way to write one) will therefore walk into this on
-    /// its own, and the day the game adds a <c>using</c> to a method we already patch, this arm is what
-    /// says so instead of the menu going missing.
+    /// ARM (a) — <c>unemittable-target</c>. THE ROOT CAUSE, GENERALISED. A target whose body is closed by a
+    /// <c>fault</c> or <c>filter</c> handler cannot be patched — by us or by anyone — and the attempt throws
+    /// at bind time. MEASURED against the shipped assembly, not reasoned from the API: driving real Harmony
+    /// at the three fire-path coroutines answers <c>InvalidProgramException</c> ("the CLR detected an invalid
+    /// program") for both bodies carrying a fault clause and for neither body without one. Note what the
+    /// mechanism is NOT, because the obvious story is wrong: MonoMod does not simply fail to emit the clause.
+    /// <c>DynamicMethodDefinition.Generate</c> INSPECTS the body, sees a fault/filter handler, and
+    /// deliberately routes it away from <c>DynamicMethod</c> (whose ILGenerator has no
+    /// <c>BeginFaultBlock</c>/<c>BeginExceptFilterBlock</c>) to the MethodBuilder backend — and it is that
+    /// backend whose output for these bodies is an invalid method. The discriminator is the same either way,
+    /// which is why this arm tests the clause and not the exception.
+    ///
+    /// C# never writes those handlers by hand; the compiler does, and the shape that matters here is an
+    /// ITERATOR whose source carries a <c>try/finally</c>: its <c>MoveNext</c> comes out wrapped in a
+    /// <c>fault</c> that calls <c>Dispose</c>. That is <c>&lt;ReturnFire&gt;d__321</c> and
+    /// <c>&lt;ShootAndWaitRF&gt;d__323</c>; <c>&lt;FireWeaponAtTargetCrt&gt;d__322</c> carries the same wait
+    /// with no handler and binds cleanly. A patch class that derives its own targets structurally (the right
+    /// way to write one) will therefore walk into this on its own, and the day the game adds a
+    /// <c>using</c> to a method we already patch, this arm is what says so instead of the menu going missing.
     ///
     /// ARM (b) — <c>unresolved-target</c>. This repo's other standing bind trap:
     /// <c>AccessTools.Method(type, name, Type[])</c> matches parameter types EXACTLY, so naming a base type
@@ -124,8 +130,8 @@ namespace RailCheck
                 {
                     if (!Emittable(target))
                         yield return "L125 unemittable-target: " + type.Name + " -> " + Describe(target) +
-                                     " — its body is closed by a fault/filter handler, which no DynamicMethod " +
-                                     "ILGenerator can re-emit; patching it throws at bind time";
+                                     " — its body is closed by a fault/filter handler; Harmony cannot rebuild " +
+                                     "it and patching it throws InvalidProgramException at bind time";
                     else if (transpiler != null)
                         foreach (var v in ProbeTranspiler(type, transpiler, target)) yield return v;
                 }

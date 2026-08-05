@@ -301,26 +301,29 @@ namespace Multiplayer.Tactical
                 if (!Reads(m, wait)) continue;
                 if (!Emittable(m))
                 {
-                    Debug.LogError("[Multiplayer][tac] " + m.DeclaringType.Name + "." + m.Name + " parks on the " +
-                                   "map-global projectile wait but CANNOT BE PATCHED — its body is closed by a " +
-                                   "fault/filter handler. It keeps the game's own global wait, so a shot there " +
-                                   "still waits on every peer's projectiles (law L104(m), reported by L125).");
+                    Debug.Log("[Multiplayer][tac] " + m.DeclaringType.Name + "." + m.Name + " parks on the " +
+                              "map-global projectile wait and is NOT narrowed — its body is closed by a " +
+                              "fault/filter handler and Harmony cannot re-emit it. It keeps the game's own " +
+                              "global wait, so a shot there still waits on every peer's projectiles " +
+                              "(law L104(m), reported by L125). Expected on every launch, not a fault.");
                     continue;
                 }
                 yield return m;
             }
         }
 
-        /// <summary>Can Harmony rebuild this body at all? It re-emits the target into a <c>DynamicMethod</c>
-        /// and MonoMod replays the original's exception clauses verbatim (<c>_DMDEmit</c>:217/233 call
-        /// <c>BeginExceptFilterBlock</c>/<c>BeginFaultBlock</c>), neither of which a DynamicMethod ILGenerator
-        /// implements — so a target closed by a <c>fault</c> or <c>filter</c> throws at BIND time, out of
-        /// PatchAll, for reasons that have nothing to do with what this transpiler wants to do to it. A
-        /// C# iterator whose source has a <c>try/finally</c> compiles to exactly that shape, and two of the
-        /// three waits found here are in one: <c>ReturnFire</c>:1464 and <c>ShootAndWaitRF</c>:1797 (measured
-        /// against the shipped Assembly-CSharp). Only <c>FireWeaponAtTargetCrt</c>:1759 is narrowed, so
-        /// return fire and the overwatch wait still park on the map-global flag — a narrower fix than the
-        /// law wants, and the honest one: the alternative was the whole mod not loading.</summary>
+        /// <summary>Can Harmony rebuild this body at all? MEASURED, not reasoned: patching each of the three
+        /// waits for real against the shipped Assembly-CSharp throws <c>InvalidProgramException</c> ("the CLR
+        /// detected an invalid program") on both bodies that carry a <c>fault</c> clause and on neither that
+        /// does not. Note what the mechanism is NOT: MonoMod does not merely fail to emit the clause —
+        /// <c>DynamicMethodDefinition.Generate</c> spots a fault/filter body and deliberately routes it away
+        /// from <c>DynamicMethod</c> to the MethodBuilder backend. That backend's output for these two is an
+        /// invalid method, and the throw lands at BIND time, out of PatchAll, for reasons that have nothing
+        /// to do with what this transpiler wants to do. A C# iterator whose source has a <c>try/finally</c>
+        /// compiles to exactly that shape, which is why <c>ReturnFire</c>:1464 and <c>ShootAndWaitRF</c>:1797
+        /// are out and <c>FireWeaponAtTargetCrt</c>:1759 is in. So return fire and the overwatch wait still
+        /// park on the map-global flag — a narrower fix than the law wants, and the honest one: the
+        /// alternative was the whole mod not loading.</summary>
         private static bool Emittable(MethodBase m)
         {
             var body = m.GetMethodBody();
