@@ -1051,13 +1051,6 @@ namespace Multiplayer.Tactical
         /// coroutine it starts runs later, on the game loop, with this already cleared.</summary>
         private static ulong _replayOriginPeer;
 
-        /// <summary>HOST: the shot seed the peer being replayed already played its own speculative shot with
-        /// (law L104(k)). Same scope and same reason as <see cref="_replayOriginPeer"/> — minting a fresh one
-        /// here would leave the peer that CLICKED as the only screen rolling its own trajectory, which is the
-        /// defect with one peer fewer.</summary>
-        private static int _replaySeed;
-        private static bool _replaySeedArmed;
-
         /// <summary>When the 0x82 record now being decoded reached this peer, for the mirror telemetry's
         /// arrival delta. A plain field: the decode and the play are one synchronous call.</summary>
         private static float _recordArrived;
@@ -1148,11 +1141,8 @@ namespace Multiplayer.Tactical
             _saidUncovered.Clear();
             _mirrorSkipsCameraWait.Clear();   // live ability refs: never let them outlive the battle
             _relayedAim.Clear();              // L104(j): keys belong to ONE battle
-            TacticalShotSync.Reset();         // L104(k)(l): the armed shot belongs to ONE battle too
             _saidKeyless.Clear();
             _replayOriginPeer = 0;
-            _replaySeed = 0;
-            _replaySeedArmed = false;
             _burstFrame = 0;
             _burstCount = 0;
             TacticalActorKey.Reset();   // A3b: the derived alien keys belong to ONE battle and to no other
@@ -1297,17 +1287,6 @@ namespace Multiplayer.Tactical
             // AND THE AIM BRANCH, one layer down (law L104(j)). Same arm point, deliberately NOT gated on
             // TrackWithCamera: the aim entry has nothing to do with the camera.
             ArmRelayedAim(key);
-            // AND THE SHOT ITSELF, one layer further down (laws L104(k)(l)). The seed is minted by whoever
-            // ACTS — the host on its own click, the acting client on its speculative play — and then rides the
-            // order in BOTH directions, so the peer that clicked is anchored to the same roll as every watcher
-            // instead of being the one screen left on its own dice. `_replaySeed` carries a client's seed
-            // through the host's replay unchanged, in the same scope as `_replayOriginPeer`.
-            int shotSeed = _replaySeedArmed ? _replaySeed : TacticalShotSync.MintSeed();
-            // The game's own term (TacticalLevelController:1556), computed HERE, where the acting peer's
-            // position and the target it clicked are both still the ones it clicked with. A NaN ShootFromPos
-            // gives false in IEEE — exactly what the native line does with the same inputs.
-            bool stepOut = target != null && Vector3.SqrMagnitude(actor.Pos - target.ShootFromPos) > 0.01f;
-            TacticalShotSync.ArmShot(key, shotSeed, stepOut);
 
             if (relay == RelayMirror)
             {
@@ -1326,13 +1305,12 @@ namespace Multiplayer.Tactical
                 _cmdOwner[key] = _replayOriginPeer;
                 Send(OpActivate, "mirror " + actor.name + " " + name + " " + Where(target) +
                      (IsAutonomous(target) ? " [" + target.AttackType + "]" : "") + (fumbled ? " FUMBLED" : ""),
-                     _replayOriginPeer, w => { WriteCommand(w, key, guid, target); w.Write(fumbled);
-                                               w.Write(shotSeed); w.Write(stepOut); });
+                     _replayOriginPeer, w => { WriteCommand(w, key, guid, target); w.Write(fumbled); });
             }
             else
                 IntentRail.Send(SurfaceIds.TacCommandIntent, OpIntentActivate,
                                 "command " + actor.name + " " + name + " " + Where(target),
-                                w => { WriteCommand(w, key, guid, target); w.Write(shotSeed); });
+                                w => WriteCommand(w, key, guid, target));
         }
 
         /// <summary>Which actor-shaped payload field (if any) this peer cannot name on the wire. Null = all of
@@ -1752,9 +1730,6 @@ namespace Multiplayer.Tactical
             // it is a named refusal, so the losing peer is told which actor the host could not find.
             var unresolved = new List<string>();
             var target = ReadCommandTarget(r, unresolved);
-            // Read before any refusal returns, so the stream is always past it and the deferral below captures
-            // the WHOLE body verbatim (law L104(k) — the acting peer's seed must survive a hold).
-            int shotSeed = r.ReadInt32();
             if (unresolved.Count > 0)
             {
                 IntentRail.Reject(SurfaceIds.TacCommandIntent, senderPeerId,
@@ -1830,18 +1805,13 @@ namespace Multiplayer.Tactical
                 // screen, so it is read by a player and not only by whoever opens the host's log.
                 IntentRail.Reject(SurfaceIds.TacCommandIntent, senderPeerId,
                                   "command for " + SafeActorName(actor) + ": " + refusal);
-                // Snap his speculative local play back. FORCED (2026-07-31 RCA): the rejected peer is the one
-                // whose actor is stuck mid-speculation, so its ClientTick would HOLD this correction behind
-                // HasExecutingAbility() — forever, if that ability never ends, which is exactly what
-                // "everything went dead" looked like.
-                // AND UNCONDITIONAL (2026-08-05, law L104(m)). This used to be gated on the actor being IDLE
-                // here, on the reasoning that a busy actor's own end-of-action settle is the better corrector.
-                // That reasoning holds only while the busy actor is going to FINISH: the give-up refusal at
-                // DeferCeilingSeconds fires precisely when it did not, so the one case that needed correcting
-                // was the one case that got none — a repaint and no correction. A mid-flight settle is
-                // self-healing (the end-of-action settle overwrites it moments later); a refusal with no
-                // settle at all leaves the refused peer's soldier standing somewhere the host never agreed to.
-                if (actor != null) HostSettle(actor, forced: true);
+                // Snap his speculative local play back — but only if the actor is idle HERE. If it is busy, the
+                // command that won is still running and its own end-of-action settle is the corrector; a settle
+                // taken mid-flight would ship a position the host itself is about to leave.
+                // FORCED (2026-07-31 RCA): the rejected peer is the one whose actor is stuck mid-speculation,
+                // so its ClientTick would HOLD this correction behind HasExecutingAbility() — forever, if that
+                // ability never ends, which is exactly what "everything went dead" looked like.
+                if (actor != null && !actor.HasExecutingAbility()) HostSettle(actor, forced: true);
                 return;
             }
 
@@ -1849,11 +1819,9 @@ namespace Multiplayer.Tactical
             // scoped around this one synchronous call: the capture postfix inside reads it, and the move
             // coroutine it starts runs later with the field already cleared.
             _replayOriginPeer = senderPeerId;
-            _replaySeed = shotSeed;
-            _replaySeedArmed = true;
             FillLiveTargetObject(ability, target);
             try { ability.Activate(target); }
-            finally { _replayOriginPeer = 0; _replaySeed = 0; _replaySeedArmed = false; }
+            finally { _replayOriginPeer = 0; }
             Debug.Log("[Multiplayer][tac] HOST command from peer=" + senderPeerId + " ACCEPTED — " + actor.name +
                       " " + (ability.AbilityDef == null ? "?" : ability.AbilityDef.name) + " → " +
                       Where(target) + " nonce=" + nonce);
@@ -1901,13 +1869,6 @@ namespace Multiplayer.Tactical
                     IntentRail.Reject(SurfaceIds.TacCommandIntent, d.Peer,
                                       "command for actor " + d.Key + ": that soldier is still executing this same " +
                                       "peer's previous order after " + DeferCeilingSeconds + "s");
-                    // AND CORRECT HIM (law L104(m)). The reject nudge repaints; only a settle moves that
-                    // soldier back to where the host has him. This actor is BUSY by definition here, which is
-                    // exactly why its end-of-action settle is not coming — so the settle is forced, the same
-                    // way the ordinary refusal path forces it.
-                    string stuckWhy;
-                    var stuck = TacticalActorKey.Resolve(Tlc(), d.Key, out stuckWhy) as TacticalActor;
-                    if (stuck != null) HostSettle(stuck, forced: true);
                     continue;
                 }
                 _deferred.RemoveAt(i);
@@ -1950,9 +1911,7 @@ namespace Multiplayer.Tactical
                         var unresolved = new List<string>();
                         var target = ReadCommandTarget(r, unresolved);
                         bool fumbled = r.ReadBoolean();
-                        int shotSeed = r.ReadInt32();
-                        bool stepOut = r.ReadBoolean();
-                        ApplyActivate(actorKey, abilityGuid, target, fumbled, shotSeed, stepOut, unresolved);
+                        ApplyActivate(actorKey, abilityGuid, target, fumbled, unresolved);
                     }
                     else if (op == OpSettle) QueueSettle(r.ReadInt32(),
                                                         new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
@@ -2012,7 +1971,7 @@ namespace Multiplayer.Tactical
         /// <summary>Play the host's order with the game's own code, inside an apply scope so the capture
         /// postfix does not echo it straight back as a fresh intent (law 8).</summary>
         private static void ApplyActivate(int key, string guid, TacticalAbilityTarget target, bool fumbled,
-                                          int shotSeed, bool stepOut, List<string> unresolved)
+                                          List<string> unresolved)
         {
             string why;
             var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
@@ -2056,11 +2015,6 @@ namespace Multiplayer.Tactical
             // token is always consumed and never goes stale.
             if (ability.TrackWithCamera) _mirrorSkipsCameraWait.Add(ability);
             ArmRelayedAim(key);   // law L104(j), same arm as the acting path's
-            // AND THE SHOT (laws L104(k)(l)), same arm as the acting path's. The seed makes this peer's
-            // trajectory the acting peer's trajectory — so what this screen SEES hit is what the host's 0x84
-            // damage record says was hit, instead of blood on a target that took nothing. The step-out answer
-            // makes the shot the same LENGTH here as there.
-            TacticalShotSync.ArmShot(key, shotSeed, stepOut);
             FillLiveTargetObject(ability, target);
             using (SyncApplyScope.Enter()) ability.Activate(target);
             // DID IT START, OR ONLY GET IN LINE? PlayingAction.SetState(Playing) calls StartPlayingAction
