@@ -72,7 +72,8 @@ namespace Multiplayer.Tactical
     /// WHAT THE PAYLOAD IS. Per container: <c>(actorKey, kind)</c> where kind names the actor's own
     /// <c>Inventory</c> or <c>Equipments</c>, or <see cref="KindGround"/> — a pile of dropped items, addressed
     /// by the GAME'S OWN container identity <c>(ComponentSetDef guid, Pos)</c> because such a pile has no actor
-    /// key to carry and never could have one (see the constant) — plus the ordered item DEF GUIDS in it. Items carry no shared
+    /// key to carry and never could have one (see the constant) — plus the ordered items in it, each as a DEF
+    /// GUID and its <see cref="ChargeOf"/>. Items carry no shared
     /// identity (A4 had to solve the same problem for the corpse manifest and reached the same answer), and
     /// they do not need one here: a committed batch only ever MOVES items between the containers it names, so
     /// the multiset of defs across those containers is invariant, and the host CHECKS that invariant before
@@ -82,7 +83,13 @@ namespace Multiplayer.Tactical
     /// KNOWN CEILING: order WITHIN a container is not forced, only membership. The native lists are re-sorted
     /// by the UI's own filters on display, and forcing order would mean removing and re-adding items that
     /// never moved — which for <c>EquipmentComponent</c> means unmounting and remounting a weapon that was
-    /// never touched.
+    /// never touched. WHAT THAT USED TO COST, AND NO LONGER DOES: because only membership crossed, two
+    /// magazines of one def were interchangeable to this batch and it moved whichever THIS peer's list held
+    /// first — a full clip on the host, a spent one here. The per-item CHARGE now rides beside each def guid
+    /// and <see cref="ChargeOf"/>/<see cref="OrdinalOf"/>/<see cref="ResolveIn"/> are the ONE address rule
+    /// this file and A7's target codec both use, so same-def items resolve apart WITHOUT forcing an order on
+    /// anything. The charge deliberately stays out of <see cref="ContentsDiff"/> — that multiset is the trust
+    /// boundary against a client conjuring items, and a charge that ticked mid-batch is not that.
     /// </summary>
     public static class TacticalInventorySync
     {
@@ -136,6 +143,12 @@ namespace Multiplayer.Tactical
             internal string SetGuid;
             internal Vector3 Pos;
             internal List<string> ItemDefs = new List<string>();
+            /// <summary>Parallel to <see cref="ItemDefs"/>, one <see cref="ChargeOf"/> per item. It rides so
+            /// that a batch moving ONE of two same-def magazines moves the RIGHT one; it deliberately stays
+            /// OUT of <see cref="ContentsDiff"/>, which keeps checking def guids alone — the multiset check
+            /// is the trust boundary against a client conjuring items, and a charge that ticked between
+            /// capture and apply is not that.</summary>
+            internal List<int> ItemCharges = new List<int>();
         }
 
         /// <summary>The <c>InventoryComponent</c> behind a query. <c>_linkedInventory</c> is private and there
@@ -274,7 +287,11 @@ namespace Multiplayer.Tactical
                     w.Write(s.Pos.x); w.Write(s.Pos.y); w.Write(s.Pos.z);
                 }
                 w.Write(s.ItemDefs.Count);
-                foreach (var g in s.ItemDefs) w.Write(g ?? "");
+                for (int i = 0; i < s.ItemDefs.Count; i++)
+                {
+                    w.Write(s.ItemDefs[i] ?? "");
+                    w.Write(i < s.ItemCharges.Count ? s.ItemCharges[i] : -1);
+                }
             }
         }
 
@@ -296,7 +313,7 @@ namespace Multiplayer.Tactical
                     s.Pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 }
                 int items = r.ReadInt32();
-                for (int j = 0; j < items; j++) s.ItemDefs.Add(r.ReadString());
+                for (int j = 0; j < items; j++) { s.ItemDefs.Add(r.ReadString()); s.ItemCharges.Add(r.ReadInt32()); }
                 slots.Add(s);
             }
             return slots;
@@ -421,15 +438,29 @@ namespace Multiplayer.Tactical
             {
                 var target = targets[i];
                 if (target == null) continue;
-                foreach (var guid in slots[i].ItemDefs)
+                for (int k = 0; k < slots[i].ItemDefs.Count; k++)
                 {
-                    int found = -1, inPlace = -1;
+                    string guid = slots[i].ItemDefs[k];
+                    int charge = k < slots[i].ItemCharges.Count ? slots[i].ItemCharges[k] : -1;
+                    // THE SAME ADDRESS RULE AS ItemAddress, applied to a whole batch: the def alone made two
+                    // magazines of one type interchangeable, so a batch moving ONE of them moved whichever
+                    // this peer's list happened to hold first — a full clip on the host, a spent one here.
+                    // The charge is preferred; a def-only match is still taken (a charge that ticked between
+                    // the sender's capture and this apply must not strand an item) but only after every
+                    // exact one is spoken for.
+                    int found = -1, inPlace = -1, foundLoose = -1, inPlaceLoose = -1;
                     for (int p = 0; p < pool.Count; p++)
                     {
                         if (pool[p].Key == null || DefGuid(pool[p].Key) != guid) continue;
-                        if (ReferenceEquals(pool[p].Value, target)) { inPlace = p; break; }
-                        if (found < 0) found = p;
+                        bool here = ReferenceEquals(pool[p].Value, target);
+                        bool exact = ChargeOf(pool[p].Key) == charge;
+                        if (exact && here) { inPlace = p; break; }
+                        if (exact) { if (found < 0) found = p; }
+                        else if (here) { if (inPlaceLoose < 0) inPlaceLoose = p; }
+                        else if (foundLoose < 0) foundLoose = p;
                     }
+                    // Only when no EXACT item exists anywhere does the def-only match get used at all.
+                    if (inPlace < 0 && found < 0) { inPlace = inPlaceLoose; found = foundLoose; }
                     // Prefer an item that is ALREADY here: nothing to do, and nothing to unmount.
                     if (inPlace >= 0) { pool.RemoveAt(inPlace); continue; }
                     if (found < 0)
@@ -470,7 +501,76 @@ namespace Multiplayer.Tactical
         private static string DefGuid(Item item)
         {
             var def = item == null ? null : item.ItemDef;
-            return def == null ? "" : def.Guid;
+            // ReferenceEquals, not ==: BaseDef is a ScriptableObject, so `def == null` is Unity's overloaded
+            // comparison and answers true for a def whose native side is gone as well as for a genuinely
+            // absent one. Reading .Guid is a managed field read either way, and an item silently reported as
+            // def-less is an item every address in this file then confuses with every other def-less item.
+            return ReferenceEquals(def, null) ? "" : def.Guid;
+        }
+
+        // ─── THE ITEM ADDRESS RULE — declared ONCE, used by both riders ────
+
+        /// <summary>THE per-item state an address can see, and the reason two identical clips are not
+        /// actually identical: the CHARGE. <c>CommonItemData.CurrentCharges</c>:33 is
+        /// <c>Ammo?.CurrentCharges ?? _charges</c> — for a magazine its own rounds, for a weapon the rounds
+        /// in the magazine loaded into it — so it is exactly the field that makes "the half-empty clip" a
+        /// different item from "the full one" while both share a def guid.
+        ///
+        /// -1 means "this kind of item has no charge at all" (a plain <c>Item</c> that is not a
+        /// <c>TacticalItem</c>). It is deliberately not 0: an empty clip really is charge 0, and collapsing
+        /// the two would put chargeless items in the same equivalence class as spent ones.</summary>
+        internal static int ChargeOf(Item item)
+        {
+            var t = item as TacticalItem;
+            var data = t == null ? null : t.CommonItemData;
+            return data == null ? -1 : data.CurrentCharges;
+        }
+
+        /// <summary>How many items BEFORE this one, in its own container, share its (def, charge).
+        ///
+        /// This is what turns A7's ceiling — "the far side resolves the FIRST same-def item" — into a
+        /// bounded one. The ordinal orders WITHIN an equivalence class whose members are identical in every
+        /// field the address can see, so a peer whose container happens to be sorted differently picks a
+        /// different member of THAT CLASS and never a different clip. The old address had no class at all:
+        /// a full magazine and a spent one were one key, and "the first" was a coin toss between them.
+        ///
+        /// ponytail: it does NOT make the ordinal itself peer-stable, and it must not pretend to — forcing
+        /// container order would mean unmounting a weapon nobody touched (the A6 ceiling above, still
+        /// standing). What it makes peer-stable is the ANSWER, which is the only thing a caller reads.</summary>
+        internal static int OrdinalOf(Item item)
+        {
+            var c = item == null ? null : item.InventoryComponent;
+            // ReferenceEquals, not ==: InventoryComponent is a DefineableBehavior (a MonoBehaviour), whose
+            // overloaded == also answers true for a DESTROYED one. The guard here is against a genuinely
+            // absent container, and walking a managed item list needs no live native object.
+            if (ReferenceEquals(c, null)) return 0;
+            string guid = DefGuid(item);
+            int charge = ChargeOf(item);
+            int n = 0;
+            foreach (var other in c.Items)
+            {
+                if (ReferenceEquals(other, item)) return n;
+                if (other != null && DefGuid(other) == guid && ChargeOf(other) == charge) n++;
+            }
+            return n;
+        }
+
+        /// <summary>The inverse of <see cref="OrdinalOf"/>: the item a written address names, on THIS peer.
+        /// Null when the container holds no such item at all — never a "closest match", because a reload
+        /// aimed at the wrong weapon is the divergence this address exists to stop.</summary>
+        internal static Item ResolveIn(InventoryComponent container, string guid, int charge, int ordinal)
+        {
+            if (ReferenceEquals(container, null)) return null;   // see OrdinalOf
+            int n = 0;
+            foreach (var it in container.Items)
+                if (it != null && DefGuid(it) == guid && ChargeOf(it) == charge && n++ == ordinal) return it;
+            // The charge DRIFTED — a reload or a shot landed on the sender and has not been applied here
+            // yet. Fall back to the ordinal-th item of the DEF, which is still a DISTINCT item per ordinal:
+            // the one thing that must never come back is "the first one" for every address at once.
+            n = 0;
+            foreach (var it in container.Items)
+                if (it != null && DefGuid(it) == guid && n++ == ordinal) return it;
+            return null;
         }
 
         // ─── THE CAPTURE ───────────────────────────────────────────────────
@@ -656,7 +756,7 @@ namespace Multiplayer.Tactical
                 // collection AttemptMoveItems iterates, so a query can no longer receive the same item twice. A
                 // dedup kept past that point would only hide a REAL double, which is exactly what the multiset
                 // check exists to refuse out loud (law 12).
-                foreach (var item in q.Items) slot.ItemDefs.Add(DefGuid(item));
+                foreach (var item in q.Items) { slot.ItemDefs.Add(DefGuid(item)); slot.ItemCharges.Add(ChargeOf(item)); }
                 slots.Add(slot);
             }
             // A ground address names EVERY pile at (def, pos), so two queries CAN share one: UIStateInventory:513-522
@@ -672,6 +772,7 @@ namespace Multiplayer.Tactical
                     if (slots[j].Kind != KindGround || !string.Equals(slots[j].SetGuid, slots[i].SetGuid, StringComparison.Ordinal) ||
                         !Utl.Equals(slots[j].Pos, slots[i].Pos)) continue;
                     slots[j].ItemDefs.AddRange(slots[i].ItemDefs);
+                    slots[j].ItemCharges.AddRange(slots[i].ItemCharges);
                     slots.RemoveAt(i);
                     break;
                 }

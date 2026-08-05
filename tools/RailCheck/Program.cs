@@ -183,6 +183,7 @@ namespace RailCheck
             laws.AddRange(L109_QueuedStateRaise.Check());
             laws.AddRange(L110_ReplenishWalletChoke.Check());
             laws.AddRange(L111_SharedOfferCommit.Check());
+            laws.AddRange(L112_ItemAddressOrdinal.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

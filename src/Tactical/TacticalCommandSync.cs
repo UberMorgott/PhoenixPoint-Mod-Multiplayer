@@ -487,18 +487,32 @@ namespace Multiplayer.Tactical
         /// <c>Equipment.EquipmentComponent</c>:19 is that same field cast — so the owning container IS the
         /// address A6 already ships, reused rather than reinvented.
         ///
-        /// KNOWN CEILING, declared rather than papered over: two items of the SAME def in one container are
-        /// interchangeable by this key and the far side resolves the FIRST. Membership is all A6 forces
-        /// (order within a container is deliberately not synchronised), so an ordinal would be false
-        /// precision — it would name a different clip whenever the two lists happened to be sorted
-        /// differently, which is worse than naming an equivalent one.</summary>
-        private static bool ItemAddress(Item item, out int actorKey, out byte kind, out string defGuid)
+        /// THE CEILING THAT USED TO BE HERE IS CLOSED. The key was (actorKey, kind, defGuid) alone, so two
+        /// items of the same def in one container were ONE address and the far side resolved whichever its
+        /// list held first — a soldier carrying a full magazine and a spent one had a reload that aimed at a
+        /// coin toss, and the peers landed on different clips. The address now carries the two fields that
+        /// tell them apart, both defined once in <see cref="TacticalInventorySync"/> and shared with A6's
+        /// layout so there is ONE rule and not two that can drift:
+        ///   • <c>ChargeOf</c> — the per-item state (<c>CommonItemData.CurrentCharges</c>), which is what
+        ///     actually makes the half-empty clip a DIFFERENT item from the full one;
+        ///   • <c>OrdinalOf</c> — the position among the items sharing that (def, charge), which separates
+        ///     the remaining genuinely-interchangeable ones into distinct addresses.
+        /// The old objection to an ordinal ("it would name a different clip whenever the two lists were
+        /// sorted differently") is answered rather than ignored: the ordinal only ever orders WITHIN an
+        /// equivalence class whose members match in every field the address can see, so a differently sorted
+        /// peer picks a different member of THAT class — never a different charge. Container order is still
+        /// not forced, and must not be: forcing it would unmount a weapon nobody touched.</summary>
+        private static bool ItemAddress(Item item, out int actorKey, out byte kind, out string defGuid,
+                                        out int charge, out int ordinal)
         {
-            actorKey = 0; kind = 0; defGuid = null;
+            actorKey = 0; kind = 0; defGuid = null; charge = -1; ordinal = 0;
             if (item == null) return false;
             defGuid = item.ItemDef == null ? null : item.ItemDef.Guid;
             if (string.IsNullOrEmpty(defGuid)) return false;
-            return TacticalInventorySync.AddressOf(item.InventoryComponent, out actorKey, out kind);
+            if (!TacticalInventorySync.AddressOf(item.InventoryComponent, out actorKey, out kind)) return false;
+            charge = TacticalInventorySync.ChargeOf(item);
+            ordinal = TacticalInventorySync.OrdinalOf(item);
+            return true;
         }
 
         /// <summary>The other half. Null + a sentence on any failure — never a "closest match", because a
@@ -508,6 +522,8 @@ namespace Multiplayer.Tactical
             int key = r.ReadInt32();
             byte kind = r.ReadByte();
             string guid = r.ReadString();
+            int charge = r.ReadInt32();
+            int ordinal = r.ReadInt32();
             string why;
             var owner = TacticalActorKey.Resolve(tlc, key, out why);
             if (owner == null)
@@ -522,11 +538,13 @@ namespace Multiplayer.Tactical
                     unresolved.Add(field + ": " + owner.name + " has no container of kind " + kind + " on this peer");
                 return null;
             }
-            foreach (var it in container.Items)
-                if (it != null && it.ItemDef != null && it.ItemDef.Guid == guid) return it;
+            var resolved = TacticalInventorySync.ResolveIn(container, guid, charge, ordinal);
+            if (resolved != null) return resolved;
             if (unresolved != null)
-                unresolved.Add(field + ": no item with def guid " + guid + " in " + owner.name + "'s container " +
-                               kind + " on this peer — mod parity should have made that impossible (law 10)");
+                unresolved.Add(field + ": no item #" + ordinal + " with def guid " + guid + " (charge " + charge +
+                               ") in " + owner.name + "'s container " + kind + " on this peer — mod parity should " +
+                               "have made the def impossible to miss (law 10), so this is a container that holds " +
+                               "fewer of them here than on the sender");
             return null;
         }
 
@@ -547,11 +565,12 @@ namespace Multiplayer.Tactical
             int eqKey = 0, itKey = 0;
             byte eqKind = 0, itKind = 0;
             string eqGuid = null, itGuid = null;
+            int eqCharge = -1, itCharge = -1, eqOrd = 0, itOrd = 0;
             bool eqRides = false, itRides = false;
             if (t != null)
             {
-                eqRides = ItemAddress(t.Equipment, out eqKey, out eqKind, out eqGuid);
-                itRides = ItemAddress(t.TacticalItem, out itKey, out itKind, out itGuid);
+                eqRides = ItemAddress(t.Equipment, out eqKey, out eqKind, out eqGuid, out eqCharge, out eqOrd);
+                itRides = ItemAddress(t.TacticalItem, out itKey, out itKind, out itGuid, out itCharge, out itOrd);
                 if (!eqRides) NoteUnkeyableItem("Equipment", t.Equipment);
                 if (!itRides) NoteUnkeyableItem("TacticalItem", t.TacticalItem);
                 NoteDroppedField("ItemContainer", t.ItemContainer);
@@ -595,8 +614,8 @@ namespace Multiplayer.Tactical
             }
             if ((mask & BitAttackType) != 0) w.Write((byte)t.AttackType);
             if ((mask & BitObstructionsCheckRadius) != 0) w.Write(t.ObstructionsCheckRadius);
-            if ((mask & BitEquipment) != 0) { w.Write(eqKey); w.Write(eqKind); w.Write(eqGuid); }
-            if ((mask & BitTacticalItem) != 0) { w.Write(itKey); w.Write(itKind); w.Write(itGuid); }
+            if ((mask & BitEquipment) != 0) { w.Write(eqKey); w.Write(eqKind); w.Write(eqGuid); w.Write(eqCharge); w.Write(eqOrd); }
+            if ((mask & BitTacticalItem) != 0) { w.Write(itKey); w.Write(itKind); w.Write(itGuid); w.Write(itCharge); w.Write(itOrd); }
         }
 
         /// <summary>Decode against the RECEIVING peer's own world: every actor-shaped field is a key that is
