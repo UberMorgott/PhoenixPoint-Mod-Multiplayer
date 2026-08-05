@@ -849,6 +849,16 @@ namespace Multiplayer.Tactical
               "the same replicated willpower" },
             { typeof(AIEvaluationAbility),
               "ambient: the AI's own evaluation pass, and a client runs no AI at all (ClientAiGate)" },
+            { typeof(EndTurnAbility),
+              "ambient: TacticalAbility.OnPlayingActionEnd:1060-1065 raises it on the actor of EVERY ability " +
+              "whose def says EndsTurn — so the ENGINE ends the turn as a CONSEQUENCE of the action that just " +
+              "played, on every peer that played it, off AP the mirror already carries. IsAutonomous cannot see " +
+              "it (EndTurnAbility has no TacticalAbilityTarget at all, so there is no AttackType to read), which " +
+              "is how an Overwatch that drained the last AP shipped a SECOND intent behind its own: the host had " +
+              "already raised its own EndTurn while replaying the overwatch, its gate refused the duplicate, and " +
+              "the acting client took a reject + a full resend + a forced settle for a turn that had ended " +
+              "correctly everywhere (live 2026-08-05, nonce=18 after nonce=17). A peer's DELIBERATE end-turn is " +
+              "a different funnel entirely — TacticalFaction.RequestEndTurn, captured by ClientEndTurnGate" },
             { typeof(TacticalHurtReactionAbility),
               "ambient: fired from OnActorDamaged:110-129 by damage that is ALREADY replicated (0x84), so every " +
               "peer raises it for itself off the same hit" },
