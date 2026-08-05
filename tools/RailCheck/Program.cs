@@ -193,6 +193,7 @@ namespace RailCheck
             laws.AddRange(L118_MirroredHostLoad.Check(game));
             laws.AddRange(L119_AdvisoryReadyLabel.Check());
             laws.AddRange(L120_LeaveNotice.Check());
+            laws.AddRange(L121_ContainedSpawnInert.Check(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

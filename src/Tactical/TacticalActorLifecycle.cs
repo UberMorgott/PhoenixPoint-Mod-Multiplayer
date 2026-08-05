@@ -136,11 +136,26 @@ namespace Multiplayer.Tactical
         // ─── SPAWN ─────────────────────────────────────────────────────────
 
         /// <summary>The enter-play PREFIX. Returns false to CONTAIN a spawn this peer must not have made.
-        /// Containment is refusing to enter play, NOT destroying: the object stays inert and unreferenced by
-        /// the map (<c>ActorComponent.OnEnterPlay</c>:130-138 is what calls <c>BaseMap.RegisterActor</c> and
-        /// sets <c>InPlay</c>, and <c>IsActive</c> is <c>InPlay</c>), so nothing can see it, target it or
-        /// enumerate it — while whatever spawned it still holds a valid reference and cannot NRE. Destroying
-        /// it is the v1 shape and is never done here.</summary>
+        /// Containment is refusing to enter play AND deactivating the GameObject — NOT destroying it: whatever
+        /// spawned it still holds a valid reference and cannot NRE. Destroying is the v1 shape and is never
+        /// done here.
+        ///
+        /// WHY THE DEACTIVATION IS LOAD-BEARING, and not the tidy-up it looks like (law L121, 2026-08-05 RCA).
+        /// This doc used to claim that refusing enter-play alone left the actor "unreferenced by the map… so
+        /// nothing can see it, target it or enumerate it", on the strength of
+        /// <c>ActorComponent.OnEnterPlay</c>:130-138 being the only caller of <c>BaseMap.RegisterActor</c>.
+        /// That was FALSE for the one native enumerator that does not read <c>_actors</c> at all:
+        /// <c>BaseMap.FindAllActors</c>:75-80 is
+        /// <c>FindGameObjectsWithTag(ActorsTag).Where(go =&gt; go.activeInHierarchy)</c>, and a half-built actor
+        /// is still tagged and still active. So <c>TacticalLevelController.OnLevelEnd</c>:748 handed the
+        /// contained actor straight to <c>OnExitPlay</c>, <c>TacticalActor.OnExitPlay</c>:804-816 dereferenced
+        /// the <c>CharacterStats</c> that <c>PrepareEnterPlay</c> never built, and the NRE killed
+        /// <c>Level+&lt;SetCurrentCrt&gt;d__50</c> — the peer that pressed FINISH on the results screen hung in
+        /// the loading screen forever while the other two left the battle normally.
+        ///
+        /// <c>SetActive(false)</c> makes the invariant true through the GAME'S OWN filter rather than through
+        /// a second patch per consumer, so it also covers the other <c>FindAllActors</c> caller
+        /// (<c>TacticalLevelController</c>:636, which re-enters every found actor at level start).</summary>
         internal static bool OnActorEnteringPlay(ActorComponent component)
         {
             var actor = component as TacticalActor;
@@ -156,6 +171,9 @@ namespace Multiplayer.Tactical
                 "positions the peers legitimately disagree about, so a locally-rolled one is a different " +
                 "monster in a different place. If a wave is MISSING on this screen, that is a lost 0x84 spawn " +
                 "record, not this line.");
+            // OUT OF THE GAME'S OWN ENUMERATOR, not merely out of BaseMap._actors — see the doc above. One
+            // line, no destruction, reference still valid for the spawner that is about to get it back.
+            component.gameObject.SetActive(false);
             return false;
         }
 
