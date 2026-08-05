@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
 namespace Multiplayer.Network.Sync
 {
@@ -17,30 +17,37 @@ namespace Multiplayer.Network.Sync
     public class IntentDedup
     {
         private readonly int _capacity;
-        private readonly HashSet<(ulong, ulong)> _seen = new HashSet<(ulong, ulong)>();
-        private readonly Queue<(ulong, ulong)> _order = new Queue<(ulong, ulong)>();
+        // ONE RING PER PEER (N=50 mandate). The ring used to be global: 512 entries shared by everyone,
+        // which at 50 players is a ~10-intent memory per peer. A retransmit older than ten of that peer's
+        // own clicks then read as NEW and re-applied — a double-spend of a click, on the reliable
+        // transport's own doing, and the busier the session the shorter the window got. Per-peer rings
+        // make the window a property of the peer instead of the roster: every player keeps a full
+        // _capacity of history no matter how many others are talking.
+        private readonly Dictionary<ulong, Ring> _peers = new Dictionary<ulong, Ring>();
+
+        private sealed class Ring
+        {
+            internal readonly HashSet<ulong> Seen = new HashSet<ulong>();
+            internal readonly Queue<ulong> Order = new Queue<ulong>();
+        }
 
         public IntentDedup(int capacity = 512) { _capacity = capacity < 16 ? 16 : capacity; }
 
-        private static (ulong, ulong) Key(ulong peerId, ushort surfaceId, uint nonce)
-            => (peerId, ((ulong)surfaceId << 32) | nonce);
+        private static ulong Key(ushort surfaceId, uint nonce) => ((ulong)surfaceId << 32) | nonce;
 
         /// <summary>True the FIRST time a (peer,surface,nonce) is offered; false on any repeat (drop it).</summary>
         public bool IsNew(ulong peerId, ushort surfaceId, uint nonce)
         {
-            var k = Key(peerId, surfaceId, nonce);
-            if (_seen.Contains(k)) return false;
-            _seen.Add(k);
-            _order.Enqueue(k);
-            if (_order.Count > _capacity) _seen.Remove(_order.Dequeue());
+            if (!_peers.TryGetValue(peerId, out var ring)) _peers[peerId] = ring = new Ring();
+            var k = Key(surfaceId, nonce);
+            if (ring.Seen.Contains(k)) return false;
+            ring.Seen.Add(k);
+            ring.Order.Enqueue(k);
+            if (ring.Order.Count > _capacity) ring.Seen.Remove(ring.Order.Dequeue());
             return true;
         }
 
-        public void Reset()
-        {
-            _seen.Clear();
-            _order.Clear();
-        }
+        public void Reset() => _peers.Clear();
 
         /// <summary>
         /// Drop ONE peer's remembered window, leaving every other peer's intact. Rejoin case (rca-3 audit b):
@@ -50,14 +57,6 @@ namespace Multiplayer.Network.Sync
         /// Per-peer (not <see cref="Reset"/>) so a straddling reliable double-send from a still-connected
         /// OTHER client can never re-apply.
         /// </summary>
-        public void ResetPeer(ulong peerId)
-        {
-            if (_seen.RemoveWhere(k => k.Item1 == peerId) == 0) return;
-            var kept = new List<(ulong, ulong)>(_order.Count);
-            foreach (var k in _order)
-                if (k.Item1 != peerId) kept.Add(k);
-            _order.Clear();
-            foreach (var k in kept) _order.Enqueue(k);
-        }
+        public void ResetPeer(ulong peerId) => _peers.Remove(peerId);
     }
 }

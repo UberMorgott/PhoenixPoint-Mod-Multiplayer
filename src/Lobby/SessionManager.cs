@@ -108,6 +108,7 @@ namespace Multiplayer.Network
         public void Update()
         {
             var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+            FlushPeerList(); // one roster per frame, however many things changed in it (see BroadcastPeerList)
 
             // Periodic heartbeat
             if (now - _lastHeartbeatSend > HeartbeatIntervalMs)
@@ -835,9 +836,25 @@ namespace Multiplayer.Network
             return peers;
         }
 
+        // COALESCED (N=50 mandate). The roster is O(N) entries and every join, ready toggle, rename,
+        // pause and resume asked for a fresh broadcast — O(N) bytes to O(N) peers per change, i.e. O(N^2)
+        // for something that changes constantly while fifty people are filing into a lobby. Marking dirty
+        // and flushing ONCE per frame collapses a burst of changes into one roster, which is all any peer
+        // could render anyway. Correctness is unaffected: the roster is an absolute snapshot, so the last
+        // one in a frame is the only one that carries information.
+        private bool _peerListDirty;
+
         public void BroadcastPeerList()
         {
             if (!_engine.IsHost) return;
+            _peerListDirty = true;
+        }
+
+        /// <summary>Ship the roster if anything asked for it this frame. Driven from <see cref="Update"/>.</summary>
+        private void FlushPeerList()
+        {
+            if (!_peerListDirty || !_engine.IsHost) return;
+            _peerListDirty = false;
             var payload = MessageSerializer.SerializePeerList(BuildPeerList());
             _engine.BroadcastToAll(new NetworkMessage(PacketType.PlayerListUpdate, payload));
         }
@@ -924,6 +941,12 @@ namespace Multiplayer.Network
                 var leaverNick = _clients.TryGetValue(peerSteamId, out var lc) ? lc.PlayerName : "a player";
                 SystemChat($"— {leaverNick} left —");
             }
+            // A VOLUNTARY leave is the one thing that frees a seat: give the slot back to the pool so a
+            // long session cannot exhaust the byte-wide slot space (SlotAllocator.Assign). A peer that
+            // merely lost its connection is PAUSED and keeps its slot — it is coming back.
+            if (_engine.IsHost && _slots != null && _clients.TryGetValue(peerSteamId, out var leaver)
+                && leaver.PlayerGuid != Guid.Empty)
+                _slots.Release(leaver.PlayerGuid);
             RemoveClient(peerSteamId);
             // Host: same transport-registry leak as the heartbeat timeout — without this the leaver
             // stays in the transport's peer set and Broadcast writes to the dead id forever. The kick's

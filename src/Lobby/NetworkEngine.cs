@@ -37,7 +37,7 @@ namespace Multiplayer.Network
         /// join is a direct P2P connect — tops out at Steam's own documented 250 members. So the structure
         /// holds ~50 comfortably; the first real ceiling is 255 slots, and the practical one before that is
         /// bandwidth, because the host sends each delta once PER PEER.
-        public static readonly int MaxPlayers = 8;
+        public static readonly int MaxPlayers = 50;
 
         /// <summary>Seats for CLIENTS — the host holds one. Derived, never typed twice.</summary>
         public static readonly int MaxClients = MaxPlayers - 1;
