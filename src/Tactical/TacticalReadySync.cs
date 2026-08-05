@@ -293,17 +293,59 @@ namespace Multiplayer.Tactical
             }
         }
 
-        /// <summary>Same anchors, pivot, size and scale as the native button, one button-height lower. Copied
-        /// rather than guessed so the clone keeps whatever layout the prefab has.</summary>
+        /// <summary>Gap between the native button's bottom edge and ours. One value, so "its own row" is
+        /// a number and not a feeling.</summary>
+        private const float RowGapPx = 6f;
+
+        /// <summary>
+        /// STRICTLY BELOW, AND NATIVE UI MOVES FOR NOBODY. Reported live: the clone landed on top of / to the
+        /// right of End Turn and shoved the native buttons left, and the panel resized every time the counter
+        /// changed digits. Copying anchors and subtracting a height cannot cause either — a LAYOUT GROUP can,
+        /// and does both: a new child in the End Turn container's row is placed BY the group (our
+        /// anchoredPosition is overwritten, the row re-flows and the natives shift), and the group sizes that
+        /// child from its preferred width, which is the label's text width, which is why "1/3" and "10/3"
+        /// gave different widths.
+        ///
+        /// So the fix is not a better offset, it is LEAVING THE LAYOUT: <c>LayoutElement.ignoreLayout</c> is
+        /// Unity's own opt-out (<c>ILayoutIgnorer</c>) — the group skips the child entirely, stops reserving
+        /// a cell for it and re-flows the natives back to exactly where they were, and our RectTransform
+        /// values are ours again. WIDTH IS THEN FIXED BY CONSTRUCTION: it is the native button's own sizeDelta,
+        /// copied once, with any <c>ContentSizeFitter</c> on the clone switched off so nothing can re-derive
+        /// it from the caption. The number of digits cannot change the geometry, because no live measurement
+        /// of the caption is left in the path. (Deliberately NOT a monospace/tabular font: the clone's font
+        /// comes from the prefab, and swapping it would be the one part of this button that stops looking
+        /// native — the caption is centred, so digit widths only move the text inside a rect that no longer
+        /// moves.)
+        ///
+        /// AND READ THE SOURCE AFTER THE LAYOUT HAS RUN, NOT BEFORE. This is called from the module's Awake,
+        /// where <c>src.anchoredPosition</c>/<c>rect</c> are still the raw prefab values; a group would move
+        /// the native button at the end of the frame and leave our clone measured against a position it no
+        /// longer occupies. <c>ForceRebuildLayoutImmediate</c> settles the row first — after our opt-out, so
+        /// the rebuild it performs is already the final, clone-free one.
+        ///
+        /// Sibling, still: making the clone a CHILD of the End Turn button would also dodge the group, but
+        /// Unity's pointer enter/exit walks the whole parent chain, so hovering ours would light the native
+        /// End Turn button up with it.
+        /// </summary>
         private static void PlaceBelow(RectTransform src, RectTransform clone)
         {
             if (src == null || clone == null) return;
+
+            var ignore = clone.GetComponent<LayoutElement>();
+            if (ignore == null) ignore = clone.gameObject.AddComponent<LayoutElement>();
+            ignore.ignoreLayout = true;
+
+            foreach (var fitter in clone.GetComponents<ContentSizeFitter>()) fitter.enabled = false;
+
+            var parent = src.parent as RectTransform;
+            if (parent != null) LayoutRebuilder.ForceRebuildLayoutImmediate(parent);
+
             clone.anchorMin = src.anchorMin;
             clone.anchorMax = src.anchorMax;
             clone.pivot = src.pivot;
             clone.sizeDelta = src.sizeDelta;
             clone.localScale = src.localScale;
-            clone.anchoredPosition = src.anchoredPosition - new Vector2(0f, src.rect.height + 6f);
+            clone.anchoredPosition = src.anchoredPosition - new Vector2(0f, src.rect.height + RowGapPx);
         }
 
         /// <summary>Re-wire the click exactly as <c>NativeWidgetFactory.CloneMenuButton</c> does: strip the
