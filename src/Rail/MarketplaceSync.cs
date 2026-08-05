@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Text;
 using Assets.Code.PhoenixPoint.Geoscape.Entities.Sites.TheMarketplace;
 using Base.Core;
@@ -11,6 +12,7 @@ using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Common.Core;
 using PhoenixPoint.Common.Entities.Items;
+using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.Research;
 using PhoenixPoint.Geoscape.Events;
 using PhoenixPoint.Geoscape.Levels;
@@ -100,6 +102,10 @@ namespace Multiplayer.Network.Sync
                 new Dictionary<byte, IntentRail.OpHandler>
                 {
                     [OpBuy] = (engine, peer, nonce, op, r) => HandleBuy(peer, nonce, r),
+                    // 0xBE is the SHARED-OFFER family's surface, not the marketplace's alone — the
+                    // geoscape band 0xA0-0xBF is fully allocated (0xBF was the last), and a second
+                    // shared-stock panel is an OP, never a new surface. See TradeSync's class doc.
+                    [TradeSync.OpTrade] = (engine, peer, nonce, op, r) => TradeSync.HandleTrade(peer, nonce, r),
                 },
                 // Family reconverge: a rejected purchase leaves the gesturing client looking at a shop it
                 // thinks it just changed. The offer list does not ride the value rail, so the generic
@@ -391,6 +397,63 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>THE VEHICLE COUNT LEAVES THE PURCHASE PATH.
+        ///
+        /// <c>GeoscapeEvent.CompleteMarketplaceEvent</c>:77 builds the reward's context with
+        /// <c>Context.Site.Vehicles.SingleOrDefault()</c> — a vanilla single-player assumption that there is
+        /// at most ONE aircraft parked where the event fires. <c>Enumerable.SingleOrDefault</c> THROWS on
+        /// two, so the second aircraft at the marketplace breaks every purchase for everyone, on the host's
+        /// own click too. Co-op does not create the bug, it makes it ordinary: the whole point of a shared
+        /// campaign is several aircraft in the same place.
+        ///
+        /// The fix patches the PICK and nothing else — <c>GenerateFactionReward</c> and
+        /// <c>ChoiceReward.Apply</c> stay the game's, because re-implementing a reward apply is how a mod
+        /// starts disagreeing with the game it mirrors. One <c>call</c> operand is swapped for
+        /// <see cref="PickVehicle"/>, which (a) cannot throw at any count and (b) is DETERMINISTIC across
+        /// peers: it orders by <c>GeoVehicle.VehicleID</c> — law 2's own stable aircraft id, identical on
+        /// every peer — never by list order, which is <c>GeoMap.Vehicles</c> filtered by a <c>Where</c> and
+        /// therefore an artefact of creation order, not of the shared model.
+        ///
+        /// Ungated on purpose: this is not a mirroring decision, it is the game's arithmetic being wrong at
+        /// a count vanilla never reached, and a peer that picked differently from the host would be exactly
+        /// the divergence the determinism is for. Its only caller is the marketplace module
+        /// (<c>UIModuleTheMarketplace</c>:219), so the blast radius is this shop.</summary>
+        [HarmonyPatch(typeof(GeoscapeEvent), nameof(GeoscapeEvent.CompleteMarketplaceEvent))]
+        internal static class VehiclePickPatch
+        {
+            /// <summary>Internal: RailCheck L111 calls it directly — the assertion is that the PICK is
+            /// total and order-independent, which is a question about this method, not about the patch.</summary>
+            /// ponytail: the null guard is <c>ReferenceEquals</c>, NOT <c>v == null</c> — GeoVehicle is a
+            /// UnityEngine.Object, whose overloaded <c>==</c> also answers true for a DESTROYED one, which
+            /// would collapse every sort key to the same value and hand the pick straight back to list
+            /// order. RailCheck L111 caught exactly that.
+            internal static GeoVehicle PickVehicle(IEnumerable<GeoVehicle> vehicles) =>
+                vehicles?.OrderBy(v => ReferenceEquals(v, null) ? int.MaxValue : v.VehicleID).FirstOrDefault();
+
+            private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+            {
+                var target = AccessTools.Method(typeof(VehiclePickPatch), nameof(PickVehicle));
+                int swapped = 0;
+                foreach (var ci in instructions)
+                {
+                    if (ci.opcode == OpCodes.Call && ci.operand is MethodInfo mi &&
+                        mi.DeclaringType == typeof(Enumerable) && mi.Name == "SingleOrDefault")
+                    {
+                        swapped++;
+                        yield return new CodeInstruction(OpCodes.Call, target) { labels = ci.labels, blocks = ci.blocks };
+                    }
+                    else yield return ci;
+                }
+                // Law 1 (silent swallow): a transpiler that matched nothing leaves the throw in place and
+                // says nothing at all, which is the worst of both worlds — the patch looks applied.
+                if (swapped != 1)
+                    Debug.LogError("[MP][market] CompleteMarketplaceEvent's vehicle pick was NOT replaced (" +
+                                   swapped + " SingleOrDefault call(s) found, expected 1) — the game's own " +
+                                   "single-aircraft assumption is still live and a second aircraft parked at " +
+                                   "the marketplace will throw on every peer's purchase");
+            }
+        }
+
         /// <summary>HOST: re-derive everything from HOST state and run the game's own three lines
         /// (<c>UIModuleTheMarketplace.OnChoiceSelected</c>:215/:219/:223). The client named a row; the price,
         /// the eligibility test and the reward all come from here.
@@ -399,11 +462,8 @@ namespace Multiplayer.Network.Sync
         /// (<c>GeoscapeView.ToMarketplace</c>:736 — a fresh <c>GeoscapeEvent</c> over the marketplace site
         /// and the Phoenix faction), because the host generally has no marketplace window open at all and
         /// therefore no live event to borrow.
-        /// ponytail: <c>CompleteMarketplaceEvent</c>:77 does <c>Context.Site.Vehicles.SingleOrDefault()</c>,
-        /// which THROWS when two aircraft sit at the marketplace — a vanilla single-player assumption that
-        /// co-op makes reachable, on the host's own click too. It surfaces here as a rejected purchase with
-        /// the throw in the log rather than as a silent one. Fix it (if it bites) where the game picks the
-        /// vehicle, not by hand-rolling the reward apply.</summary>
+        /// The vehicle-count hazard at <c>CompleteMarketplaceEvent</c>:77 is closed by
+        /// <see cref="VehiclePickPatch"/> — no purchase path reads how many aircraft are parked.</summary>
         private static void HandleBuy(ulong peer, uint nonce, BinaryReader r)
         {
             string eventId = r.ReadString();

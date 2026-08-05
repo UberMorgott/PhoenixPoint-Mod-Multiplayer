@@ -174,14 +174,25 @@ namespace RailCheck
             }
         }
 
-        /// <summary>EXECUTED arm: register the real family and count the real op table. Reflection into
+        /// <summary>EXECUTED arm: register the real family and read the real op table. Reflection into
         /// IntentRail's own registry rather than a claim about the source, because the failure this guards
         /// against — "buyResearch(2), buyVehicle(3)" — is added in exactly the place a source-shaped
-        /// assertion would keep passing.</summary>
+        /// assertion would keep passing.
+        ///
+        /// WHAT IS ASSERTED IS THE OP SET, NOT A COUNT. 0xBE stopped being the marketplace's private
+        /// surface when haven trade joined it (the geoscape band 0xA0-0xBF is fully allocated, so a second
+        /// SHARED-OFFER panel is an op and never a new surface), and a bare count could only be kept green
+        /// by refusing the family its second rider. The declared set below is the family roster: every op
+        /// on it names a DISTINCT native commit funnel — <c>CompleteMarketplaceEvent</c> for the shop,
+        /// <c>GeoHaven.TradeResource</c> for the haven — and an op that is NOT on it is red no matter what
+        /// it is called, which is exactly the "buyVehicle(3)" this arm was written for. Widening the roster
+        /// is therefore a reviewed line here, in the law, next to the reason it is allowed.</summary>
+        private static readonly byte[] DeclaredOps = { MarketplaceSync.OpBuy, TradeSync.OpTrade };
+
         private static IEnumerable<string> OpCountArm()
         {
             string violation = null;
-            int ops = -1;
+            var ops = new List<byte>();
             try
             {
                 MarketplaceSync.RegisterIntents();
@@ -193,12 +204,12 @@ namespace RailCheck
                 else
                 {
                     var family = families[SurfaceIds.GeoMarketplaceIntent];
-                    var opsDict = family?.GetType().GetField("Ops")?.GetValue(family) as System.Collections.ICollection;
+                    var opsDict = family?.GetType().GetField("Ops")?.GetValue(family) as System.Collections.IDictionary;
                     if (opsDict == null)
                         violation = "L99 family-unregistered: nothing is registered on surface 0xBE after " +
                                     "MarketplaceSync.RegisterIntents() — a client's purchase intent would reach the " +
                                     "host and be dropped as an unknown surface";
-                    else ops = opsDict.Count;
+                    else foreach (byte k in opsDict.Keys) ops.Add(k);
                 }
             }
             catch (Exception ex)
@@ -206,12 +217,22 @@ namespace RailCheck
                 violation = "L99 family-unregisterable: MarketplaceSync.RegisterIntents() threw (" +
                             ex.GetType().Name + ": " + ex.Message + ") — the purchase family cannot be armed at all";
             }
-            if (violation != null) yield return violation;
-            else if (ops != 1)
-                yield return "L99 op-per-goods-kind: the marketplace family registers " + ops + " ops. The shop sells " +
+            if (violation != null) { yield return violation; yield break; }
+            var undeclared = ops.Where(o => !DeclaredOps.Contains(o)).OrderBy(o => o).ToList();
+            var missing = DeclaredOps.Where(o => !ops.Contains(o)).OrderBy(o => o).ToList();
+            if (undeclared.Count > 0)
+                yield return "L99 op-per-goods-kind: the shared-offer family registers UNDECLARED op(s) [" +
+                             string.Join(",", undeclared.Select(o => o.ToString())) + "] on 0xBE. The shop sells " +
                              "items, vehicles and researches through ONE GeoEventChoice and ONE native funnel, so " +
-                             "ONE op is the whole family — an op per kind of goods is the per-subsystem macaroni " +
-                             "factory the mandate exists to prevent";
+                             "ONE op covers the whole shop — an op per kind of goods is the per-subsystem macaroni " +
+                             "factory the mandate exists to prevent. A genuinely new SHARED-OFFER PANEL (a second " +
+                             "commit funnel, not a second kind of goods) is welcome here, but it is declared in " +
+                             "L99.DeclaredOps with its funnel named, never merely registered";
+            if (missing.Count > 0)
+                yield return "L99 family-rider-missing: op(s) [" + string.Join(",", missing.Select(o => o.ToString())) +
+                             "] are declared shared-offer riders but nothing is registered for them on 0xBE. That " +
+                             "peer's commit reaches the host and is dropped as an unknown op — the click does " +
+                             "nothing anywhere, which is law 91's silent no-op wearing a registration";
         }
 
         // ── Harmony targets, read off the attribute's own constructor arguments (L94's rule: a renamed

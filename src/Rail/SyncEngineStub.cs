@@ -34,8 +34,11 @@ namespace Multiplayer.Network.Sync
             // 0xBC resupply — the post-mission screen's two writes no other family funnels through
             // (GeoCharacter.RepairItem spends the SHARED wallet; the single-item reload).
             ReplenishSync.RegisterIntents();
-            // 0xBE Kaos marketplace — ONE buy op for every kind of goods (the shop's offer list itself
-            // rides 0xBF, host→all: it is EXCLUDED from the value rail as bridge-unresolved).
+            // 0xBE the SHARED-OFFER family — op 1 = the Kaos marketplace's ONE buy op for every kind of
+            // goods (the shop's offer list itself rides 0xBF, host→all: it is EXCLUDED from the value rail
+            // as bridge-unresolved); op 2 = TradeSync's haven resource exchange, whose stock and wallet ARE
+            // ordinary value-rail state. Both ops are registered by this one call — the geoscape band
+            // 0xA0-0xBF is fully allocated, so a new shared-stock panel is an op, never a surface.
             MarketplaceSync.RegisterIntents();
             // Tactical arc A2's end-turn (0x81) is an ordinary intent family — same engine, same envelope.
             Multiplayer.Tactical.TacticalTurnSync.RegisterIntents();
