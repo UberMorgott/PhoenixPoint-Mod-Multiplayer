@@ -1152,7 +1152,12 @@ namespace Multiplayer.Tactical
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return null;
             var coord = engine.SaveTransfer;
-            return coord != null && coord.SessionStarted ? engine : null;
+            if (coord != null && coord.SessionStarted) return engine;
+            // Not solo — a live co-op session with no SessionBegin. OnAbilityActivated returns on the very
+            // next line, before any log, so THIS is where a client silently loses its whole battle. Named,
+            // throttled, shared with TacticalDamageSync.LiveEngine (same swallow, same message).
+            TacticalDamageSync.WarnDeadSession();
+            return null;
         }
 
         // ─── THE ONE CAPTURE: every command, on every peer ─────────────────

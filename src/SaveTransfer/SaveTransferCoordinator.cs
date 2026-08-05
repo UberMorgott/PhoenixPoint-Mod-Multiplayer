@@ -720,6 +720,16 @@ namespace Multiplayer.Network
             _loadCompleteSent = false;
             _revealAllSent = false;
             _transferId = Guid.NewGuid();
+            // ARM SYNCHRONOUSLY, NOT INSIDE THE COROUTINE. The mid-tactical save write below takes ~1.15 s
+            // (live: bytes=1580544 ms=1151), and the barrier used to open only AFTER it — a window in which
+            // the previous load's LoadCompletes were still landing in a barrier nobody owned. Opening here
+            // means every ack that arrives during the write is already keyed to THIS entry: the tracker is
+            // clean, and AllDone cannot fire because the host does not mark itself done until the write
+            // finishes (SendLoadComplete). _loadPhaseActive on top of OpenBarrier's reset makes the two
+            // reveal-release paths in Update() (liveness give-up, AllDone) reachable for the whole entry —
+            // they were dead when Begin() early-returned, which is the second half of the same live bug.
+            OpenBarrier();
+            _loadPhaseActive = true;
             timing.Start(HostTacticalEntryTransferCrt(saveManager));
             return true;
         }
@@ -749,7 +759,8 @@ namespace Multiplayer.Network
 
             SendBlob(blob, SerializationComponent.DefaultExtension);
 
-            OpenBarrier();        // open the LOADED barrier (reveal-hold already armed at launch; _hostEntryHold untouched)
+            // (OpenBarrier already ran SYNCHRONOUSLY in HostBeginTacticalEntryTransfer, before this write —
+            // see the comment there. Re-opening here would wipe the acks that arrived during the write.)
             _hostLoaded = true;   // host holds its state locally (already in the level) → counts as loaded
             SendLoadComplete();   // host is past Playing → mark its slot done (+ TryReleaseBarrier: client not loaded yet)
             // Overlay fix (2026-07-13): on tac-entry the host never runs the phase-2 pump (_loadCompleteSent is
@@ -781,6 +792,11 @@ namespace Multiplayer.Network
                     MessageSerializer.SerializeEntryTransferAbort(reason)));
             }
             catch (Exception e) { Debug.LogError("[Multiplayer] EntryTransferAbort broadcast failed: " + e.Message); }
+            // Close the barrier this entry opened (HostBeginTacticalEntryTransfer opens it synchronously,
+            // BEFORE the save write that can fail into here). Leaving it open would pin TransferActive true
+            // and make every LATER mission refuse to start — the abort must not outlive itself.
+            _barrierOpen = false;
+            _loadPhaseActive = false;
             PerformDeferredLift();
         }
 
@@ -1188,6 +1204,15 @@ namespace Multiplayer.Network
             _slotAdvancedMs.Clear();
             _lastSnapshotMs = -1;
             _lastReportedLoadPct = -1;
+            // …and END the PREVIOUS load's aggregation, or it reveals THIS entry for us. _tracker.Reset()
+            // above is not enough: a peer still loading the lobby/F2 save keeps sending LoadComplete after
+            // it, re-filling the set, and Update()'s AllDone branch (gated on _loadPhaseActive alone) then
+            // fires RevealAll + PerformDeferredLift mid-entry — which lifts the host's curtain ALONE and
+            // drops _hostEntryHold. That is exactly the 2026-08-05 live run: host revealed at frame 2705,
+            // clients parked for 3 minutes. From here the reveal belongs to the ENTRY transfer, which arms
+            // its own load phase at deploy-ready (HostBeginTacticalEntryTransfer). The host's own entry load
+            // keeps broadcasting through HostEntryLoad, which is what that predicate exists for.
+            _loadPhaseActive = false;
             Debug.Log($"[Multiplayer] host reveal-hold armed (tac-entry): sessionStarted={SessionStarted} " +
                       $"revealed={_revealed} — host holds its loading screen until all clients load-complete.");
 
@@ -1858,7 +1883,17 @@ namespace Multiplayer.Network
             // — TryReleaseBarrier and the phase-1 timeout both bail on !_barrierOpen — so relaxing the _begun
             // guard on the entry path cannot double-fire. EnterLevel() no-ops on the host (its own _begun
             // guard), so the host never re-enters the level it already built.
-            if (_begun && !_hostEntryHold) return;
+            // LIVE RCA 2026-08-05 — the _hostEntryHold relaxation alone is NOT enough, because the flag is
+            // not ours alone to hold: PerformDeferredLift clears it (:1735), and the PREVIOUS load's AllDone
+            // can fire during the 1151 ms mid-tactical save write (host log frames 2705 vs 2707). Begin()
+            // then early-returned, SessionBegin was never broadcast, and both clients sat at _begun=false
+            // for the whole battle — every client tactical command dropped silently in
+            // TacticalCommandSync.LiveEngine(). So guard on the flag that is actually OURS: _barrierOpen,
+            // which the comment above already names the true single-fire guard, is set by the OpenBarrier of
+            // THIS transfer and cleared on the next line. TryReleaseBarrier (the only caller) bails on
+            // !_barrierOpen, so today this makes the early return unreachable — deliberately: a barrier that
+            // was opened must always produce its BEGIN.
+            if (_begun && !_hostEntryHold && !_barrierOpen) return;
             _barrierOpen = false;
             // Phase-2 (world load) starts now; keep snapshots flowing until the roster is all-done.
             _loadPhaseActive = true;

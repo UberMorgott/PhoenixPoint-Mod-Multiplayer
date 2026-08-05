@@ -716,8 +716,16 @@ namespace Multiplayer.Network
         /// i.e. the same row <see cref="RefreshLiveness"/> bumps on every inbound packet. The reveal barrier
         /// reads this to tell "still there, just slow" from "the process died" (SaveTransferMath.HoldsBarrier)
         /// — deliberately the RAW clock, not the reaper's verdict: a PAUSED peer keeps its roster row (L84) and
-        /// would otherwise hold the barrier for ever. Slot 0 is the host itself, always live. A slot no longer
-        /// on the roster returns 0 (never heard) — unreachable while iterating GetRosterSlots.
+        /// would otherwise hold the barrier for ever. Slot 0 is the host itself, always live.
+        ///
+        /// NEVER 0. Both miss paths (no <c>_lastHeartbeat</c> row for a client we do track, and no
+        /// <c>_clients</c> row for a slot still on the roster — a PAUSED or re-registering peer, whose
+        /// roster row L84 keeps) used to return 0, which the caller reads as an epoch timestamp:
+        /// <c>now - 0 ≈ 1.78e12 ms</c>, past every grace, so <see cref="SaveTransferMath.HoldsBarrier"/>
+        /// declares that peer DEAD on the very first sample and the reveal barrier abandons a peer nobody
+        /// ever heard from. ABSENCE OF DATA IS "NOT STARTED", NOT DEATH — only a clock that was once fresh
+        /// and has since aged past the grace may mean dead, so seed the miss with <c>now</c> and let the
+        /// grace be measured from here. (<c>SlotAdvancedMs</c> already does exactly this, by lazy-seeding.)
         /// </summary>
         public long LastSeenMsForSlot(byte slot)
         {
@@ -725,8 +733,8 @@ namespace Multiplayer.Network
             if (slot == 0) return now;
             foreach (var c in _clients.Values)
                 if (c.SlotIndex == slot)
-                    return _lastHeartbeat.TryGetValue(c.SteamId, out var last) ? last : 0;
-            return 0;
+                    return _lastHeartbeat.TryGetValue(c.SteamId, out var last) ? last : now;
+            return now;
         }
 
         /// <summary>

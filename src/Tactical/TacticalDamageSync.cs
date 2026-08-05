@@ -437,7 +437,32 @@ namespace Multiplayer.Tactical
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return null;
             var coord = engine.SaveTransfer;
-            return coord != null && coord.SessionStarted ? engine : null;
+            if (coord != null && coord.SessionStarted) return engine;
+            WarnDeadSession();
+            return null;
+        }
+
+        /// <summary>
+        /// THE SILENT SWALLOW, NAMED. Every tactical sync arm starts with <c>LiveEngine() == null → return</c>,
+        /// and that one line has two utterly different meanings: "solo play, native behaviour" (silence is
+        /// correct) and "we ARE in a co-op session but SessionBegin never arrived, so this peer's every move,
+        /// shot and kill is being thrown away" (silence is the 2026-08-05 blocker — a client played a whole
+        /// battle whose actions never reached the wire, and not one log line said so). Say the second one,
+        /// throttled to 5 s so a per-frame arm cannot flood the log. Cheap: the common solo path returns
+        /// above without ever reaching here.
+        /// </summary>
+        private static long _lastDeadSessionWarnMs;
+
+        internal static void WarnDeadSession()
+        {
+            var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+            if (now - _lastDeadSessionWarnMs < 5000) return;
+            _lastDeadSessionWarnMs = now;
+            Debug.LogError("[Multiplayer][tac] tactical sync is DEAD on this peer: a co-op session is active " +
+                           "but SaveTransferCoordinator.SessionStarted is false (no SessionBegin was ever " +
+                           "received/broadcast for this level), so every command, shot and kill captured here " +
+                           "is being DROPPED before it reaches the rail. Host: check that Begin() broadcast " +
+                           "SessionBegin after its barrier opened.");
         }
 
         /// <summary>TRUE when this peer must not compute damage of its own: a live co-op client, outside a
