@@ -28,6 +28,18 @@ namespace Multiplayer.Network.Parity
                 return diffs;
             }
 
+            // ── GAME BUILD: the identity the mod list cannot carry. Both peers may run the same mods on
+            // different Phoenix Point builds; join then rides the native save loader (mandate L6) across a
+            // build boundary the game itself keys saves on (SavegameMetaData.BuildRevisionNumber), fields
+            // and defs move under the diff rail, and the campaign diverges mid-session with nothing said.
+            // Compared ONLY when both sides state a version: an unknown means the other peer's Multiplayer
+            // build predates this field, which its MOD VERSION already diffs below — so a blank never
+            // rejects a peer that is actually fine.
+            if (!string.IsNullOrEmpty(host.GameVersion) && !string.IsNullOrEmpty(client.GameVersion) &&
+                !string.Equals(host.GameVersion, client.GameVersion, StringComparison.Ordinal))
+                diffs.Add($"Phoenix Point build differs: host {host.GameVersion} != client {client.GameVersion}. " +
+                          "Co-op needs the same game build on both machines (check for a pending Steam update).");
+
             // ── DLC: block only when the host has a DLC the client does not. ──
             var clientDlc = new HashSet<string>(client.Dlc ?? new List<string>(), StringComparer.Ordinal);
             foreach (var d in host.Dlc ?? new List<string>())

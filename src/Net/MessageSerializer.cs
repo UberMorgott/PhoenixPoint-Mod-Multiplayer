@@ -89,6 +89,12 @@ namespace Multiplayer.Network.MessageLayer
                     bw.Write(s.Entries.Count);
                     foreach (var e in s.Entries) bw.Write(e ?? "");
                 }
+
+                // APPENDED, on purpose: a peer running a Multiplayer build from before the game-build gate
+                // sends a manifest that simply ends here, and the reader below treats the absent field as
+                // "unknown" instead of throwing "implausible manifest" at a peer whose only real problem is
+                // an old mod version — which its own ModRef already diffs.
+                bw.Write(m.GameVersion ?? "");
                 return ms.ToArray();
             }
         }
@@ -128,6 +134,7 @@ namespace Multiplayer.Network.MessageLayer
                     for (var j = 0; j < entryCount; j++) s.Entries.Add(br.ReadString());
                     m.Settings.Add(s);
                 }
+                if (ms.Position < ms.Length) m.GameVersion = br.ReadString(); // see the writer's note
                 return m;
             }
         }

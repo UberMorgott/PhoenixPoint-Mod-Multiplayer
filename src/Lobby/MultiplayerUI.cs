@@ -285,17 +285,14 @@ namespace Multiplayer.UI
             StartHostAndOpenLobby();
         }
 
-        // Phase 5b version-guard co-op gate: when the startup reflection guard latched an
-        // incompatibility (ReflectionGuard.IsCompatible == false), refuse to host or join a co-op
-        // session — the spec intent "disable networking rather than proceeding". INERT on a green
-        // install (all curated bindings resolve → IsCompatible stays true), so zero behavior change on
-        // the current PP build. Returns true when the attempt must be aborted; NEVER throws.
-        private bool CoopGuardBlocks(string action)
-        {
-            // ReflectionGuard stayed in the quarry with the legacy sync reflection it curated; the rail
-            // has no binding list yet, so the version gate is always green. Re-arm when bindings return.
-            return false;
-        }
+        // THE VERSION GATE IS NOT HERE, and cannot be. `CoopGuardBlocks` used to sit at this spot returning
+        // false unconditionally (its ReflectionGuard stayed in the v1 quarry), and no amount of filling it in
+        // could have gated a BUILD: both of its call sites run BEFORE any peer exists — one starts hosting,
+        // the other parses the join code — so there is no second version to compare against yet. The real
+        // gate lives where both versions are actually in hand: ParityManifest.GameVersion
+        // (Base.Build.RuntimeBuildInfo.BuildVersion) rides the JOIN message and ParityComparer.Compare names
+        // both builds in the roster diff, which is the same soft gate that already blocks READY — so a
+        // mismatched peer is told at lobby time and the campaign never starts, rather than desyncing later.
 
         // Default DirectIP listen port for the host (matches the client connect default).
         private const int DefaultDirectPort = 14242;
@@ -308,8 +305,6 @@ namespace Multiplayer.UI
         // Steam unavailable) does not abort the others.
         private void StartHostAndOpenLobby()
         {
-            if (CoopGuardBlocks("host a co-op session"))
-                return;
             NetworkEngine.Create();
             var composite = new CompositeTransport(new ITransport[]
             {
@@ -558,8 +553,6 @@ namespace Multiplayer.UI
         // Native ShowInputPrompt → classify → drop our own host lobby → join as client.
         public void OnLobbyJoin(string input)
         {
-            if (CoopGuardBlocks("join a co-op session"))
-                return;
             var target = SmartJoinParser.Parse(input ?? "");
             if (target.Kind == JoinKind.Invalid)
             {

@@ -29,6 +29,12 @@ namespace Multiplayer.Network
             var dlc = new List<string>();
             var mods = new List<(string id, string version)>();
             var settings = new List<(string modId, IEnumerable<(string key, string value)> entries)>();
+            // The GAME's own build string, the same one the main menu shows and saves are keyed on. Read
+            // outside the big try so a failure here cannot cost the DLC/mod halves; "" then means "unknown"
+            // and ParityComparer skips the arm rather than blocking a peer over a value we failed to read.
+            var gameVersion = "";
+            try { gameVersion = Base.Build.RuntimeBuildInfo.BuildVersion ?? ""; }
+            catch (Exception e) { Debug.LogWarning("[Multiplayer] parity: game build version unreadable: " + e.Message); }
 
             try
             {
@@ -81,7 +87,7 @@ namespace Multiplayer.Network
             }
             catch (Exception e) { Debug.LogError("[Multiplayer] parity manifest collect failed: " + e.Message); }
 
-            return ParityManifest.Build(dlc, mods, settings);
+            return ParityManifest.Build(dlc, mods, settings, gameVersion);
         }
 
         // Deterministic, dependency-free value → string (no Newtonsoft ref in the mod). Scalars stringify

@@ -15,6 +15,17 @@ namespace Multiplayer.Network.Parity
     /// </summary>
     public sealed class ParityManifest
     {
+        /// <summary>The GAME's own build identity — <c>Base.Build.RuntimeBuildInfo.BuildVersion</c>
+        /// ("1.30.2.&lt;revision&gt;"). THE gate the mod set alone cannot be: peers can run identical mods on
+        /// different Phoenix Point builds, and join rides the native save loader (mandate L6) whose own
+        /// compatibility key is that same revision (<c>SavegameMetaData.BuildRevisionNumber</c>,
+        /// SavegameMetaData.cs:34). A build difference moves fields and defs under the diff rail and the
+        /// result is a silent mid-campaign divergence, which is the one failure this manifest exists to
+        /// make loud. "" = the peer's build could not be read, or its Multiplayer mod predates this field —
+        /// compared only when BOTH sides state one, so an unknown never rejects a legitimate peer (the mod
+        /// version itself already diffs in that case).</summary>
+        public string GameVersion = "";
+
         /// <summary>Sorted DLC def-names the peer owns/has enabled.</summary>
         public List<string> Dlc = new List<string>();
 
@@ -27,9 +38,10 @@ namespace Multiplayer.Network.Parity
         public static ParityManifest Build(
             IEnumerable<string> dlc,
             IEnumerable<(string id, string version)> mods,
-            IEnumerable<(string modId, IEnumerable<(string key, string value)> entries)> settings)
+            IEnumerable<(string modId, IEnumerable<(string key, string value)> entries)> settings,
+            string gameVersion = "")
         {
-            var m = new ParityManifest();
+            var m = new ParityManifest { GameVersion = gameVersion ?? "" };
 
             if (dlc != null)
                 m.Dlc = dlc.Where(d => !string.IsNullOrEmpty(d))
