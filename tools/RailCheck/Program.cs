@@ -201,6 +201,7 @@ namespace RailCheck
             laws.AddRange(L126_TranspilerSubstitutesNeverStores.Check());
             laws.AddRange(L127_ConfirmSpeaksOrActivates.Check());
             laws.AddRange(L128_BoundaryBaselineOwnsItsLevel.Check());
+            laws.AddRange(L129_HintStillShows.Check(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
