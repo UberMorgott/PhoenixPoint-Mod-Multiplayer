@@ -978,6 +978,12 @@ namespace Multiplayer.Network.Sync
                 try { s.GetComponent<PhoenixPoint.Geoscape.View.GeoSiteVisualsController>()?.Refresh(); }
                 catch (Exception ex)
                 { LogMissOnce("site visuals refresh failed for " + (IdentityResolver.RootRef(s) ?? "S#?") + ": " + ex.Message); }
+                // The AFTER picture, paired with the "[MP][outcome] CLIENT stamped" BEFORE line: what this
+                // peer's site now IS, at the instant a rail write changed it. The site-marker RCA had to be
+                // reconstructed from the host's log alone because this moment was never named on the client —
+                // and a site that never prints one of these after a mission return never received the delta.
+                Debug.Log("[MP][site] repaint " + (IdentityResolver.RootRef(s) ?? "S#?") + " state=" + s.State +
+                          " activeMission=" + (s.ActiveMission?.MissionDef?.name ?? "none"));
             }
             _siteRepaint.Clear();
         }

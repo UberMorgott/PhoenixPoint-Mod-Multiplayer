@@ -97,7 +97,22 @@ namespace Multiplayer.Network.Sync
         /// line after <c>reward.Apply(...)</c>:801, so the <c>ApplyResult</c> is fully built and is the
         /// GRANTED amount, not the requested one. Mission-specific by construction, which is why the seam is
         /// here and not on <c>GeoFactionReward.Apply</c> (that one also fires for every encounter reward).</summary>
-        internal static void HostBroadcast(GeoFactionRewardApplyResult result)
+        /// <summary>THE SITE, AS THIS PEER SEES IT AT THIS INSTANT — the diagnostic the site-marker RCA had to
+        /// be reconstructed without. Printed on BOTH peers at the same seam (host: the reward it just applied;
+        /// client: the outcome it just stamped), so the two lines are directly comparable and a host that
+        /// retired a site while its clients did not is one grep. `state` is the material
+        /// <c>GeoSiteVisualsController.RefreshSiteVisuals</c> picks from and `mission` is what
+        /// <c>RefreshMissionVisuals</c>:620 draws the quest wrapper off, i.e. exactly the two facts the
+        /// user reports as "COMPLETED here, still a quest site there".</summary>
+        internal static string SiteLine(GeoMission mission)
+        {
+            var site = mission?.Site;
+            if (site == null) return "site=none";
+            return "site=" + (Ref(site) ?? "S#?") + " state=" + site.State +
+                   " activeMission=" + (site.ActiveMission?.MissionDef?.name ?? "none");
+        }
+
+        internal static void HostBroadcast(GeoFactionRewardApplyResult result, GeoMission mission)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
@@ -119,7 +134,7 @@ namespace Multiplayer.Network.Sync
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.GeoMissionOutcome, SyncKind.StateDelta, inner)));
                 Debug.Log("[MP][outcome] HOST mission reward seq=" + seq + " res=" + Count(result.Resources) +
-                          " items=" + Count(result.Items));
+                          " items=" + Count(result.Items) + " — " + SiteLine(mission));
             }
             catch (Exception ex)
             {
@@ -521,7 +536,9 @@ namespace Multiplayer.Network.Sync
             RewardSetter.Invoke(mission, new object[] { reward });
             Debug.Log("[MP][outcome] CLIENT stamped mission outcome — CompleteSilently + the host's reward " +
                       "(res=" + Count(reward.Resources) + " items=" + Count(reward.Items) + "); the native " +
-                      "UIStateInitial:101 branch now runs the outcome modal and the resupply screen.");
+                      "UIStateInitial:101 branch now runs the outcome modal and the resupply screen. " +
+                      SiteLine(mission) + " — this is the BEFORE picture: the retirement is the host's and " +
+                      "arrives on the rail, so compare it against the '[MP][site] repaint' line that follows.");
         }
 
         /// <summary>The payload landed AFTER this peer had already completed its own mission, so
@@ -597,7 +614,7 @@ namespace Multiplayer.Network.Sync
     [HarmonyPatch(typeof(GeoFaction), nameof(GeoFaction.OnMissionRewardApplied))]
     internal static class MissionRewardBroadcast
     {
-        private static void Postfix(GeoFactionRewardApplyResult result) =>
-            MissionOutcomeMirror.HostBroadcast(result);
+        private static void Postfix(GeoFactionRewardApplyResult result, GeoMission mission) =>
+            MissionOutcomeMirror.HostBroadcast(result, mission);
     }
 }
