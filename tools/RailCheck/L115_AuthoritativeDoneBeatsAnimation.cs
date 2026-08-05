@@ -152,6 +152,39 @@ namespace RailCheck
                              "GeoSite.SetInspected:403 actually mutates (_factionsData, GeoSite.cs:71). A trigger " +
                              "keyed on a name the rail never ships fires never, and silently.";
 
+            // ── (c2) EVERY site write repaints, not just the authority leaf ─────────────────────────
+            // Executed against the real production splitter. The arm above pins that the AUTHORITY leaf is
+            // recognised; this one pins that recognition is NOT what gates the repaint, because no other
+            // covered GeoSiteInstaceData member goes through a notifying setter either: `State` raises
+            // StateChanged and `ActiveMission` (GeoSite.cs:101) raises nothing, while the controller
+            // subscribes to PropertyChanged alone (:152). A repaint keyed on one name is why a site the host
+            // RETIRED on a mission return kept its Functioning material and its blue GeoUpdateableMission
+            // wrapper (RefreshMissionVisuals:620-638) on every client — the state landed, the marker never asked.
+            var consequences = applier.GetMethod("SiteWriteConsequences", All);
+            if (consequences == null)
+                yield return "L115 premise-changed: GenericApplier.SiteWriteConsequences no longer resolves — the " +
+                             "split between 'repaint this site' and 're-seed its parked vehicles' is gone, so the " +
+                             "arms below cannot execute the decision the applier actually makes.";
+            else
+                foreach (var leaf in new[] { "State", "ActiveMission", "SiteTags", "OwnerFactionDef" })
+                {
+                    var args = new object[] { leaf, false, false };
+                    consequences.Invoke(null, args);
+                    if (!(bool)args[1])
+                        yield return "L115 site-write-unrepainted: SiteWriteConsequences leaves the marker " +
+                                     "UNREPAINTED for the covered leaf '" + leaf + "'. That leaf lands as a twin " +
+                                     "write on the live GeoSite and fires no PropertyChanged, so " +
+                                     "GeoSiteVisualsController._refresh is never set and the globe keeps drawing " +
+                                     "the pre-write site — the exact 2026-08-05 report (host COMPLETED, clients " +
+                                     "still an active quest site). The field NAME may decide the vehicle re-seed; " +
+                                     "it may not decide whether the marker asks again.";
+                    if (leaf == "State" && (bool)args[2])
+                        yield return "L115 reseed-overreach: SiteWriteConsequences re-seeds the parked vehicles for " +
+                                     "'State' too. Re-deriving a derivation is only correct off the " +
+                                     "AUTHORITATIVE-DONE leaf; widening it makes every ordinary site delta re-issue " +
+                                     "Navigate, and NavigateRoutine opens with a 5 s yield (GeoNavComponent.cs:89).";
+                }
+
             // ── (d) + (e) what the peer ENDS UP looking at ─────────────────
             if (!Program.Callees(markSite, game).Any(c => c.MetadataToken == vehiclesProp.MetadataToken && c.Module == vehiclesProp.Module))
                 yield return "L115 parked-vehicle-unmarked: MarkSiteAuthority does not ask GeoSite.Vehicles:239, so " +

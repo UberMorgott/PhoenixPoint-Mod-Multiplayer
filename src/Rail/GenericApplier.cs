@@ -309,6 +309,11 @@ namespace Multiplayer.Network.Sync
                         }
                         // op==1 with existing != null / op==2 with null = redelivery or already-converged: no-op (law 7)
                     }
+                    // Same post-batch rung the value batch uses at :171 (and outside SyncApplyScope for the
+                    // same reason): a structural packet is the ONLY carrier of a site's mission going
+                    // null↔non-null, so without this the marker repaint it just marked would wait for the
+                    // next value batch — or never arrive at all on a quiet geoscape.
+                    FlushOrderReseed();
                 }
                 catch (Exception ex)
                 {
@@ -422,6 +427,7 @@ namespace Multiplayer.Network.Sync
             else LogMissOnce("descend create at " + rootKey + ": no native wiring for " +
                              owner.GetType().Name + "." + field.Name + " — field assigned RAW");
             touched.Add(owner);
+            MarkOrderChange(owner, field.Name); // the mission wrapper is a MARKER, not a view state (law 11)
             OpenUiRepaint.MarkDirty(); // law 11: the open geoscape shows the new marker NOW
             Debug.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + t.Name + ")");
             return true;
@@ -437,6 +443,10 @@ namespace Multiplayer.Network.Sync
             { LogMissOnce("descend owner/field unresolved at " + rootKey + " — destroy skipped"); return; }
             field.SetValue(owner, null);
             touched.Add(owner);
+            // The retired mission's blue wrapper hangs off GeoSiteVisualsController.RefreshMissionVisuals:620
+            // (`site.ActiveMission as GeoUpdateableMission`), a globe MonoBehaviour that no view-state
+            // re-enter touches — so MarkDirty alone leaves the wrapper on screen. Same seam as the leaf path.
+            MarkOrderChange(owner, field.Name);
             OpenUiRepaint.MarkDirty();
             Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied");
         }
@@ -883,10 +893,37 @@ namespace Multiplayer.Network.Sync
         /// <see cref="MarkSiteAuthority"/>.</summary>
         private static bool IsSiteAuthorityLeaf(string name) => name == "FactionsData";
 
+        /// <summary>WHAT A RAIL WRITE ON A GeoSite MUST TRIGGER, kept pure so RailCheck L115 can execute it
+        /// case by case.
+        ///
+        /// THE MARKER REPAINT IS UNCONDITIONAL and the field name may not gate it. Every covered
+        /// <c>GeoSiteInstaceData</c> member lands as a twin write on the LIVE site, which is exactly the
+        /// path the game's own <c>SetProperty</c> notification does NOT sit on: <c>ActiveMission</c> is a
+        /// plain auto-property (GeoSite.cs:101) and <c>State</c> raises <c>StateChanged</c>, not
+        /// <c>PropertyChanged</c> (:189-197) — and <c>GeoSiteVisualsController</c> subscribes to
+        /// <c>PropertyChanged</c> ALONE (:152). So the game repaints a retired site only from its own
+        /// explicit <c>RefreshVisuals()</c> calls (:826 updateable-mission ended, :866 <c>DestroySite</c>),
+        /// none of which a projector runs. Gating the repaint on ONE leaf name ("FactionsData") is what let
+        /// a host-retired quest site keep its blue mission wrapper and its Functioning material on every
+        /// client after a mission returned: the state arrived, the marker never asked again.
+        ///
+        /// THE PARKED-VEHICLE RE-SEED STAYS NAMED, and that asymmetry is the point: re-deriving a
+        /// derivation is only correct off the AUTHORITATIVE-DONE leaf (see <see cref="MarkSiteAuthority"/>),
+        /// while asking a MonoBehaviour to set its own <c>_refresh</c> bool costs one field write and is
+        /// correct after any write at all.</summary>
+        internal static void SiteWriteConsequences(string fieldName, out bool repaintMarker, out bool reseedParked)
+        {
+            repaintMarker = true;
+            reseedParked = IsSiteAuthorityLeaf(fieldName);
+        }
+
         private static void MarkOrderChange(object entity, string fieldName)
         {
             if (IsOrderLeaf(fieldName) && entity is GeoVehicle v) { _reseed.Add(v); return; }
-            if (IsSiteAuthorityLeaf(fieldName) && entity is GeoSite s) MarkSiteAuthority(s);
+            if (!(entity is GeoSite s)) return;
+            SiteWriteConsequences(fieldName, out var repaintMarker, out var reseedParked);
+            if (repaintMarker) _siteRepaint.Add(s);
+            if (reseedParked) MarkSiteAuthority(s);
         }
 
         /// <summary>

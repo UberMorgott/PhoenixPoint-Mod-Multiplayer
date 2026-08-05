@@ -110,6 +110,11 @@ namespace Multiplayer.Network.Sync
         private static readonly List<Type> _kinds = new List<Type>();
         private static readonly HashSet<byte> _sentKinds = new HashSet<byte>();
         private static bool _baselined;
+        // The LEVEL the reload boundary was taken on, and the level the current cycle is walking. See
+        // BaselineIsHonest: the baseline's whole premise is "the clients hold what I am looking at", and
+        // that survives only as long as it is the SAME level object.
+        private static int _boundaryLevelId;
+        private static int _cycleLevelId;
         private static bool _forceFull;
         private static float _lastFullResendAt = float.NegativeInfinity; // see FullResendCooldownSec
         private static bool _fullResendPending;                          // a request arrived inside the window
@@ -362,6 +367,10 @@ namespace Multiplayer.Network.Sync
         {
             ResetForReloadBoundary();
             Seq.Reset();
+            // Session teardown is the ONE place the structural root set dies: across a mere reload boundary
+            // it is kept on purpose (see ResetForReloadBoundary), but a new session's peers share nothing
+            // with the old one's, so a surviving set would diff the next level against a foreign campaign.
+            _prevRoots.Clear(); _rootsSeeded = false;
             _kindIds.Clear(); _kinds.Clear();
             _rootTouchedSeq.Clear(); // the seq stream restarts, so recorded touch-seqs would over-gate
             _reportWritten = false;
@@ -377,8 +386,20 @@ namespace Multiplayer.Network.Sync
                                         // walk that belonged to a level it no longer has
             _snapshot = new Dictionary<string, Entry>(StringComparer.Ordinal);
             _sentKinds.Clear();
-            _prevRoots.Clear(); _rootsSeeded = false; // re-seed silently on the post-boundary baseline walk
+            // _prevRoots is deliberately KEPT. It is the root set of the level the CLIENTS still hold — they
+            // loaded the very blob this boundary was taken on — so it is the only honest reference the
+            // deferred first walk has. Clearing it silently seeded the post-transition set instead
+            // (StructuralDiff:1266 `if (!_rootsSeeded) { SeedRoots(); return; }`), which is how a mission
+            // the host retired during the geoscape return never got its `S#<id>…ActiveMission` DESTROY:
+            // gone on the host, still live on every client, and no later walk can ever notice. Redundant in
+            // the same-level case, and safe in the save-load case: a stale create the client already has is
+            // a no-op (`op==1 with existing != null`), a stale destroy of a root it also lacks likewise.
             _baselined = false;
+            // Stamp WHICH level the "clients share the save" promise was made about. Instance id, not a
+            // reference: a dying GeoLevelController must not be kept alive by the rail, and an id never
+            // trips Unity's fake-null equality (law L113).
+            var boundaryLevel = GeoLevel();
+            _boundaryLevelId = boundaryLevel == null ? 0 : boundaryLevel.GetInstanceID();
             _forceFull = false;
             _forcePrefixes.Clear();
             _fullResendPending = false;
@@ -643,6 +664,37 @@ namespace Multiplayer.Network.Sync
         // REPLACES the reference and cannot write into a def-shared instance), and DefOwnership is the
         // reference-identity index the criterion asked for. Counting aliased binds would change nothing.
 
+        /// <summary>
+        /// THE BASELINE PREMISE, kept pure so RailCheck L128 can execute it case by case.
+        ///
+        /// "No emit — clients share the save" is a claim about ONE INSTANT: the moment the boundary was
+        /// taken, every peer held the same bytes. It is not a claim about the walk that eventually reads
+        /// them, and the two are not the same event — the boundary is taken when the transfer blob is
+        /// consumed, the first walk happens whenever a geoscape next exists. On a co-op tactical mission
+        /// those are separated by the WHOLE MISSION: <see cref="HostTick"/> bails while
+        /// <c>GeoLevel()</c> is null, so <c>_baselined</c> stays false from mission ENTRY until the
+        /// post-mission geoscape RETURN.
+        ///
+        /// And the host writes the campaign in that gap. The return completes the mission during the
+        /// geoscape load (<c>GeoLevelController._missionToComplete</c>, cs:694-711 → <c>GeoMission.Complete</c>
+        /// → <c>ApplyOutcomes</c>:463-474 `Site.ActiveMission = null` + `Reward.DestroySites.Add(Site)` →
+        /// <c>GeoSite.DestroySite</c>:846-867 `State = Destroyed`), while the clients run
+        /// <c>CompleteSilently</c> ALONE (ClientMissionResultGate — law 3: the campaign write is the host's).
+        /// So the site is retired on the host and untouched on every client, and the baseline walk that
+        /// followed ~15 frames later recorded the RETIRED site as "what everybody already has" and shipped
+        /// nothing. Permanently: the value diff has no older snapshot to disagree with. That is the
+        /// 2026-08-05 report — the site read COMPLETED on the host and kept its blue quest wrapper on the
+        /// clients — and it is not site-specific: every host write across that transition died the same way.
+        ///
+        /// THE FIX IS THE PREDICATE, not a mission hook: a baseline is honest only for the LEVEL it was
+        /// taken on. Same level (a session starting on a live geoscape — the clients' save transfer really
+        /// is this state) → baseline. Different level (a tactical return, a save load) → the clients hold
+        /// the PRE-transition bytes, so the walk EMITS. A boundary taken with no level at all (id 0) can
+        /// promise nothing and never baselines.
+        /// </summary>
+        internal static bool BaselineIsHonest(int boundaryLevelId, int walkedLevelId) =>
+            boundaryLevelId != 0 && boundaryLevelId == walkedLevelId;
+
         public static void HostTick(NetworkEngine engine)
         {
             if (engine == null || !engine.IsHost || !engine.IsActiveSession) return;
@@ -710,6 +762,7 @@ namespace Multiplayer.Network.Sync
             _cycleForcePrefixes.Clear();
             _cycleForcePrefixes.AddRange(_forcePrefixes);
             _cycleForceFull = _forceFull;
+            _cycleLevelId = geo.GetInstanceID();
             _cycleRoots = new List<KeyValuePair<string, object>>();
             foreach (var r in IdentityResolver.Roots(geo)) _cycleRoots.Add(r);
             _cycleNext = 0; _cycleFrames = 0; _cycleWalkMs = 0; _maxSliceMs = 0;
@@ -827,7 +880,15 @@ namespace Multiplayer.Network.Sync
                           maxSliceMs.ToString("F1", CultureInfo.InvariantCulture) + "ms roots=" + roots +
                           " changed=" + changed.Count);
 
-            if (!_baselined && !wasForceFull)
+            bool honest = BaselineIsHonest(_boundaryLevelId, _cycleLevelId);
+            if (!_baselined && !honest)
+                // Never silent (law 1): a swallowed baseline left no line at all, and that silence is the
+                // whole reason it survived. The emit itself is the fall-through below.
+                Debug.Log("[Multiplayer][rail] DiffEngine post-boundary walk EMITS instead of baselining: the " +
+                          "boundary was taken on level #" + _boundaryLevelId + " and this walk is on level #" +
+                          _cycleLevelId + ". Everything the host wrote across that transition — the mission " +
+                          "outcome above all — is NOT in what the clients loaded, so it ships as a delta.");
+            if (!_baselined && !wasForceFull && honest)
             {
                 _baselined = true;
                 SeedRoots(); // baseline root set — clients got these entities via the save transfer (law 1)
