@@ -162,6 +162,7 @@ namespace RailCheck
             laws.AddRange(L26_PauseAndOneShot.Check());
             laws.AddRange(L79AimAnimAndAbilityRefresh.Check(game));
             laws.AddRange(L80_AbilityKeyStability.Check(game));
+            laws.AddRange(L84_NoPeerRemoval.Check());
             laws.AddRange(L91_NoPeerDeadlock.Check());
             laws.AddRange(L92_DerivedGeoWidgets.Check(game));
             laws.AddRange(L93_WindowOrderAndHistory.Check(game));
