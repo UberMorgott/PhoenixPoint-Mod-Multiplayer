@@ -1626,7 +1626,7 @@ namespace Multiplayer.Tactical
         /// (<c>MoveAbility.GetDisabledStateInternal</c>:94-97). Both arms matter; neither subsumes the other.</summary>
         internal static string Validate(bool actorFound, bool actorAlive, bool actorIsPlayerControlled,
                                         bool factionIsPlayingTurn, bool abilityFound, bool abilityIsRider,
-                                        bool actorBusy, string abilityDisabledReason,
+                                        bool actorBusy, string abilityDisabledReason, bool targetIsOffered,
                                         float actionPoints, float actionPointCost,
                                         float willPoints, float willPointCost)
         {
@@ -1648,6 +1648,15 @@ namespace Multiplayer.Tactical
                        "(first-to-act-wins)";
             if (!string.IsNullOrEmpty(abilityDisabledReason))
                 return "the game's own gate refuses this ability: " + abilityDisabledReason;
+            // WHICH target, not WHETHER there is one. GetDisabledState's NoValidTarget arm
+            // (TacticalAbility:464, HasValidTargets) only says SOME legal target exists — so the point or the
+            // actor the client picked was accepted verbatim by the host and every peer wrote it: the exit tile
+            // of a vehicle was effectively client-authoritative, and boarding never checked the chosen vehicle
+            // against the ability's own set (capacity is computed locally, VehicleComponent.IsFull:37). This
+            // arm makes the game's OWN enumeration the authority for the choice as well as for its existence.
+            if (!targetIsOffered)
+                return "the chosen target is not one this ability offers on the host — the two peers disagree " +
+                       "about the board, and the host's own target list is what an order may name";
             if (actionPoints < actionPointCost)
                 return "not enough AP: " + actionPoints.ToString("0.##") + " left, " +
                        actionPointCost.ToString("0.##") + " needed";
@@ -1728,6 +1737,80 @@ namespace Multiplayer.Tactical
                       " — falling back to its own scene object so the replay cannot throw and strand the actor.");
         }
 
+        /// <summary>Two targets are the SAME choice, as a pure decision so RailCheck L132 can execute it.
+        ///
+        /// The choice has exactly two axes, and which one is being made is decided by the CHOSEN target, never
+        /// by the ability: naming an ACTOR (board that vehicle, shoot that alien) or naming a POSITION (exit
+        /// onto that tile, throw at that point). A target that names neither — a direction, an inventory item,
+        /// the actor itself — is not a choice between offers at all, and the game's own disabled-state gate
+        /// stays its only authority.
+        ///
+        /// Position is compared with a grid tolerance because the two peers RE-DERIVE the offer from their own
+        /// physics casts (<c>GetTargetPositions</c> yields <c>castResult.Point + up*0.05</c>), so identical
+        /// tiles differ in the last decimals; the tactical grid is 1 unit, so half a unit can never reach the
+        /// neighbouring tile.</summary>
+        internal static bool TargetMatches(object offeredActor, Vector3 offeredPos, bool offeredHasPos,
+                                           object chosenActor, Vector3 chosenPos, bool chosenHasPos)
+        {
+            if (chosenActor != null) return ReferenceEquals(offeredActor, chosenActor);   // L113: identity
+            if (!chosenHasPos) return true;
+            return offeredHasPos && (offeredPos - chosenPos).sqrMagnitude <= 0.25f;
+        }
+
+        /// <summary>Does the ability itself offer the target the client picked? ONE seam, every ability, and
+        /// the enumeration is the game's own <c>TacticalAbility.GetTargets()</c> — no list of abilities here
+        /// and no re-implementation of any ability's rules (<c>EnterVehicleAbility.GetTargets</c>:135-150 is
+        /// where <c>CanEnter</c>/<c>IsFull</c> live, <c>ExitVehicleAbility</c>:100-113 is where
+        /// <c>CanExit</c>+<c>CanStandAt</c> live, and both answer here for free).
+        ///
+        /// ONLY FOR AN ABILITY THAT DECLARES ITS OWN SET, and that is structural rather than a whitelist: an
+        /// ability which does not override <c>GetTargets</c> inherits <c>GetDefaultTargets</c>, whose position
+        /// branch floor-casts the whole reachable area — for <c>MoveAbility</c>, whose real authority is the
+        /// PATHFINDER and not an enumeration (<c>GetTargetsData</c>, and it logs an error if asked while the
+        /// actor is executing), that is thousands of casts per intent for an answer the ability never used.
+        /// So the rule is "an ability that publishes a target list is held to it", which every modded ability
+        /// joins by overriding the same method.
+        ///
+        /// A THROW ACCEPTS. This is an extra gate on top of the game's own; it must never become a new way for
+        /// an order to be refused by our own bug.</summary>
+        internal static bool TargetIsOffered(TacticalAbility ability, TacticalAbilityTarget chosen)
+        {
+            if (ability == null || chosen == null) return true;
+            if (!DeclaresOwnTargets(ability.GetType())) return true;
+            try
+            {
+                foreach (var offered in ability.GetTargets())
+                {
+                    if (offered == null) continue;
+                    if (TargetMatches(offered.GetTargetActor(), offered.PositionToApply, offered.HasPositionToApply,
+                                      chosen.GetTargetActor(), chosen.PositionToApply, chosen.HasPositionToApply))
+                        return true;
+                }
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][tac] could not enumerate the targets of " +
+                               (ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name) +
+                               " to check the one a peer picked — the order is ACCEPTED on the game's own gate " +
+                               "alone: " + ex);
+                return true;
+            }
+        }
+
+        private static readonly Dictionary<Type, bool> _declaresTargets = new Dictionary<Type, bool>();
+
+        private static bool DeclaresOwnTargets(Type abilityType)
+        {
+            bool declares;
+            if (_declaresTargets.TryGetValue(abilityType, out declares)) return declares;
+            var m = AccessTools.Method(abilityType, "GetTargets",
+                                       new[] { typeof(TacticalTargetData), typeof(TacticalActorBase), typeof(Vector3) });
+            declares = m != null && m.DeclaringType != typeof(TacticalAbility);
+            _declaresTargets[abilityType] = declares;
+            return declares;
+        }
+
         private static void HandleActivate(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
             long bodyStart = r.BaseStream.Position;
@@ -1799,6 +1882,7 @@ namespace Multiplayer.Tactical
                                       faction != null && faction.IsPlayingTurn,
                                       ability != null, ability != null && IsRider(ability),
                                       actor != null && actor.HasExecutingAbility(), disabled,
+                                      TargetIsOffered(ability, target),
                                       stats == null ? 0f : (float)stats.ActionPoints,
                                       ability == null ? 0f : ability.ActionPointCost,
                                       stats == null ? 0f : (float)stats.WillPoints,

@@ -204,6 +204,7 @@ namespace RailCheck
             laws.AddRange(L129_HintStillShows.Check(game));
             laws.AddRange(L130_HintReachesEveryPeer.Check(game));
             laws.AddRange(L131_StatusSetIsRailed.Check());
+            laws.AddRange(L132_ChosenTargetIsOffered.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -7000,36 +7001,36 @@ namespace RailCheck
             }
             // accept, then each refusal in turn. Every arm is a real case the host will meet.
             const string ok = null;
-            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, false, null, 4f, 1f, 10f, 0f) != ok)
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, false, null, true, 4f, 1f, 10f, 0f) != ok)
                 yield return "L65 arbiter-refuses-the-legal-case: a living player soldier on its own turn, with a " +
                              "rider ability it can afford, is REFUSED — no peer could command anything";
-            if (Multiplayer.Tactical.TacticalCommandSync.Validate(false, true, true, true, true, true, false, null, 4f, 1f, 10f, 0f) == null)
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(false, true, true, true, true, true, false, null, true, 4f, 1f, 10f, 0f) == null)
                 yield return "L65 arbiter-accepts-a-ghost: a command for an actor the host cannot find is accepted";
-            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, false, true, true, true, true, false, null, 4f, 1f, 10f, 0f) == null)
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, false, true, true, true, true, false, null, true, 4f, 1f, 10f, 0f) == null)
                 yield return "L65 arbiter-commands-the-dead: a command for a DEAD actor is accepted";
-            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, false, true, true, true, false, null, 4f, 1f, 10f, 0f) == null)
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, false, true, true, true, false, null, true, 4f, 1f, 10f, 0f) == null)
                 yield return "L65 arbiter-commands-the-aliens: a command for an actor whose faction is NOT " +
                              "player-controlled is accepted — a peer could walk the Pandorans around";
-            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, false, true, true, false, null, 4f, 1f, 10f, 0f) == null)
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, false, true, true, false, null, true, 4f, 1f, 10f, 0f) == null)
                 yield return "L65 arbiter-ignores-the-turn: a command is accepted while that faction is not playing " +
                              "its turn — soldiers would move during the aliens' turn";
-            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, false, true, false, null, 4f, 1f, 10f, 0f) == null)
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, false, true, false, null, true, 4f, 1f, 10f, 0f) == null)
                 yield return "L65 arbiter-invents-abilities: a command naming a def guid the actor does not have is accepted";
-            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, false, false, null, 4f, 1f, 10f, 0f) == null)
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, false, false, null, true, 4f, 1f, 10f, 0f) == null)
                 yield return "L65 arbiter-runs-non-riders: a command for an ability outside the declared rider set is " +
                              "accepted — the host would execute something no peer is mirroring";
             // THE two-peers-one-soldier arms. These are the arbitration, not decoration.
-            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, true, null, 4f, 1f, 10f, 0f) == null)
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, true, null, true, 4f, 1f, 10f, 0f) == null)
                 yield return "L65 arbiter-double-commands: a second peer's command for a soldier that is ALREADY " +
                              "executing an ability is accepted — both orders queue on one soldier and first-to-act-wins " +
                              "is not enforced at all";
-            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, false, "NeedsMovementLeft", 4f, 1f, 10f, 0f) == null)
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, false, "NeedsMovementLeft", true, 4f, 1f, 10f, 0f) == null)
                 yield return "L65 arbiter-overrides-the-game: a command the game's OWN disabled-state gate refuses is " +
                              "accepted — for movement that gate IS the out-of-AP rule (ActionPoints < 1)";
-            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, false, null, 0.5f, 1f, 10f, 0f) == null)
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, false, null, true, 0.5f, 1f, 10f, 0f) == null)
                 yield return "L65 arbiter-spends-what-is-gone: a command costing more AP than the actor has left is " +
                              "accepted — the AP check IS the cross-turn arbiter for two peers on one soldier";
-            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, false, null, 4f, 1f, 1f, 3f) == null)
+            if (Multiplayer.Tactical.TacticalCommandSync.Validate(true, true, true, true, true, true, false, null, true, 4f, 1f, 1f, 3f) == null)
                 yield return "L65 arbiter-spends-willpower-it-lacks: a command costing more WP than the actor has is accepted";
 
             // the host really consults it, really runs native, really refuses out loud
