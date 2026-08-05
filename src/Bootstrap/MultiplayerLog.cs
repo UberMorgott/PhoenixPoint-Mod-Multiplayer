@@ -28,7 +28,6 @@ namespace Multiplayer.Util
         private static readonly string[] Prefixes = { "[MP]", "[Multiplayer]" };
         private const string DirName = "Multiplayer";
         private const string LogName = "multiplayer.log";
-        private const string PrevName = "multiplayer-prev.log";
         // Same-machine instance cap for the suffixed-file fallback (multiplayer-2.log … -N.log) when
         // the primary log is locked by an earlier instance (co-op client on the local 2-instance rig).
         private const int MaxInstances = 5;
@@ -66,24 +65,7 @@ namespace Multiplayer.Util
                     var dir = Path.Combine(Application.persistentDataPath, DirName);
                     Directory.CreateDirectory(dir);
 
-                    var logPath = Path.Combine(dir, LogName);
-                    var prevPath = Path.Combine(dir, PrevName);
-                    LogPath = logPath;
-
-                    // Rotate: keep exactly one previous run (multiplayer-prev.log).
-                    try
-                    {
-                        if (File.Exists(logPath))
-                        {
-                            if (File.Exists(prevPath))
-                                File.Delete(prevPath);
-                            File.Move(logPath, prevPath);
-                        }
-                    }
-                    catch
-                    {
-                        // Rotation is best-effort; fall back to truncating the fresh file below.
-                    }
+                    LogPath = Path.Combine(dir, LogName);
 
                     // append:false -> truncate/create fresh; AutoFlush so a crash still leaves data on disk.
                     // A 2nd same-machine instance (the co-op client test rig) finds multiplayer.log
@@ -97,6 +79,30 @@ namespace Multiplayer.Util
                             ? LogName
                             : "multiplayer-" + instance + ".log";
                         var attemptPath = Path.Combine(dir, attemptName);
+
+                        // Rotate HERE, per suffix — keep exactly one previous run each
+                        // (multiplayer-prev.log, multiplayer-2-prev.log, …). This used to sit before the
+                        // loop and so only ever rotated multiplayer.log: the -N suffix is picked by LOCK
+                        // ORDER at runtime, not by instance folder, so every fallback instance overwrote
+                        // its own history on launch and two investigations were run without it.
+                        // Best-effort by design — a first launch has nothing to move and a locked file
+                        // must cost a log, never the boot.
+                        try
+                        {
+                            if (File.Exists(attemptPath))
+                            {
+                                var prevPath = Path.Combine(
+                                    dir, Path.ChangeExtension(attemptName, null) + "-prev.log");
+                                if (File.Exists(prevPath))
+                                    File.Delete(prevPath);
+                                File.Move(attemptPath, prevPath);
+                            }
+                        }
+                        catch
+                        {
+                            // Locked or unmovable; the append:false open below still truncates it.
+                        }
+
                         try
                         {
                             _writer = new StreamWriter(attemptPath, append: false) { AutoFlush = true };
