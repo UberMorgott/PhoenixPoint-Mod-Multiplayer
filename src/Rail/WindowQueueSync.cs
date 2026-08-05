@@ -407,4 +407,112 @@ namespace Multiplayer.Network.Sync
             }
         }
     }
+
+    /// <summary>
+    /// A RESTORED WINDOW WHOSE SUBJECT HAS RESOLVED IS NOT RESTORED.
+    ///
+    /// THE REPORT (2026-08-05). Coming out of a tactical mission, the whole pre-deployment window history
+    /// came back correctly — including the START-MISSION window for the mission that had just been played.
+    /// The player had already flown that mission; being asked to launch it again is an offer on a subject
+    /// that no longer exists.
+    ///
+    /// WHY IT CAME BACK. A mission brief is a <c>UIStateGeoModal</c> opened through
+    /// <c>GeoscapeView.OpenModalPersistent</c>:848, and <c>Persistent</c> is exactly what puts it in the
+    /// save: <c>GenerateContext</c>:129-136 hands back a <c>RestoreContext(_modal, _modalData)</c>, which
+    /// <c>GeoscapeViewSwitchQuery.GetRestorableData</c>:25-37 writes out and <c>RestoreData</c>:39-56 rebuilds
+    /// by calling <c>RegenerateState</c>:30-40 on each entry. That rebuild tests exactly one thing —
+    /// <c>_modalData == null</c> — and a completed <c>GeoMission</c> is not null, so the brief was rebuilt
+    /// unconditionally.
+    ///
+    /// SO THE GAME ALREADY HAS THIS RULE AND IT IS SIMPLY TOO NARROW. "A restored window whose subject no
+    /// longer EXISTS is not restored" is <c>RegenerateState</c>'s own null test, and <c>RestoreData</c>:46-50
+    /// already knows how to skip such an entry. This widens "no longer exists" to "has RESOLVED", using the
+    /// game's own verdict rather than a new one: <c>UIStateInitial.EnterState</c>:102 decides a mission is
+    /// over with <c>IsCompleted || GetMissionOutcomeState() != TacFactionState.Playing</c>, and that is the
+    /// predicate below, unchanged.
+    ///
+    /// GENERIC BY SUBJECT, NOT BY <c>ModalType</c>. The filter reads the SUBJECT out of whatever context it
+    /// is handed — any instance field holding a <c>GeoMission</c> — so it covers all five
+    /// <c>IGeoscapeRestorableViewStateContext</c> implementors at once (<c>UIStateGeoModal</c>,
+    /// <c>UIStateAssetDeployment</c>, <c>UIStateGeoscapeEvent</c>, <c>UIStateMarketplaceGeoscapeEvent</c>,
+    /// <c>UIStateBaseGeoscapeEvent</c>) and every one of the eleven brief <c>ModalType</c>s
+    /// <c>GetMissionBriefModal</c>:1724-1798 can return. A blacklist of one enum member would have covered
+    /// the reported window and left its ten siblings — and every future one — restoring dead offers.
+    ///
+    /// THE REWARD WINDOW IS UNAFFECTED, AND NOT BECAUSE IT IS EXEMPTED. It is never in the restored set at
+    /// all: the post-mission outcome modal is raised FRESH on the way back in, by
+    /// <c>UIStateInitial.EnterState</c>:112 <c>OpenModalPersistent(GetMissionOutcomeModal(lastMission),
+    /// lastMission, int.MaxValue)</c>, which runs AFTER <c>GeoscapeView.RestoreState</c> has already rebuilt
+    /// the queue. So "drop the finished mission's windows" cannot reach it — it was not restored, it was
+    /// just created. RailCheck L117 pins that, because it is the load-bearing half of this fix.
+    ///
+    /// OTHER WINDOWS OF THE SAME SHAPE, stated rather than assumed: the INTERCEPTION brief/outcome carry an
+    /// <c>InterceptionInfoData</c> with live aircraft lists and NO <c>GeoMission</c>
+    /// (<c>GeoWindowCoverage</c> declares them Gap), so this filter does not reach them and they restore as
+    /// before; <c>HavenInfiltrateBrief</c> is declared LocalOnly and likewise carries no mission. A haven
+    /// mission brief that DOES carry its <c>GeoMission</c> rides this filter for free — that is the point of
+    /// keying on the subject.
+    ///
+    /// KNOWN AND DELIBERATE SCOPE EDGE: a CANCELLED mission is not caught. <c>GeoMission.Cancel</c>:253-265
+    /// clears <c>Site.ActiveMission</c> but never sets <c>IsCompleted</c>, so the game's own predicate reads
+    /// it as still Playing. Testing site-detachment instead would catch it and would also risk dropping a
+    /// LIVE brief whose mission is not its site's active one — an un-grounded false drop, traded for a case
+    /// that closes its own window on the way out anyway.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoscapeViewSwitchQuery), nameof(GeoscapeViewSwitchQuery.RestoreData))]
+    internal static class RestoreDropsResolvedSubjects
+    {
+        private static void Prefix(List<GeoscapeViewStateSwitchRestorableData> data)
+        {
+            if (data == null) return;
+            try
+            {
+                for (int i = data.Count - 1; i >= 0; i--)
+                {
+                    var mission = SubjectMission(data[i].State);
+                    if (mission == null || !HasResolved(mission)) continue;
+                    data.RemoveAt(i);
+                    // Never silent: a window the player expected back and did not get must say why.
+                    Debug.Log("[MP][windows] restore DROPS a stacked window whose mission '" +
+                              (mission.MissionDef == null ? "?" : mission.MissionDef.name) + "' has already " +
+                              "resolved (completed=" + mission.IsCompleted + ") — the offer it carried is dead. " +
+                              "The post-mission reward window is not affected: it is raised fresh by " +
+                              "UIStateInitial after this restore, not carried through it.");
+                }
+            }
+            catch (Exception ex)
+            {
+                // A filter that throws must not cost the player their whole window history — the native
+                // restore below still runs on the untouched remainder.
+                Debug.LogError("[MP][windows] filtering resolved subjects out of the restored window queue " +
+                               "failed — the queue is restored unfiltered: " + ex);
+            }
+        }
+
+        /// <summary>The game's OWN verdict that a mission is over (<c>UIStateInitial.EnterState</c>:102),
+        /// not a second opinion. <c>GetMissionOutcomeState</c>:556 dereferences
+        /// <c>Site.GeoLevel.ViewerFaction</c> whenever <c>Result</c> is set, so the site is checked first —
+        /// a restored context can name a mission whose site is already gone.</summary>
+        private static bool HasResolved(GeoMission mission)
+        {
+            if (mission.IsCompleted) return true;
+            if (mission.Site == null) return true;
+            return mission.GetMissionOutcomeState() != PhoenixPoint.Tactical.Levels.TacFactionState.Playing;
+        }
+
+        /// <summary>THE SUBJECT, read off whatever context the save produced. Field-walked rather than
+        /// type-switched on purpose: <c>UIStateGeoModal.RestoreContext._modalData</c> is typed <c>object</c>
+        /// and holds a different class per <c>ModalType</c>, so there is no static table to key on — the
+        /// object in hand is the only honest answer (the same argument <c>GeoModalMirror.DataShape</c> makes
+        /// for deriving a shape from the runtime type). A context with no mission in it returns null and is
+        /// restored exactly as before.</summary>
+        private static GeoMission SubjectMission(IGeoscapeRestorableViewStateContext context)
+        {
+            if (context == null) return null;
+            for (var t = context.GetType(); t != null && t != typeof(object); t = t.BaseType)
+                foreach (var f in t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                    if (f.GetValue(context) is GeoMission m) return m;
+            return null;
+        }
+    }
 }
