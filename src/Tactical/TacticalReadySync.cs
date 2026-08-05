@@ -272,11 +272,31 @@ namespace Multiplayer.Tactical
                 go.SetActive(true);
 
                 // A second copy of the End Turn HOTKEY would end the turn from a button that promises not to
-                // do anything. The native hotkey lives on the module rather than on this subtree, so this is
-                // belt on top of braces. DISABLED, never destroyed: RailCheck L67 bans Object.Destroy from
-                // this namespace outright (v1 destroyed evacuating actors and wedged the battle summary), and
-                // a namespace-wide ban is worth more than the one line it costs here.
-                foreach (var h in go.GetComponentsInChildren<HotkeyController>(true)) h.enabled = false;
+                // do anything — and it also came across VISIBLY: the cloned subtree carries a "hotkey" node
+                // whose Image draws the platform glyph (live log: sprite "XboxOne_Windows", the Xbox View
+                // button — two panels in a circle), which is the stray icon players reported on our button.
+                // Hidden the GAME'S OWN way rather than by poking at Images: SetDisplayed(false) is what the
+                // native code itself calls to take a hotkey display down, and it covers HotkeyIcon, HotkeyText,
+                // HotkeyLabel and Background in one go (HotkeyController.cs:131-164). The component is then
+                // disabled so nothing re-displays it, and its GameObject deactivated so a glyph that is NOT
+                // one of those four links still cannot draw.
+                // DISABLED, never destroyed: RailCheck L67 bans Object.Destroy from this namespace outright
+                // (v1 destroyed evacuating actors and wedged the battle summary), and a namespace-wide ban is
+                // worth more than the one line it costs here.
+                int hotkeys = 0;
+                foreach (var h in go.GetComponentsInChildren<HotkeyController>(true))
+                {
+                    h.SetDisplayed(false);
+                    h.enabled = false;
+                    // Never the clone ROOT: a prefab that put the controller on the button itself would
+                    // otherwise take the whole button down with the glyph.
+                    if (!ReferenceEquals(h.gameObject, go)) h.gameObject.SetActive(false);
+                    hotkeys++;
+                }
+                if (hotkeys == 0)
+                    Debug.LogWarning("[Multiplayer][tac] ready button found NO HotkeyController to hide — if a " +
+                                     "stray platform glyph is still drawn on it, it is not coming from the " +
+                                     "native hotkey display and the subtree dump below is where to look.");
 
                 PlaceBelow(template.GetComponent<RectTransform>(), go.GetComponent<RectTransform>());
                 WireClick(go);
@@ -300,16 +320,20 @@ namespace Multiplayer.Tactical
             }
         }
 
-        /// <summary>The gap the developer asked for in as many words ("make there be a GAP between them — a
-        /// line, or half a line"), expressed as a FRACTION OF THE BUTTON'S OWN MEASURED HEIGHT rather than as
-        /// pixels: half a button height. A pixel constant would be a different-sized gap at every resolution
-        /// and every HUD scale — this one is the same gap everywhere by construction.</summary>
+        /// <summary>FALLBACK ONLY, for a row no layout group drives. The gap normally comes from the game's
+        /// own <c>HorizontalOrVerticalLayoutGroup.spacing</c> (see
+        /// <see cref="TacticalReadyRowFollower.NativeSpacing"/>); when there is no group to ask, this is the
+        /// developer's "a line, or half a line", expressed as a FRACTION OF THE BUTTON'S OWN MEASURED HEIGHT
+        /// rather than as pixels, so it is the same gap at every resolution and HUD scale.</summary>
         private const float GapFraction = 0.5f;
 
         /// <summary>
         /// STRICTLY BELOW, AND NATIVE UI MOVES FOR NOBODY.
         ///
-        /// THREE MISSES, THREE DIFFERENT LIARS — and the third one is a UNIT bug, not a timing bug.
+        /// FOUR MISSES, FOUR DIFFERENT LIARS — a timing bug, a size bug, a UNIT bug, and finally the one that
+        /// was never about arithmetic at all: measuring the RECT of a button whose art does not live inside it
+        /// (see <see cref="TacticalReadyRowFollower.ExtraClearance"/>, which is where the placement is decided
+        /// now — this method only wires the follower up).
         ///
         /// (1) <c>rect.height</c> read in <c>Awake</c>: the canvas has not laid the row out yet, so it is the
         ///     raw prefab number (~0 for a layout-driven button). Offset ~0 → clone ON the button.
@@ -332,7 +356,8 @@ namespace Multiplayer.Tactical
         ///
         /// The clone still MIRRORS the source's anchors/pivot/scale/sizeDelta every LateUpdate, so it is
         /// rect-identical to End Turn — same frame art at the same size, drawn by the same prefab components —
-        /// and it sits one measured height plus <see cref="GapFraction"/> of one below it.
+        /// and it sits one measured height, plus the layout group's own spacing, plus whatever extra it takes
+        /// to clear what the native row actually DRAWS, below it.
         ///
         /// <c>ignoreLayout</c> STAYS, and now only does the job it is good at: the group neither places our
         /// clone nor reserves a cell for it, so the native buttons never shift sideways to make room. What it
@@ -548,8 +573,13 @@ namespace Multiplayer.Tactical
     ///
     /// AND IT MUST BE READ IN THE PARENT'S UNITS. <c>rect</c>/<c>sizeDelta</c> are the button's own; a
     /// <c>anchoredPosition</c> step is the parent's; mixing them is what put the clone half a button too high
-    /// on the third attempt. <see cref="ParentLocalHeight"/> is the whole answer and the only place a length
-    /// is computed in this file.
+    /// on the third attempt. <see cref="ParentLocalHeight"/> converts once and everything downstream is in
+    /// parent units.
+    ///
+    /// AND THE RECT IS NOT THE PICTURE. Clearing End Turn's rect exactly — which the third attempt provably
+    /// did — still left the clone under its glow and shadow, because those are child rects that bleed past
+    /// the frame on purpose. <see cref="ExtraClearance"/> is what closed that, and it is also what makes a
+    /// native sibling BELOW End Turn impossible to land on.
     ///
     /// It is also the localization guarantee and the anti-digit-jump guarantee in one line: the width is
     /// ALWAYS the native button's width — already sized for every shipped language — and our own caption is
@@ -603,8 +633,11 @@ namespace Multiplayer.Tactical
             // clone where it is and try again next frame rather than placing it against a zero.
             if (height <= 0f) return;
 
-            float gap = height * Gap;
-            me.anchoredPosition = Source.anchoredPosition - new Vector2(0f, height + gap);
+            string spacingFrom;
+            float gap = NativeSpacing(height, out spacingFrom);
+            string clearanceFrom;
+            float extra = ExtraClearance(me, height, out clearanceFrom);
+            me.anchoredPosition = Source.anchoredPosition - new Vector2(0f, height + gap + extra);
 
             if (_measured) return;
             _measured = true;
@@ -614,11 +647,118 @@ namespace Multiplayer.Tactical
                       " localScale.y=" + Source.localScale.y + " parentLossyScale.y=" +
                       (Source.parent == null ? 1f : Source.parent.lossyScale.y) +
                       " | worldHeight=" + WorldHeight(Source) + " -> parentLocalHeight=" + height +
-                      " | gap=" + gap + " (" + Gap + " x height), offset=" + (height + gap) +
+                      " | gap=" + gap + " (" + spacingFrom + "), extraClearance=" + extra + " (" +
+                      clearanceFrom + "), offset=" + (height + gap + extra) +
                       " | EndTurn anchoredPosition=" + Source.anchoredPosition + " ready anchoredPosition=" +
                       me.anchoredPosition + " ready worldHeight=" + WorldHeight(me) +
                       " (must equal EndTurn's worldHeight — a 0 here means the clone has no rect for the " +
                       "frame sprites to fill).");
+        }
+
+        /// <summary>
+        /// The gap between two stacked HUD buttons, TAKEN FROM THE GAME rather than chosen by us: if the row
+        /// is driven by a layout group — and the live measurement says it is, since End Turn reads back with
+        /// point anchors at the parent's top-left corner and zero inset on both axes, which is exactly what
+        /// <c>LayoutGroup.SetInsetAndSizeFromParentEdge</c> writes — then <c>spacing</c> IS the game's own
+        /// answer to "how far apart does this HUD put two buttons", and it is already denominated in the
+        /// parent's local units, the same space <c>anchoredPosition</c> lives in. No conversion, no constant.
+        ///
+        /// <see cref="Gap"/> survives only as the hand-placed-row fallback.
+        /// </summary>
+        private float NativeSpacing(float height, out string from)
+        {
+            var group = Source.parent == null
+                ? null
+                : Source.parent.GetComponent<HorizontalOrVerticalLayoutGroup>();
+            if (group != null && group.spacing > 0f)
+            {
+                from = "native " + group.GetType().Name + ".spacing";
+                return group.spacing;
+            }
+            from = "no layout group, fallback " + Gap + " x height";
+            return height * Gap;
+        }
+
+        /// <summary>
+        /// THE FOURTH LIAR, AND THE ONE THAT SURVIVED THREE FIXES: the RECT IS NOT WHAT THE BUTTON DRAWS.
+        ///
+        /// The previous attempt is arithmetically correct and still looked wrong, which is the whole clue. Its
+        /// own log: End Turn's rect spans 0..-60 in the parent's units and the clone was placed at -90..-150 —
+        /// thirty units of daylight between two rects that testers nevertheless saw touching. Because the End
+        /// Turn button does not stop at its rect. Its cloned subtree (same log) is
+        /// <c>shadow&lt;Tactical_FeatheredCircle&gt;</c>, <c>underlight&lt;UI_Gradient_Round&gt;</c> and
+        /// <c>MainButton_Sidelight_Glow</c> — child rects that deliberately bleed past the frame. Measuring the
+        /// PARENT rect and clearing that is measuring the one box the art was never inside.
+        ///
+        /// So clear what the row RENDERS: the lowest world-space corner of the End Turn button AND of every
+        /// other live child of the shared parent, descendants included. That covers both ways this can be
+        /// wrong at once — the art that overhangs End Turn, and any native sibling sitting below it that a
+        /// measurement taken against End Turn alone would never have seen. Both are read off real rects at
+        /// their settled size; nothing here is a number anyone picked.
+        ///
+        /// Returns the EXTRA drop on top of the one-height-plus-spacing step the caller already applies, so a
+        /// row whose lowest drawn point is just End Turn's own rect bottom returns 0 and the placement is
+        /// unchanged.
+        /// </summary>
+        private float ExtraClearance(RectTransform me, float height, out string from)
+        {
+            var parent = Source.parent;
+            float rectBottom = WorldBottom(Source);
+            float drawnBottom = SubtreeBottom(Source);
+            string lowest = Source.name;
+            if (parent != null)
+            {
+                for (int i = 0; i < parent.childCount; i++)
+                {
+                    var child = parent.GetChild(i) as RectTransform;
+                    // Skip OURSELVES (we are a sibling too — measuring our own rect here would walk the clone
+                    // further down every single frame) and anything the game currently has switched off.
+                    if (child == null || ReferenceEquals(child, me)) continue;
+                    if (!child.gameObject.activeInHierarchy) continue;
+                    float b = SubtreeBottom(child);
+                    if (b < drawnBottom) { drawnBottom = b; lowest = child.name; }
+                }
+            }
+
+            float scale = parent == null ? 1f : Mathf.Abs(parent.lossyScale.y);
+            if (scale <= 1e-5f) scale = 1f;
+            float extra = (rectBottom - drawnBottom) / scale;
+
+            // ponytail: capped at one button height. A feathered glow is a bounded thing, but a future prefab
+            // with a full-screen decorative child under this parent would otherwise push the clone off the
+            // bottom of the HUD — a worse failure than the overlap this fixes. Raise the cap if a real prefab
+            // ever needs more than one button of clearance.
+            float capped = Mathf.Clamp(extra, 0f, height);
+            from = "lowest drawn by '" + lowest + "', raw=" + extra + " capped=" + capped;
+            return capped;
+        }
+
+        /// <summary>Reusable buffer for the non-allocating <c>GetComponentsInChildren</c> overload. This runs
+        /// every LateUpdate, so the allocating overload would drop a fresh array per sibling per frame.</summary>
+        private static readonly List<RectTransform> Scratch = new List<RectTransform>();
+
+        /// <summary>The lowest point this rect or anything under it actually DRAWS at, in world units. Active
+        /// children only — an inactive child's corners are wherever the layout last left them and would pin the
+        /// row against art nobody can see.</summary>
+        private static float SubtreeBottom(RectTransform root)
+        {
+            float bottom = WorldBottom(root);
+            root.GetComponentsInChildren(false, Scratch);
+            for (int i = 0; i < Scratch.Count; i++)
+            {
+                float b = WorldBottom(Scratch[i]);
+                if (b < bottom) bottom = b;
+            }
+            Scratch.Clear();
+            return bottom;
+        }
+
+        /// <summary>Lowest rendered edge in world units. Corners are BL, TL, TR, BR — both bottom corners are
+        /// read so a rotated rect still reports its true lowest point.</summary>
+        private static float WorldBottom(RectTransform rt)
+        {
+            rt.GetWorldCorners(Corners);
+            return Mathf.Min(Corners[0].y, Corners[3].y);
         }
 
         /// <summary>
