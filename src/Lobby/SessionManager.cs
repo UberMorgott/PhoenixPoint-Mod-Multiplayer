@@ -572,6 +572,12 @@ namespace Multiplayer.Network
             }
         }
 
+        /// <summary>CLIENT-only, set on the accept: the pending "your Multiplayer version differs from the
+        /// host's" notice ("" / null = versions match or unknown). MultiplayerUI drains it exactly once, on
+        /// the same frame it would have opened the lobby, and shows it natively BEFORE the lobby appears.
+        /// A plain field so the whole gate stays one decision in <see cref="ParityComparer"/>.</summary>
+        public string VersionMismatchNotice { get; set; } = "";
+
         public void HandleConnectionAccepted(NetworkMessage msg)
         {
             // Client received host confirmation
@@ -586,6 +592,20 @@ namespace Multiplayer.Network
             try
             {
                 var hostManifest = MessageSerializer.DeserializeParityManifest(msg.Payload);
+
+                // VERSION GATE, at the DOOR. This is the first instant either side holds BOTH Multiplayer
+                // versions: our own rode the JOIN (ConnectionRequest, the very first client→host message),
+                // the host's rides this accept — and the accept lands before the host's first PEER_LIST,
+                // which is what MultiplayerUI waits on to open the lobby. So the notice raised from here is
+                // shown while the player is still on the "Connecting…" box, never after they have settled
+                // into a lobby. Stored, not popped: SessionManager owns no UI (and this runs on a packet
+                // callback with no Timing.Current). Nobody is disconnected over it (L84) — the host's own
+                // parity gate already keeps this peer's READY locked, and ONLY this peer's.
+                VersionMismatchNotice = ParityComparer.VersionNoticeForClient(
+                    hostManifest, ParityManifestCollector.Collect());
+                if (!string.IsNullOrEmpty(VersionMismatchNotice))
+                    Debug.LogWarning("[Multiplayer] " + VersionMismatchNotice.Replace("\n", " "));
+
                 if (ParityConfigSync.ApplyHostSettings(hostManifest))
                 {
                     var fresh = ParityManifestCollector.Collect();

@@ -26,6 +26,13 @@ namespace Multiplayer.Network.Parity
         /// version itself already diffs in that case).</summary>
         public string GameVersion = "";
 
+        /// <summary>THIS mod's own id, exactly as <c>meta.json</c> declares it ("Morgott.Multiplayer") and
+        /// therefore exactly as <c>ModEntry.ID</c> reports it to the collector. Our own version needs NO new
+        /// wire field: it already rides <see cref="Mods"/> like every other mod, and this constant is the
+        /// key that pulls it back out (<see cref="ParityComparer.MultiplayerVersion"/>). One version scheme,
+        /// the one the mod actually ships.</summary>
+        public const string MultiplayerModId = "Morgott.Multiplayer";
+
         /// <summary>Sorted DLC def-names the peer owns/has enabled.</summary>
         public List<string> Dlc = new List<string>();
 

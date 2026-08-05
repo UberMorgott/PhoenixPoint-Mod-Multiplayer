@@ -1415,7 +1415,23 @@ namespace Multiplayer.UI
                     _lobbyController.JoinConfirmed();
                     DismissConnectingBox();   // close "Connecting…" before showing the lobby
                     ShowInGameBar();
-                    _lobby?.Show();           // real, populated roster — never a fake empty lobby
+
+                    // VERSION GATE, client leg: the accept (which lands BEFORE this first PEER_LIST) already
+                    // compared our Multiplayer version against the host's. If they differ, the player is told
+                    // here — with the "Connecting…" box just closed and the lobby not yet shown, i.e. at the
+                    // door, before any time is invested. Read once and cleared, so a later rejoin re-decides
+                    // instead of replaying a stale notice. NOT a disconnect (L84): we go on to open the lobby
+                    // on dismiss and the peer keeps its seat; the host's parity gate keeps THIS peer's READY
+                    // locked and touches nobody else's. If the native box is unavailable, open the lobby
+                    // anyway — a mismatch must never leave the player staring at nothing.
+                    var versionNotice = engine.Session?.VersionMismatchNotice;
+                    if (engine.Session != null) engine.Session.VersionMismatchNotice = "";
+                    var versionBox = string.IsNullOrEmpty(versionNotice) ? null : GameUtl.GetMessageBox();
+                    if (versionBox != null)
+                        versionBox.ShowSimplePrompt(versionNotice, MessageBoxIcon.Error, MessageBoxButtons.OK,
+                            delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+                    else
+                        _lobby?.Show();       // real, populated roster — never a fake empty lobby
                 }
 
                 if (_barStatusText != null)

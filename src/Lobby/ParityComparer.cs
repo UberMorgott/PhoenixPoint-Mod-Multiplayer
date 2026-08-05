@@ -28,6 +28,16 @@ namespace Multiplayer.Network.Parity
                 return diffs;
             }
 
+            // ── THIS MOD's OWN VERSION, first and by name. It already rode the generic mod loop below as
+            // one anonymous "Mod version differs" line among DLC, settings and every other mod — true, but
+            // unreadable, and it is the ONE diff that explains all the others (two Multiplayer builds do not
+            // agree on the wire, so every later symptom is downstream of it). Named here, first, so the
+            // roster badge and the client's join notice both lead with the thing to actually fix.
+            if (MultiplayerVersionMismatch(host, client))
+                diffs.Add($"Multiplayer mod version differs: host v{MultiplayerVersion(host)} != " +
+                          $"client v{MultiplayerVersion(client)}. Both players must run the SAME " +
+                          "Multiplayer mod version — update the older install.");
+
             // ── GAME BUILD: the identity the mod list cannot carry. Both peers may run the same mods on
             // different Phoenix Point builds; join then rides the native save loader (mandate L6) across a
             // build boundary the game itself keys saves on (SavegameMetaData.BuildRevisionNumber), fields
@@ -53,7 +63,10 @@ namespace Multiplayer.Network.Parity
             {
                 if (!clientMods.TryGetValue(kv.Key, out var cv))
                     diffs.Add($"Mod missing on client: {kv.Key} v{kv.Value}");
-                else if (!string.Equals(kv.Value, cv, StringComparison.Ordinal))
+                // Our own version already has its own named line above — say it ONCE. (Missing/extra
+                // still falls through generically: "Multiplayer is absent" is a different sentence.)
+                else if (!string.Equals(kv.Value, cv, StringComparison.Ordinal) &&
+                         !string.Equals(kv.Key, ParityManifest.MultiplayerModId, StringComparison.Ordinal))
                     diffs.Add($"Mod version differs: {kv.Key} host v{kv.Value} != client v{cv}");
             }
             foreach (var kv in clientMods)
@@ -74,6 +87,44 @@ namespace Multiplayer.Network.Parity
 
             return diffs;
         }
+
+        /// <summary>This peer's OWN Multiplayer-mod version, pulled out of the manifest's ordinary mod list
+        /// (<see cref="ParityManifest.MultiplayerModId"/>). "" = UNKNOWN, which happens when the collector
+        /// could not read the mod list at all, or the peer's manifest predates a shape we can read. Unknown
+        /// is never a mismatch — see <see cref="MultiplayerVersionMismatch"/>.</summary>
+        public static string MultiplayerVersion(ParityManifest m)
+        {
+            if (m?.Mods == null) return "";
+            foreach (var mod in m.Mods)
+                if (mod != null && string.Equals(mod.Id, ParityManifest.MultiplayerModId, StringComparison.Ordinal))
+                    return mod.Version ?? "";
+            return "";
+        }
+
+        /// <summary>THE version gate, one decision, read by the host diff AND by the client's join notice.
+        /// A mismatch needs BOTH sides to actually state a version: an unknown means we failed to read a
+        /// version, not that the other install is wrong, and refusing on it would lock out a peer who is
+        /// fine. (A peer whose Multiplayer really is absent is a different, generically-diffed sentence.)</summary>
+        public static bool MultiplayerVersionMismatch(ParityManifest host, ParityManifest client)
+        {
+            var h = MultiplayerVersion(host);
+            var c = MultiplayerVersion(client);
+            return h.Length > 0 && c.Length > 0 && !string.Equals(h, c, StringComparison.Ordinal);
+        }
+
+        /// <summary>The CLIENT-facing join notice ("" when the versions match or either is unknown): shown
+        /// natively the moment the host's manifest lands on the accept — before the lobby ever opens, so a
+        /// mismatched player learns it at the door instead of after picking a seat. Names BOTH versions and
+        /// the action; second-person because only the client is ever shown this string (the host reads the
+        /// neutral roster diff from <see cref="Compare"/>). The peer stays CONNECTED — nobody is thrown out
+        /// (L84) — it simply cannot READY until the versions match.</summary>
+        public static string VersionNoticeForClient(ParityManifest host, ParityManifest client)
+            => !MultiplayerVersionMismatch(host, client) ? ""
+             : "MULTIPLAYER MOD VERSION MISMATCH\n\n" +
+               $"The host is running Multiplayer v{MultiplayerVersion(host)}.\n" +
+               $"You are running Multiplayer v{MultiplayerVersion(client)}.\n\n" +
+               $"Update your Multiplayer mod to v{MultiplayerVersion(host)} (or ask the host to match yours). " +
+               "You stay connected and can chat, but READY stays locked until both versions are the same.";
 
         /// <summary>Join the diffs into a single message-box-ready block ("" when there are none).</summary>
         public static string Format(List<string> diffs)
