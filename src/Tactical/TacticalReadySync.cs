@@ -283,8 +283,10 @@ namespace Multiplayer.Tactical
                 CollectLabels(go);      // before the overlay: the overlay's depth is derived from the labels'
                 BuildGreenOverlay(go);
                 Repaint();
+                // The CLONE's subtree, not the template's: the question this answers is "did the frame come
+                // across", and only the clone can answer it.
                 Debug.Log("[Multiplayer][tac] co-op ready button built under the native End Turn button (" +
-                          _setters.Count + " label target(s)). Cloned subtree: " + Describe(template.transform));
+                          _setters.Count + " label target(s)). Cloned subtree: " + Describe(go.transform));
             }
             catch (Exception ex)
             {
@@ -298,28 +300,39 @@ namespace Multiplayer.Tactical
             }
         }
 
-        /// <summary>Gap between the native button's bottom edge and ours. One value, so "its own row" is
-        /// a number and not a feeling.</summary>
-        private const float RowGapPx = 6f;
+        /// <summary>The gap the developer asked for in as many words ("make there be a GAP between them — a
+        /// line, or half a line"), expressed as a FRACTION OF THE BUTTON'S OWN MEASURED HEIGHT rather than as
+        /// pixels: half a button height. A pixel constant would be a different-sized gap at every resolution
+        /// and every HUD scale — this one is the same gap everywhere by construction.</summary>
+        private const float GapFraction = 0.5f;
 
         /// <summary>
         /// STRICTLY BELOW, AND NATIVE UI MOVES FOR NOBODY.
         ///
-        /// WHY THE LAST TWO ATTEMPTS LANDED ON TOP OF END TURN AND LOST THE FRAME — one cause, both symptoms.
-        /// Both wrote the clone's rect ONCE, from inside <c>UIModuleEndTurnContainer.Awake</c>. At that instant
-        /// the canvas has not laid the row out yet, so <c>src.rect.height</c> is still the raw prefab number;
-        /// for a button whose size is driven by the row's layout group that number is ~0. Subtracting ~0 puts
-        /// the clone ON the native button (symptom 1). And the previous fix's <c>ignoreLayout = true</c> then
-        /// FROZE the clone at that same collapsed prefab size, so the frame Image — a sliced sprite that fills
-        /// the button rect — had no rect left to fill and drew nothing, while the caption, which sits on its
-        /// own child rect, kept drawing: "text floating in the air" (symptom 2). The group diagnosis was right;
-        /// opting out and freezing was the wrong half of the fix.
+        /// THREE MISSES, THREE DIFFERENT LIARS — and the third one is a UNIT bug, not a timing bug.
         ///
-        /// SO MIRROR THE SOURCE INSTEAD OF COPYING IT ONCE (<see cref="TacticalReadyRowFollower"/>). Every
-        /// LateUpdate the clone takes the native button's CURRENT anchors, pivot, scale and sizeDelta and sits
-        /// one height + <see cref="RowGapPx"/> below its current anchoredPosition. The clone is then rect-
-        /// identical to End Turn — same frame art at the same size, drawn by the same prefab components — in
-        /// its own row, at every resolution, however late the layout settles.
+        /// (1) <c>rect.height</c> read in <c>Awake</c>: the canvas has not laid the row out yet, so it is the
+        ///     raw prefab number (~0 for a layout-driven button). Offset ~0 → clone ON the button.
+        /// (2) <c>ignoreLayout</c> + a frozen <c>sizeDelta</c>: the clone kept that collapsed prefab size, so
+        ///     the frame — sliced sprites that FILL the button rect — had no rect to fill and drew nothing,
+        ///     while the caption, on its own child rect, kept drawing: "text floating in the air".
+        /// (3) <c>rect.height</c> read in LateUpdate — the right VALUE in the WRONG SPACE. <c>rect</c> is
+        ///     expressed in the button's OWN local space; <c>anchoredPosition</c> is expressed in its
+        ///     PARENT's. The two differ by the button's own <c>localScale</c>, and this prefab is not drawn
+        ///     at 1:1. Subtracting a self-space height from a parent-space position therefore moved the clone
+        ///     down by only a FRACTION of a button — which is exactly the "overlaps by about half, coming up
+        ///     from below" that came back from testing.
+        ///
+        /// SO MEASURE IN A SPACE THAT CANNOT LIE (<see cref="TacticalReadyRowFollower.ParentLocalHeight"/>):
+        /// <c>GetWorldCorners</c> gives the button's height as actually rendered — it already accounts for the
+        /// anchor mode (stretched anchors make <c>sizeDelta</c> an INSET, not a size, so <c>sizeDelta</c> may
+        /// read 0 or negative under a 60px-tall button), for every scale in the chain, and for the layout
+        /// settling late. Dividing by the PARENT's <c>lossyScale.y</c> converts that world height into the
+        /// units <c>anchoredPosition</c> is actually denominated in. Everything after that is arithmetic.
+        ///
+        /// The clone still MIRRORS the source's anchors/pivot/scale/sizeDelta every LateUpdate, so it is
+        /// rect-identical to End Turn — same frame art at the same size, drawn by the same prefab components —
+        /// and it sits one measured height plus <see cref="GapFraction"/> of one below it.
         ///
         /// <c>ignoreLayout</c> STAYS, and now only does the job it is good at: the group neither places our
         /// clone nor reserves a cell for it, so the native buttons never shift sideways to make room. What it
@@ -354,7 +367,7 @@ namespace Multiplayer.Tactical
 
             var follower = clone.gameObject.AddComponent<TacticalReadyRowFollower>();
             follower.Source = src;
-            follower.GapPx = RowGapPx;
+            follower.Gap = GapFraction;
             follower.Apply(); // first frame already looks right if the row happens to be settled
         }
 
@@ -529,9 +542,14 @@ namespace Multiplayer.Tactical
     ///
     /// A ONE-SHOT COPY CANNOT DO THIS, and that is the whole reason this component exists. The clone is built
     /// from <c>UIModuleEndTurnContainer.Awake</c>, before the canvas has laid the row out: the numbers read
-    /// there are raw prefab values (a layout-driven button measures ~0 high), which is how the last two
+    /// there are raw prefab values (a layout-driven button measures ~0 high), which is how the first two
     /// attempts put the clone ON the native button and left it collapsed to a size with no room for the frame
     /// art. Reading in LateUpdate reads the size the layout actually settled on.
+    ///
+    /// AND IT MUST BE READ IN THE PARENT'S UNITS. <c>rect</c>/<c>sizeDelta</c> are the button's own; a
+    /// <c>anchoredPosition</c> step is the parent's; mixing them is what put the clone half a button too high
+    /// on the third attempt. <see cref="ParentLocalHeight"/> is the whole answer and the only place a length
+    /// is computed in this file.
     ///
     /// It is also the localization guarantee and the anti-digit-jump guarantee in one line: the width is
     /// ALWAYS the native button's width — already sized for every shipped language — and our own caption is
@@ -545,8 +563,17 @@ namespace Multiplayer.Tactical
         /// <summary>The native End Turn button's rect. Unity-null when the battle tears down.</summary>
         internal RectTransform Source;
 
-        /// <summary>Gap between the native button's bottom edge and ours, so "its own row" is a number.</summary>
-        internal float GapPx = 6f;
+        /// <summary>Gap as a fraction of the measured button height (see <c>TacticalReadyButton.GapFraction</c>).</summary>
+        internal float Gap = 0.5f;
+
+        /// <summary>Scratch for <see cref="RectTransform.GetWorldCorners"/>, which fills a caller-owned array.
+        /// Static and reused: this runs every LateUpdate and Unity's UI is single-threaded, so allocating four
+        /// Vector3s a frame forever would be litter for nothing.</summary>
+        private static readonly Vector3[] Corners = new Vector3[4];
+
+        /// <summary>The diagnostic below is a ONE-SHOT: it is the state at the first settled layout, and a
+        /// per-frame version would bury the log.</summary>
+        private bool _measured;
 
         private void LateUpdate() => Apply();
 
@@ -564,12 +591,63 @@ namespace Multiplayer.Tactical
                 enabled = false;
                 return;
             }
+
             me.anchorMin = Source.anchorMin;
             me.anchorMax = Source.anchorMax;
             me.pivot = Source.pivot;
             me.localScale = Source.localScale;
             me.sizeDelta = Source.sizeDelta;
-            me.anchoredPosition = Source.anchoredPosition - new Vector2(0f, Source.rect.height + GapPx);
+
+            float height = ParentLocalHeight(Source);
+            // Not laid out yet (first frame, or the module is hidden and the canvas gave it no size). Leave the
+            // clone where it is and try again next frame rather than placing it against a zero.
+            if (height <= 0f) return;
+
+            float gap = height * Gap;
+            me.anchoredPosition = Source.anchoredPosition - new Vector2(0f, height + gap);
+
+            if (_measured) return;
+            _measured = true;
+            Debug.Log("[Multiplayer][tac] ready row measured: EndTurn anchorMin=" + Source.anchorMin +
+                      " anchorMax=" + Source.anchorMax + " pivot=" + Source.pivot +
+                      " sizeDelta=" + Source.sizeDelta + " rect.height=" + Source.rect.height +
+                      " localScale.y=" + Source.localScale.y + " parentLossyScale.y=" +
+                      (Source.parent == null ? 1f : Source.parent.lossyScale.y) +
+                      " | worldHeight=" + WorldHeight(Source) + " -> parentLocalHeight=" + height +
+                      " | gap=" + gap + " (" + Gap + " x height), offset=" + (height + gap) +
+                      " | EndTurn anchoredPosition=" + Source.anchoredPosition + " ready anchoredPosition=" +
+                      me.anchoredPosition + " ready worldHeight=" + WorldHeight(me) +
+                      " (must equal EndTurn's worldHeight — a 0 here means the clone has no rect for the " +
+                      "frame sprites to fill).");
+        }
+
+        /// <summary>
+        /// The button's height IN THE UNITS <c>anchoredPosition</c> IS DENOMINATED IN, which is the parent's
+        /// local space — the one number this whole placement turns on, and the one every earlier attempt got
+        /// from a field that could not supply it.
+        ///
+        /// <c>GetWorldCorners</c> is used instead of <c>rect</c>/<c>sizeDelta</c> because it is the only
+        /// reading that is true under EVERY anchor mode: with stretched anchors <c>sizeDelta</c> is an INSET
+        /// (it can read 0 or negative under a visibly tall button), and <c>rect</c>, while correct, is
+        /// expressed in the button's own space and so is off by its <c>localScale</c> the moment the prefab is
+        /// not drawn at 1:1. Corners are world-space, after every scale in the chain; dividing by the PARENT's
+        /// <c>lossyScale</c> lands exactly in the parent's units.
+        /// </summary>
+        private static float ParentLocalHeight(RectTransform rt)
+        {
+            float world = WorldHeight(rt);
+            var parent = rt.parent;
+            float scale = parent == null ? 1f : Mathf.Abs(parent.lossyScale.y);
+            // A degenerate parent scale would divide the offset into infinity and fling the clone off-screen;
+            // the un-converted height at least keeps it on the button's own row.
+            return scale > 1e-5f ? world / scale : world;
+        }
+
+        /// <summary>Rendered height in world units. Corners are BL, TL, TR, BR.</summary>
+        private static float WorldHeight(RectTransform rt)
+        {
+            rt.GetWorldCorners(Corners);
+            return (Corners[1] - Corners[0]).magnitude;
         }
     }
 
