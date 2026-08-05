@@ -5,6 +5,7 @@ using System.Reflection.Emit;
 using HarmonyLib;
 using Multiplayer.Tactical;
 using PhoenixPoint.Tactical.Entities.Abilities;
+using PhoenixPoint.Tactical.Entities.Weapons;
 using PhoenixPoint.Tactical.Levels;
 using PhoenixPoint.Tactical.View;
 
@@ -371,6 +372,203 @@ namespace RailCheck
                         break;
                     }
             }
+
+            // ── (k) EVERY PEER ROLLS THE SAME SHOT ─────────────────────────
+            // THE REPORT: "a client sees a hit with blood, and no damage is dealt." The order relays the
+            // ACTIVATION, not the shot, so every peer ran Weapon.SpreadInCone:482 / SpreadInRadius:488-491
+            // against the global UNSEEDED UnityEngine.Random and pointed its projectiles somewhere else. Damage
+            // is authoritative on 0x84 and the impact VFX is not — it hangs off the LOCAL raycast — so the two
+            // disagreed on screen. Nothing in this law family asserted the OUTCOME a peer SEES; L98 is AP only.
+            var spread = typeof(Weapon).GetMethod("SpreadInCone", All);
+            var fireProjectile = typeof(Weapon).GetMethod("FireProjectile", All);
+            var createTrajectory = typeof(Weapon).GetMethod("CreateTrajectory", All);
+            bool drawsFromGlobalStream = false;
+            if (spread != null)
+                foreach (var c in Callees(spread))
+                    if (c.DeclaringType == typeof(UnityEngine.Random)) { drawsFromGlobalStream = true; break; }
+            if (spread == null || fireProjectile == null || createTrajectory == null || !drawsFromGlobalStream)
+                yield return "L104(k): Weapon no longer resolves a shot through FireProjectile → CreateTrajectory " +
+                             "→ SpreadInCone drawing on UnityEngine.Random — the anchor seeds a stream the shot " +
+                             "no longer uses, so this whole arm needs re-grounding against the real fire path.";
+            else if (!Calls(fireProjectile, createTrajectory))
+                yield return "L104(k): Weapon.FireProjectile no longer builds the trajectory itself — the seed " +
+                             "bracket is around a call that does not roll any more, and every peer is back to " +
+                             "its own trajectory with the host's damage landing somewhere else.";
+            var rollAttr = Targeted(typeof(RelayedShotRollsTheSameOnEveryPeer));
+            if (rollAttr?.declaringType != typeof(Weapon) || rollAttr?.methodName != "FireProjectile")
+                yield return "L104(k): the shot-roll anchor no longer patches Weapon.FireProjectile — it brackets " +
+                             "something else, or nothing, and the roll is local again on every peer.";
+
+            // EXECUTED — the outcome, not the call: two peers handed the SAME order draw the SAME trajectories,
+            // in the same order, and an unrelayed shot is left entirely alone.
+            TacticalShotSync.Reset();
+            int throwaway;
+            bool rolledUnarmed = TacticalShotSync.NextShotRoll(4242, out throwaway);
+            var burstA = Rolls(4242, 31337, 3);
+            var burstB = Rolls(4242, 31337, 3);
+            var burstC = Rolls(4242, 31338, 3);
+            bool otherActor = TacticalShotSync.NextShotRoll(5151, out throwaway);
+            TacticalShotSync.ArmShot(0, 31337, false);
+            bool keylessRoll = TacticalShotSync.NextShotRoll(0, out throwaway);
+            TacticalShotSync.Reset();
+            if (rolledUnarmed || otherActor || keylessRoll)
+                yield return "L104(k): the roll anchor answers for a shot nobody relayed (unarmed=" + rolledUnarmed +
+                             " other-actor=" + otherActor + " keyless=" + keylessRoll + "). Single player and " +
+                             "every unrelayed ability must keep the game's own dice; an actor no peer can NAME " +
+                             "has nobody to agree with.";
+            if (burstA.Count != 3 || burstB.Count != 3)
+                yield return "L104(k): an armed shot stopped answering for its own projectiles — the bracket " +
+                             "never seeds and the anchor is decorative.";
+            else
+            {
+                if (burstA[0] != burstB[0] || burstA[1] != burstB[1] || burstA[2] != burstB[2])
+                    yield return "L104(k): two peers arming the SAME order rolled DIFFERENT trajectories " +
+                                 "([" + Join(burstA) + "] vs [" + Join(burstB) + "]) — which is the defect " +
+                                 "itself: one screen shows blood where the host's damage never landed.";
+                if (burstA[0] == burstA[1] || burstA[1] == burstA[2])
+                    yield return "L104(k): every projectile of a burst rolls the SAME number ([" + Join(burstA) +
+                                 "]) — a shotgun fires one pellet N times and a burst puts every round in one " +
+                                 "hole. The anchor must make the sequence shared, not constant.";
+                if (burstC.Count == 3 && burstC[0] == burstA[0])
+                    yield return "L104(k): a DIFFERENT order's seed rolls the same trajectory — the shipped seed " +
+                                 "is not actually reaching the roll, so the anchor would hold by accident today " +
+                                 "and not at all tomorrow.";
+            }
+
+            // ── (l) THE WHOLE AIM BRANCH, NOT ONE OF ITS THREE TERMS ───────
+            // Arm (j) equalises CurrentlyAiming. The SAME if at TacticalLevelController:1645 also reads
+            // shootAnimAction.UseAiming (bound at :1566 from four mirrored inputs, so it agrees by
+            // construction) and stepOutNeeded (:1556), which compares the mirrored ShootFromPos against THIS
+            // peer's own actor.Pos and therefore can flip per peer — one peer paying the ~1 s AIM_START wait
+            // and/or the STEPPING_OUT nav that the other skips. Measured spread on the same ability,
+            // Shoot→ShootingStarted: 794 ms, 494 ms, 833 ms. Neither (j) nor L79 asserts shot DURATION parity.
+            var fireBody = RelayedStepOutIsTheSameOnEveryPeer.MoveNextOf("FireWeaponAtTargetCrt");
+            FieldInfo stepOutField = null;
+            if (fireBody != null)
+                foreach (var f in fireBody.DeclaringType.GetFields(All))
+                    if (f.FieldType == typeof(bool) &&
+                        f.Name.IndexOf("stepOutNeeded", StringComparison.Ordinal) >= 0) { stepOutField = f; break; }
+            if (fireBody == null || stepOutField == null)
+                yield return "L104(l): FireWeaponAtTargetCrt no longer carries a 'stepOutNeeded' state field — " +
+                             "the branch input this arm anchors is gone, so the shot's length is decided per " +
+                             "peer again and the transpiler is patching nothing.";
+            else
+            {
+                // EXECUTED — the real production transpiler over the REAL field, so a rename or a re-shaped
+                // branch turns this red instead of leaving a silent no-op patch in place.
+                var woven = new List<CodeInstruction>(RelayedStepOutIsTheSameOnEveryPeer.Transpiler(
+                    new List<CodeInstruction>
+                    {
+                        new CodeInstruction(OpCodes.Ldarg_0),
+                        new CodeInstruction(OpCodes.Ldc_I4_1),
+                        new CodeInstruction(OpCodes.Stfld, stepOutField),
+                    }));
+                var anchorCall = typeof(TacticalShotSync).GetMethod("StepOutForShot", All);
+                int at = woven.FindIndex(i => i.opcode == OpCodes.Call && (i.operand as MethodInfo) == anchorCall);
+                int store = woven.FindIndex(i => i.opcode == OpCodes.Stfld);
+                if (at < 0 || store < 0 || at != store - 1 || woven[at - 1].opcode != OpCodes.Ldarg_0)
+                    yield return "L104(l): the step-out transpiler does not put the anchor immediately before the " +
+                                 "store (call at " + at + ", store at " + store + ") — the branch keeps whatever " +
+                                 "this peer computed for itself and the same shot plays a different length on " +
+                                 "every screen.";
+            }
+
+            // EXECUTED — the anchor decides, in BOTH directions, and only under a relayed order.
+            TacticalShotSync.Reset();
+            TacticalShotSync.ArmShot(9001, 1, true);
+            bool forcedOn = TacticalShotSync.StepOutAnchor(false, 9001);
+            TacticalShotSync.ArmShot(9001, 1, false);
+            bool forcedOff = TacticalShotSync.StepOutAnchor(true, 9001);
+            bool freeTrue = TacticalShotSync.StepOutAnchor(true, 9002);
+            bool freeFalse = TacticalShotSync.StepOutAnchor(false, 9002);
+            bool keylessStep = TacticalShotSync.StepOutAnchor(true, 0);
+            TacticalShotSync.Reset();
+            if (!forcedOn || forcedOff)
+                yield return "L104(l): the step-out anchor does not carry the acting peer's answer across " +
+                             "(forced-on=" + forcedOn + " forced-off=" + forcedOff + "). It must decide BOTH " +
+                             "ways: pinned one way it is a hand-listed constant, not the branch's real input.";
+            if (!freeTrue || freeFalse || !keylessStep)
+                yield return "L104(l): the step-out anchor overrides an UNRELAYED shot (true→" + freeTrue +
+                             " false→" + freeFalse + " keyless→" + keylessStep + ") — solo play and every " +
+                             "actor no peer can name lose the game's own step-out for no reason.";
+
+            // ── (m) NO PEER'S IN-FLIGHT ACTION MAY STALL ANOTHER PEER ──────
+            // TacticalMap.HasActiveProjectiles:133 is ProjectilesInFlight.Any(p => p.IsActive) — EVERY actor on
+            // the map. Single player never has two simultaneous shooters; in co-op peer B's mirrored shot spawns
+            // projectiles on peer A's map and A's own fire coroutine parks on them with ZERO log lines, keeping
+            // its actor in ExecutingAbilities — which hides the native tactical UI and makes the host's
+            // BusyWithOwnOrder defer that peer's next order to the DeferCeilingSeconds give-up. L91 does not
+            // model the native wait and (e) only asserts the ceiling EXISTS; this is the outcome arm.
+            var globalWait = typeof(TacticalMap).GetProperty("HasActiveProjectiles", All)?.GetGetMethod(true);
+            var owed = new List<MethodBase>();
+            if (globalWait != null)
+                foreach (var m in FireControllerBodies())
+                    if (Calls(m, globalWait)) owed.Add(m);
+            if (globalWait == null || owed.Count < 3)
+                yield return "L104(m): the game no longer parks " + owed.Count + " fire paths on the MAP-GLOBAL " +
+                             "projectile wait (shoot, the pre-shot clear and return fire) — the narrowing " +
+                             "targets code that is gone and this arm needs re-grounding.";
+            var narrowed = new List<MethodBase>(AShotWaitsOnlyForItsOwnProjectiles.TargetMethods());
+            foreach (var m in owed)
+                if (!narrowed.Contains(m))
+                    yield return "L104(m): " + m.DeclaringType?.Name + "." + m.Name + " still parks on the " +
+                                 "map-global projectile wait — that fire path stalls behind ANOTHER peer's " +
+                                 "shot, which is the zero-blocking mandate broken with no log line at all.";
+
+            // EXECUTED — whose projectile is it, and does the transpiler actually take the wait over.
+            var mineShot = new object();
+            var hisShot = new object();
+            if (TacticalShotSync.ForeignProjectile(mineShot, mineShot))
+                yield return "L104(m): a shot does not recognise its OWN projectile — every shot would stop " +
+                             "waiting for the round it just fired and resolve before it lands.";
+            if (!TacticalShotSync.ForeignProjectile(hisShot, mineShot))
+                yield return "L104(m): another actor's projectile is not recognised as foreign — the wait is " +
+                             "map-global again and one peer's shot parks every other peer's.";
+            if (TacticalShotSync.ForeignProjectile(hisShot, null))
+                yield return "L104(m): a projectile is called foreign when the SHOOTER is unknown — an " +
+                             "unattributable wait must fall back to the game's own global answer, never skip it.";
+            if (globalWait != null)
+            {
+                var replaced = new List<CodeInstruction>(AShotWaitsOnlyForItsOwnProjectiles.Transpiler(
+                    new List<CodeInstruction>
+                    {
+                        new CodeInstruction(OpCodes.Ldarg_0),
+                        new CodeInstruction(OpCodes.Callvirt, globalWait),
+                    }));
+                var forShot = typeof(TacticalShotSync).GetMethod("HasActiveProjectilesForShot", All);
+                bool stillGlobal = replaced.Exists(i => (i.operand as MethodInfo) == globalWait);
+                bool takesOver = replaced.Exists(i => (i.operand as MethodInfo) == forShot);
+                if (stillGlobal || !takesOver)
+                    yield return "L104(m): the projectile-wait transpiler leaves the map-global getter in place " +
+                                 "(global=" + stillGlobal + " narrowed=" + takesOver + ") — the patch is bound " +
+                                 "and does nothing, which is worse than absent because the law reads green.";
+            }
+        }
+
+        /// <summary>Drive the real roll anchor for one armed order and collect what it hands out.</summary>
+        private static List<int> Rolls(int key, int seed, int count)
+        {
+            TacticalShotSync.ArmShot(key, seed, false);
+            var got = new List<int>();
+            for (int i = 0; i < count; i++)
+            {
+                int s;
+                if (TacticalShotSync.NextShotRoll(key, out s)) got.Add(s);
+            }
+            return got;
+        }
+
+        private static string Join(List<int> v) => string.Join(",", v.ConvertAll(x => x.ToString()).ToArray());
+
+        /// <summary>Every method of the fire controller, including the compiler-generated coroutine bodies its
+        /// waits actually live in — an IL scan of the enumerator-returning method finds one newobj.</summary>
+        private static IEnumerable<MethodBase> FireControllerBodies()
+        {
+            const BindingFlags Declared = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public |
+                                          BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            foreach (var m in typeof(TacticalLevelController).GetMethods(Declared)) yield return m;
+            foreach (var nested in typeof(TacticalLevelController).GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic))
+                foreach (var m in nested.GetMethods(Declared)) yield return m;
         }
 
         /// <summary>Same, for a postfix that also takes the patched instance. Null is the honest argument
