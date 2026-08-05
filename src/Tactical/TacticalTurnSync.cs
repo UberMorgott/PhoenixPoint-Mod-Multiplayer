@@ -408,7 +408,10 @@ namespace Multiplayer.Tactical
             {
                 // No path prefix: nothing on the GEOSCAPE rail is touched by a tactical reject, and the
                 // reject nudge is what repaints the gesturing client's own screen.
-                IntentRail.Reject(SurfaceIds.TacTurnIntent, senderPeerId, why);
+                // NOTIFY: every reason Validate can return is about TURN OWNERSHIP — a thing only co-op has.
+                // The End Turn button is not greyed for a peer whose turn it is not, so a refusal here is a
+                // click that does nothing at all, with no vanilla surface anywhere that would explain it.
+                IntentRail.Reject(SurfaceIds.TacTurnIntent, senderPeerId, why, notify: true);
                 return;
             }
             cur.RequestEndTurn(); // the same native call the host's own end-turn button makes
@@ -466,7 +469,11 @@ namespace Multiplayer.Tactical
                 // that is worth a reject + its forced re-emit. "No level any more" and "already leaving" are
                 // the ORDINARY race of every peer clicking Continue at its own pace — rejecting those would
                 // fire a full-graph resend on the exact frame the host is loading its geoscape.
-                if (tlc != null && !over) IntentRail.Reject(SurfaceIds.TacTurnIntent, senderPeerId, why);
+                // NOTIFY: the peer clicked Continue on the battle summary and stays sitting in a battle the
+                // host says is still being fought. The button is live and did nothing — pure mod protocol,
+                // and the only remaining arm here is exactly that one (the ordinary races log instead).
+                if (tlc != null && !over)
+                    IntentRail.Reject(SurfaceIds.TacTurnIntent, senderPeerId, why, notify: true);
                 else Debug.Log("[Multiplayer][tac] leave-battle from peer=" + senderPeerId + " nonce=" + nonce +
                                " did NOT apply — " + why);
                 return;

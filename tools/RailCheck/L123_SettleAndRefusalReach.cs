@@ -43,6 +43,16 @@ namespace RailCheck
     ///   composed, in the game's own localized words — never crossed the wire. Silent swallow is this repo's
     ///   dominant bug class; a refusal the player cannot see is its purest form.
     ///
+    /// …AND THEN IT WAS TOLD TOO LOUDLY (second pass, same day). The first fix showed EVERY reject, and
+    /// <c>SessionNotifier.ShowToast(modalFallback: true)</c> finds no <c>NotificationController</c> in
+    /// tactical or replenish, so it falls through to <c>GameUtl.GetMessageBox().ShowSimplePrompt</c>: a
+    /// release-visible ERROR BOX per refusal. Most refusals are not news — <c>ReplenishAll</c> ships every
+    /// un-full item as its own intent, including the un-researched crossbow clip vanilla would have silently
+    /// returned false on, and the host's re-run of the same affordability test rejects each one. A reject is a
+    /// CONVERGENCE mechanism; the reason always crosses the wire and is always logged, and only a refusal the
+    /// host marked <c>notify</c> reaches the screen. Which refusals those are is arm (g), and it is a closed
+    /// allowlist rather than a judgement call at 40 call sites.
+    ///
     /// THE ARMS:
     ///   (a) PREMISE — the settle, reject and AI-gate families resolve.
     ///   (b) THE SWEEP IS ON THE TURN EDGE: <c>HostBroadcastTurn</c> reaches <c>HostSettleAllLive</c>, which
@@ -55,16 +65,22 @@ namespace RailCheck
     ///       <c>ExecuteQueuedAbilitiesSequence</c> share. This is the checkable form of "on a client,
     ///       SetTransform for an AI faction's actor happens only inside SyncApplyScope": the runtime
     ///       statement is not decidable headless, but its one known cause is.
-    ///   (e) THE REFUSAL IS PUT ON THE WIRE, AND TAKEN OFF IT, AND SHOWN. All three links, because any one
-    ///       of them missing restores the silence exactly.
-    ///   (f) EXECUTED: THE REASON SURVIVES THE ENVELOPE. A reject whose text is dropped or mangled by the
-    ///       codec arrives as the empty nudge it used to be — the same failure, one layer down, with nothing
-    ///       in any log.
+    ///   (e) THE REFUSAL REACHES THE ONE PEER THAT GESTURED, AND NOBODY ELSE: unicast to the sender, never a
+    ///       broadcast, through the ONE codec pair both ends use — and the screen surface must still be
+    ///       reachable, or the notify bit is a flag nothing reads.
+    ///   (f) EXECUTED: THE REASON SURVIVES THE ENVELOPE, AND SO DOES THE NOTIFY BIT. A reject whose text is
+    ///       dropped arrives as the empty nudge it used to be; a notify bit lost in one direction turns every
+    ///       ordinary refusal into an error box, and in the other puts the ones that matter back in silence.
+    ///   (g) A MODAL ONLY FOR A MOD-PROTOCOL REFUSAL. The notifying overload's call sites ARE the allowlist,
+    ///       read off the IL: turn ownership, a site another peer took, an event another peer answered — the
+    ///       refusals co-op invented, where the player holds a live control that did nothing and vanilla has
+    ///       nothing to grey. Never a refusal the game itself expresses by DISABLING the control.
     ///
     /// Falsify (each verified to go RED, then restored):
     ///   • drop HostSettleAllLive from HostBroadcastTurn        → settle-not-swept-at-the-turn-edge
     ///   • send the reject nudge with a null payload            → refusal-never-reaches-the-player
-    ///   • drop the ShowToast from the client reject branch     → refusal-never-reaches-the-player
+    ///   • flip the notify bit's polarity in EncodeNudge        → modal-flag-lost-on-the-wire
+    ///   • pass notify:true from any ordinary reject call site  → modal-for-an-ordinary-refusal
     /// </summary>
     internal static class L123_SettleAndRefusalReach
     {
@@ -86,30 +102,33 @@ namespace RailCheck
             var keyOf = actorKey?.GetMethod("Of", All);
             var getActors = typeof(Base.Levels.BaseMap).GetMethod("GetActors", All);
 
-            var reject = typeof(IntentRail).GetMethod("Reject", All);
+            // The two Reject overloads are the whole opt-in mechanism: the params-only one CANNOT notify, the
+            // bool one is the only way to ask for a popup. Resolved by signature so a rename cannot blur them.
+            var rejects = typeof(IntentRail).GetMethods(All).Where(m => m.Name == "Reject").ToList();
+            var reject = rejects.FirstOrDefault(m => m.GetParameters().Any(p => p.ParameterType == typeof(bool)));
+            var rejectQuiet = rejects.FirstOrDefault(m => !m.GetParameters().Any(p => p.ParameterType == typeof(bool)));
             var inbound = typeof(IntentRail).GetMethod("HandleInbound", All);
             var toast = typeof(SessionNotifier).GetMethod("ShowToast", All);
-            var toBytes = typeof(Encoding).GetMethods(All)
-                                          .FirstOrDefault(m => m.Name == "GetBytes" &&
-                                                               m.GetParameters().Length == 1 &&
-                                                               m.GetParameters()[0].ParameterType == typeof(string));
-            var toString = typeof(Encoding).GetMethods(All)
-                                           .FirstOrDefault(m => m.Name == "GetString" &&
-                                                                m.GetParameters().Length == 1);
+            var encodeNudge = typeof(IntentRail).GetMethod("EncodeNudge", All);
+            var decodeNudge = typeof(IntentRail).GetMethod("DecodeNudge", All);
+            var sendToClient = typeof(NetworkEngine).GetMethod("SendToClient", All);
+            var broadcast = typeof(NetworkEngine).GetMethod("BroadcastToAll", All);
 
             var aiEval = typeof(TacticalLevelController).GetMethod("ExecuteAIEvaluationAbilities", All);
             var queuedSeq = typeof(TacticalLevelController).GetMethod("ExecuteQueuedAbilitiesSequence", All);
             var gatePrefix = aiEvalGate?.GetMethod("Prefix", All);
 
             if (broadcastTurn == null || sweep == null || settle == null || keyOf == null || getActors == null ||
-                reject == null || inbound == null || toast == null || toBytes == null || toString == null ||
+                reject == null || rejectQuiet == null || inbound == null || toast == null ||
+                encodeNudge == null || decodeNudge == null || sendToClient == null || broadcast == null ||
                 aiEval == null || queuedSeq == null || gatePrefix == null)
             {
                 yield return "L123 premise-changed: the settle/refusal family no longer resolves " +
                              "(TacticalTurnSync.HostBroadcastTurn, TacticalCommandSync.HostSettleAllLive/" +
-                             "HostSettle, TacticalActorKey.Of, BaseMap.GetActors, IntentRail.Reject/" +
-                             "HandleInbound, SessionNotifier.ShowToast, Encoding.GetBytes/GetString, " +
-                             "TacticalLevelController.ExecuteAIEvaluationAbilities/" +
+                             "HostSettle, TacticalActorKey.Of, BaseMap.GetActors, IntentRail.Reject in BOTH " +
+                             "its quiet and its notifying overload / HandleInbound / EncodeNudge / " +
+                             "DecodeNudge, SessionNotifier.ShowToast, NetworkEngine.SendToClient/" +
+                             "BroadcastToAll, TacticalLevelController.ExecuteAIEvaluationAbilities/" +
                              "ExecuteQueuedAbilitiesSequence, ClientAiEvaluationGate.Prefix). Every arm below " +
                              "would pass vacuously, so 'drift is corrected and refusals are heard' is " +
                              "UNCHECKED rather than satisfied";
@@ -156,43 +175,109 @@ namespace RailCheck
                              "ExecuteAIEvaluationAbilities, so the gate is placed on a method that route can " +
                              "no longer reach. Re-derive where enemy AI is decided before trusting the gate";
 
-            // ═══ (e) THE REFUSAL IS PUT ON THE WIRE, TAKEN OFF IT, AND SHOWN ═══
-            if (!Reaches(reject, toBytes, typeof(Encoding).Assembly))
-                yield return "L123 refusal-never-reaches-the-player: IntentRail.Reject sends the nudge with no " +
-                             "reason in it. The host composes the refusal in the game's own localized words, " +
-                             "logs it to its own console, and ships an EMPTY envelope to the one peer that " +
-                             "needs it — so the player who clicked gets a wind-up, a cancel, and no word, " +
-                             "five times in a row, with nothing anywhere to say why";
-            if (!Reaches(inbound, toString, typeof(Encoding).Assembly))
-                yield return "L123 refusal-never-reaches-the-player: IntentRail.HandleInbound's client branch " +
-                             "does not decode the reason off the nudge, so whatever the host shipped is " +
-                             "dropped on arrival — the empty-nudge failure, one link further along";
+            // ═══ (e) THE REFUSAL REACHES THE ONE PEER THAT GESTURED, AND NOBODY ELSE ═══
+            if (!Reaches(reject, sendToClient, mod))
+                yield return "L123 refusal-never-reaches-the-player: IntentRail.Reject does not unicast the " +
+                             "nudge to the peer that gestured. The host composes the refusal in the game's own " +
+                             "localized words, logs it to its own console, and tells nobody — so the player " +
+                             "who clicked gets a wind-up, a cancel, and no word, five times in a row";
+            if (Reaches(reject, broadcast, mod))
+                yield return "L123 refusal-told-to-everyone: IntentRail.Reject BROADCASTS the refusal. A reject " +
+                             "is about one peer's own gesture: every other player would be interrupted by the " +
+                             "reason a stranger's click died, and on the surface that falls back to a native " +
+                             "prompt in tactical that is a modal in the middle of somebody else's turn";
+            if (!Reaches(reject, encodeNudge, mod) || !Reaches(inbound, decodeNudge, mod))
+                yield return "L123 refusal-never-reaches-the-player: the nudge no longer goes through the ONE " +
+                             "EncodeNudge/DecodeNudge pair (Reject encodes / HandleInbound decodes). Two " +
+                             "hand-rolled halves can agree with each other while disagreeing with the wire, and " +
+                             "arm (f) would then be executing a codec nothing actually uses";
             if (!Reaches(inbound, toast, mod))
                 yield return "L123 refusal-never-reaches-the-player: IntentRail.HandleInbound's client branch " +
-                             "decodes the reason and does not put it on screen. A refusal that only reaches a " +
-                             "log file is the silence this arm exists to break — the player is mid-battle and " +
-                             "has no log open";
+                             "decodes the reason and has no way to put it on screen at all. The notify bit " +
+                             "would then be a flag nothing reads — the refusals that DO need a word (turn " +
+                             "ownership, a mission another peer took) are back to reaching a log file the " +
+                             "player mid-battle does not have open";
 
-            // ═══ (f) EXECUTED: THE REASON SURVIVES THE ENVELOPE ═══
+            // ═══ (f) EXECUTED: THE REASON SURVIVES THE ENVELOPE — AND SO DOES THE NOTIFY BIT ═══
+            // The production codec, not a copy of it. Both values, because the bit is what separates "the
+            // convergence mechanism did its job quietly" from "the player is looking at an error box".
             const string why = "command for Soldier_9: the game's own gate refuses this ability: Нет подходящей цели";
             byte surface;
             SyncKind kind;
             byte[] body;
-            var wire = SyncProtocol.EncodeEnvelope(SurfaceIds.TacCommandIntent, SyncKind.ActionRequest,
-                                                   Encoding.UTF8.GetBytes(why));
-            if (!SyncProtocol.TryDecodeEnvelope(wire, out surface, out kind, out body) ||
-                body == null || Encoding.UTF8.GetString(body) != why)
-                yield return "L123 refusal-lost-on-the-wire: a reject reason does not survive the envelope " +
-                             "round-trip (decoded='" + (body == null ? "<null>" : Encoding.UTF8.GetString(body)) +
-                             "'). It would arrive as the empty nudge the client already treats as 'repaint and " +
-                             "say nothing' — the identical silent failure, one layer down, and this time with " +
-                             "the code that sends it looking correct";
-            var empty = SyncProtocol.EncodeEnvelope(SurfaceIds.TacCommandIntent, SyncKind.ActionRequest, null);
-            if (SyncProtocol.TryDecodeEnvelope(empty, out surface, out kind, out body) &&
-                body != null && body.Length > 0)
-                yield return "L123 refusal-lost-on-the-wire: an EMPTY nudge decodes to a non-empty payload, so " +
-                             "the client would show a blank prompt for every reject that legitimately carries " +
-                             "no words";
+            foreach (var wanted in new[] { false, true })
+            {
+                var wire = SyncProtocol.EncodeEnvelope(SurfaceIds.TacCommandIntent, SyncKind.ActionRequest,
+                                                       IntentRail.EncodeNudge(why, wanted));
+                bool got = false;
+                string reason = SyncProtocol.TryDecodeEnvelope(wire, out surface, out kind, out body)
+                                    ? IntentRail.DecodeNudge(body, out got) : null;
+                if (reason != why)
+                    yield return "L123 refusal-lost-on-the-wire: a reject reason does not survive the " +
+                                 "encode→envelope→decode round-trip (notify=" + wanted + ", decoded='" +
+                                 (reason ?? "<null>") + "'). It arrives as the empty nudge the client treats " +
+                                 "as 'repaint and say nothing' — the identical silent failure one layer down, " +
+                                 "with the code that sends it looking correct";
+                if (got != wanted)
+                    yield return "L123 modal-flag-lost-on-the-wire: the notify bit does not survive the " +
+                                 "round-trip (sent " + wanted + ", read " + got + "). Lost in one direction " +
+                                 "every ordinary refusal — an unaffordable reload, an un-researched clip — " +
+                                 "becomes a native error prompt the player must dismiss; lost in the other, " +
+                                 "the refusals that have no other surface go silent again";
+            }
+            bool quiet;
+            if (IntentRail.DecodeNudge(null, out quiet) != null || quiet)
+                yield return "L123 refusal-lost-on-the-wire: a NULL nudge does not decode to 'no reason, no " +
+                             "modal'. A malformed or legacy envelope must still repaint the client and must " +
+                             "never raise a blank prompt";
+            if (IntentRail.DecodeNudge(new byte[0], out quiet) != null || quiet)
+                yield return "L123 refusal-lost-on-the-wire: an EMPTY nudge does not decode to 'no reason, no " +
+                             "modal' — the client would show a blank prompt for a reject that carries no words";
+
+            // ═══ (g) A MODAL ONLY FOR A MOD-PROTOCOL REFUSAL ═══
+            // The notifying overload is the ONLY way to raise a popup, so its call sites ARE the allowlist and
+            // the law can read them off the IL. Every entry is a refusal co-op invented, where vanilla has no
+            // control to grey because single-player cannot produce the situation, and the player is left with
+            // a live button that did nothing. Everything else — unaffordable, un-researched, no storage, no
+            // power, the game's own ability gate — is a refusal vanilla expresses by DISABLING the control,
+            // and popping an error box for each is a worse bug than the silence L123 originally replaced
+            // (live: ReplenishAll ships every un-full item, so one click produced one prompt per item).
+            var allowed = new[]
+            {
+                "Multiplayer.Tactical.TacticalTurnSync.HandleEndTurn",
+                "Multiplayer.Tactical.TacticalTurnSync.HandleLeaveBattle",
+                "Multiplayer.Network.Sync.MissionSync.Reject",
+                "Multiplayer.Network.Sync.EventSync.HandleAnswer",
+            };
+            var optIns = mod.GetTypes()
+                            .SelectMany(Methods)
+                            .Where(m => m.DeclaringType != typeof(IntentRail) && Reaches(m, reject, mod))
+                            .Select(m => (m.DeclaringType == null ? "?" : m.DeclaringType.FullName) + "." + m.Name)
+                            .Distinct()
+                            .OrderBy(n => n, StringComparer.Ordinal)
+                            .ToList();
+            var added = optIns.Where(n => !allowed.Contains(n)).ToList();
+            var gone = allowed.Where(n => !optIns.Contains(n)).OrderBy(n => n, StringComparer.Ordinal).ToList();
+            if (added.Count > 0)
+                yield return "L123 modal-for-an-ordinary-refusal: [" + string.Join(", ", added) + "] now asks " +
+                             "IntentRail.Reject to NOTIFY. A modal belongs only to a refusal co-op invented — " +
+                             "turn ownership, a site another peer already took, an event another peer already " +
+                             "answered — where the player is left holding a live control that did nothing and " +
+                             "vanilla has nothing to grey. If this call site is one of those, add it to the " +
+                             "allowlist WITH its reason; otherwise it is an error box for something the game " +
+                             "itself would have refused in silence";
+            if (gone.Count > 0)
+                yield return "L123 refusal-never-reaches-the-player: [" + string.Join(", ", gone) + "] no " +
+                             "longer notifies. These are the refusals with NO other surface: the End Turn " +
+                             "button is not greyed for a peer whose turn it is not, the Launch button is not " +
+                             "greyed for a site another peer just took, and the event popup is already gone " +
+                             "from the screen. Dropping the notify here is dropping the player's only word";
+        }
+
+        private static IEnumerable<MethodBase> Methods(Type t)
+        {
+            try { return t.GetMethods(All).Cast<MethodBase>().Concat(t.GetConstructors(All)); }
+            catch { return Enumerable.Empty<MethodBase>(); }
         }
 
         /// <summary>The MoveNext of a method's iterator state machine — where a coroutine's real calls live.

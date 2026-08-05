@@ -155,12 +155,22 @@ namespace Multiplayer.Network.Sync
                 // five refused shots in 45 s while the host was answering "the game's own gate refuses this
                 // ability: Нет подходящей цели" to itself. Silent swallow is this repo's dominant bug class;
                 // a refusal the player cannot see is the purest form of it.
-                string reason = payload == null || payload.Length == 0
-                                    ? null : Encoding.UTF8.GetString(payload);
+                //
+                // …AND THE MODAL IS OPT-IN (2026-08-05, second pass). L123 shipped the reason and showed EVERY
+                // one of them as a native prompt, because SessionNotifier.ShowToast(modalFallback:true) finds no
+                // NotificationController in tactical/replenish and falls through to GameUtl.GetMessageBox()
+                // .ShowSimplePrompt. A reject is a CONVERGENCE mechanism, not a notification: the overwhelming
+                // majority are refusals vanilla itself expresses by greying a control (ReplenishAll ships every
+                // un-full item, including the un-researched crossbow clip the game would have silently returned
+                // false on) and popping an error box for each is a worse bug than the silence it replaced. So
+                // the REASON always crosses and is always logged — diagnostics never regress — and only a
+                // refusal the host marked `notify` reaches the screen.
+                bool notify;
+                string reason = DecodeNudge(payload, out notify);
                 Debug.Log("[MP][intent] CLIENT " + Tag(surfaceId) + " reject nudge — repainting open UI" +
-                          (reason == null ? "" : " — " + reason));
+                          (reason == null ? "" : " — " + reason) + (notify ? " [notify]" : ""));
                 OpenUiRepaint.MarkDirty();
-                if (reason != null) SessionNotifier.ShowToast(reason, modalFallback: true);
+                if (notify && reason != null) SessionNotifier.ShowToast(reason, modalFallback: true);
                 return true;
             }
             try
@@ -211,8 +221,19 @@ namespace Multiplayer.Network.Sync
         /// or passes only conditionally-known ids that came out null — falls back to the full covered
         /// graph, because "nothing" is a permanent divergence and a reject is user-gesture rate.</summary>
         public static void Reject(byte surfaceId, ulong peer, string why, params string[] reemitPrefixes)
+            => Reject(surfaceId, peer, why, false, reemitPrefixes);
+
+        /// <summary><see cref="Reject(byte,ulong,string,string[])"/> with the ONE extra decision: whether the
+        /// refusal is also PUT ON THE PLAYER'S SCREEN. Default (the overload above) is NO — see the client
+        /// branch in <see cref="HandleInbound"/>. Pass <paramref name="notify"/> true ONLY where the refusal is
+        /// a MOD-PROTOCOL one (turn ownership, another peer already took this) that leaves the player with a
+        /// dead gesture and no other feedback; never where vanilla already says it by disabling the control.
+        /// An overload rather than an optional argument because <c>params</c> must stay last: this way the 40-odd
+        /// existing call sites keep their prefixes unchanged AND cannot silently acquire a popup.</summary>
+        public static void Reject(byte surfaceId, ulong peer, string why, bool notify, params string[] reemitPrefixes)
         {
-            Debug.LogWarning("[MP][intent] HOST " + Tag(surfaceId) + " REJECT peer=" + peer + " — " + why);
+            Debug.LogWarning("[MP][intent] HOST " + Tag(surfaceId) + " REJECT peer=" + peer +
+                             (notify ? " [notify]" : "") + " — " + why);
             int scoped = 0;
             if (reemitPrefixes != null)
                 foreach (var p in reemitPrefixes)
@@ -231,16 +252,41 @@ namespace Multiplayer.Network.Sync
             // THE NUDGE CARRIES THE REASON (law L123). It used to be a null payload, so the ONE peer that
             // needs to know why its order died was the only peer never told — the host logged the refusal
             // to its own console and the player saw a wind-up and a cancel. The reason is the whole content
-            // of a reject; shipping the envelope without it is shipping the silence.
+            // of a reject; shipping the envelope without it is shipping the silence. WHETHER IT IS ALSO SHOWN
+            // is the `notify` bit riding byte 0 (EncodeNudge) — the reason crosses either way, the popup does
+            // not.
             try
             {
                 var engine = NetworkEngine.Instance;
                 if (engine != null && engine.IsHost && peer != 0)
                     engine.SendToClient(peer, new NetworkMessage(PacketType.SyncEnvelope,
                         SyncProtocol.EncodeEnvelope(surfaceId, SyncKind.ActionRequest,
-                                                    Encoding.UTF8.GetBytes(why ?? ""))));
+                                                    EncodeNudge(why, notify))));
             }
             catch (Exception ex) { Debug.LogError("[MP][intent] reject nudge send failed: " + ex.Message); }
+        }
+
+        // ─── The reject-nudge framing: [notify:u8][reason UTF8] ─────────────
+        // ONE encode/decode pair rather than two hand-rolled halves, so RailCheck L123 executes the REAL
+        // round-trip instead of a copy of it that can agree with itself while the wire disagrees.
+
+        internal static byte[] EncodeNudge(string why, bool notify)
+        {
+            var reason = Encoding.UTF8.GetBytes(why ?? "");
+            var body = new byte[reason.Length + 1];
+            body[0] = (byte)(notify ? 1 : 0);
+            Buffer.BlockCopy(reason, 0, body, 1, reason.Length);
+            return body;
+        }
+
+        /// <summary>The reason off a nudge, or null when it carries none (a reject whose text was empty, or a
+        /// pre-reason empty envelope). Never throws on a short/absent payload — a malformed nudge must still
+        /// repaint the client, which is the half of the reject that converges it.</summary>
+        internal static string DecodeNudge(byte[] payload, out bool notify)
+        {
+            notify = payload != null && payload.Length > 0 && payload[0] != 0;
+            return payload == null || payload.Length <= 1
+                       ? null : Encoding.UTF8.GetString(payload, 1, payload.Length - 1);
         }
 
         private static string Tag(byte surfaceId)

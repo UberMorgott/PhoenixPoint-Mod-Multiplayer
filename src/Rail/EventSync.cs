@@ -95,8 +95,13 @@ namespace Multiplayer.Network.Sync
                 return;
             }
             string why = Validate(rec.State, index, data.Choices == null ? 0 : data.Choices.Count);
+            // NOTIFY: the popup this peer answered is already gone from its screen, and the only reason its
+            // answer can die is that ANOTHER peer answered first (record state). Vanilla has no control to
+            // grey here — single-player cannot lose a race for an event — so without a word the player just
+            // watched a choice evaporate.
             if (why != null)
-            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "event '" + eventId + "': " + why, RecordScope); return; }
+            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "event '" + eventId + "': " + why,
+                                true /* notify */, RecordScope); return; }
 
             // Prefer the host's OWN live instance: it carries the real Context (site + vehicle) the reward
             // and any mission launch are applied against. Otherwise synthesise the same shape the game

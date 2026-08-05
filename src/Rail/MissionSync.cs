@@ -63,9 +63,13 @@ namespace Multiplayer.Network.Sync
             return level == null ? null : level.GetComponent<GeoLevelController>();
         }
 
+        // NOTIFY: a refused LAUNCH is the one geoscape gesture with no vanilla surface to fall back on. The
+        // player picked a squad, pressed Launch and the deployment simply does not happen; the usual cause is
+        // co-op arbitration (another peer already took this site / the mission stopped being runnable under
+        // them), which nothing in the game's own UI greys out because single-player cannot produce it.
         private static void Reject(ulong peer, string siteRef, string why) =>
             IntentRail.Reject(SurfaceIds.GeoMissionIntent, peer, (siteRef ?? "S#?") + " — " + why,
-                              string.IsNullOrEmpty(siteRef) ? null : siteRef);
+                              true /* notify */, string.IsNullOrEmpty(siteRef) ? null : siteRef);
 
         // ─── THE ONE VALIDATOR (pure — host facts only, law 3) ──────────────
 
