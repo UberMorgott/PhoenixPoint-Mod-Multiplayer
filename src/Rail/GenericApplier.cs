@@ -107,6 +107,11 @@ namespace Multiplayer.Network.Sync
                 long t = RailCost.Now();
                 if (payload[0] == DiffEngine.MsgDelta) { ApplyDelta(engine, payload); RailCost.Charge("apply", t); }
                 else if (payload[0] == DiffEngine.MsgStructural) { ApplyStructural(engine, payload); RailCost.Charge("structural", t); }
+                // A 0xB7 modal raise is broadcast SYNCHRONOUSLY from the host's OpenModal postfix while the
+                // entity it names only crosses on this surface a frame later — so an applied batch is the one
+                // moment a parked window can become raisable (law 3: only a structural apply creates
+                // identity). Pumped for delta batches too: the pump is also what advances the bounded expiry.
+                GeoModalMirror.PumpParked();
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][rail] GenericApplier inbound failed: " + ex); }
             return true;

@@ -64,10 +64,13 @@ namespace Multiplayer.Network.Sync
         private static readonly System.Reflection.FieldInfo SwitchQueryField =
             AccessTools.Field(typeof(GeoscapeView), "_viewSwichQuery");   // GeoscapeView.cs:138 (game typo)
 
+        private static readonly ModalParkQueue Park = new ModalParkQueue();
+
         /// <summary>FULL session teardown only — the raise seq is a host monotonic stream and a client
         /// last-writer guard, so a mid-session reload must NOT reset it (rca-3 contract, same as
-        /// <see cref="EventPopup.Reset"/>).</summary>
-        public static void Reset() => Seq.Reset();
+        /// <see cref="EventPopup.Reset"/>). The park queue DOES go: a parked raise names an entity in the
+        /// graph that teardown just threw away.</summary>
+        public static void Reset() { Seq.Reset(); Park.Clear(); }
 
         // ─── THE PAYLOAD (host→all, surface 0xB7) ──────────────────────────
 
@@ -380,10 +383,59 @@ namespace Multiplayer.Network.Sync
                 // A re-delivered raise is a SECOND window, not a stale value — the strictly-greater guard is
                 // what makes this surface idempotent (law 7), and it is marked only after the window is up.
                 if (!Seq.ShouldApply(SurfaceIds.GeoModalRaise, seq)) return true;
+                // STRICT FIFO, and the queue is checked FIRST: once one raise is waiting for its entity,
+                // every later raise waits behind it. The game's own queue is priority-ordered but keeps
+                // ARRIVAL order between equal priorities (QueryStateSwitch:77-82 inserts before the first
+                // LOWER entry), so releasing a parked raise after a later one that resolved immediately
+                // would put this peer's windows in a sequence the host never showed.
+                if (Park.Count > 0 || NeedsPark(p))
+                {
+                    var evicted = Park.Park(seq, p);
+                    if (evicted != null) Debug.LogError("[MP][modals] " + evicted);
+                    Debug.Log("[MP][modals] raise of '" + (ModalType)p.ModalType + "' seq=" + seq +
+                              " PARKED — waiting for '" + p.Ref + "' to reach this peer's graph (queue=" +
+                              Park.Count + ")");
+                    return true;
+                }
                 if (RaiseMirrored(p, seq)) Seq.Mark(SurfaceIds.GeoModalRaise, seq);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][rail] GeoModalMirror inbound failed: " + ex); }
             return true;
+        }
+
+        /// <summary>THE DEFERRAL PREDICATE, and the whole reason <see cref="ModalParkQueue"/> exists: an
+        /// <see cref="DataShape.EntityRef"/> raise routinely arrives BEFORE the entity it names. The host
+        /// broadcasts inside the <c>OpenModal</c> postfix — SYNCHRONOUSLY, in the same call stack that just
+        /// minted the object (HavenMissionUtil.cs:94 creates the GeoCharacter, :59 opens the modal) — while
+        /// the structural create for that object is a VALUE-RAIL packet the diff cycle only emits on a later
+        /// frame (<c>DiffEngine.HostTick</c>, TickInterval 0.1 s). So the inversion is not a race the
+        /// transport could lose: 0xB7 is ALWAYS on the wire first, and refusing it there is a reward window
+        /// the player never sees (law 91). Generic on purpose — every present and future EntityRef window
+        /// rides this, there is no soldier-join arm anywhere.
+        /// A raise this peer has no geoscape for is NOT parked: that is the existing loud drop in
+        /// <see cref="RaiseMirrored"/> (mid-load / tactical), and a window is never replayed after the fact.</summary>
+        private static bool NeedsPark(Raise p)
+        {
+            if (p.Shape != DataShape.EntityRef) return false;   // only a NAME can be early; None/research resolve or never will
+            var geo = GeoLevel();
+            return geo != null && IdentityResolver.Resolve(geo, p.Ref, null) == null;
+        }
+
+        /// <summary>Called once per applied GeoRail batch (<c>GenericApplier.HandleInbound</c>) — the one
+        /// moment this peer's graph can have GAINED the entity a parked raise names (law 3: only a
+        /// structural apply creates identity, and it rides that same surface). The pump is ALSO what
+        /// advances the bounded expiry, so no parked raise can sit forever without saying so.</summary>
+        public static void PumpParked()
+        {
+            if (Park.Count == 0 || GeoLevel() == null) return;   // no geoscape = nothing to raise INTO; the wait does not count
+            Park.Pump(
+                p => !NeedsPark(p),
+                (p, s) => { if (RaiseMirrored(p, s)) Seq.Mark(SurfaceIds.GeoModalRaise, s); },
+                (p, s, waited) => Debug.LogError(
+                    "[MP][modals] parked raise of '" + (ModalType)p.ModalType + "' seq=" + s + " EXPIRED after " +
+                    waited + " rail batches — '" + p.Ref + "' never reached this peer's graph, so the window is " +
+                    "DROPPED and this player never sees it. The entity is not on the rail (no structural create " +
+                    "kind for it), or its create failed earlier and said so"));
         }
 
         /// <summary>Rebuild the host's modal here and push the NATIVE view state through the game's own switch
@@ -492,6 +544,71 @@ namespace Multiplayer.Network.Sync
         {
             try { return Base.Core.GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>(); }
             catch { return null; }
+        }
+    }
+
+    /// <summary>
+    /// The deferral for a 0xB7 raise whose entity has not landed on this peer yet — PURE (no Unity, no game
+    /// types beyond the payload struct) so RailCheck L107 drives the REAL queue with a fake resolver instead
+    /// of asserting that some call exists.
+    ///
+    /// STRICT FIFO. Only the HEAD is ever tested: a raise behind a waiting one is not "ready", it is LATER.
+    /// The game shows windows one at a time out of a priority-ordered queue that keeps arrival order between
+    /// equal priorities, so releasing out of order would hand this peer a sequence the host never showed.
+    /// Cost, stated: one raise whose entity never arrives holds the ones behind it until it EXPIRES.
+    ///
+    /// BOUNDED TWICE, because the failure this replaces was a silent swallow and an unbounded queue is the
+    /// same bug wearing a hat: <see cref="MaxBatches"/> caps how long a raise may wait (counted in APPLIED
+    /// rail batches, not wall clock — deterministic, and it is the same clock the entity would arrive on),
+    /// and <see cref="MaxParked"/> caps how many may wait at once. Both exits log; neither is silent.
+    /// </summary>
+    internal sealed class ModalParkQueue
+    {
+        /// <summary>Applied GeoRail batches a raise may wait. The create it waits for rides the NEXT diff
+        /// cycle (DiffEngine TickInterval 0.1 s) and a sliced cycle can emit several packets, so this is
+        /// generous by design — a few seconds of live rail traffic, then a loud drop.</summary>
+        internal const int MaxBatches = 32;
+        /// <summary>Concurrent waiters. The host raises windows one at a time out of its own queue, so more
+        /// than a handful pending means they are not arriving at all.</summary>
+        internal const int MaxParked = 8;
+
+        private struct Entry { public uint Seq; public GeoModalMirror.Raise P; public int Waited; }
+        private readonly List<Entry> _q = new List<Entry>();
+
+        internal int Count { get { return _q.Count; } }
+        internal void Clear() { _q.Clear(); }
+
+        /// <summary>Park one raise at the TAIL. Returns null normally, or the reason string for the OLDEST
+        /// entry this push evicted — the caller logs it, because a dropped window that says nothing is the
+        /// exact bug class this queue exists to close.</summary>
+        internal string Park(uint seq, GeoModalMirror.Raise p)
+        {
+            _q.Add(new Entry { Seq = seq, P = p });
+            if (_q.Count <= MaxParked) return null;
+            var lost = _q[0];
+            _q.RemoveAt(0);
+            return "parked-raise queue is FULL (" + MaxParked + ") — the oldest waiting raise of '" +
+                   (ModalType)lost.P.ModalType + "' seq=" + lost.Seq + " ('" + lost.P.Ref + "') is DROPPED " +
+                   "unshown. Entities named by 0xB7 are not reaching this peer at all";
+        }
+
+        /// <summary>One batch of progress. <paramref name="resolved"/> asks whether the head's entity is
+        /// here NOW; <paramref name="show"/> raises it; <paramref name="expire"/> is the loud drop. A head
+        /// that is still waiting stops the walk (FIFO) after costing itself one batch; an EXPIRED head is
+        /// removed and the next one gets its turn in this same pump.</summary>
+        internal void Pump(Func<GeoModalMirror.Raise, bool> resolved,
+                           Action<GeoModalMirror.Raise, uint> show,
+                           Action<GeoModalMirror.Raise, uint, int> expire)
+        {
+            while (_q.Count > 0)
+            {
+                var head = _q[0];
+                if (resolved(head.P)) { _q.RemoveAt(0); show(head.P, head.Seq); continue; }
+                head.Waited++;
+                if (head.Waited < MaxBatches) { _q[0] = head; return; }
+                _q.RemoveAt(0);
+                expire(head.P, head.Seq, head.Waited);
+            }
         }
     }
 
