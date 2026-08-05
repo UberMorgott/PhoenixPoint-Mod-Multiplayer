@@ -1683,9 +1683,40 @@ namespace Multiplayer.Network
         /// else. See <see cref="SaveTransferMath.BarrierReleased"/> for why no peer is counted.</summary>
         internal static bool BarrierReleased(bool hostLoaded) => SaveTransferMath.BarrierReleased(hostLoaded);
 
-        /// <summary>This peer's load is truly finished (event-driven done) — tell the host, reliably.</summary>
+        // THE REPORT WAS A LIE ABOUT READINESS, AND THAT IS THE WHOLE 2026-08-05 REPORT (host out first,
+        // clients trickling after). A peer reaches Playing in the MIDDLE of one enormous blocking
+        // mission-start frame and reported done from inside it, with seconds of main-thread work still
+        // queued behind the call. Live run, frame counters straight from the three logs:
+        //   host      frame 1722 spans 21:42:01.314→03.4, SendLoadComplete at 02.168 — 0.8 s in;
+        //   client-3  frame 1243 spans 21:42:02.502→04.76, SendLoadComplete at 03.321 — 0.8 s in.
+        // Every slot was therefore "loaded" by 03.4, the host's AllDone fired on its very next frame
+        // (1723, 03.541) and it lifted — CORRECTLY, by the barrier's own rule — while both clients were
+        // still inside frame 1243/their own and could not so much as READ the RevealAll until 04.930 and
+        // 05.081. The barrier never released early; its INPUT was wrong. Note what this is not: not the
+        // latch, not a timeout, not the arm — those were all working in that run.
+        //
+        // The only honest proof that a peer can show the world is a COMPLETED FRAME past the point it
+        // claims to be at, so the report is due on the next one. Every caller — host and client, tactical
+        // and geoscape — arms through this one method, and the report leaves from FlushLoadComplete alone.
+        //
+        // A frame NUMBER, not a flag and not a clock (law L94 e2 forbids clocks, rightly): it fires on the
+        // very next Update or not at all, so it cannot outlive its own load boundary and needs no clearing
+        // at any of the six re-arm sites. `+ 1` is what makes it strictly a LATER frame, so a flush that
+        // runs after this call within the same frame still waits.
+        private int _loadCompleteDueFrame;
+
+        /// <summary>This peer's load is truly finished (event-driven done) — tell the host, reliably,
+        /// on the next frame boundary (see <see cref="_loadCompleteDueFrame"/>).</summary>
         public void SendLoadComplete()
         {
+            if (_loadCompleteSent || _loadCompleteDueFrame != 0) return;
+            _loadCompleteDueFrame = Time.frameCount + 1;
+        }
+
+        private void FlushLoadComplete()
+        {
+            if (_loadCompleteDueFrame == 0 || Time.frameCount < _loadCompleteDueFrame) return;
+            _loadCompleteDueFrame = 0;
             if (_loadCompleteSent) return;
             NoteProgress(); // flag edge (this peer's phase-2 load finished)
             _loadCompleteSent = true;
@@ -1694,7 +1725,8 @@ namespace Multiplayer.Network
             // loaded (runtime defs minted) and the curtain/overlay still up — so the ~0.3-1.5 s
             // full-def-graph walk never fires lazily inside a mid-play walk/apply slice.
             Sync.DefOwnership.Warm();
-            Debug.Log("[Multiplayer] SendLoadComplete fired slot=" + _engine.Session.LocalSlotIndex);
+            Debug.Log("[Multiplayer] SendLoadComplete fired slot=" + _engine.Session.LocalSlotIndex +
+                      " (frame boundary past Playing — this peer can actually render now)");
             var slot = _engine.Session.LocalSlotIndex;
             _tracker.MarkDone(slot); // local self-done
             if (_engine.IsHost) { TryReleaseBarrier(); return; }
@@ -1736,9 +1768,9 @@ namespace Multiplayer.Network
             // This peer is done but HELD (curtain gate parks every native lift until Revealed).
             // Label the held native loading screen so the wait reads as intentional.
             Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel("Waiting for players…");
-            // Done is reported HERE and only here (Playing = actually in the level, curtain-liftable).
-            // (The tac-entry "defer until deploy hydrate settles" pair — _loadCompleteAwaitsHydrate +
-            // NotifyHydrateSettled — stayed in the quarry; re-quarry it with the tactical arc.)
+            // Done is ARMED here and only here — and it LEAVES one frame later, because Playing is reached
+            // in the middle of a multi-second blocking frame and "loaded" said from inside that frame is
+            // what let the host out first (see _loadCompleteDueFrame for the measured run).
             SendLoadComplete();
         }
 
@@ -2091,6 +2123,10 @@ namespace Multiplayer.Network
             // Converge the reveal input-lock invariant before anything else: a peer that has revealed must
             // never be left holding the geoscape loading-screen input override (see RepairRevealInputLock).
             RepairRevealInputLock();
+
+            // The one place "this peer is loaded" leaves this peer — runs on EVERY peer, above every
+            // host-only return below, and one frame later than the SendLoadComplete that armed it.
+            FlushLoadComplete();
 
             // Host: keep handing the start blob out, a few peers at a time (see PumpBlobQueue), and
             // serve anyone who joined at a moment we could not onboard them. Both are cheap no-ops once

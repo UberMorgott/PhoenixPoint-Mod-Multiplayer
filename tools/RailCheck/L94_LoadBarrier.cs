@@ -421,6 +421,47 @@ namespace RailCheck
                                      "left them when it comes back";
                 }
 
+            // ─── (m) "LOADED" LEAVES FROM A FRAME BOUNDARY, NEVER FROM INSIDE THE LOADING FRAME. ───
+            // THE ARM FOR THE 2026-08-05 RETEST, in which every arm above stayed green and the host still
+            // came out first. Nothing here was released early: the peers reported done, AllDone held on the
+            // LAST of them, the release fired exactly once. The INPUT was wrong. A peer reaches Playing in
+            // the middle of one ~2.3 s blocking mission-start frame and reported from inside it, ~0.8 s in
+            // (host frame 1722 fired at 21:42:02.168 of 01.314→03.4; client-3 frame 1243 at 03.321 of
+            // 02.502→04.76). So the host — a frame ahead — saw AllDone at 03.541 and lifted, while both
+            // clients were still inside their own frame and could not so much as READ the RevealAll for
+            // another 1.4 s. Every aggregate arm passes on that run, because the aggregate was right.
+            //
+            // The observable outcome, stated where a law can hold it: the method that MARKS this peer
+            // load-complete may be reached from the per-frame pump and nothing else. Reporting from
+            // OnReachedPlaying (or from the tac-entry coroutine) is reporting from inside the frame, which
+            // is the bug. This is not a clock and does not weaken (e2): one frame is a handoff, never a
+            // deadline — it cannot end a wait, only start one honestly.
+            var sentF = coord.GetField("_loadCompleteSent", AllMembers);
+            if (sentF == null)
+                yield return "L94 premise-changed: SaveTransferCoordinator._loadCompleteSent is gone — this " +
+                             "law can no longer tell where a peer announces that it is loaded, which is the " +
+                             "one input the whole barrier trusts";
+            else
+            {
+                var reporters = SafeMethods(coord).Where(m => WritesBool(m, sentF, true)).ToList();
+                if (reporters.Count == 0)
+                    yield return "L94 never-reports: nothing on SaveTransferCoordinator sets _loadCompleteSent " +
+                                 "= true any more. No peer ever announces itself loaded, AllDone can never hold " +
+                                 "and every player sits behind a loading screen forever";
+                foreach (var r in reporters)
+                    foreach (var c in ModCallersOf(r).Where(c => c.Name != "Update" && c != r))
+                        yield return "L94 reports-inside-the-loading-frame: SaveTransferCoordinator." + r.Name +
+                                     " marks this peer load-complete and is called from " +
+                                     (c.DeclaringType?.Name ?? "?") + "." + c.Name + ", not from the per-frame " +
+                                     "Update. Playing is reached in the MIDDLE of a multi-second blocking frame, " +
+                                     "so a report made there claims a readiness the peer does not have: it still " +
+                                     "owes seconds of main-thread work before it can render, or even read the " +
+                                     "RevealAll it is about to be sent. The peer that happens to be a frame " +
+                                     "ahead — the host, every time, since it starts loading first — then gets " +
+                                     "its world while the others are still behind a screen they cannot take " +
+                                     "down. A completed frame past Playing is the only honest proof of ready";
+            }
+
             // ─── (l) THE COVERAGE ARM. NO PEER'S SCREEN COMES DOWN BEFORE THE REVEAL — ANY OF THEM. ───
             foreach (var v in TakedownCoverage()) yield return v;
         }
