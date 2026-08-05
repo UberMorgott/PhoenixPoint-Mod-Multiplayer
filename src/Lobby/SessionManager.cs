@@ -380,6 +380,50 @@ namespace Multiplayer.Network
 
         public int ClientCount => _clients.Count;
 
+        // ─── The tactical "I have finished moving" ADVISORY flag ───────────
+        //
+        // WHY IT LIVES HERE AND NOT ON THE RAIL. It is per-peer bookkeeping, which is this class's whole
+        // job — and RailCheck L91 arm (c) forbids the rail namespaces from holding ANY static peer-id
+        // collection, precisely so a per-peer table can never grow into a quorum next to a decision. The
+        // rail side (Multiplayer.Tactical.TacticalReadySync) therefore keeps two ints and one bool: the
+        // numbers on a LABEL. Nothing in the mod reads this tally to decide anything — RailCheck L119.
+
+        /// <summary>The HOST's own advisory flag (the host is not in <c>_clients</c>, same shape as
+        /// <see cref="HostReady"/>).</summary>
+        public bool HostTacReady { get; set; }
+
+        /// <summary>Record one peer's advisory flag. Unknown peer = dropped: a flag from somebody who is
+        /// not seated changes no seat, and the tally is rebuilt from the roster on every read anyway.</summary>
+        public void SetTacReady(ulong peerId, bool ready)
+        {
+            if (_clients.TryGetValue(peerId, out var c)) c.TacReady = ready;
+        }
+
+        /// <summary>The advisory tally the tactical ready button LABELS itself with: <paramref name="ready"/>
+        /// of <paramref name="total"/>. A PAUSED peer keeps its seat (it counts in <paramref name="total"/>,
+        /// law L84) but counts as NOT ready: its last flag was sent before it went silent, and showing
+        /// "everybody is ready" for a player who is not there is exactly the lie this tally must not tell.
+        /// Rebuilt on every call rather than incrementally maintained — the roster is the truth and a
+        /// cached count is one more thing that can disagree with it.</summary>
+        public void TacReadyTally(out int ready, out int total)
+        {
+            total = 1;                        // the host's own seat
+            ready = HostTacReady ? 1 : 0;
+            foreach (var c in _clients.Values)
+            {
+                ++total;
+                if (c.TacReady && !c.IsPaused) ++ready;
+            }
+        }
+
+        /// <summary>Every seat back to "not ready" — driven from the game's own new-player-round edge
+        /// (TacticalReadySync.OnNewTurn off <c>TacMission.OnNewTurn</c>).</summary>
+        public void ResetTacReady()
+        {
+            HostTacReady = false;
+            foreach (var c in _clients.Values) c.TacReady = false;
+        }
+
         // ─── Connection Handshake ─────────────────────────────────────────
 
         public void HandleConnectionRequest(NetworkMessage msg)
@@ -1165,6 +1209,10 @@ namespace Multiplayer.Network
         // Deliberately NOT on the wire — the PEER_LIST format is unchanged; peers learn it from the
         // system-chat notice PausePeer/ResumePeer post.
         public bool IsPaused { get; set; }
+        // ADVISORY ONLY: "this player says they have finished moving this round". Gates nothing, ever
+        // (RailCheck L119) — it is read by one label and cleared on every new player round. Deliberately
+        // NOT on the PEER_LIST wire: it rides the tactical band's own tally (SurfaceIds.TacTurn op 4).
+        public bool TacReady { get; set; }
         public string ParityDiffs { get; set; } = ""; // FIX-4 soft-gate: exact diff text ("" = parity OK)
         public int LatencyMs { get; set; }
         public byte SlotIndex { get; set; }           // host-assigned stable slot (echoed in PEER_LIST)

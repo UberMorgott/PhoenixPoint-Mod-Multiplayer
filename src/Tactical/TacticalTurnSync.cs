@@ -87,6 +87,7 @@ namespace Multiplayer.Tactical
             LeftBattle = false;
             ClientMissionStartHints.Reset();   // the next battle gets its own mission-start replay
             TacticalUiRepaint.Reset();         // drop the paint memo: it names an actor of the dead battle
+            TacticalReadySync.Reset();         // advisory ready flags + the cloned button's handles
         }
 
         internal static void RegisterIntents()
@@ -95,6 +96,10 @@ namespace Multiplayer.Tactical
             {
                 [OpEndTurn] = HandleEndTurn,
                 [OpLeaveBattle] = HandleLeaveBattle,
+                // ADVISORY, gates nothing (RailCheck L119). It rides this family because it is the same
+                // question one step earlier: "I am done with this turn" → "end this turn" → "we are done
+                // with this battle".
+                [TacticalReadySync.OpSetReady] = TacticalReadySync.HandleSetReady,
             };
             IntentRail.Register(SurfaceIds.TacTurnIntent, "tac-turn", ops);
         }
@@ -168,7 +173,10 @@ namespace Multiplayer.Tactical
             Send(SurfaceIds.TacTurn, OpLeave, "battle LEFT — every peer follows", w => { });
         }
 
-        private static void Send(byte surfaceId, byte op, string what, Action<BinaryWriter> writeBody)
+        /// <summary>internal, not private: <see cref="TacticalReadySync"/> ships its advisory tally as op 4
+        /// of THIS surface, and a second emitter with its own SurfaceSeq would break the one property 0x80
+        /// exists for — a single ordered stream in which nothing can overtake the turn edge.</summary>
+        internal static void Send(byte surfaceId, byte op, string what, Action<BinaryWriter> writeBody)
         {
             var engine = NetworkEngine.Instance;
             try
@@ -215,6 +223,8 @@ namespace Multiplayer.Tactical
                     if (op == OpTurn) ApplyTurn(r.ReadString(), r.ReadInt32());
                     else if (op == OpEnd) ApplyEnd((TacFactionState)r.ReadByte());
                     else if (op == OpLeave) ApplyLeave();
+                    else if (op == TacticalReadySync.OpReadyTally)
+                        TacticalReadySync.ApplyTally(r.ReadInt32(), r.ReadInt32());
                     else
                     {
                         Debug.LogError("[Multiplayer][tac] unknown host→all tactical op " + op + " (seq=" + seq +
@@ -585,6 +595,9 @@ namespace Multiplayer.Tactical
             // this, aliens move on the host and never on a client (A2's ClientAiGate), so a later rebuild would
             // give the two peers different maps and point every alien key at the wrong monster.
             TacticalActorKey.BuildBattleKeys(nextFaction == null ? null : nextFaction.TacticalLevel);
+            // THE ADVISORY READY RESET, on the game's own round edge (constraint 4: no poll, no timer).
+            // Every peer clears its own flag; the host additionally clears every seat and ships 0/M.
+            TacticalReadySync.OnNewTurn(nextFaction);
             if (engine.IsHost) TacticalTurnSync.HostBroadcastTurn(nextFaction);
             else TacticalTurnSync.ClientVerifyTurn(nextFaction);
         }

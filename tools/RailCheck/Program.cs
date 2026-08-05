@@ -191,6 +191,7 @@ namespace RailCheck
             laws.AddRange(L116_EveryOpenContainerPanel.Check(game));
             laws.AddRange(L117_RestoredSubjectStillLive.Check(game));
             laws.AddRange(L118_MirroredHostLoad.Check(game));
+            laws.AddRange(L119_AdvisoryReadyLabel.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
