@@ -91,6 +91,14 @@ namespace Multiplayer.Network.Sync
             /// <summary><c>DiplomacyResearchRewardData</c>: Ref = <c>Faction</c>, Keys = every
             /// <c>ResearchID</c> in <c>Researches</c>, Num = <c>DiplomacyShareLevel</c>.</summary>
             DiplomacyReward = 2,
+            /// <summary>THE GENERIC ARM, and the reason this file stopped growing a case per window: the
+            /// modalData IS an entity the rail already names, so there is nothing to describe — Ref = the
+            /// rail path (<see cref="EntityRefOf"/>), Keys[0] = the object's class, and the peer hands the
+            /// prefab whatever ITS OWN graph resolves that path to. A mission brief's live
+            /// <c>GeoMission</c> and a <c>FactionSoldierJoin</c>'s <c>GeoCharacter</c> both ride it with no
+            /// type-specific code on either side; the next entity-shaped modal rides it with none
+            /// either.</summary>
+            EntityRef = 3,
             /// <summary>The host holds an object this file has no description for. Never sent — the host
             /// refuses the raise and logs it, because a modal whose data cannot be rebuilt renders as an empty
             /// prefab full of the designers' baked placeholder text (the 0xB6 half-built-window lesson).</summary>
@@ -192,9 +200,51 @@ namespace Multiplayer.Network.Sync
                         Num = d.DiplomacyShareLevel,
                     };
                 default:
-                    return new Raise { Shape = DataShape.Unsupported, Ref = "", Keys = new string[0] };
+                    var named = EntityRefOf(modalData);
+                    return named == null
+                        ? new Raise { Shape = DataShape.Unsupported, Ref = "", Keys = new string[0] }
+                        // The CLASS rides along because a path cannot carry it and the prefab's data-bind
+                        // casts on it: it is the one thing the peer must check before handing the object over.
+                        : new Raise
+                        {
+                            Shape = DataShape.EntityRef,
+                            Ref = named,
+                            Keys = new[] { modalData.GetType().FullName },
+                        };
             }
         }
+
+        /// <summary>The rail path that NAMES a modal's data object, or null when the rail cannot name it at
+        /// all. Two rungs, both of them the rail's OWN law-2 grammar and neither of them about windows:
+        ///   1. a ROOT entity names itself — <see cref="IdentityResolver.RootRef"/> covers
+        ///      GeoSite/GeoVehicle/GeoCharacter/GeoFaction/GeoHavenZone, which is the whole of what a
+        ///      <c>FactionSoldierJoin</c> needs (its modalData is the offered <c>GeoCharacter</c>, and
+        ///      <c>CreateCharacterFromDescriptor</c>:1597 has already put it in <c>_tacUnits</c> under a
+        ///      minted id, so it is a root the walk structurally creates on the peer).
+        ///   2. a SUB-entity is named by the PATH to the slot its owner holds it in — the same shape
+        ///      <c>IdentityResolver.HavenZoneRef</c> uses, and for a <c>GeoMission</c> that slot is the
+        ///      Descend field the VALUE rail already ships it under: <c>S#&lt;id&gt;.SerializationData
+        ///      .ActiveMission</c> (GenericApplier.cs:251, docs/rail-baseline.txt GeoSite twin table
+        ///      "+ Descend ActiveMission"). So a mission brief resolves to the peer's own structurally
+        ///      mirrored mission and never to a wire reference the host may already have cancelled — the
+        ///      same rule <see cref="MissionSync"/> follows for the launch intent.
+        /// A name that cannot be resolved BACK to its object is not a name; <see cref="HostBroadcast"/>
+        /// checks that on the host's own graph rather than trusting either rung.</summary>
+        internal static string EntityRefOf(object modalData)
+        {
+            var root = IdentityResolver.RootRef(modalData);
+            if (root != null) return root;
+            if (modalData is PhoenixPoint.Geoscape.Entities.GeoMission m)
+            {
+                var owner = IdentityResolver.RootRef(m.Site);
+                return owner == null ? null : owner + MissionSlotPath;
+            }
+            return null;
+        }
+
+        /// <summary>The owner-slot suffix of rung 2 above, as one constant: the rail emits this exact path
+        /// for the mission's structural create, so a peer resolving it walks the SAME member.</summary>
+        internal const string MissionSlotPath = ".SerializationData.ActiveMission";
 
         /// <summary>Host-side broadcast of ONE modal, called from the postfixes on the two native openers.
         /// Never throws into game code: a raise this fails on is a window the client does not get, and it
@@ -226,6 +276,20 @@ namespace Multiplayer.Network.Sync
                                    "against and would render the prefab's placeholder text");
                     return;
                 }
+                // A NAME MUST NAME ITS OBJECT — checked on the HOST's own graph, where the object certainly
+                // is. A derivation can produce a syntactically perfect key that means nothing: an entity the
+                // level has not registered yet, or an id that means "nobody" (a fresh GeoTacUnitId is 0, and
+                // "U#0" resolves to no unit — or to somebody else's). Refusing here is the difference between
+                // a window that does not appear and a window built over the wrong soldier.
+                if (p.Shape == DataShape.EntityRef &&
+                    !ReferenceEquals(IdentityResolver.Resolve(GeoLevel(), p.Ref, null), modalData))
+                {
+                    Debug.LogError("[MP][modals] '" + modalType + "' NOT mirrored — the rail named its " +
+                                   modalData.GetType().Name + " '" + p.Ref + "', but that path does not " +
+                                   "resolve back to that very object on the HOST's own graph, so it names " +
+                                   "nothing (or something else) on a peer. The entity is not on the rail yet");
+                    return;
+                }
                 uint seq = Seq.Next(SurfaceIds.GeoModalRaise);
                 var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoModalRaise, SyncKind.StateDelta, Encode(seq, p));
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
@@ -253,6 +317,25 @@ namespace Multiplayer.Network.Sync
         internal static string DataRefusal(DataShape shape, bool rootResolved, int keysWanted, int keysResolved)
         {
             if (shape == DataShape.None) return null;
+            if (shape == DataShape.EntityRef)
+            {
+                // Same three questions as below, asked of one object instead of a root plus its ids —
+                // spelled out rather than folded in, because the REASONS differ and a refusal nobody can
+                // read is the silent swallow with extra steps.
+                if (!rootResolved)
+                    return "the host named an entity this peer's own graph cannot resolve — either the rail " +
+                           "has not created it here yet or it never will, and a modal whose data is null has " +
+                           "its cast dereferenced unguarded inside EnterState";
+                if (keysWanted <= 0)
+                    return "the host shipped no class for the entity it named, so nothing here can tell " +
+                           "whether this peer resolved the same KIND of object — and the prefab's data-bind " +
+                           "casts before it reads";
+                if (keysResolved != keysWanted)
+                    return "the shipped path resolves to a DIFFERENT class on this peer than the host " +
+                           "described (mod parity: law 10 should have blocked the join) — the data-bind's " +
+                           "cast throws inside EnterState, which is the same half-built window by another route";
+                return null;
+            }
             if (!rootResolved)
                 return "the host raised it for a faction/root this peer cannot resolve — the rebuilt modal data " +
                        "would be null and the prefab's data-bind casts and dereferences it unguarded inside " +
@@ -265,6 +348,24 @@ namespace Multiplayer.Network.Sync
                        "parity: law 10 should have blocked the join) — a modal missing part of what the host " +
                        "showed is a different window, not the same one";
             return null;
+        }
+
+        /// <summary>The <see cref="DataShape.EntityRef"/> arm's peer-side half, PURE so RailCheck L106 can
+        /// execute the whole describe→encode→decode→rebuild round trip headless.
+        /// <paramref name="resolved"/> is what THIS peer's graph made of the shipped path (see
+        /// <see cref="BuildData"/>); the object is returned as-is, because for this shape the modalData IS
+        /// the entity. The CLASS check is not ceremony: the path grammar is type-blind, so a ref that lands
+        /// on a different kind of object here than it named on the host is a cast that throws inside
+        /// <c>UIStateGeoModal.EnterState</c> — the half-built-prefab failure, and it would be logged as a
+        /// successful raise.</summary>
+        internal static object EntityData(Raise p, object resolved, out string refusal)
+        {
+            var want = p.Keys != null && p.Keys.Length > 0 ? p.Keys[0] : null;
+            bool sameClass = resolved != null && !string.IsNullOrEmpty(want) &&
+                             resolved.GetType().FullName == want;
+            refusal = DataRefusal(DataShape.EntityRef, resolved != null,
+                                  string.IsNullOrEmpty(want) ? 0 : 1, sameClass ? 1 : 0);
+            return refusal == null ? resolved : null;
         }
 
         /// <summary>Returns true when the surface was consumed. Client-only: the host never applies its own
@@ -345,6 +446,12 @@ namespace Multiplayer.Network.Sync
         {
             refusal = null;
             if (p.Shape == DataShape.None) return null;
+            // THE GENERIC ARM. The wire carried a NAME, so the object comes out of THIS peer's own mirrored
+            // graph — never off the payload, which holds no entity to be tempted by. The modalData for this
+            // shape IS the entity, so the prefab binds against the peer's own live GeoMission/GeoCharacter
+            // and renders this peer's state in this peer's locale.
+            if (p.Shape == DataShape.EntityRef)
+                return EntityData(p, IdentityResolver.Resolve(geo, p.Ref, null), out refusal);
             var faction = IdentityResolver.Resolve(geo, p.Ref, null) as GeoFaction;
             var keys = p.Keys ?? new string[0];
             var found = new List<ResearchElement>(keys.Length);

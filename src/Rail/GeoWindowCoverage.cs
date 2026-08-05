@@ -253,42 +253,44 @@ namespace Multiplayer.Network.Sync
                 "modalData NULL (nothing to resolve, nothing that can fail to resolve) and an empty `case` in " +
                 "ModalResultCallback:798. Shared campaign truth about a base BOTH peers now own",
                 ModalType.GeoPhoenixBaseOutcome);
-
-            // ── GAP: should reach the other peer, and does not yet ──
-            Modal(d, WindowSync.Gap,
-                "mission BRIEF — raised host-side at GeoscapeView.cs:1903 (OpenModalPersistent). The DATA is " +
-                "already there: the mission is site.ActiveMission and the rail structurally creates it on the " +
-                "client (docs/rail-baseline.txt, GeoSite twin table `Descend ActiveMission`). The BUTTONS are what " +
-                "is missing — ModalResultCallback:798 maps Confirm to LaunchMission and Cancel to mission.Cancel(), " +
-                "both host-authoritative — and behind them a decision this rail has NOW made, but only half of. " +
-                "NARROWED 2026-08-01: the squad INTENT the previous wording named as this entry's prerequisite " +
-                "SHIPPED as MissionSync (surface 0xB8), so Confirm no longer has an undefined meaning — " +
-                "GeoMission.Launch is captured block-first on a client and the host commits it, and Cancel is " +
-                "gated (MissionCancelGate). The ANSWER half (WindowQueueSync's 0xB9 advance op) carries a " +
-                "clicked ModalResult back and the host runs UIStateGeoModal.FinishDialog:82 natively — but " +
-                "CORRECTED 2026-08-01, same day: that op reaches only windows the HOST RAISED to the answering " +
-                "peer, i.e. the Mirrored notification modals, and it never reached a brief. It cannot: the " +
-                "identity both peers agree on is a re-description of the 0xB7 payload, a brief's modalData is a " +
-                "live GeoMission that no DataShape describes, and the peer has no copy to click in the first " +
-                "place. The claim that the answer half was done here was written on an arbiter that matched " +
-                "TYPE + ModalType, which is what let one peer's window dismiss another's. So the hole is " +
-                "unchanged and singular — a DataShape for the mission brief on 0xB7 — and until it exists a " +
-                "client starts the mission from the site and aircraft UI instead. Superseded reasoning, kept " +
-                "for the record: " +
-                "\"what is still missing is only this WINDOW's own two halves: the modal intent op that " +
-                "carries the clicked ModalResult back, and the host→all hide keyed on " +
-                "GeoscapeView.ModalClosed:793\"; and before that: " +
-                "Confirm → LaunchMission:1043-1050 walks straight into the DEPLOYMENT screen, and " +
-                "deployment is host-only for an entry-mechanism reason law 5's rewrite did not touch: the host " +
-                "builds the battle and ships it as a save, so a client's squad pick has nowhere to be committed. " +
-                "So \"the client clicked Launch\" still has no defined meaning, and shipping this read-only would " +
-                "put a live LAUNCH MISSION button on the client that silently does nothing, which is worse than " +
-                "the gap. Needs a squad INTENT (client picks → host commits) before the modal intent op + the " +
-                "host→all hide keyed on GeoscapeView.ModalClosed:793 are worth building",
+            Modal(d, WindowSync.Mirrored,
+                "mission BRIEF — raised host-side at GeoscapeView.cs:1903 (OpenModalPersistent), modalData = " +
+                "the live GeoMission. SHIPPED 2026-08-05 as the GENERIC 0xB7 EntityRef shape and not as a " +
+                "brief-specific payload: the mission is named by the rail path its own site already addresses " +
+                "it with (S#<id>.SerializationData.ActiveMission — the Descend field the value rail " +
+                "structurally creates on the client, docs/rail-baseline.txt), and the client's copy is built " +
+                "from what THAT path resolves to on its own graph, never from a wire reference the host may " +
+                "already have cancelled. Ten ModalTypes ride it and none of them cost a line: " +
+                "GetMissionBriefModal:1724 only picks the prefab. The BUTTONS were this entry's prerequisite " +
+                "and both halves already exist — Confirm's LaunchMission is captured block-first as the 0xB8 " +
+                "launch intent (MissionSync, which likewise reads the host's OWN site.ActiveMission) and " +
+                "Cancel is gated (MissionCancelGate); the click itself crosses as the 0xB9 advance intent " +
+                "(WindowQueueSync) and the HOST runs its own FinishDialog:82, because the copy here carries a " +
+                "null DialogCallback and no button on it can run game logic locally. Law 91 is the whole " +
+                "point: a brief on an idle host held the shared queue and the shared clock with no peer able " +
+                "to answer it. If the mission has not reached this peer yet the raise is REFUSED loudly " +
+                "(DataRefusal) — no window beats a window over placeholder text",
                 ModalType.GeoHavenAttackBrief, ModalType.GeoAlienBaseBrief, ModalType.GeoScavengeBrief,
                 ModalType.GeoPhoenixBaseDefenseBrief, ModalType.GeoAmbushBrief,
                 ModalType.GeoPhoenixBaseInfestationBrief, ModalType.AncientSiteAttackBrief,
                 ModalType.AncientSiteDefenceBrief, ModalType.BehemothAttackBrief, ModalType.InfestedHavenBrief);
+            Modal(d, WindowSync.Mirrored,
+                "a faction soldier offers to join — HavenMissionUtil.cs:59, modalData = the offered " +
+                "GeoCharacter (reward.Units.First()). SHIPPED 2026-08-05 by the SAME EntityRef shape with " +
+                "zero type-specific code, which is the point: a GeoCharacter is a rail ROOT, so " +
+                "IdentityResolver.RootRef names it \"U#<id>\" on rung one and the peer resolves it out of its " +
+                "own _tacUnits. It is a real root and not a detached reward object — " +
+                "GenerateHavenMissionRecruitmentReward:93 spawns it through " +
+                "GeoLevelController.CreateCharacterFromDescriptor, whose last line is " +
+                "`_tacUnits[geoCharacter.Id] = geoCharacter`:1597, so the walk creates it structurally on the " +
+                "peer like any other unit. Confirm stays HOST-authoritative: reward.Apply(faction, site, " +
+                "aircraft) runs on the host through the 0xB9 advance intent's native FinishDialog, and what " +
+                "it grants was already replicated. KNOWN ORDERING CEILING: the raise is broadcast in the same " +
+                "breath as the spawn, so a peer whose structural create has not landed yet refuses it loudly " +
+                "(DataRefusal) instead of rendering an empty prefab",
+                ModalType.FactionSoldierJoin);
+
+            // ── GAP: should reach the other peer, and does not yet ──
             Modal(d, WindowSync.Gap,
                 "mission OUTCOME — TWO raisers with OPPOSITE verdicts under one ModalType, which is why this stays " +
                 "a declared hole instead of a half-answer. UIStateInitial.cs:112 raises it on the peer RETURNING " +
@@ -337,16 +339,6 @@ namespace Multiplayer.Network.Sync
                 "List<RewardDiplomacyChange>; the data object IS the closure. Describable in principle (faction + " +
                 "research ids + the diplomacy deltas), not described yet",
                 ModalType.AlienResearchBrief);
-            Modal(d, WindowSync.Gap,
-                "a faction soldier offers to join — HavenMissionUtil.cs:59, Confirm→reward.Apply(faction, site, " +
-                "aircraft), a host-authoritative GRANT. 2026-08-01: 0xB9's advance op is the shape the answer " +
-                "will take — the host runs its OWN DialogCallback, so the grant stays host-side exactly as it " +
-                "must — but it does NOT reach this window today, and the same-day claim that it did is " +
-                "withdrawn: the op only advances a window the host RAISED to the answering peer, and the RAISE " +
-                "(a 0xB7 DataShape for this modalData) is precisely what is missing. Ordering matters and was " +
-                "got backwards: the raise is not the leftover, it is the prerequisite. Once the host accepts, " +
-                "the soldier itself already reaches the other peer as a structural create",
-                ModalType.FactionSoldierJoin);
             Modal(d, WindowSync.Gap,
                 "NO caller anywhere in the shipped assembly (full sweep 2026-07-31) — declared so this table stays " +
                 "TOTAL over the enum. Gap rather than LocalOnly on purpose: nobody has reviewed what these should " +

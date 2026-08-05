@@ -177,6 +177,7 @@ namespace RailCheck
             laws.AddRange(L103_NativeTacticalEntry.Check());
             laws.AddRange(L104_ActionAnchor.Check());
             laws.AddRange(L105_StatOrdering.Check());
+            laws.AddRange(L106_ModalEntityRaise.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
