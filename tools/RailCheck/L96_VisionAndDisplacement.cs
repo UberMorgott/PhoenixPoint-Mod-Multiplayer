@@ -213,6 +213,9 @@ namespace RailCheck
                 }
             }
 
+            // ─── HALF 3: THE OUTCOME, EXECUTED — a known-state survives the turn edge as the host's does ───
+            foreach (var v in TurnEpochArm()) yield return v;
+
             var hurt = game.GetType("PhoenixPoint.Tactical.Entities.Abilities.TacticalHurtReactionAbility");
             var activate = hurt == null ? null : hurt.GetMethod("Activate", AllMembers);
             if (hurt == null || activate == null || !ReadsField(activate, "TriggerOnDamage"))
@@ -222,6 +225,97 @@ namespace RailCheck
                              "caller's own target, and true ignores the parameter for GetHurtReactionTarget(). " +
                              "Without it there is no sound way to tell an ordered reposition from an ambient one.";
         }
+
+        /// <summary>
+        /// HALF 3 — THE OUTCOME ARM, and the only one here that RUNS the shipped code rather than reading it.
+        /// Halves 1 and 2 assert CALLS: a second call site exists, a foreign sweep exists, a discriminator is
+        /// read. All of that stayed true on 2026-08-05 while an enemy's sound beacon was <c>Located</c> on
+        /// the host and <c>Hidden</c> on both clients, because the defect was not a missing call — it was
+        /// ORDER. The host raised the trace from a bleed tick AFTER its faction-turn decay
+        /// (<c>Player.log</c>:8227 turn, :8272 damage); the clients applied the mirrored raise BEFORE their
+        /// own decay (:6946 damage, :7051 turn) and wiped it. The settle could not repair it either: the
+        /// actor was cloaked, and both <c>LocateByDistance</c> and <c>ReUpdateHearingImpl</c> skip cloaked
+        /// actors.
+        ///
+        /// So this arm drives the REAL production chokepoint — <c>SurfaceRouter.OnInbound</c>, with the real
+        /// <c>ClientBehindTurnEdge</c> gate armed — and asserts the four facts the fix consists of:
+        /// (1) the turn cursor itself is never held (holding it would deadlock the gate that opens it);
+        /// (2) a record that arrives while this peer is behind the host's edge is NOT applied;
+        /// (3) crossing the edge applies the whole backlog IN ARRIVAL ORDER;
+        /// (4) the hold is BOUNDED — a peer that never crosses still gets its records, late and loudly.
+        /// Delete the hold from <c>OnInbound</c> and (2) goes red; drop the <c>TacTurn</c> exemption and (1)
+        /// goes red; drop the ceiling and (4) hangs at red.
+        /// </summary>
+        private static IEnumerable<string> TurnEpochArm()
+        {
+            var router = new Multiplayer.Network.Sync.SurfaceRouter();
+            var applied = new List<byte>();
+            var prevTac = Multiplayer.Network.Sync.SurfaceRouter.TacticalInbound;
+            var prevGate = Multiplayer.Network.Sync.SurfaceRouter.ClientBehindTurnEdge;
+            bool behind = true;
+            try
+            {
+                Multiplayer.Network.Sync.SurfaceRouter.TacticalInbound =
+                    (peer, sid, payload) => { applied.Add(sid); return true; };
+                Multiplayer.Network.Sync.SurfaceRouter.ClientBehindTurnEdge = () => behind;
+
+                // (1) the cursor is never held — it is the message that OPENS the gate.
+                router.OnInbound(1, Envelope(Multiplayer.Network.Sync.SurfaceIds.TacTurn));
+                if (!applied.Contains(Multiplayer.Network.Sync.SurfaceIds.TacTurn))
+                    yield return "L96 turn-epoch-holds-the-cursor: the 0x80 turn cursor was HELD by the " +
+                                 "turn-epoch gate. That surface is the only thing that can move this peer past " +
+                                 "the edge the gate is waiting for, so holding it is a permanent deadlock — the " +
+                                 "exact failure the gate exists to avoid.";
+
+                // (2) a record stamped on the far side of the host's edge does not land early.
+                applied.Clear();
+                router.OnInbound(1, Envelope(Multiplayer.Network.Sync.SurfaceIds.TacResult));
+                router.OnInbound(1, Envelope(Multiplayer.Network.Sync.SurfaceIds.TacCommand));
+                if (applied.Count != 0)
+                    yield return "L96 turn-epoch-not-gated: a record arriving while this peer is still BEHIND " +
+                                 "the faction-turn edge the host already crossed was applied immediately (" +
+                                 applied.Count + " surface(s)). It is then applied in the wrong epoch and this " +
+                                 "peer's own turn edge decays what the host had already raised — a KnownState " +
+                                 "the host shows and no client does (2026-08-05, an invisible enemy whose sound " +
+                                 "beacon existed only on the host).";
+
+                // (3) crossing the edge releases the backlog, in arrival order.
+                behind = false;
+                router.ReleaseHeld();
+                if (applied.Count != 2 ||
+                    applied[0] != Multiplayer.Network.Sync.SurfaceIds.TacResult ||
+                    applied[1] != Multiplayer.Network.Sync.SurfaceIds.TacCommand)
+                    yield return "L96 turn-epoch-backlog-lost: after this peer crossed its own turn edge the " +
+                                 "held records did not replay as [0x84, 0x82] (got " + Describe(applied) + "). " +
+                                 "A gate that drops or reorders what it held is worse than no gate: the peers " +
+                                 "then differ by whatever went missing, permanently and silently.";
+
+                // (4) the hold is bounded — a peer that never crosses still gets its records.
+                behind = true;
+                applied.Clear();
+                router.OnInbound(1, Envelope(Multiplayer.Network.Sync.SurfaceIds.TacResult));
+                for (int i = 0; i <= Multiplayer.Network.Sync.SurfaceRouter.HeldFrameCeiling; i++)
+                    router.ReleaseHeld();
+                if (applied.Count == 0)
+                    yield return "L96 turn-epoch-hold-unbounded: a peer that never crosses its turn edge holds " +
+                                 "inbound records forever (" + router.HeldCount + " still queued after " +
+                                 Multiplayer.Network.Sync.SurfaceRouter.HeldFrameCeiling + " pumps). Law L91: " +
+                                 "no wait in this mod may be unbounded, including one that waits on nothing but " +
+                                 "this peer's own stuck turn machine.";
+            }
+            finally
+            {
+                Multiplayer.Network.Sync.SurfaceRouter.TacticalInbound = prevTac;
+                Multiplayer.Network.Sync.SurfaceRouter.ClientBehindTurnEdge = prevGate;
+            }
+        }
+
+        private static byte[] Envelope(byte surfaceId) =>
+            Multiplayer.Network.Sync.SyncProtocol.EncodeEnvelope(
+                surfaceId, Multiplayer.Network.Sync.SyncKind.ActionApply, new byte[] { 7 });
+
+        private static string Describe(List<byte> ids) =>
+            ids.Count == 0 ? "nothing" : "[" + string.Join(", ", ids.Select(b => "0x" + b.ToString("X2"))) + "]";
 
         private static IEnumerable<Type> SafeTypes(Assembly a)
         {

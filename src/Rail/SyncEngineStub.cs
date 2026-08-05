@@ -92,6 +92,16 @@ namespace Multiplayer.Network.Sync
             // ones that can plausibly own a frame; everything else is covered by the tick total, and
             // frameMax is the control that says whether a hitch is the rail's at all.
             long t0 = RailCost.Now(), t = t0;
+            // TURN-EPOCH GATE pump (law L96, see SurfaceRouter.ClientBehindTurnEdge). FIRST in the tick: a
+            // backlog held for this peer's own turn edge must be applied before anything else this frame
+            // reads the model. Inert on the host and whenever nothing is held.
+            int forcedLate = Router.ReleaseHeld();
+            if (forcedLate > 0)
+                UnityEngine.Debug.LogError("[Multiplayer][tac] turn-epoch hold CEILING reached — " + forcedLate +
+                                           " record(s) applied late, after " + SurfaceRouter.HeldFrameCeiling +
+                                           " frames, because this peer never crossed the faction-turn edge the " +
+                                           "host announced. Applying beats dropping, but the local turn machine " +
+                                           "is stuck and the peers are on different turns.");
             ManufactureSync.HostTick(_engine);
             MistSync.Tick(_engine); // host: recompute the "M#mist" payload; client: hand it to the native loader
             t = RailCost.Charge("mist", t);

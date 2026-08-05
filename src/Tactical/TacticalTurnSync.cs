@@ -102,6 +102,12 @@ namespace Multiplayer.Tactical
                 [TacticalReadySync.OpSetReady] = TacticalReadySync.HandleSetReady,
             };
             IntentRail.Register(SurfaceIds.TacTurnIntent, "tac-turn", ops);
+
+            // ARM THE TURN-EPOCH GATE on the ONE inbound chokepoint. Here rather than in a tactical-init
+            // step because this is the method that already declares "the turn cursor is this file's job",
+            // and the predicate self-guards (host / no session / no level → false), so a standing
+            // assignment is safe and re-arming per battle is a no-op.
+            SurfaceRouter.ClientBehindTurnEdge = ClientBehindTurnEdge;
         }
 
         private static TacticalLevelController Tlc()
@@ -357,6 +363,22 @@ namespace Multiplayer.Tactical
             if (HostMissionOver) return true;
             var guid = Guid(faction);
             return HostFactionGuid != null && guid != null && HostFactionGuid != guid;
+        }
+
+        /// <summary>THE TURN-EPOCH GATE's predicate (law L96) — armed onto
+        /// <see cref="SurfaceRouter.ClientBehindTurnEdge"/> in <see cref="RegisterIntents"/>, which is where
+        /// the full reasoning lives. TRUE means: the host has announced a faction this peer is not standing
+        /// on yet, so every record arriving right now was stamped on the far side of an edge this peer has
+        /// not crossed. Deliberately NOT <see cref="HostHasLeft"/> with the current faction passed in —
+        /// that one returns TRUE on <see cref="HostMissionOver"/> because its job is to release holds, and
+        /// releasing a hold is the opposite of what a battle-over peer should do to its inbox.</summary>
+        internal static bool ClientBehindTurnEdge()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return false;
+            if (HostFactionGuid == null || HostMissionOver) return false;
+            var guid = Guid(Tlc()?.CurrentFaction);
+            return guid != null && guid != HostFactionGuid;
         }
 
         /// <summary>Standing release for a PLAYER faction's turn on the client (driven from
@@ -734,10 +756,19 @@ namespace Multiplayer.Tactical
     ///
     /// THE FIX = RUN THE NATIVE REPLAY THE GATE SKIPPED, once, on the peers the gate skipped it on.
     /// A POSTFIX (law 4c presentation seam), no wire bytes and no surface — hints are per-peer presentation,
-    /// which is why <c>ContextHelpData</c> is already an excluded field on the rail (RailMeta.cs:753). Nothing
-    /// here can strand a peer: each peer's popup is its own local <c>UIStateTacticalContextHelp</c> and holds
-    /// only its own UI stack — the model, the turn machine and every mirrored order keep running underneath,
-    /// and no peer waits on another's OK.
+    /// which is why <c>ContextHelpData</c> is already an excluded field on the rail (RailMeta.cs:753).
+    ///
+    /// THE "NO PEER WAITS ON ANOTHER'S OK" CLAIM THAT USED TO SIT HERE WAS FALSE, and nothing enforced it.
+    /// A popup does hold only its own UI stack — but the native ALIEN-TURN coroutine yielded on that stack:
+    /// <c>TacticalFaction.AIUpdateCrt</c>:567 and :621 → <c>TacticalView.WaitUntilHintsAreConfirmed</c>. On
+    /// 2026-08-05 the host's Umbra hint stopped the alien turn for 125 s on all three peers, and the clients
+    /// — which never render an AI turn of their own — sat in <c>ClientAiGate</c>'s hold with no popup to
+    /// dismiss. What is enforced NOW, and where: <see cref="HintWaitGate"/> (src\Tactical\TacticalHintGate.cs)
+    /// prefixes that one funnel so the coroutine never stops on any peer's popup; <c>ClientAiGate</c>'s hold
+    /// carries a named ceiling (<c>HoldCeilingFrames</c>, TacticalEntry.cs) and releases rather than waiting
+    /// forever; and law L91 arms (f)/(g) assert both mechanically — every hold coroutine on the rail must
+    /// load a named bound, and every native wait funnel the shared turn coroutine reaches through the local
+    /// UI state stack must be patched by this mod.
     ///
     /// NOTHING SHOWS IT EXPLICITLY, deliberately. <c>UIStateCharacterSelected.UpdateState</c>:1103-1106 calls
     /// <c>TacticalView.TryShowContextHint</c>:339 EVERY FRAME, so filling <c>_hintsPendingDisplay</c> is the
