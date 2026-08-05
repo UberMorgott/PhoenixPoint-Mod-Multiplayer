@@ -129,7 +129,9 @@ namespace Multiplayer.Tactical
     {
         // ~10 s at 60 fps. A budget, not a deadline: the capture happens either way, but a timeout is a
         // LOUD error — a silently-early capture is exactly the failure this arc must not have.
-        private const int CaptureReadyMaxFrames = 600;
+        // static readonly, not const: see HoldCeilingFrames — L91's bounded-hold arm asserts the ldsfld, and
+        // an inlined const is a magic number by the time the IL exists.
+        private static readonly int CaptureReadyMaxFrames = 600;
 
         private static void Postfix(TacticalLevelController __instance, Level.State state)
         {
@@ -250,16 +252,45 @@ namespace Multiplayer.Tactical
         }
 
         // ~60 s at 60 fps. Not a deadline — a long alien turn is normal — but a hold nobody can see is the
-        // silent-swallow class this project keeps paying for, so it says so periodically and keeps waiting.
-        private const int HoldWarnFrames = 3600;
+        // silent-swallow class this project keeps paying for, so it says so periodically.
+        // static readonly, not const: a const is inlined into the state machine's IL and becomes
+        // indistinguishable from a typed digit, so L91's bounded-hold arm could not see it (the same
+        // reasoning that made NetworkEngine.MaxPlayers a field).
+        private static readonly int HoldWarnFrames = 3600;
 
+        /// <summary>~3 minutes at 60 fps. THE CEILING LAW L91 DEMANDS: this hold used to have none, by an
+        /// explicit design note, and it was itself a peer waiting on another peer — the shape the prime rule
+        /// forbids. 3 minutes is far past any real alien turn (the pathological 60 s+ hold in the 2026-08-05
+        /// log came from the host's hint popup, which <see cref="HintWaitGate"/> now removes as a cause), so
+        /// reaching this is a broken stream, not a slow one.</summary>
+        private static readonly int HoldCeilingFrames = 10800;
+
+        /// <summary>ON EXPIRY THE CLIENT RELEASES — and that is safe because releasing is NOT running blind.
+        /// Returning from <c>AIUpdateCrt</c> ends only THIS faction's turn locally; the client's turn machine
+        /// then enters the next faction and meets THE SAME hold again, so it can walk forward at most as far
+        /// as the host's last announced cursor and stops dead there (that is the documented
+        /// <c>ClientAdoptTurn</c> "catching up — a faction the host skipped" path). If the host has announced
+        /// nothing at all, every faction re-arms a fresh 3-minute hold, so a peer that has genuinely lost the
+        /// stream crawls one faction per ceiling with an ERROR per step rather than freezing — loud and
+        /// recoverable beats silent and permanent. The one thing never done here is advancing the client's
+        /// model on its own guess: no actor is moved, no turn is ended for anyone else, and the host's next
+        /// cursor message re-anchors the peer.</summary>
         private static IEnumerator<NextUpdate> HoldUntilHostHandsOn(TacticalFaction faction)
         {
             string name = faction?.TacticalFactionDef?.name ?? "<unnamed faction>";
             int frames = 0;
             while (!TacticalTurnSync.HostHasLeft(faction))
             {
-                if (++frames % HoldWarnFrames == 0)
+                if (++frames >= HoldCeilingFrames)
+                {
+                    Debug.LogError("[Multiplayer][tac] turn hold CEILING reached in '" + name + "'s turn after " +
+                                   (frames / 60) + "s — the host has announced no handoff. Releasing rather " +
+                                   "than waiting forever (law L91): this peer moves to the next faction, where " +
+                                   "the same hold re-engages, so it advances no further than the host's last " +
+                                   "announced cursor.");
+                    yield break;
+                }
+                if (frames % HoldWarnFrames == 0)
                     Debug.LogWarning("[Multiplayer][tac] still holding in '" + name + "'s turn after " +
                                      (frames / 60) + "s — the host has announced no handoff yet.");
                 yield return NextUpdate.NextFrame;

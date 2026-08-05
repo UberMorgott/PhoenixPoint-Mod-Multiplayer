@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using HarmonyLib;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
 using Multiplayer.Transport;
@@ -158,6 +159,223 @@ namespace RailCheck
             // A `const` would be inlined at both sites and become indistinguishable from someone typing the
             // digit, so the seats are static readonly fields and this arm asserts the ldsfld.
             foreach (var v in SeatCountArm()) yield return v;
+
+            // ─── (f) EVERY HOLD THIS MOD CAN ENTER IS BOUNDED BY A NAMED NUMBER ───
+            foreach (var v in BoundedHoldArm(railTypes)) yield return v;
+
+            // ─── (g) EVERY NATIVE WAIT FUNNEL THE SHARED TURN COROUTINE REACHES IS PATCHED ───
+            foreach (var v in NativeWaitFunnelArm(mod)) yield return v;
+        }
+
+        /// <summary>
+        /// ARM (f) — NO UNBOUNDED HOLD, DERIVED AND NOT LISTED. Arms (b)-(e) are about the SHAPE of a
+        /// decision, which is exactly why they were green through 2026-08-05: a coroutine that stands still
+        /// takes no decision at all and has no peer-id anywhere near it, yet <c>ClientAiGate</c>'s
+        /// <c>HoldUntilHostHandsOn</c> sat in an alien turn "with NO timeout BY DESIGN", warning every 60 s
+        /// and waiting forever on the host. A wait with no ceiling IS a peer unable to act.
+        ///
+        /// THE CRITERION, so a new hold is covered the day it is written: a coroutine that yields
+        /// <c>NextUpdate.NextFrame</c> is BY CONSTRUCTION a hold — it exists to let wall-clock time pass. So
+        /// the swept set is every compiler-generated iterator in the rail namespaces whose <c>MoveNext</c>
+        /// references <c>NextUpdate.NextFrame</c>. Nothing is hand-listed; <c>yield break</c> stubs
+        /// (<c>Nothing</c>/<c>NoWait</c>) never touch the field and are never swept.
+        ///
+        /// THE TEST is a named bound actually COMPARED against: an <c>ldsfld</c> of a static <c>Int32</c>
+        /// immediately followed by a comparison. That is what distinguishes a ceiling
+        /// (<c>frames >= HoldCeilingFrames</c> → <c>ldsfld</c> + <c>blt</c>) from a diagnostic period
+        /// (<c>frames % HoldWarnFrames == 0</c> → <c>ldsfld</c> + <c>rem</c>), so deleting the ceiling and
+        /// keeping the warning goes RED. It must be a FIELD and not a <c>const</c> for the same reason the
+        /// seat count is: a const is inlined and becomes indistinguishable from a typed digit.
+        /// </summary>
+        private static IEnumerable<string> BoundedHoldArm(List<Type> railTypes)
+        {
+            var nextUpdate = typeof(PhoenixPoint.Tactical.Levels.TacticalFaction).Assembly
+                                 .GetType("Base.Core.NextUpdate");
+            if (nextUpdate == null || nextUpdate.GetField("NextFrame", All) == null)
+            {
+                yield return "L91 hold-premise-changed: Base.Core.NextUpdate.NextFrame no longer resolves as a " +
+                             "field, so 'this coroutine yields a frame' — the criterion that finds every hold " +
+                             "without listing one — cannot be asked. Re-derive it before trusting this arm";
+                yield break;
+            }
+
+            var holds = railTypes.Where(t => t.Name.IndexOf("d__", StringComparison.Ordinal) >= 0 &&
+                                             t.Name.Length > 0 && t.Name[0] == '<')
+                                 .Select(t => new { Type = t, Move = t.GetMethod("MoveNext", All) })
+                                 .Where(x => x.Move != null && ReadsNamedField(x.Move, "NextFrame"))
+                                 .ToList();
+            if (holds.Count == 0)
+            {
+                yield return "L91 no-holds-swept: not one coroutine in the rail namespaces yields " +
+                             "NextUpdate.NextFrame, so this arm is vacuous. Either every hold was deleted — " +
+                             "unlikely while the client still follows the host's turn cursor — or the criterion " +
+                             "no longer finds them and the ceiling rule is UNCHECKED rather than satisfied";
+                yield break;
+            }
+            foreach (var h in holds)
+                if (!ComparesAgainstStaticInt(h.Move))
+                    yield return "L91 unbounded-hold: " + Readable(h.Type) + " yields NextUpdate.NextFrame in a " +
+                                 "loop but never compares anything against a named static int bound. It can " +
+                                 "therefore stand still forever, and a peer standing still forever is a peer " +
+                                 "unable to act — the prime rule, whatever the hold is nominally waiting for. " +
+                                 "This is verbatim what HoldUntilHostHandsOn did on 2026-08-05 while two players " +
+                                 "watched a frozen battlefield for 125 s. Give it a static readonly ceiling and a " +
+                                 "defined give-up (a const is inlined and does not count)";
+        }
+
+        /// <summary>
+        /// ARM (g) — A NATIVE COROUTINE MAY NOT STOP THE SHARED TURN ON ONE PEER'S SCREEN. The other half of
+        /// the same 2026-08-05 report, and the half no structural rule could have seen: the thing that froze
+        /// three peers was not our code at all. <c>TacticalFaction.AIUpdateCrt</c> — the alien turn, which
+        /// only the host runs — yields on <c>TacticalView.WaitUntilHintsAreConfirmed</c>, whose loop spins
+        /// while the LOCAL UI state stack is showing a hint popup. One player's un-dismissed Umbra panel held
+        /// the turn for everybody.
+        ///
+        /// THE CRITERION, derived not listed: take the shared turn coroutine's own state machine, take every
+        /// callee of it that is itself a <c>IEnumerator&lt;NextUpdate&gt;</c> coroutine, and ask of each
+        /// whether ITS body reads the local UI state stack (<c>get_CurrentState</c>) or the hint pump
+        /// (<c>TryShowContextHint</c>). Every funnel that does MUST carry a patch from this mod. A new engine
+        /// wait added to the AI turn tomorrow is swept the same day; nothing here names a hint.
+        /// </summary>
+        private static IEnumerable<string> NativeWaitFunnelArm(Assembly mod)
+        {
+            var faction = typeof(PhoenixPoint.Tactical.Levels.TacticalFaction);
+            var game = faction.Assembly;
+            var aiTurn = faction.GetNestedTypes(All)
+                                .Select(t => t.GetMethod("MoveNext", All))
+                                .FirstOrDefault(m => m != null &&
+                                                     m.DeclaringType.Name.IndexOf("AIUpdateCrt",
+                                                         StringComparison.Ordinal) >= 0);
+            if (aiTurn == null)
+            {
+                yield return "L91 turn-coroutine-gone: TacticalFaction.AIUpdateCrt's state machine no longer " +
+                             "resolves. It is the shared alien turn — the one coroutine whose stalling stops " +
+                             "every peer at once — so this arm can no longer find the waits inside it";
+                yield break;
+            }
+
+            var patched = PatchedGameMethods(mod);
+            bool sweptAny = false;
+            foreach (var callee in Callees(aiTurn, game).Distinct())
+            {
+                var mi = callee as MethodInfo;
+                if (mi == null || mi.ReturnType == null ||
+                    !mi.ReturnType.Name.StartsWith("IEnumerator", StringComparison.Ordinal)) continue;
+                var body = mi.DeclaringType.GetNestedTypes(All)
+                             .Where(t => t.Name.IndexOf(mi.Name, StringComparison.Ordinal) >= 0)
+                             .Select(t => t.GetMethod("MoveNext", All))
+                             .FirstOrDefault(m => m != null);
+                if (body == null) continue;
+                var reached = Callees(body, game).Select(c => c.Name).ToList();
+                if (!reached.Contains("get_CurrentState") && !reached.Contains("TryShowContextHint")) continue;
+                sweptAny = true;
+                if (!patched.Contains(mi.DeclaringType.Name + "." + mi.Name))
+                    yield return "L91 turn-waits-on-local-ui: TacticalFaction.AIUpdateCrt yields on " +
+                                 mi.DeclaringType.Name + "." + mi.Name + ", which spins on this peer's own UI " +
+                                 "state stack — and this mod does not patch it. The alien turn then runs at the " +
+                                 "speed of one player's mouse: on 2026-08-05 a host-side Umbra hint stopped the " +
+                                 "turn for 125 s on all three peers, and the two clients had no popup to dismiss " +
+                                 "because a hint is per-peer presentation. Make the wait LOCAL (a prefix " +
+                                 "returning an immediately-finished enumerator); do not replicate the pause";
+            }
+            if (!sweptAny)
+                yield return "L91 no-wait-funnels-swept: no coroutine reached from AIUpdateCrt reads the UI " +
+                             "state stack or the hint pump any more, so this arm found nothing to check. Either " +
+                             "the engine stopped waiting on local UI inside the shared turn — verify it — or the " +
+                             "criterion has drifted and the rule is UNCHECKED rather than satisfied";
+        }
+
+        /// <summary>Every game method this mod declares a Harmony patch on, as "Type.Method".
+        /// <c>HarmonyPatch</c> is AllowMultiple and the type/name split across attributes, so the pair is
+        /// assembled per patch class rather than per attribute.</summary>
+        private static HashSet<string> PatchedGameMethods(Assembly mod)
+        {
+            var set = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var t in mod.GetTypes())
+            {
+                Type declaring = null;
+                string method = null;
+                foreach (HarmonyPatch a in t.GetCustomAttributes(typeof(HarmonyPatch), inherit: false))
+                {
+                    if (a.info == null) continue;
+                    if (a.info.declaringType != null) declaring = a.info.declaringType;
+                    if (!string.IsNullOrEmpty(a.info.methodName)) method = a.info.methodName;
+                }
+                if (declaring != null && method != null) set.Add(declaring.Name + "." + method);
+            }
+            return set;
+        }
+
+        private static string Readable(Type stateMachine)
+        {
+            var name = stateMachine.Name;
+            int open = name.IndexOf('<'), close = name.IndexOf('>');
+            var inner = open == 0 && close > 1 ? name.Substring(1, close - 1) : name;
+            return (stateMachine.DeclaringType?.Name ?? "?") + "." + inner;
+        }
+
+        /// <summary>Does <paramref name="m"/> load a static field with this name?</summary>
+        private static bool ReadsNamedField(MethodBase m, string name)
+        {
+            foreach (var step in Walk(m))
+            {
+                if (step.Op.OperandType != OperandType.InlineField) continue;
+                FieldInfo f = null;
+                try { f = m.Module.ResolveField(BitConverter.ToInt32(step.Il, step.Pos)); } catch { }
+                if (f != null && f.Name == name) return true;
+            }
+            return false;
+        }
+
+        /// <summary>Is a static <c>Int32</c> field loaded and IMMEDIATELY compared? A ceiling reads
+        /// <c>ldsfld</c> + a branch/compare opcode; a diagnostic period reads <c>ldsfld</c> + <c>rem</c>. That
+        /// one-instruction difference is what stops this arm going green on a hold that only knows how to
+        /// complain about itself.</summary>
+        private static bool ComparesAgainstStaticInt(MethodBase m)
+        {
+            bool armed = false;
+            foreach (var step in Walk(m))
+            {
+                if (armed)
+                {
+                    var op = step.Op;
+                    if (op == OpCodes.Clt || op == OpCodes.Clt_Un || op == OpCodes.Cgt || op == OpCodes.Cgt_Un ||
+                        op == OpCodes.Ceq || op == OpCodes.Blt || op == OpCodes.Blt_S || op == OpCodes.Blt_Un ||
+                        op == OpCodes.Blt_Un_S || op == OpCodes.Bge || op == OpCodes.Bge_S ||
+                        op == OpCodes.Bge_Un || op == OpCodes.Bge_Un_S || op == OpCodes.Bgt ||
+                        op == OpCodes.Bgt_S || op == OpCodes.Bgt_Un || op == OpCodes.Bgt_Un_S ||
+                        op == OpCodes.Ble || op == OpCodes.Ble_S || op == OpCodes.Ble_Un ||
+                        op == OpCodes.Ble_Un_S || op == OpCodes.Beq || op == OpCodes.Beq_S) return true;
+                    armed = false;
+                }
+                if (step.Op.OperandType != OperandType.InlineField) continue;
+                FieldInfo f = null;
+                try { f = m.Module.ResolveField(BitConverter.ToInt32(step.Il, step.Pos)); } catch { }
+                armed = f != null && f.IsStatic && f.FieldType == typeof(int);
+            }
+            return false;
+        }
+
+        private struct IlStep { public byte[] Il; public OpCode Op; public int Pos; }
+
+        /// <summary>The same operand-size walk the arms above use; anything unparseable ABANDONS the method
+        /// rather than guessing, so this under-reports and never invents a red.</summary>
+        private static IEnumerable<IlStep> Walk(MethodBase m)
+        {
+            byte[] il = null;
+            try { il = m?.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) yield break;
+            int i = 0;
+            while (i < il.Length)
+            {
+                short code = il[i++];
+                if (code == 0xFE) { if (i >= il.Length) yield break; code = (short)(0xFE00 | il[i++]); }
+                if (!OpCodeByValue.TryGetValue(code, out var op)) yield break;
+                int size = OperandSize(op.OperandType, il, i);
+                if (size < 0 || i + size > il.Length) yield break;
+                yield return new IlStep { Il = il, Op = op, Pos = i };
+                i += size;
+            }
         }
 
         private static IEnumerable<string> SeatCountArm()
