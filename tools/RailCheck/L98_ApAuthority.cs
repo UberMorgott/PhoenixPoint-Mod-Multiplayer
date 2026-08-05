@@ -181,11 +181,78 @@ namespace RailCheck
                              "icons and tooltip and never touches those texts, over POOLED elements. Without this " +
                              "call the squad bar has no reactivity at all.";
 
+            // ─── HALF 5: the host's turn-edge sweep is stamped in the turn it ANNOUNCES, not inside the edge ─
+
+            foreach (var v in SweepEpochArm()) yield return v;
+
             if (armer == null || !WritesField(armer, "_updateSquadMembersWillAndActionPointsIn"))
                 yield return "L98 premise-countdown-now-idempotent: " +
                              "TacticalView.UpdateSquadMembersActionAndWillPoints no longer writes its countdown " +
                              "field. The bypass above exists ONLY because arming was resettable — if the game made " +
                              "it idempotent, delete PaintSquadBar and arm the native pass again.";
+        }
+
+        /// <summary>THE ARM THIS LAW WAS MISSING, and the one that would have caught 2026-08-05: every arm
+        /// above is about a settle LANDING, and none of them says anything about WHEN the host stamped the
+        /// value it carries. AP restore is native and per-peer (<c>PlayTurnCrt</c>:422-425 →
+        /// <c>TacticalActor.RestartAbilities</c>:1244 <c>ActionPoints.SetToMax</c>), so the host's authority
+        /// for the new turn only exists AFTER the host's own restore has run. A sweep emitted from
+        /// <c>TacMission.OnNewTurn</c> — raised by <c>NextTurnCrt</c>:716 BEFORE <c>PlayTurnCrt</c> — carries
+        /// the AP every soldier ENDED the previous turn on, in neither epoch. While clients applied it early
+        /// that was harmless; under the turn-epoch gate (L96) it is held until after the client's own restore
+        /// and overwrites it, and every soldier on every client starts the turn spent. Nothing was red.
+        ///
+        /// Decidable headless as three facts: <c>HostBroadcastTurn</c> makes NO direct sweep call, the sweep
+        /// is fired behind a <c>TacticalFaction.IsPlayingTurn</c> read (TacticalFaction.cs:441, the game's own
+        /// "this turn has started"), and something on the standing tick drives it — a gated emitter nobody
+        /// calls is the silent swallow this repo is made of.
+        ///
+        /// Falsify: call HostSettleAllLive straight from HostBroadcastTurn again → sweep-stamped-inside-the-edge;
+        /// drop the IsPlayingTurn test → sweep-not-gated-on-the-turn-start; drop the HostSweepTick call from
+        /// SyncEngine.Tick → sweep-has-no-driver.</summary>
+        private static IEnumerable<string> SweepEpochArm()
+        {
+            var turnSync = typeof(Multiplayer.Tactical.TacticalTurnSync);
+            var broadcast = turnSync.GetMethod("HostBroadcastTurn", AllMembers);
+            var sweepTick = turnSync.GetMethod("HostSweepTick", AllMembers);
+            var sweep = typeof(Multiplayer.Tactical.TacticalCommandSync).GetMethod("HostSettleAllLive", AllMembers);
+            var engineTick = typeof(Multiplayer.Network.Sync.SyncEngine).GetMethod("Tick", AllMembers);
+            if (broadcast == null || sweepTick == null || sweep == null || engineTick == null)
+            {
+                yield return "L98 premise-turn-edge-sweep-gone: TacticalTurnSync.HostBroadcastTurn / " +
+                             "HostSweepTick, TacticalCommandSync.HostSettleAllLive or SyncEngine.Tick no " +
+                             "longer resolve, so 'the host's AP authority is stamped after the host's own " +
+                             "restore' is UNCHECKED rather than satisfied.";
+                yield break;
+            }
+
+            if (Calls(broadcast).Any(c => c.Name == "HostSettleAllLive"))
+                yield return "L98 sweep-stamped-inside-the-edge: TacticalTurnSync.HostBroadcastTurn calls " +
+                             "HostSettleAllLive directly again. It runs from TacMission.OnNewTurn, which " +
+                             "NextTurnCrt:716 raises BEFORE PlayTurnCrt — so every AP in that sweep is the " +
+                             "value the actor ENDED the previous turn on, stamped in neither epoch. Held by " +
+                             "the L96 turn-epoch gate it is replayed AFTER this peer's own " +
+                             "RestartAbilities:1244 SetToMax and wins over it: measured 2026-08-05, six " +
+                             "'CLIENT settled … ap=0' lines one frame after 'Changing turn to Phoenix'.";
+
+            int gate = FirstCallOffset(sweepTick, "get_IsPlayingTurn");
+            int fire = FirstCallOffset(sweepTick, "HostSettleAllLive");
+            if (fire < 0)
+                yield return "L98 sweep-not-gated-on-the-turn-start: TacticalTurnSync.HostSweepTick does not " +
+                             "reach HostSettleAllLive, so the deferred sweep never ships and no actor the " +
+                             "host is not animating is corrected at all (law L123's whole point).";
+            else if (gate < 0 || gate > fire)
+                yield return "L98 sweep-not-gated-on-the-turn-start: HostSweepTick fires HostSettleAllLive " +
+                             "without first reading TacticalFaction.IsPlayingTurn. That flag " +
+                             "(TacticalFaction.cs:441) is set immediately after every actor's StartTurn and is " +
+                             "the ONLY headless-checkable evidence that this host's own AP restore has already " +
+                             "run; without it the sweep is back to shipping last turn's leftovers.";
+
+            if (!Calls(engineTick).Any(c => c.Name == "HostSweepTick"))
+                yield return "L98 sweep-has-no-driver: SyncEngine.Tick does not call " +
+                             "TacticalTurnSync.HostSweepTick. HostBroadcastTurn only ARMS the sweep — under " +
+                             "the native ordering its own eager evaluation is always false — so without the " +
+                             "standing tick the turn-edge sweep silently never happens.";
         }
 
         /// <summary>EXECUTED, not inspected: the queue must be last-writer-wins per actor. A settle is the

@@ -97,11 +97,22 @@ namespace Multiplayer.Network.Sync
             // reads the model. Inert on the host and whenever nothing is held.
             int forcedLate = Router.ReleaseHeld();
             if (forcedLate > 0)
+            {
                 UnityEngine.Debug.LogError("[Multiplayer][tac] turn-epoch hold CEILING reached — " + forcedLate +
                                            " record(s) applied late, after " + SurfaceRouter.HeldFrameCeiling +
                                            " frames, because this peer never crossed the faction-turn edge the " +
                                            "host announced. Applying beats dropping, but the local turn machine " +
-                                           "is stuck and the peers are on different turns.");
+                                           "is stuck and the peers are on different turns. Asking the host for a " +
+                                           "full actor resnapshot — these records landed in the wrong epoch and " +
+                                           "nothing else re-converges what they wrote.");
+                // The recovery the discrete streams already own (0x83 op 2), reused rather than reinvented: it
+                // re-ships every keyed actor's position/HP/AP/WP/dead flag, which is exactly the state a
+                // backlog applied in the wrong epoch can have corrupted. Rate-limited by construction — the
+                // ceiling can only be reached once per hold.
+                IntentRail.Send(SurfaceIds.TacCommandIntent,
+                                Multiplayer.Tactical.TacticalDamageSync.OpIntentResnap,
+                                "resnapshot after a turn-epoch hold ceiling");
+            }
             ManufactureSync.HostTick(_engine);
             MistSync.Tick(_engine); // host: recompute the "M#mist" payload; client: hand it to the native loader
             t = RailCost.Charge("mist", t);
@@ -112,6 +123,11 @@ namespace Multiplayer.Network.Sync
             // STANDING condition, not a one-shot in the applier — PlayTurnCrt clears _endTurnRequested on
             // its own first line, so a flag set a frame too early is silently erased and parks the client.
             Multiplayer.Tactical.TacticalTurnSync.ClientTick(_engine);
+            // host-only inside: ship the turn-edge settle sweep once the host's OWN faction turn has actually
+            // started (IsPlayingTurn), so it carries post-AP-restore numbers instead of last turn's leftovers.
+            // See TacticalTurnSync.HostSweepTick — this is what stopped the epoch gate from replaying stale AP
+            // over every client's own restore.
+            Multiplayer.Tactical.TacticalTurnSync.HostSweepTick(_engine);
             // client-only inside: apply each host settle once ITS actor stops executing. Standing, not
             // one-shot at arrival — a settle that lands while this peer is still playing the mirrored move
             // would be overwritten by that move's own navigation and vanish with no log line.

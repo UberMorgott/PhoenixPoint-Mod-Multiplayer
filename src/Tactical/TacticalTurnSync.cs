@@ -85,6 +85,7 @@ namespace Multiplayer.Tactical
             HostTurnNumber = 0;
             HostMissionOver = false;
             LeftBattle = false;
+            _pendingSweepWhen = null;          // a sweep owed to a battle that is over must not fire in the next
             ClientMissionStartHints.Reset();   // the next battle gets its own mission-start replay
             TacticalUiRepaint.Reset();         // drop the paint memo: it names an actor of the dead battle
             TacticalReadySync.Reset();         // advisory ready flags + the cloned button's handles
@@ -144,12 +145,60 @@ namespace Multiplayer.Tactical
             Send(SurfaceIds.TacTurn, OpTurn, "turn '" + Name(next) + "' #" + (next.TurnNumber + 1),
                  w => { w.Write(guid); w.Write(next.TurnNumber); });
 
-            // NO KEYED LIVE ACTOR'S LAST SETTLE MAY BE OLDER THAN THE CURRENT FACTION TURN (law L123). The
-            // only other settles in this arc ride an action the host is animating, so an actor that drifted
-            // by any other route stayed drifted for the rest of the battle — and a peer that sees an enemy
-            // the host does not has every shot at it refused. AFTER the announcement, so the settles land in
-            // the turn they belong to.
-            TacticalCommandSync.HostSettleAllLive("turn '" + Name(next) + "' #" + (next.TurnNumber + 1));
+            // NO KEYED LIVE ACTOR'S LAST SETTLE MAY BE OLDER THAN THE CURRENT FACTION TURN (law L123) — but
+            // NOT STAMPED FROM HERE. See <see cref="HostSweepTick"/> for why this is an arm and not a call.
+            _pendingSweepWhen = "turn '" + Name(next) + "' #" + (next.TurnNumber + 1);
+            HostSweepTick(engine);
+        }
+
+        /// <summary>The turn-edge settle sweep, WAITING FOR THIS HOST'S OWN TURN TO ACTUALLY START.
+        ///
+        /// THE REPORT (2026-08-05, DLL 964608 B). The player ends a turn, the aliens play, the player's turn
+        /// begins — and on every CLIENT the soldiers stand there with the action points they ENDED the
+        /// previous turn on. On the host they are full.
+        ///
+        /// AP RESTORE IS NATIVE AND PER-PEER, and it does run on the client: <c>PlayTurnCrt</c>:422-425 calls
+        /// <c>TacticalActor.StartTurn</c> → <c>RestartAbilities</c>:1244 → <c>ActionPoints.SetToMax()</c>.
+        /// Nothing replicates it and nothing needs to. What went wrong is the ORDER a value landed in.
+        ///
+        /// THE SWEEP USED TO BE STAMPED IN NEITHER EPOCH. <c>TacMission.OnNewTurn</c> — where
+        /// <see cref="HostBroadcastTurn"/> runs — is raised by <c>NextTurnCrt</c>:716 BEFORE
+        /// <c>PlayTurnCrt</c>, so a sweep emitted there reads every actor's AP from BEFORE the host's own
+        /// restore. It is not "the host's authority for the new turn"; it is last turn's leftovers wearing the
+        /// new turn's timestamp. That was invisible only while clients applied it EARLY — they then restored
+        /// AP themselves, afterwards, and the stale number was overwritten. The turn-epoch gate
+        /// (<see cref="SurfaceRouter.ClientBehindTurnEdge"/>) inverted exactly that: the sweep is now held
+        /// until this peer crosses its own edge, i.e. until AFTER its own restore, and the stale number wins.
+        /// Measured, <c>D:\PP-Instance2\Player.log</c>: frame 10059 host cursor → Phoenix turn 3, frame 10061
+        /// "Changing turn to \"Phoenix\" | Turn 3" (the client's own restore), frame 10062 six
+        /// "CLIENT settled … ap=0" lines, one per soldier.
+        ///
+        /// THE FIX IS ON THE EMITTER, NOT ON THE GATE. The gate's premise is that the host stamps records in
+        /// exactly two epochs; the host was breaking that premise itself, in the one window between announcing
+        /// an edge and finishing it. So the sweep waits for the game's OWN "this turn has started" flag —
+        /// <c>TacticalFaction.IsPlayingTurn</c> (TacticalFaction.cs:441, set immediately after every actor's
+        /// StartTurn) — and then ships post-restore AP, which agrees with the client whether it is applied
+        /// before or after the client's own restore. The race is not narrowed; it stops existing.
+        ///
+        /// BOUNDED BY CONSTRUCTION, so a pending sweep can never sit forever: <c>OnNewTurn</c> is only raised
+        /// for a faction with alive or undeployed actors (<c>NextTurnCrt</c>:698), and that faction always
+        /// goes on to <c>PlayTurnCrt</c> — <c>IsPlayingTurn</c> always becomes true. A later announcement
+        /// overwrites the pending one rather than queueing, so at most one sweep is ever owed.
+        ///
+        /// Called eagerly from <see cref="HostBroadcastTurn"/> as well as from <c>SyncEngine.Tick</c>: a turn
+        /// announced for a faction that is ALREADY playing sweeps on the spot instead of a frame later. Under
+        /// the native ordering above that first evaluation is false, and the tick is what fires it.</summary>
+        private static string _pendingSweepWhen;
+
+        internal static void HostSweepTick(NetworkEngine engine)
+        {
+            if (_pendingSweepWhen == null) return;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) { _pendingSweepWhen = null; return; }
+            var cur = Tlc()?.CurrentFaction;
+            if (cur == null || !cur.IsPlayingTurn) return;
+            string when = _pendingSweepWhen;
+            _pendingSweepWhen = null;
+            TacticalCommandSync.HostSettleAllLive(when);
         }
 
         /// <summary>The host's authoritative mission end. One byte of outcome: the Player participant's

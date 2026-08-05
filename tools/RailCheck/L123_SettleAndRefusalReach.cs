@@ -55,9 +55,12 @@ namespace RailCheck
     ///
     /// THE ARMS:
     ///   (a) PREMISE — the settle, reject and AI-gate families resolve.
-    ///   (b) THE SWEEP IS ON THE TURN EDGE: <c>HostBroadcastTurn</c> reaches <c>HostSettleAllLive</c>, which
-    ///       reaches <c>HostSettle</c>. This is the "no keyed live actor's last settle is older than the
-    ///       current faction turn" arm, asserted where it is decidable.
+    ///   (b) THE SWEEP IS ON THE TURN EDGE: <c>HostBroadcastTurn</c> reaches <c>HostSweepTick</c>, which
+    ///       reaches <c>HostSettleAllLive</c>, which reaches <c>HostSettle</c>. (The middle hop is the
+    ///       2026-08-05 deferral: the sweep waits for this host's own <c>IsPlayingTurn</c> so it ships
+    ///       post-AP-restore numbers — L98's sweep-epoch arm owns WHEN, this one owns WHETHER.) This is the
+    ///       "no keyed live actor's last settle is older than the current faction turn" arm, asserted where
+    ///       it is decidable.
     ///   (c) THE SWEEP IS OVER EVERY ACTOR, NOT ONE: it enumerates the map and asks each actor for its key,
     ///       rather than settling a single subject. A sweep of one is the bug with a new name.
     ///   (d) THE CLIENT CANNOT RUN AI EVALUATION FROM EITHER DOOR: the gate is on
@@ -77,7 +80,7 @@ namespace RailCheck
     ///       nothing to grey. Never a refusal the game itself expresses by DISABLING the control.
     ///
     /// Falsify (each verified to go RED, then restored):
-    ///   • drop HostSettleAllLive from HostBroadcastTurn        → settle-not-swept-at-the-turn-edge
+    ///   • drop HostSweepTick's HostSettleAllLive call          → settle-not-swept-at-the-turn-edge
     ///   • send the reject nudge with a null payload            → refusal-never-reaches-the-player
     ///   • flip the notify bit's polarity in EncodeNudge        → modal-flag-lost-on-the-wire
     ///   • pass notify:true from any ordinary reject call site  → modal-for-an-ordinary-refusal
@@ -97,6 +100,11 @@ namespace RailCheck
             var aiEvalGate = mod.GetType("Multiplayer.Tactical.ClientAiEvaluationGate");
 
             var broadcastTurn = turnSync?.GetMethod("HostBroadcastTurn", All);
+            // The sweep is ARMED at the announcement and FIRED once this host's own turn has started
+            // (TacticalTurnSync.HostSweepTick, 2026-08-05) — emitting it from OnNewTurn shipped pre-AP-restore
+            // numbers, which L98's sweep-epoch arm now owns. The edge still has to produce a sweep; it just
+            // reaches it one hop further on.
+            var sweepTick = turnSync?.GetMethod("HostSweepTick", All);
             var sweep = cmdSync?.GetMethod("HostSettleAllLive", All);
             var settle = cmdSync?.GetMethod("HostSettle", All);
             var keyOf = actorKey?.GetMethod("Of", All);
@@ -118,13 +126,13 @@ namespace RailCheck
             var queuedSeq = typeof(TacticalLevelController).GetMethod("ExecuteQueuedAbilitiesSequence", All);
             var gatePrefix = aiEvalGate?.GetMethod("Prefix", All);
 
-            if (broadcastTurn == null || sweep == null || settle == null || keyOf == null || getActors == null ||
+            if (broadcastTurn == null || sweepTick == null || sweep == null || settle == null || keyOf == null || getActors == null ||
                 reject == null || rejectQuiet == null || inbound == null || toast == null ||
                 encodeNudge == null || decodeNudge == null || sendToClient == null || broadcast == null ||
                 aiEval == null || queuedSeq == null || gatePrefix == null)
             {
                 yield return "L123 premise-changed: the settle/refusal family no longer resolves " +
-                             "(TacticalTurnSync.HostBroadcastTurn, TacticalCommandSync.HostSettleAllLive/" +
+                             "(TacticalTurnSync.HostBroadcastTurn/HostSweepTick, TacticalCommandSync.HostSettleAllLive/" +
                              "HostSettle, TacticalActorKey.Of, BaseMap.GetActors, IntentRail.Reject in BOTH " +
                              "its quiet and its notifying overload / HandleInbound / EncodeNudge / " +
                              "DecodeNudge, SessionNotifier.ShowToast, NetworkEngine.SendToClient/" +
@@ -136,7 +144,7 @@ namespace RailCheck
             }
 
             // ═══ (b) THE SWEEP IS ON THE TURN EDGE ═══
-            if (!Reaches(broadcastTurn, sweep, mod))
+            if (!Reaches(broadcastTurn, sweepTick, mod) || !Reaches(sweepTick, sweep, mod))
                 yield return "L123 settle-not-swept-at-the-turn-edge: TacticalTurnSync.HostBroadcastTurn no " +
                              "longer settles every keyed live actor. The only other settles in this arc ride " +
                              "an action the host is ANIMATING (the end-of-action rider and the reject path), " +
