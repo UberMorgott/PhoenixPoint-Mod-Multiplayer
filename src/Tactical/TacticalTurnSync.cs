@@ -725,10 +725,12 @@ namespace Multiplayer.Tactical
     /// TACTICAL TEARDOWN, on host AND client (<c>OnLevelStateChanged</c> reaches <c>OnLevelEnd</c> for any
     /// transition out of Playing — TacticalLevelController.cs:432-436). Two jobs, one edge:
     ///   • drop this battle's mirror state, so the next battle does not inherit a set mission-over flag;
-    ///   • arm <see cref="SaveTransferCoordinator.OpenReturnBarrier"/> — the tac→geo return has NO save
-    ///     transfer (each peer rides the native mission end to its own geoscape load), so nothing else
-    ///     re-arms the synchronized reveal and the first peer to finish loading would lift its curtain while
-    ///     the others were still loading. This was A1's known dead code: the method existed with no caller.
+    ///   • drop this battle's mirror state, so the next battle does not inherit a set mission-over flag.
+    ///
+    /// It does NOT arm the reveal barrier. It used to, and that was a SECOND arm for the one concern:
+    /// <c>PhoenixGame.FinishLevel</c> (<c>LoadBarrierGate</c>) is the universal funnel every level change
+    /// goes through and it runs FIRST on this very path (<c>GoToGeoscape</c> → <c>FinishLevel</c> → the
+    /// level leaves Playing → here), so this call was always the no-op half of the pair.
     /// </summary>
     [HarmonyPatch(typeof(TacticalLevelController), "OnLevelStateChanged")]
     internal static class TacLevelEndBarrier
@@ -742,9 +744,6 @@ namespace Multiplayer.Tactical
             TacticalTurnSync.Reset();
             TacticalCommandSync.Reset();   // A3a: 0x82 seq + pending settles must not survive into the next battle
             TacticalDamageSync.Reset();    // A3b: 0x84 seq + the gap cursor + any leaked mirror-apply depth
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession) return;
-            engine.SaveTransfer?.OpenReturnBarrier();
         }
     }
 

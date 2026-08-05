@@ -58,18 +58,15 @@ namespace Multiplayer.Harmony
     /// loading anything. Excluded explicitly; a null result (no next level at all — <c>UIStateInitial</c>:73,
     /// <c>IntroLevelController</c>:108) likewise.
     ///
-    /// SELF-RELEASING, WHICH IS A FIRST-CLASS REQUIREMENT AND NOT A NICETY (user's law: at any moment ANY
-    /// player must be able to play EVERYTHING — 49 of 50 AFK, the one active player still finishes the
-    /// game). A barrier that waits on a peer that will never report is a permanent block, so the release
-    /// this re-enters has three independent openers, all pre-existing: (1) a peer that drops is removed from
-    /// the roster before <c>AllDone(GetRosterSlots())</c> is next evaluated, so the expected set SHRINKS and
-    /// the barrier opens with whoever is left — the normal case, and it is immediate; (2) the host's LIVENESS
-    /// release (<c>NoLiveLoaderLeft</c>): a peer that shows no progress AND says nothing for
-    /// <c>BarrierLivenessGraceMs</c> (60 s) stops being waited for and <c>RevealAll</c> goes out without it,
-    /// while a peer that is merely SLOW is waited for indefinitely, by design; (3) each peer's own self-reveal
-    /// once the HOST has been silent for the same grace, for a host that died holding the announcement.
-    /// Teardown is a fourth: <c>HoldCurtain</c> returns false the moment the engine goes inactive. None of the
-    /// four removes anybody from the session (law L84) — they leave the BARRIER, not the game.
+    /// THE WAIT IS UNBOUNDED AND EVERY OPENER IS AN EVENT, NEVER A DEADLINE (user ruling 2026-08-05). If a
+    /// peer is slow, everybody waits; if a peer never reports, everybody keeps waiting. The two clocks that
+    /// used to end the wait — the host's 60 s liveness give-up and each peer's own self-reveal — were both
+    /// ways for one player's screen to come down while the others were still loading, which is the entire
+    /// report, so they are gone. What opens the barrier: (1) <c>AllDone(GetRosterSlots())</c>, the normal
+    /// simultaneous release; (2) a peer that DROPS leaves the roster, so the expected set SHRINKS and (1)
+    /// holds on the very next frame — automatic, reactive, no click and no timer; (3) session teardown, where
+    /// <c>HoldCurtain</c> returns false the moment the engine goes inactive. None of the three removes
+    /// anybody from the session (law L84) — they leave the BARRIER, not the game.
     /// </summary>
     [HarmonyPatch(typeof(PhoenixGame), nameof(PhoenixGame.FinishLevel))]
     internal static class LoadBarrierGate

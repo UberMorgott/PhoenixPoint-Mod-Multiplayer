@@ -184,75 +184,74 @@ namespace RailCheck
                              "session died mid-load is then stuck behind a loading screen with nothing left to " +
                              "release it";
 
-            // ─── (e) THE WAIT ENDS ON ABSENCE OF LIFE, NEVER ON A CLOCK. ───
-            // EXECUTED against the real per-peer predicate, same as arm (d).
-            var update = coord.GetMethod("Update", AllMembers);
-            var lift = coord.GetMethod("PerformDeferredLift", AllMembers);
-            var giveUp = coord.GetMethod("NoLiveLoaderLeft", AllMembers);
-            var holds = typeof(SaveTransferMath).GetMethod("HoldsBarrier", AllMembers);
-            var graceF = coord.GetField("BarrierLivenessGraceMs", AllMembers);
-            if (update == null || lift == null || giveUp == null || holds == null || graceF == null)
-                yield return "L94 premise-changed: SaveTransferCoordinator.Update / PerformDeferredLift / " +
-                             "NoLiveLoaderLeft / BarrierLivenessGraceMs / SaveTransferMath.HoldsBarrier no longer " +
-                             "all exist, so this law can no longer prove the barrier waits on liveness rather than " +
-                             "on a stopwatch — and cannot prove it has any escape at all from a peer that hangs " +
-                             "without dropping its connection";
-            else
+            // ─── (e1) THE RELEASE IS THE LAST PEER ARRIVING, AND NOTHING ELSE. ───
+            // The OUTCOME, sequenced, executed against the real production predicate: releasing must flip
+            // false→true on the arrival of the LAST slot and never one arrival earlier. Arm (d) above proves
+            // one snapshot; this walks the whole sequence, because "released early" is the entire report and
+            // a single-snapshot probe can pass while the boundary sits one peer too soon.
+            var seq = new RosterProgressTracker();
+            var seqRoster = new List<byte> { 0, 2, 3 };
+            for (int i = 0; i < seqRoster.Count; i++)
             {
-                if (!CallsMethod(update, giveUp) || !CallsMethod(update, lift))
-                    yield return "L94 liveness-release-gone: Update no longer asks NoLiveLoaderLeft before it " +
-                                 "reveals. Either the barrier has gone back to a wall-clock deadline — which " +
-                                 "force-revealed a healthy-but-slow peer mid-load and cost him his transition for " +
-                                 "owning an HDD — or it has no escape at all and one crashed process now blocks " +
-                                 "everybody else's level transition for ever";
-
-                if (!CallsMethod(giveUp, holds))
-                    yield return "L94 release-not-the-predicate: NoLiveLoaderLeft does not call " +
-                                 "SaveTransferMath.HoldsBarrier, so the rule the arms below EXECUTE is not the " +
-                                 "rule the host actually runs. A second copy of the release condition is how the " +
-                                 "law goes green while the game hangs";
-
-                long grace = Convert.ToInt64(graceF.GetRawConstantValue());
-
-                if (!SaveTransferMath.HoldsBarrier(false, msSinceProgress: 0, msSinceHeard: 0, graceMs: grace))
-                    yield return "L94 abandons-a-live-peer: a peer that reported progress THIS INSTANT does not " +
-                                 "hold the barrier. The ruling is that a peer which is alive and still making " +
-                                 "progress is waited for indefinitely — a slow disk or a lossy link must never " +
-                                 "cost a player his transition";
-
-                if (!SaveTransferMath.HoldsBarrier(false, grace, grace, grace))
-                    yield return "L94 abandons-a-live-peer: at EXACTLY the grace window the peer is already " +
-                                 "dropped from the barrier. The window is how long it may be silent, so the " +
-                                 "give-up belongs strictly after it — an off-by-one here abandons peers on the " +
-                                 "boundary that the honest reading of the constant says are still fine";
-
-                if (SaveTransferMath.HoldsBarrier(false, grace + 1, grace + 1, grace))
-                    yield return "L94 waits-on-the-dead: a peer that has neither moved nor said anything for " +
-                                 "longer than the grace window still holds the barrier. That is the crashed " +
-                                 "process the ruling names — the rest of the session must load on without it";
-
-                if (SaveTransferMath.HoldsBarrier(false, grace + 1, 0, grace))
-                    yield return "L94 idle-peer-holds-forever: a peer whose progress has been frozen past the " +
-                                 "grace window still holds the barrier because packets keep arriving. Heartbeats " +
-                                 "prove a socket, not a load: a peer stuck at 12% for ever would hold forty-nine " +
-                                 "others behind a curtain while chatting happily";
-
-                // Fresh clocks on purpose: a stale-clock probe here passes for the WRONG reason (the timing
-                // terms alone answer false), which is exactly how the done term could be dropped unnoticed.
-                if (SaveTransferMath.HoldsBarrier(true, msSinceProgress: 0, msSinceHeard: 0, graceMs: grace))
-                    yield return "L94 done-still-holds: a slot that already reported LoadComplete keeps holding " +
-                                 "the barrier while it is still chattering. Every peer talks right up to the " +
-                                 "moment it is in, so nobody would ever be released — the block this whole " +
-                                 "release path exists to make impossible";
-
-                var hbF = typeof(SessionManager).GetField("HeartbeatTimeoutMs", AllMembers);
-                if (hbF != null && grace < 2L * Convert.ToInt64(hbF.GetRawConstantValue()))
-                    yield return "L94 grace-too-tight: BarrierLivenessGraceMs (" + grace + " ms) is under twice " +
-                                 "SessionManager.HeartbeatTimeoutMs. A peer on a bad link routinely goes quiet for " +
-                                 "one heartbeat window and gets PAUSED, then resumes on its next packet; a grace " +
-                                 "that tight abandons exactly those players at every single level transition — the " +
-                                 "'fight to be able to play' the N=50 mandate forbids";
+                if (seq.AllDone(seqRoster))
+                    yield return "L94 releases-early: the reveal opened with only " + i + " of " +
+                                 seqRoster.Count + " roster slots reported in. Every peer still loading at that " +
+                                 "instant has its loading screen taken down under it while the world is not " +
+                                 "there yet — one player acting on a world the others have not reached, which " +
+                                 "IS the report";
+                seq.MarkDone(seqRoster[i]);
             }
+            if (!seq.AllDone(seqRoster))
+                yield return "L94 never-releases: the LAST peer reported in and the reveal still did not open. " +
+                             "Everyone is now behind a loading screen with nothing left that can lift it — the " +
+                             "barrier turned into the permanent hang it exists to avoid";
+
+            // ─── (e2) THERE IS NO CLOCK ON THIS WAIT, BY RULING (2026-08-05). ───
+            // "Even if one player is slow, everyone waits." Every timed release this barrier ever had — the
+            // flat 180 s deadline, then the 60 s liveness give-up and the per-peer self-reveal — was a way for
+            // one screen to come down while the others were still loading, so a timed release is now a
+            // REGRESSION and this arm is what makes re-adding one cost a red line instead of a battle.
+            if (typeof(SaveTransferMath).GetMethod("HoldsBarrier", AllMembers) != null)
+                yield return "L94 timed-release-is-back: SaveTransferMath.HoldsBarrier exists again — the " +
+                             "grace-window predicate whose only job was to stop waiting for a peer. The ruling " +
+                             "is that a peer which never reports is waited for; a peer that is genuinely gone " +
+                             "leaves the ROSTER and arm (d)'s shrink opens the barrier on the next frame";
+            foreach (var f in coord.GetFields(AllMembers))
+            {
+                if (!f.Name.EndsWith("GraceMs") && !f.Name.EndsWith("DeadlineMs") &&
+                    !f.Name.EndsWith("TimeoutMs")) continue;
+                yield return "L94 timed-release-is-back: SaveTransferCoordinator." + f.Name + " is a deadline " +
+                             "living on the barrier's own type. The reveal wait has no clock: it ends when the " +
+                             "last roster slot reports load-complete, or when that slot leaves the roster";
+            }
+
+            // ─── (e3) THE ONE RELEASE MUST CLEAR EVERY LATCH THE NEXT ARM'S GUARD READS. ───
+            // THE 2026-08-05 ROOT CAUSE, generalised so the next latch is caught too. OpenReturnBarrier is
+            // guarded on flags left over from the PREVIOUS barrier; _barrierOpen was one of them and
+            // PerformDeferredLift did not clear it, so any reveal reached without Begin() having run latched
+            // it true and EVERY later boundary silently skipped its arm — _revealed stayed true, HoldCurtain
+            // never held, each peer lifted on its own load. Nothing was red: the arm "existed", the aggregate
+            // was correct, and the guard simply returned. So the invariant is not "clear _barrierOpen", it is
+            // "the release WRITES every flag the re-arm's guard tests" — polarity-agnostic on purpose: the
+            // guard wants _revealed TRUE (arm only after a release) and _barrierOpen FALSE (no transfer owns
+            // the state), and the broken one is whichever the release never touches at all.
+            var lift = coord.GetMethod("PerformDeferredLift", AllMembers);
+            if (lift == null)
+                yield return "L94 premise-changed: SaveTransferCoordinator.PerformDeferredLift is gone — the one " +
+                             "release every reveal path routes through, and the only place this law can prove " +
+                             "the barrier's latches are handed back";
+            else
+                foreach (var f in coord.GetFields(AllMembers))
+                {
+                    if (f.FieldType != typeof(bool) || !ReadsField(arm, f)) continue;
+                    if (WritesField(lift, f)) continue;
+                    yield return "L94 latch-outlives-the-release: OpenReturnBarrier's guard reads " + f.Name +
+                                 ", but PerformDeferredLift never writes it. A barrier that ends without " +
+                                 "handing that flag back leaves the guard stale, so the NEXT load boundary " +
+                                 "returns before it arms anything — and every peer lifts its own loading " +
+                                 "screen the instant its own load finishes, silently, with the aggregate still " +
+                                 "looking perfect";
+                }
 
             // ─── (h) A BARRIER THAT OPENED MUST PRODUCE ITS BEGIN. ───
             // The 2026-08-05 blocker, as an OUTCOME arm. Arm (e) above only ever asked whether Update CALLS
@@ -683,6 +682,8 @@ namespace RailCheck
         }
 
         private static bool WritesField(MethodBase m, FieldInfo f) => TouchesField(m, f, 0x7D, 0x80); // stfld / stsfld
+
+        private static bool ReadsField(MethodBase m, FieldInfo f) => TouchesField(m, f, 0x7B, 0x7E);  // ldfld / ldsfld
 
         /// <summary>Does this method store the LITERAL <paramref name="value"/> into a bool field? Arm (k)
         /// needs the value and not merely the write: `_loadPhaseActive = false` and `= true` are the bug and

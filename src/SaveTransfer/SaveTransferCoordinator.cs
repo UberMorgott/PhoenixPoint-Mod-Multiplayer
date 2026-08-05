@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using Base.Core;
@@ -58,20 +58,10 @@ namespace Multiplayer.Network
         public const long MaxTransferBytes = 64L * 1024 * 1024;
 
 
-        // LIVENESS GRACE — how long a peer may show NO sign of life at all before the reveal barrier stops
-        // waiting for it. This is a LIVENESS timeout, not a load timeout: it is never measured against "how
-        // long the load takes" (that is unbounded on purpose — a slow disk or a lossy link must not cost a
-        // player his transition), only against "how long since we last saw this peer move or speak". Both
-        // clocks feed it (SaveTransferMath.HoldsBarrier): the per-slot progress clock (download percent /
-        // native-load percent advancing) and the per-peer heard clock (any inbound packet).
-        //
-        // 60 s = parity with SessionManager.TransferStallMs, which is already this codebase's declared
-        // meaning of "this transfer/load has stopped moving", and 3× HeartbeatTimeoutMs (20 s) so a peer that
-        // merely missed a heartbeat window and got PAUSED-then-resumed is never abandoned by the barrier. It
-        // REPLACES the flat 180 s wall-clock deadline, which force-revealed healthy-but-slow peers mid-load
-        // and made everybody else stare at three minutes of nothing when a peer had genuinely died.
-        private const long BarrierLivenessGraceMs = 60_000;
-
+        // NO BARRIER GRACE CONSTANT LIVES HERE ANY MORE, ON PURPOSE. Every version of it — the flat 180 s
+        // wall clock, then the 60 s liveness grace — was a way for one player to be released while another
+        // was still loading. The reveal barrier now has no clock at all: it opens when every roster slot has
+        // reported load-complete, and a peer that is genuinely gone opens it by leaving the ROSTER.
         private readonly NetworkEngine _engine;
 
         // ─── Host transfer/barrier state ──────────────────────────────────
@@ -170,10 +160,9 @@ namespace Multiplayer.Network
         // ─── Second barrier: synchronized geoscape reveal (BUG D) ─────────
         // The native curtain auto-lifts on Loaded→Playing; the mod overlay (opaque) is held as the
         // real synchronized cover and dropped together via RevealAll. _reachedPlaying: this peer hit
-        // Playing (CurtainShowPatch); _revealHoldStartedMs: when the hold began (self-reveal baseline);
+        // Playing (CurtainShowPatch); the hold's start (no longer read: the barrier has no clock);
         // _revealed: lift performed once; _revealAllSent: host broadcast-once guard.
         private bool _reachedPlaying;
-        private long _revealHoldStartedMs;
         private bool _revealed;
         private bool _revealAllSent;
         // Batch 2 (entry-via-save): the host is holding its loading screen for a tactical-ENTRY transfer.
@@ -229,22 +218,6 @@ namespace Multiplayer.Network
         /// </summary>
         public long LastProgressMs { get; private set; } = NowMs();
         private void NoteProgress() => LastProgressMs = NowMs();
-
-        // PER-SLOT progress clock for the reveal barrier (host view). LastProgressMs above is one clock for
-        // the whole session — it cannot tell WHICH peer stopped. This one is bumped only when that slot's
-        // (phase, percent) actually MOVED FORWARD (RosterProgressTracker.Merge returned true), so it is a
-        // progress signal and not merely a traffic signal; traffic is the second, separate input
-        // (SessionManager.LastSeenMsForSlot). Seeded lazily on first read so a slot that has not reported
-        // anything yet starts its grace window now instead of at epoch 0.
-        private readonly Dictionary<byte, long> _slotAdvancedMs = new Dictionary<byte, long>();
-        private void NoteSlotAdvance(byte slot) => _slotAdvancedMs[slot] = NowMs();
-        private long SlotAdvancedMs(byte slot)
-        {
-            if (_slotAdvancedMs.TryGetValue(slot, out var t)) return t;
-            var now = NowMs();
-            _slotAdvancedMs[slot] = now;
-            return now;
-        }
 
         public SaveTransferCoordinator(NetworkEngine engine)
         {
@@ -1187,8 +1160,6 @@ namespace Multiplayer.Network
             _reachedPlaying = false;
             _revealed = false;
             _revealAllSent = false;
-            _revealHoldStartedMs = 0;
-            _slotAdvancedMs.Clear();   // fresh barrier: every slot's grace window starts on its first read
             _lastBarrierWaitLogMs = 0;
             Debug.Log($"[Multiplayer] LOADED barrier open, host self-added id={_engine.LocalSteamId}.");
         }
@@ -1218,7 +1189,6 @@ namespace Multiplayer.Network
             // points — this path had none, because it never published anything to go stale before.
             _slotProgress.Clear();
             _tracker.Reset();
-            _slotAdvancedMs.Clear();
             _lastSnapshotMs = -1;
             _lastReportedLoadPct = -1;
             // THE HOLD IS ARMED, SO SAY SO — this used to be `false`, and that is what made the hang possible.
@@ -1294,11 +1264,13 @@ namespace Multiplayer.Network
         /// (live RCA 2026-07-16). Re-arming here re-enters the EXISTING machinery unchanged:
         /// OnReachedPlaying → hold + LoadComplete; host Update() aggregates → AllDone → RevealAll →
         /// simultaneous lift. InPhase2 (=_begun &amp;&amp; !_loadCompleteSent) goes true again, so the
-        /// overlay + per-slot progress pump also work for free. Failure belts are the existing ones:
-        /// roster shrink on peer-left, 180 s host forced-reveal + per-peer self-reveal.
+        /// overlay + per-slot progress pump also work for free. The only opener is roster shrink on
+        /// peer-left; there is no timed belt, by ruling.
+        ///
+        /// ONE CALLER, AND IT IS THE FUNNEL: <c>LoadBarrierGate</c> on <c>PhoenixGame.FinishLevel</c>. The
+        /// second arm this used to have (<c>TacLevelEndBarrier</c>, on the tactical level leaving Playing)
+        /// was always the no-op half — FinishLevel runs first on that very path — and is deleted.
         /// </summary>
-        // DEAD until the MISSION-END arc — no caller yet (the TacticalLevelEndPatch that drove it stayed
-        // in the quarry). Arc A1 wires ENTRY only; the tac→geo return is a later arc.
         public void OpenReturnBarrier()
         {
             if (!_revealed || _barrierOpen) return; // already armed / an entry transfer owns the state
@@ -1321,7 +1293,6 @@ namespace Multiplayer.Network
             if (_engine == null || !_engine.IsActive || !SessionStarted) return; // live co-op sessions only
             _revealed = false;
             _reachedPlaying = false;
-            _revealHoldStartedMs = 0;
             _loadCompleteSent = false;
             _lastReportedLoadPct = -1;
             _loadingLevel = null;
@@ -1331,7 +1302,6 @@ namespace Multiplayer.Network
             _lastSnapshotMs = -1;
             // Host aggregation + liveness-based release (same Update() path as phase-2; unused off-host).
             _loadPhaseActive = true;
-            _slotAdvancedMs.Clear();   // fresh barrier: every slot's grace window starts on its first read
             _lastBarrierWaitLogMs = 0;
             _revealAllSent = false;
             Debug.Log($"[Multiplayer] self-load barrier armed ({why}): host={_engine.IsHost} — " +
@@ -1748,7 +1718,6 @@ namespace Multiplayer.Network
         {
             if (_reachedPlaying) return;
             _reachedPlaying = true;
-            _revealHoldStartedMs = NowMs();
 
             // P1 mid-session join: reveal on our OWN load finish — there is no host RevealAll to wait for
             // (the already-connected peers revealed long ago). Lift immediately + tell the host we are live
@@ -1789,6 +1758,13 @@ namespace Multiplayer.Network
             _revealedAtMs = NowMs();
             _loadPhaseActive = false; // THE one release of the hold this flag names (see its declaration)
             _hostEntryHold = false; // Batch 2: reveal done → drop the entry-hold flag (next Begin re-guards on _begun)
+            // THE LATCH THAT SKIPPED THE NEXT BOUNDARY'S ARM. _barrierOpen used to be cleared ONLY by
+            // Begin() and AbortTacticalEntryTransfer, so any reveal reached without Begin() having run left
+            // it stuck true — and OpenReturnBarrier's own guard reads it, so EVERY later boundary silently
+            // skipped its arm: _revealed stayed true, HoldCurtain never held, and each peer lifted the
+            // instant its OWN load finished. The reveal ends the barrier; it must end all of the barrier's
+            // flags, here, at the one release every path routes through.
+            _barrierOpen = false;
             // …and the entry arm expires with the reveal that ended it (law L122). A launch that died before
             // tactical Playing never reaches TacDeployReadyCapture's consume, so without this the arm outlives
             // its own entry and the NEXT battle — loaded from a save every peer already holds — consumes it.
@@ -1943,7 +1919,6 @@ namespace Multiplayer.Network
             _loadPhaseActive = true;
             // Phase-2 release runs on LIVENESS (NoLiveLoaderLeft), so a long native world-load is never
             // force-revealed mid-load — it is waited out. Restart every slot's grace window here.
-            _slotAdvancedMs.Clear();
             _lastBarrierWaitLogMs = 0;
 
             Debug.Log("[Multiplayer] BEGIN broadcast.");
@@ -2009,7 +1984,7 @@ namespace Multiplayer.Network
         /// HOST, geo→tactical entry: publish its OWN native level-load percent into the roster snapshot
         /// so clients can mirror it. Slot 0 (the host's) at <see cref="HostEntryPhase"/>, which the
         /// terminal <c>(1, 100)</c> written at deploy-ready can still overtake. Writing into
-        /// <c>_slotProgress</c> + <c>NoteSlotAdvance</c> is also what keeps the host's own slot visibly
+        /// <c>_slotProgress</c> is also what keeps the host's own slot visibly
         /// ALIVE to the reveal barrier's liveness clock instead of merely silent.
         /// Not <see cref="ReportLoadProgress"/>: that one is hard-wired to phase 1.
         /// </summary>
@@ -2017,7 +1992,7 @@ namespace Multiplayer.Network
         {
             var slot = _engine.Session.LocalSlotIndex;
             _slotProgress[slot] = (HostEntryPhase, percent);
-            if (_tracker.Merge(slot, HostEntryPhase, percent)) NoteSlotAdvance(slot);
+            _tracker.Merge(slot, HostEntryPhase, percent);
         }
 
         private void ReportDownloadProgress()
@@ -2039,7 +2014,7 @@ namespace Multiplayer.Network
             {
                 // Host has no host→host hop: aggregate its own slot 0 (phase 1) directly.
                 _slotProgress[0] = (1, percent);
-                if (_tracker.Merge(0, 1, percent)) NoteSlotAdvance(0);
+                _tracker.Merge(0, 1, percent);
             }
             else
             {
@@ -2072,74 +2047,43 @@ namespace Multiplayer.Network
             {
                 _slotProgress[slot] = (phase, percent);
                 // A forward MOVE (not just a packet) is the barrier's progress signal for this peer.
-                if (_tracker.Merge(slot, phase, percent)) NoteSlotAdvance(slot);
+                _tracker.Merge(slot, phase, percent);
             }
         }
 
         // ══════════════════════════════════════════════════════════════════
-        //  Per-frame: reveal barrier (liveness, not a clock)
+        //  Per-frame: reveal barrier (no clock at all)
         // ══════════════════════════════════════════════════════════════════
 
-        // How often the host restates WHO the barrier is waiting for. The wait itself is unbounded, so
-        // without this line an operator reading the log cannot tell "waiting for a slow peer" from "hung".
+        // How often the host restates WHO the barrier is waiting for. The wait is unbounded, so without this
+        // line an operator reading the log cannot tell "waiting for a slow peer" from "hung" — and a silent
+        // unbounded wait is this codebase's dominant bug shape.
         private const long BarrierWaitLogIntervalMs = 5_000;
         private long _lastBarrierWaitLogMs;
 
         /// <summary>
-        /// HOST: is there nobody left worth waiting for? Developer ruling 2026-08-05 — on a level transition
-        /// EVERYONE must load before anyone starts, and a peer that hard-crashed is waited for until it is
-        /// clear nothing is happening, then the rest go on without it.
-        ///
-        /// So this asks a liveness question, never a clock question. A slot that has not reported
-        /// LoadComplete keeps the barrier shut while EITHER of its two signals is fresh — its progress
-        /// advancing or any packet arriving (<see cref="SaveTransferMath.HoldsBarrier"/>) — which makes a slow
-        /// disk or a 5%-loss link cost nothing but time. Returns true only when every unfinished slot has been
-        /// silent AND motionless for <see cref="BarrierLivenessGraceMs"/>; <paramref name="abandoned"/> then
-        /// names them for the release log. Returns false when every slot is DONE — that release belongs to the
-        /// AllDone path below, which is the normal, simultaneous one.
-        ///
-        /// Leaving the BARRIER is not leaving the SESSION (law L84): nothing here removes a peer, drops a
-        /// connection or touches the roster. The abandoned peer keeps its row, slot, permissions and guid
-        /// binding, finishes loading at its own pace and re-converges through the on-demand join.
+        /// HOST, diagnostics only: name the slots the reveal is still waiting on, throttled. Deliberately has
+        /// NO return value and NO release power. THE WAIT IS UNBOUNDED (user ruling 2026-08-05, superseding
+        /// the earlier liveness give-up): if a peer never reports, everyone keeps waiting. A peer that is
+        /// genuinely gone leaves the ROSTER, and <c>AllDone(GetRosterSlots())</c> — re-evaluated every frame —
+        /// then holds on its own: that is the release, and it is an event, not a deadline.
         /// </summary>
-        private bool NoLiveLoaderLeft(out string abandoned)
+        private void LogBarrierWait()
         {
-            abandoned = null;
             var now = NowMs();
-            List<string> waiting = null, gone = null;
+            if (now - _lastBarrierWaitLogMs <= BarrierWaitLogIntervalMs) return;
+            List<string> waiting = null;
             foreach (var slot in _engine.Session.GetRosterSlots())
             {
                 if (_tracker.IsDone(slot)) continue;
-                var sinceProgress = now - SlotAdvancedMs(slot);
-                var sinceHeard = now - _engine.Session.LastSeenMsForSlot(slot);
                 var st = _tracker.Get(slot);
-                if (SaveTransferMath.HoldsBarrier(false, sinceProgress, sinceHeard, BarrierLivenessGraceMs))
-                {
-                    if (waiting == null) waiting = new List<string>();
-                    waiting.Add($"s{slot} {(st.phase == 0 ? "downloading" : "loading")} {st.percent}% " +
-                                $"(moved {sinceProgress}ms ago, heard {sinceHeard}ms ago)");
-                }
-                else
-                {
-                    if (gone == null) gone = new List<string>();
-                    gone.Add($"s{slot} (no progress for {sinceProgress}ms, nothing heard for {sinceHeard}ms)");
-                }
+                if (waiting == null) waiting = new List<string>();
+                waiting.Add($"s{slot} {(st.phase == 0 ? "downloading" : "loading")} {st.percent}%");
             }
-
-            if (waiting != null)
-            {
-                // Somebody is alive and moving: wait, for as long as it takes. Say so, throttled.
-                if (now - _lastBarrierWaitLogMs > BarrierWaitLogIntervalMs)
-                {
-                    _lastBarrierWaitLogMs = now;
-                    Debug.Log("[Multiplayer] reveal barrier holding for " + string.Join(", ", waiting) +
-                              " — alive and progressing, so there is no deadline on this wait.");
-                }
-                return false;
-            }
-            if (gone == null) return false;   // everyone loaded → the AllDone release below owns it
-            abandoned = string.Join(", ", gone);
-            return true;
+            if (waiting == null) return;   // everyone loaded → the AllDone release owns it
+            _lastBarrierWaitLogMs = now;
+            Debug.Log("[Multiplayer] reveal barrier holding for " + string.Join(", ", waiting) +
+                      " — everyone waits until the last peer is in; there is no deadline on this wait.");
         }
 
         public void Update()
@@ -2242,38 +2186,14 @@ namespace Multiplayer.Network
                 }
             }
 
-            // Reveal release on LIVENESS — runs on EVERY peer every frame (above the host-only return).
-            // Host: give up on a peer only when it shows no sign of life at all; a peer that is still
-            // downloading, still loading or still talking holds the barrier for as long as it takes.
-            if (_engine.IsHost && _loadPhaseActive && !_revealAllSent && NoLiveLoaderLeft(out var abandoned))
-            {
-                _revealAllSent = true;
-                _engine.BroadcastToAll(new NetworkMessage(
-                    PacketType.RevealAll, MessageSerializer.SerializeRevealAll(DateTime.UtcNow.Ticks)));
-                _loadPhaseActive = false;
-                Debug.LogWarning($"[Multiplayer] host reveal released: no sign of life from {abandoned} for " +
-                                 $"{BarrierLivenessGraceMs}ms — revealing without them. They keep their roster " +
-                                 $"row/slot/permissions and re-converge through the on-demand join when back " +
-                                 $"(loadedClients={_loadedPeers.Count}).");
-                PerformDeferredLift();
-                HostReseedAfterReveal(); // rca-4: this release path still re-seeds a reloaded session
-                HostReplayIntroCinematic(); // co-op campaign intro: AFTER the reveal, or the mirror drops it
-            }
-            // Per-peer self-reveal: this peer is holding (reached Playing) but no RevealAll came. The host
-            // broadcasts a RosterProgress snapshot ≤20 Hz for the whole barrier (each one bumps
-            // LastProgressMs), so silence here means the HOST is gone — not that it is patiently waiting for
-            // a slow peer, which must never end this hold. Same liveness grace, same "absence of life" rule.
-            if (_reachedPlaying && !_revealed)
-            {
-                var lastHostSignMs = LastProgressMs > _revealHoldStartedMs ? LastProgressMs : _revealHoldStartedMs;
-                if (NowMs() - lastHostSignMs > BarrierLivenessGraceMs)
-                {
-                    Debug.LogWarning($"[Multiplayer] barrier released locally: no sign of life from the host for " +
-                                     $"{NowMs() - lastHostSignMs}ms (no RevealAll, no roster snapshot) — lifting " +
-                                     "alone rather than holding a curtain nobody is coming to open.");
-                    PerformDeferredLift();
-                }
-            }
+            // THERE IS NO TIMED RELEASE, AND THAT IS THE RULE, NOT AN OMISSION (user ruling 2026-08-05).
+            // Two clocks used to live here — the host's 60 s liveness give-up and each peer's own 60 s
+            // self-reveal — and each of them was a way for one player's screen to come down while the others
+            // were still loading. Nobody leaves the loading screen until EVERY roster slot has reported
+            // load-complete. The only openers are events, never deadlines: the AllDone reveal below, a peer
+            // LEAVING the roster (GetRosterSlots shrinks, AllDone then holds on the very next frame), and
+            // session teardown (HoldCurtain goes false with the engine inactive). Say who we are waiting on.
+            if (_engine.IsHost && _loadPhaseActive && !_revealAllSent) LogBarrierWait();
 
             // Snapshots must flow through BOTH phases: the LOADED barrier window (_barrierOpen) AND
             // the phase-2 world-load (_loadPhaseActive — an armed, unreleased reveal hold, which spans it).

@@ -6695,12 +6695,15 @@ namespace RailCheck
                              "strictly-greater guard — a re-delivered turn message could be applied after the mission " +
                              "end and put the client back into a battle it already left (law 7)";
 
-            // (e) teardown: return barrier armed + per-battle state dropped
+            // (e) teardown: per-battle state dropped. THE ARM MOVED OUT OF THIS LAW (2026-08-05). This arm used
+            // to also demand that the tactical teardown CALL OpenReturnBarrier — a CALL-SITE assertion, and it
+            // pinned the second of two arms for one concern: PhoenixGame.FinishLevel (LoadBarrierGate) is the
+            // universal funnel and runs FIRST on this very path, so the teardown call was always the no-op
+            // half. Deleting the duplicate turned this law red while the behaviour was correct, which is the
+            // definition of asserting the call instead of the outcome. The OUTCOME — the tac→geo return
+            // re-arms the synchronized reveal, at the funnel, on every boundary — is L94 arms (a)+(b), and
+            // the non-vacuity arm below still proves the method is reachable from outside the coordinator.
             var endPostfix = ModMethod(endBarrier, "Postfix");
-            if (!Reaches(endPostfix, "SaveTransferCoordinator", "OpenReturnBarrier"))
-                yield return "L64 return-unarmed: the tactical teardown does not call OpenReturnBarrier — the tac→geo " +
-                             "return has no save transfer, so nothing else re-arms the synchronized reveal and the " +
-                             "first peer to finish loading its geoscape lifts its curtain alone";
             if (!Reaches(endPostfix, "TacticalTurnSync", "Reset"))
                 yield return "L64 state-leaks-between-battles: the tactical teardown does not reset the turn mirror — " +
                              "the mission-over flag survives into the NEXT battle and ends it on frame one";
