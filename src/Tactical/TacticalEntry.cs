@@ -34,6 +34,32 @@ namespace Multiplayer.Tactical
     [HarmonyPatch(typeof(GeoLevelController), "LaunchTacticalGame")]
     internal static class TacLaunchGate
     {
+        /// <summary>ONE SESSION ENTRY, ONE LOAD (law L122) — armed HERE, at the geo→tac transition, and
+        /// consumed by <see cref="TacDeployReadyCapture"/>. Same rule as 858eee3: arm at the transition,
+        /// guard on the arm.
+        ///
+        /// <c>TacDeployReadyCapture</c> fires on ANY host tactical level reaching <c>Playing</c>, and
+        /// "Playing" cannot tell "I launched this battle from the geoscape" (nobody else has it — ship it)
+        /// from "I LOADED this battle from a blob every peer already consumed" (everybody has it — shipping
+        /// it again reloads them). Loading straight into a battle from a save did exactly the second thing:
+        /// the first transfer was correct and simultaneous (995,978 B, <c>reveal released: AllDone
+        /// (loadedClients=2)</c>) and then a second ~996 KB blob went out on top of it, reloading only the
+        /// CLIENTS while the host stayed in the level it was already in. Only the geo→tac seam knows the
+        /// difference, and it is this method.</summary>
+        private static bool _entryLaunched;
+
+        internal static void ArmSessionEntry() => _entryLaunched = true;
+
+        /// <summary>One-shot BY CONSTRUCTION: it clears. A guard that only reads would pass again on the
+        /// next <c>Playing</c> — which, for a level nobody re-entered, is the same double transfer one beat
+        /// later.</summary>
+        internal static bool ConsumeSessionEntry()
+        {
+            bool armed = _entryLaunched;
+            _entryLaunched = false;
+            return armed;
+        }
+
         // Intent-capture/sim-gating seam (law 4a/4b), host+client halves of ONE decision:
         //  • HOST: arm the synchronized-reveal hold BEFORE the tactical level can reach Loaded→Playing.
         //    Ordering is the whole point — OpenTacticalEntryBarrier resets _revealed=false, and if that
@@ -65,6 +91,9 @@ namespace Multiplayer.Tactical
                 return false;
             }
 
+            // THIS is the entry. Everything TacDeployReadyCapture is allowed to ship hangs off this one line
+            // having run (law L122) — a battle reached any other way is a battle every peer already holds.
+            ArmSessionEntry();
             coord.OpenTacticalEntryBarrier();
             // Native mode ships no save, so nothing else opens the LOADED barrier or starts the host's
             // reveal aggregation (HostTacticalEntryTransferCrt's OpenBarrier is the save path's job). Arm the
@@ -97,6 +126,20 @@ namespace Multiplayer.Tactical
             if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
             var coord = engine.SaveTransfer;
             if (coord == null || !coord.SessionStarted) return;
+
+            // LAW L122 — A BATTLE EVERYONE LOADED FROM ONE BLOB IS NOT AN ENTRY. `Playing` says a tactical
+            // level exists on the host; it does not say this peer is the one that CREATED it. Loading a save
+            // that is already a battle takes the ordinary F2 save-transfer path (HostSerializeAndSendCrt) —
+            // every peer consumed that blob and entered the same level — and then arrived here, where the
+            // unguarded capture wrote a SECOND ~996 KB mid-tactical save and reloaded the clients out of the
+            // battle they had just loaded into, while the host stayed put.
+            if (!TacLaunchGate.ConsumeSessionEntry())
+            {
+                Debug.Log("[Multiplayer][tac] host tactical level Playing, but this peer did not LAUNCH this " +
+                          "battle — it came from a save blob every peer already loaded (no geo→tac transition " +
+                          "ran). No second transfer: one session entry, one load.");
+                return;
+            }
 
             Debug.Log("[Multiplayer][tac] host tactical level Playing — waiting for deploy-ready (HasAnyTurnStarted).");
             __instance.Timing.Start(CaptureWhenPlayableCrt(__instance, coord));
