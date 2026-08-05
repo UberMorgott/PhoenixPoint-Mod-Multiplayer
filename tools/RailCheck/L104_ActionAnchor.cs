@@ -30,7 +30,8 @@ namespace RailCheck
     /// THE SECOND HALF, same report, different mechanism. <c>ShootAbility.Activate</c>:167 branches on
     /// <c>TacticalLevelController.AnyAIEvaluationAbilityExecuting</c> between <c>PlayAction</c>
     /// (<c>cancelCurrent: true</c> — cancels the move it followed and fires at once) and
-    /// <c>EnqueueAction(soloAfterCurrent: true)</c> (finishes the walk first). Law L78 forced that flag TRUE
+    /// <c>EnqueueAction(soloAfterCurrent: true)</c> (finishes the walk first). Law L78 — PROSE-ONLY, it never
+    /// had an executable arm; see the law-number registry in laws.md — forced that flag TRUE
     /// for every mirror; but the host's own answer is FALSE during a player turn, so the lie made the WATCHERS
     /// the only peers cancelling the walk — "I move behind a wall and immediately shoot and the other windows
     /// do it faster than mine", with the watchers additionally standing where the order never sent them until
