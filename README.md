@@ -1,3 +1,5 @@
+![Phoenix Point: Cooperative Multiplayer](docs/images/banner.png)
+
 # Phoenix Point: Cooperative Multiplayer
 
 [English](README.md) · [Русский](README.ru.md)
@@ -5,6 +7,12 @@
 Phoenix Point is a good turn-based tactics game with no multiplayer. My friends and I wanted a shared campaign, each on our own PC, running the soldiers and the jobs the group handed us.
 
 Snapshot never shipped co-op, so this mod adds it. Two or more people run the same Geoscape and fight the same battles from their own machines. No servers, no rewritten game logic: the host runs the original simulation with a network layer on top.
+
+## Status
+
+Beta, in active development, and playable today. What works: a shared campaign on a host-authoritative Geoscape whose state is replicated to every peer, co-op tactical missions, joining by Steam invite or by direct IP, and starting a brand-new campaign together from the lobby.
+
+The rail harness enforces the sync invariants and every law check passes. A green harness is not proof, though: the real gate is a live three-player session. Expect rough edges, and file bugs.
 
 ## How a session works
 
@@ -117,7 +125,7 @@ Overwatch, return fire and zone control · falls and no-support collapse · came
 - Captured aliens never appear in a mirrored reward list: a generated recruit has no id in any registry, so there's nothing to address.
 - The client's clock trails the host by one-way latency, roughly 20–80 ms of game time; the network leg itself is not compensated.
 - Shared-seed determinism is a separate future project, and nothing in the current design assumes it.
-- Version `0.9.3`, and beta means beta. Several subsystems are verified by the harness and by two-player sessions, but not by a long soak. Expect rough edges, and file bugs.
+- Several subsystems are verified by the harness and by two-player sessions, but not by a long soak.
 
 ## Requirements
 
