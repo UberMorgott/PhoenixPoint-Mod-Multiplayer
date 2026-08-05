@@ -137,6 +137,13 @@ namespace Multiplayer.Tactical
             }
             Send(SurfaceIds.TacTurn, OpTurn, "turn '" + Name(next) + "' #" + (next.TurnNumber + 1),
                  w => { w.Write(guid); w.Write(next.TurnNumber); });
+
+            // NO KEYED LIVE ACTOR'S LAST SETTLE MAY BE OLDER THAN THE CURRENT FACTION TURN (law L123). The
+            // only other settles in this arc ride an action the host is animating, so an actor that drifted
+            // by any other route stayed drifted for the rest of the battle — and a peer that sees an enemy
+            // the host does not has every shot at it refused. AFTER the announcement, so the settles land in
+            // the turn they belong to.
+            TacticalCommandSync.HostSettleAllLive("turn '" + Name(next) + "' #" + (next.TurnNumber + 1));
         }
 
         /// <summary>The host's authoritative mission end. One byte of outcome: the Player participant's

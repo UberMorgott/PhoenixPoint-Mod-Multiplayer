@@ -254,4 +254,47 @@ namespace Multiplayer.Tactical
             }
         }
     }
+
+    /// <summary>
+    /// CLIENT turn control, arm 3 — THE OTHER DOOR INTO ENEMY AI (law L123, 2026-08-05).
+    ///
+    /// <see cref="ClientAiGate"/> above blocks <c>TacticalFaction.AIUpdateCrt</c>, which was believed to be
+    /// how AI decisions are reached. It is one of TWO. <c>TacticalLevelController.
+    /// ExecuteQueuedAbilitiesSequence</c>:1226-1232 runs panic → AI-evaluation → hurt-reaction, and it has a
+    /// SECOND caller that no gate touches: <c>ExecuteQueuedAbilitiesEffect.OnApply</c>:22 — an ordinary
+    /// authored EFFECT, started straight on <c>TacticalLevelController.Timing</c>, outside any turn
+    /// coroutine. Its <c>ExecuteAIEvaluationAbilities</c>:1234-1264 then executes an
+    /// <c>AIEvaluationAbility</c> on every <c>CurrentFaction</c> actor carrying an
+    /// <c>AIEvaluationStatus</c> — on a client, in the alien turn, that is the aliens.
+    ///
+    /// That is the leak the live log shows verbatim: <c>this CLIENT activated 'Move_AbilityDef' on
+    /// Fishman_17 … the client ran enemy AI of its own</c>, 10 ms BEFORE the host's own mirror of a different
+    /// move, 200 ms after a <c>Panic_AbilityDef … ExecuteQueuedAbilitiesSequence:1225</c> line, and a full
+    /// 8 s before <c>client AI turn SUPPRESSED</c> ever appeared. The peers then disagreed about where a
+    /// cloaked enemy was, and every shot the client aimed at the one only IT could see was refused.
+    ///
+    /// NARROWED TO THE AI ARM ON PURPOSE. Panic and hurt-reaction are REACTIONS to something that already
+    /// happened and ride the ordinary mirror; AI evaluation is a DECISION, and law 5 puts every decision on
+    /// the host. Blocking the whole sequence would take the first two with it. Returning an empty coroutine
+    /// (rather than <see cref="ClientAiGate"/>'s hold) is right here because this is not a turn boundary:
+    /// nothing downstream is waiting on it, and the host's own run of the same evaluation arrives as
+    /// ordinary 0x82 mirrors.
+    /// </summary>
+    [HarmonyPatch(typeof(TacticalLevelController), "ExecuteAIEvaluationAbilities")]
+    internal static class ClientAiEvaluationGate
+    {
+        private static bool Prefix(ref IEnumerator<NextUpdate> __result)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
+            Debug.LogWarning("[Multiplayer][tac] client AI EVALUATION suppressed — reached outside the turn " +
+                             "coroutine (ExecuteQueuedAbilitiesEffect → ExecuteQueuedAbilitiesSequence), which " +
+                             "ClientAiGate does not cover. An AI decision is the host's; its result arrives on " +
+                             "0x82 like every other action.");
+            __result = Nothing();
+            return false;
+        }
+
+        private static IEnumerator<NextUpdate> Nothing() { yield break; }
+    }
 }

@@ -147,9 +147,20 @@ namespace Multiplayer.Network.Sync
                 // reconverge re-emit usually arrives byte-equal → applies as Unchanged → no touched → no
                 // repaint, so the gesturing client's STAGED widgets stay stale. Its model is already
                 // correct (law 3: the native op never ran locally) — repainting from it un-stages the
-                // open screen. Payload is deliberately empty; nothing to decode.
-                Debug.Log("[MP][intent] CLIENT " + Tag(surfaceId) + " reject nudge — repainting open UI");
+                // open screen.
+                //
+                // AND IT CARRIES THE REASON (law L123, 2026-08-05). The nudge used to be an EMPTY envelope
+                // and this branch only logged, so the refusal never crossed the wire at all: the player who
+                // clicked got the wind-up, the cancel, and no word. Live, that read as a locked soldier —
+                // five refused shots in 45 s while the host was answering "the game's own gate refuses this
+                // ability: Нет подходящей цели" to itself. Silent swallow is this repo's dominant bug class;
+                // a refusal the player cannot see is the purest form of it.
+                string reason = payload == null || payload.Length == 0
+                                    ? null : Encoding.UTF8.GetString(payload);
+                Debug.Log("[MP][intent] CLIENT " + Tag(surfaceId) + " reject nudge — repainting open UI" +
+                          (reason == null ? "" : " — " + reason));
                 OpenUiRepaint.MarkDirty();
+                if (reason != null) SessionNotifier.ShowToast(reason, modalFallback: true);
                 return true;
             }
             try
@@ -214,14 +225,20 @@ namespace Multiplayer.Network.Sync
             if (_families.TryGetValue(surfaceId, out var f)) f.Reconverge?.Invoke();
             // The re-emit reconverges the client's MODEL, but a reject means host state did not change —
             // re-emitted values arrive byte-equal, apply as Unchanged and repaint nothing, leaving the
-            // gesturing client's staged UI stale until reopen. Nudge that ONE client: an empty envelope
-            // back on the family's own surface, handled as MarkDirty in HandleInbound's client branch.
+            // gesturing client's staged UI stale until reopen. Nudge that ONE client on the family's own
+            // surface, handled in HandleInbound's client branch (MarkDirty + show the reason).
+            //
+            // THE NUDGE CARRIES THE REASON (law L123). It used to be a null payload, so the ONE peer that
+            // needs to know why its order died was the only peer never told — the host logged the refusal
+            // to its own console and the player saw a wind-up and a cancel. The reason is the whole content
+            // of a reject; shipping the envelope without it is shipping the silence.
             try
             {
                 var engine = NetworkEngine.Instance;
                 if (engine != null && engine.IsHost && peer != 0)
                     engine.SendToClient(peer, new NetworkMessage(PacketType.SyncEnvelope,
-                        SyncProtocol.EncodeEnvelope(surfaceId, SyncKind.ActionRequest, null)));
+                        SyncProtocol.EncodeEnvelope(surfaceId, SyncKind.ActionRequest,
+                                                    Encoding.UTF8.GetBytes(why ?? ""))));
             }
             catch (Exception ex) { Debug.LogError("[MP][intent] reject nudge send failed: " + ex.Message); }
         }

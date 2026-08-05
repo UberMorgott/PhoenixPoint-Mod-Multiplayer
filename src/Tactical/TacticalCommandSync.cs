@@ -1455,6 +1455,43 @@ namespace Multiplayer.Tactical
             HostSettle(ability.TacticalActorBase);
         }
 
+        /// <summary>
+        /// THE TURN-EDGE SWEEP (law L123) — settle EVERY keyed live actor, once per host faction turn.
+        ///
+        /// <see cref="HostSettle"/> had exactly two callers: the end-of-action rider
+        /// (<see cref="OnAbilityActionEnded"/>) and the reject path. Both are about an actor the host is
+        /// ANIMATING. Nothing corrected an actor the host is NOT animating, so any divergence that got in by
+        /// some other door stayed in for the rest of the battle. Live: the user shot an enemy, it cloaked and
+        /// ran; on the host it went one way and on the clients another (a rogue local AI run leaked the
+        /// move — see the open thread on <c>ClientAiGate</c>). The client then legitimately saw an enemy
+        /// where the host had nobody, so every aimed shot was refused — <c>HOST tac-cmd REJECT peer=1 — the
+        /// game's own gate refuses this ability: Нет подходящей цели</c>, the soldier wound up and cancelled
+        /// five times in 45 s — and the lock broke on the exact settle <c>HOST settle Fishman_20 @
+        /// (9.5,0,-12.5)</c>, with the very next shot accepted.
+        ///
+        /// This heals that class of divergence REGARDLESS of which funnel leaked it, which is why it is here
+        /// and not a guard on the funnel: the turn edge is the one moment every peer agrees on, and the sweep
+        /// costs ~140 actors × 25 B once per faction turn, entirely off the hot path.
+        /// </summary>
+        internal static void HostSettleAllLive(string when)
+        {
+            var engine = LiveEngine();
+            if (engine == null || !engine.IsHost) return;
+            var tlc = Tlc();
+            if (ReferenceEquals(tlc, null) || ReferenceEquals(tlc.Map, null)) return;   // L113
+            int settled = 0;
+            foreach (var actor in tlc.Map.GetActors<TacticalActor>())
+            {
+                if (!actor.IsAlive) continue;                    // a corpse has no position worth arguing about
+                if (TacticalActorKey.Of(actor) == 0) continue;   // unkeyed: no peer could name it anyway
+                HostSettle(actor);
+                settled++;
+            }
+            Debug.Log("[Multiplayer][tac] turn-edge settle sweep at " + when + " — " + settled +
+                      " keyed live actor(s). Every peer's copy of an actor the host is not animating is " +
+                      "corrected here; nothing else corrects it at all.");
+        }
+
         /// <summary>Ship one actor's authoritative position + AP + WP to every peer. Broadcast to ALL,
         /// including whoever gestured: the acting peer is the one whose speculative local play most needs
         /// correcting.</summary>
@@ -1729,8 +1766,10 @@ namespace Multiplayer.Tactical
             {
                 // No geoscape path prefix: a tactical reject touches nothing on the value rail, and the reject
                 // NUDGE is what repaints the gesturing client's own screen.
+                // Named, not keyed: since L123 this string is shipped to the refused peer and put on its
+                // screen, so it is read by a player and not only by whoever opens the host's log.
                 IntentRail.Reject(SurfaceIds.TacCommandIntent, senderPeerId,
-                                  "command for actor " + key + ": " + refusal);
+                                  "command for " + SafeActorName(actor) + ": " + refusal);
                 // Snap his speculative local play back — but only if the actor is idle HERE. If it is busy, the
                 // command that won is still running and its own end-of-action settle is the corrector; a settle
                 // taken mid-flight would ship a position the host itself is about to leave.
