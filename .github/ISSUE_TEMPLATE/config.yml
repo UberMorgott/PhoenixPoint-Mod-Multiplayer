@@ -1,5 +1,1 @@
-blank_issues_enabled: true
-contact_links:
-  - name: TFTV Discord
-    url: https://discord.gg/Ypt5p5trNx
-    about: "Questions, co-op matchmaking and quick help. TFTV is required to play. / Вопросы, поиск напарников и быстрая помощь."
+blank_issues_enabled: false
