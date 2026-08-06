@@ -409,7 +409,32 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
-    /// A RESTORED WINDOW WHOSE SUBJECT HAS RESOLVED IS NOT RESTORED.
+    /// A RESTORED WINDOW THIS PEER DID NOT PRODUCE, OR WHOSE SUBJECT HAS RESOLVED, IS NOT RESTORED.
+    ///
+    /// THE SECOND HALF, ADDED 2026-08-06 (the campaign-intro duplicate). Every TFTV intro popup
+    /// (<c>IntroBetterGeo_0/1/2</c>) appeared on the host, was answered there, and then appeared AGAIN on
+    /// every client. TWO PRODUCERS for one window, and the second one was THIS METHOD. Write-order, measured:
+    /// the host raised the three events at 20:36:39.885-.887 (<c>EventPopup</c>:1258 → :196, surface 0xB6) and
+    /// the new-campaign autosave ran 14 ms later at 20:36:39.899 (<c>SaveTransferCoordinator</c>:1137 →
+    /// :1194), while the host answered them only at 20:36:53 — so the transferred blob carried three QUEUED
+    /// <c>UIStateGeoscapeEvent</c>s (the window queue is part of the save: <c>GetRestorableData</c>:25 ←
+    /// <c>GeoLevelController.RecordInstanceData</c>:415), and the same client also received the three as held
+    /// 0xB6 raises, replayed at reveal (20:36:57.309-.444). Six teardowns against three raises per client, and
+    /// <c>multiplayer.log</c>:751 caught it: a <c>UIStateGeoscapeEvent</c> for <c>IntroBetterGeo_0</c> torn
+    /// down 146 ms BEFORE the first mod raise, which on a client is only reachable from
+    /// <c>UIStateGeoscapeEvent.ExitState</c> (<c>EventSync</c>:191).
+    ///
+    /// WHY THE EXISTING RULES ALL MISSED IT, stated because three of them were green through the whole bug:
+    /// L49 ("no ModalType a native raiser opens may also be Mirrored") is <c>ModalType</c>/0xB7-scoped and
+    /// derives producers from the GAME's IL raisers, and the second producer here is the SAVEGAME RESTORE;
+    /// L117 (the subject half below) examines only entries carrying a <c>GeoMission</c>, and an event-carrying
+    /// entry has none; L93 arms F/H assert the carry EXISTS without ever asserting a COUNT.
+    ///
+    /// So the rule widens from "subject resolved" to "THIS PEER IS NOT THE PRODUCER", keyed on the coverage
+    /// table that already names every window's producer — see <see cref="KindIsMirrored(Type, ModalType)"/>
+    /// for the verdict and <see cref="RestoringAnotherPeersBlob"/> for the signal. RailCheck L135 pins it.
+    ///
+    /// THE FIRST HALF, unchanged:
     ///
     /// THE REPORT (2026-08-05). Coming out of a tactical mission, the whole pre-deployment window history
     /// came back correctly — including the START-MISSION window for the mission that had just been played.
@@ -465,28 +490,118 @@ namespace Multiplayer.Network.Sync
         private static void Prefix(List<GeoscapeViewStateSwitchRestorableData> data)
         {
             if (data == null) return;
+            int seen = data.Count, deadSubject = 0, notMine = 0;
+            bool foreign = false;
             try
             {
+                foreign = RestoringAnotherPeersBlob();
                 for (int i = data.Count - 1; i >= 0; i--)
                 {
-                    var mission = SubjectMission(data[i].State);
-                    if (mission == null || !HasResolved(mission)) continue;
+                    var context = data[i].State;
+                    var mission = SubjectMission(context);
+                    if (mission != null && HasResolved(mission))
+                    {
+                        data.RemoveAt(i);
+                        deadSubject++;
+                        // Never silent: a window the player expected back and did not get must say why.
+                        Debug.Log("[MP][windows] restore DROPS a stacked window whose mission '" +
+                                  (mission.MissionDef == null ? "?" : mission.MissionDef.name) + "' has already " +
+                                  "resolved (completed=" + mission.IsCompleted + ") — the offer it carried is dead. " +
+                                  "The post-mission reward window is not affected: it is raised fresh by " +
+                                  "UIStateInitial after this restore, not carried through it.");
+                        continue;
+                    }
+                    if (!foreign || !KindIsMirrored(context)) continue;
                     data.RemoveAt(i);
-                    // Never silent: a window the player expected back and did not get must say why.
-                    Debug.Log("[MP][windows] restore DROPS a stacked window whose mission '" +
-                              (mission.MissionDef == null ? "?" : mission.MissionDef.name) + "' has already " +
-                              "resolved (completed=" + mission.IsCompleted + ") — the offer it carried is dead. " +
-                              "The post-mission reward window is not affected: it is raised fresh by " +
-                              "UIStateInitial after this restore, not carried through it.");
+                    notMine++;
                 }
             }
             catch (Exception ex)
             {
                 // A filter that throws must not cost the player their whole window history — the native
                 // restore below still runs on the untouched remainder.
-                Debug.LogError("[MP][windows] filtering resolved subjects out of the restored window queue " +
-                               "failed — the queue is restored unfiltered: " + ex);
+                Debug.LogError("[MP][windows] filtering the restored window queue failed — the queue is " +
+                               "restored unfiltered: " + ex);
             }
+            // ONE line per restore, always, drops or none: the duplicate this filter closes left ZERO log
+            // lines for a whole session because RestoreData and RegenerateState are silent and the old
+            // filter only spoke when it dropped. A restore that says how many entries it saw and how many
+            // it kept is the difference between reading this bug off the log and re-deriving it from
+            // timestamps.
+            Debug.Log("[MP][windows] window-queue restore: " + seen + " entries in the save, " + data.Count +
+                      " kept — " + deadSubject + " dropped (subject already resolved), " + notMine +
+                      " dropped (Mirrored kind, produced by another peer" +
+                      (foreign ? "" : "; not applicable — this peer authored this save") + ").");
+        }
+
+        /// <summary>
+        /// IS THE GEOSCAPE BEING RESTORED SOMEBODY ELSE'S? A restored window is only ever a SECOND copy when
+        /// this peer is not the one that produced it, so this is the whole producer test.
+        ///
+        /// THE SIGNAL IS THE ONE THE MOD ALREADY RELIES ON, deliberately not a new one:
+        /// <c>ReplenishSync.CarryUnreadWindowsPatch</c>:146-160 states it and is built on it — "the geoscape's
+        /// window queue has just been rebuilt from the save; on a CLIENT that save is the HOST's, so this
+        /// peer's own unread windows are not in it" — behind exactly this gate
+        /// (<c>engine == null || !engine.IsActiveSession || engine.IsHost</c> → return). Every load boundary a
+        /// client reaches in a session (join, new campaign, mission return) is a native save TRANSFER (law 1),
+        /// so its restored queue is the host's queue, never its own.
+        ///
+        /// USING THE IDENTICAL PREDICATE IS THE POINT, not a coincidence: the peer that DROPS the restored
+        /// mirrored windows here is exactly the peer that RE-CARRIES its own unanswered ones there. One peer
+        /// cannot lose its deferred windows to this drop without the other half of the same predicate having
+        /// failed too, and RailCheck L135 asserts that complementarity rather than trusting it.
+        ///
+        /// Host: restores its OWN blob — its queue really did persist — so nothing is dropped and its own
+        /// deferral is the native save's, untouched. Solo: no session, no producer question, vanilla.
+        /// </summary>
+        private static bool RestoringAnotherPeersBlob()
+        {
+            var engine = NetworkEngine.Instance;
+            return engine != null && engine.IsActiveSession && !engine.IsHost;
+        }
+
+        /// <summary>The RestoreContext's own declaring type IS the window kind. All four
+        /// <c>IGeoscapeRestorableViewStateContext</c> implementors the game ships are a private nested
+        /// <c>RestoreContext</c> inside the view state they rebuild (<c>UIStateGeoModal</c>:14,
+        /// <c>UIStateGeoscapeEvent</c>:16, <c>UIStateMarketplaceGeoscapeEvent</c>:15,
+        /// <c>UIStateAssetDeployment</c>:16), so <c>DeclaringType</c> keys straight into the EXISTING
+        /// coverage table and no context ever needs an entry of its own.</summary>
+        private static bool KindIsMirrored(IGeoscapeRestorableViewStateContext context)
+        {
+            var stateType = context?.GetType().DeclaringType;
+            if (stateType == null) return false;                              // not a nested context: keep it
+            if (stateType != typeof(UIStateGeoModal)) return KindIsMirrored(stateType, default(ModalType));
+            // The modal family is 43 windows wearing one type and its verdict lives on the ModalType axis;
+            // a modal whose kind cannot be read is KEPT, because the type-level "Mirrored" is a pointer to
+            // that second table and not a verdict about this entry.
+            return ModalKindField?.GetValue(context) is ModalType modal && KindIsMirrored(stateType, modal);
+        }
+
+        private static readonly FieldInfo ModalKindField =
+            AccessTools.Field(AccessTools.Inner(typeof(UIStateGeoModal), "RestoreContext"), "_modal");
+
+        /// <summary>
+        /// THE VERDICT, table-only and pure so RailCheck L135 can EXECUTE it rather than read its call graph.
+        ///
+        /// A <c>Mirrored</c> window has EXACTLY ONE producer — the host's raise surface (0xB6 events, 0xB7
+        /// modals and the non-modal arm, 0xBA cutscenes). A peer that did not author the save therefore
+        /// already has, or is already holding, every mirrored window in it, and a restored copy is a second
+        /// window for one raise: the campaign-intro duplicate of 2026-08-06, where the host's autosave ran
+        /// 14 ms after it raised three <c>IntroBetterGeo</c> events and the blob carried all three as queued
+        /// <c>UIStateGeoscapeEvent</c>s while the same three arrived again as held 0xB6 raises.
+        ///
+        /// <c>LocalOnly</c> and <c>Gap</c> kinds are KEPT, and not out of caution: they have no producer at
+        /// all, so dropping them would be an uncompensated loss rather than a de-duplication. (That the
+        /// host's LocalOnly windows arguably do not belong on a client's screen either is a separate
+        /// question with a separate answer, and this filter does not pretend to have it.)
+        /// </summary>
+        internal static bool KindIsMirrored(Type stateType, ModalType modal)
+        {
+            if (stateType == null) return false;
+            var rule = stateType == typeof(UIStateGeoModal)
+                ? GeoWindowCoverage.RuleForModal(modal)
+                : GeoWindowCoverage.RuleFor(stateType);
+            return rule != null && rule.Sync == WindowSync.Mirrored;
         }
 
         /// <summary>The game's OWN verdict that a mission is over (<c>UIStateInitial.EnterState</c>:102),
