@@ -64,7 +64,10 @@ namespace Multiplayer.Harmony
                 var coord = engine?.SaveTransfer;
                 return SaveTransferMath.HoldCurtain(
                     engineActive: engine != null && engine.IsActive,
-                    sessionStarted: coord != null && coord.SessionStarted,
+                    // NOT SessionStarted: the arm has to cover the host's pending new-campaign bootstrap
+                    // too, or its fresh geoscape goes interactive before the barrier it will be gated by
+                    // even exists (SaveTransferMath.CurtainHoldArmed carries the measured run).
+                    sessionStarted: coord != null && coord.CurtainHoldArmed,
                     revealed: coord == null || coord.Revealed);
             }
             catch { return false; }
@@ -83,7 +86,9 @@ namespace Multiplayer.Harmony
                 var engine = NetworkEngine.Instance;
                 var coord = engine?.SaveTransfer;
                 return "engineActive=" + (engine != null && engine.IsActive) +
-                       " sessionStarted=" + (coord != null && coord.SessionStarted) +
+                       " holdArmed=" + (coord != null && coord.CurtainHoldArmed) +
+                       " (sessionStarted=" + (coord != null && coord.SessionStarted) +
+                       " newCampaignPending=" + (coord != null && coord.NewCampaignPending) + ")" +
                        " revealed=" + (coord == null || coord.Revealed);
             }
             catch (Exception e) { return "gate state unreadable: " + e.Message; }

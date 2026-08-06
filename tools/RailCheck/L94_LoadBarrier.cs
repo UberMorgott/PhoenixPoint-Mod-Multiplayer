@@ -464,7 +464,120 @@ namespace RailCheck
 
             // ─── (l) THE COVERAGE ARM. NO PEER'S SCREEN COMES DOWN BEFORE THE REVEAL — ANY OF THEM. ───
             foreach (var v in TakedownCoverage()) yield return v;
+
+            // ─── (n) THE ARM COVERS THE WHOLE BOUNDARY — INCLUDING THE PART BEFORE A BARRIER EXISTS. ───
+            foreach (var v in HoldArmedAcrossTheBootstrap()) yield return v;
         }
+
+        /// <summary>
+        /// ARM (n) — THE GATE IS ARMED FROM THE FIRST MOMENT A LOAD BOUNDARY OWNS THE SCREEN, NOT FROM BEGIN.
+        ///
+        /// THE 2026-08-06 REPORT, and the reason every arm above was green through it. Nothing released
+        /// early and no take-down path was uncovered: the host's curtain was never HELD in the first place.
+        /// <c>multiplayer-2.log:40</c>, 20:36:37.633 — "curtain lift PASSED gate unheld — engineActive=True
+        /// sessionStarted=False revealed=False". On a NEW CAMPAIGN the native flow hands the host a playable,
+        /// interactive geoscape while the barrier that is supposed to gate it does not exist yet: it is
+        /// <c>Begin()</c>, inside <c>LaunchTransfer</c>, which cannot run until the campaign has been created
+        /// and autosaved (20:36:40.948 in the same run, 3.3 s later — and the host's DiffEngine was already
+        /// shipping 233 changed fields at 20:36:38.778, i.e. a live world advancing). The two clients were
+        /// still in the lobby without a byte of the save; they only reached Playing at 20:36:54. The whole
+        /// invariant — nobody gets control until everybody has reported loaded — was lost in the window
+        /// BEFORE the machinery that enforces it started.
+        ///
+        /// Arms (d)/(e1) execute the RELEASE and (l) executes the COVERAGE. This one executes the ARM, on
+        /// the real latch and the real predicate, walking the host's actual state sequence: armed → attempt
+        /// in flight → launched → revealed, plus the failure branch. It is not a clock and does not weaken
+        /// (e2): the only thing that ends the added hold is <c>Conclude</c>, which is an OUTCOME (the
+        /// launch, a stated failure, or the latch's own liveness watchdog) — so a dead bootstrap RELEASES
+        /// the host loudly instead of stranding it, and no peer's wait gains a deadline.
+        /// </summary>
+        private static IEnumerable<string> HoldArmedAcrossTheBootstrap()
+        {
+            // ── EXECUTED: the host's real state walk, on the production latch + production predicate. ──
+            var latch = new NewCampaignBootstrap();
+
+            latch.Arm();                                  // native new-game CONFIRM ran
+            if (!HeldWith(sessionStarted: false, latch: latch))
+                yield return "L94 host-plays-while-clients-wait: with a new-campaign bootstrap ARMED and no " +
+                             "barrier open yet, the curtain gate does NOT hold. That window is the whole of " +
+                             "the host's native campaign creation and its first playable geoscape — measured " +
+                             "at 3.3 s live, with the world already ticking and diffing — while every client " +
+                             "sits in the lobby without a byte of the save. One player acting on a world the " +
+                             "others have not reached is the exact desync this law exists for, arriving " +
+                             "through the ARM instead of through the release";
+
+            if (!latch.TryFire(isHost: true, isActiveSession: true, geoscapeActive: true, transferActive: false))
+                yield return "L94 premise-changed: NewCampaignBootstrap.TryFire refuses a clean host/live/" +
+                             "geoscape/no-transfer evaluation, so this arm can no longer walk the window it " +
+                             "guards";
+            else if (!HeldWith(sessionStarted: false, latch: latch))
+                yield return "L94 host-plays-while-clients-wait: the gate stops holding the moment the " +
+                             "bootstrap attempt goes IN FLIGHT. That is the autosave — the seconds in which " +
+                             "the host is most obviously on a live geoscape and the clients have nothing";
+
+            // The launch: Begin() sets the session started INSIDE LaunchTransfer, and only the value it
+            // returns lets Conclude drop the pending flag. The two windows must abut with no open frame.
+            if (!HeldWith(sessionStarted: true, latch: latch))
+                yield return "L94 handover-gap: with the transfer launched (session started) AND the " +
+                             "bootstrap still pending, the gate does not hold — the arm has a hole exactly " +
+                             "where one window hands over to the next";
+            latch.Conclude();
+            if (!HeldWith(sessionStarted: true, latch: latch))
+                yield return "L94 handover-gap: the gate stops holding the instant the bootstrap concludes, " +
+                             "even though the session has begun and nobody has been revealed. The host's " +
+                             "screen comes down between its own launch and the collective reveal";
+
+            // The ONE release is still the collective one.
+            if (SaveTransferMath.HoldCurtain(
+                    engineActive: true,
+                    sessionStarted: SaveTransferMath.CurtainHoldArmed(true, latch.Armed),
+                    revealed: true))
+                yield return "L94 hold-survives-reveal: the widened arm outlives the synchronized reveal, so " +
+                             "the release that frees everyone frees nobody — a barrier turned into the hang " +
+                             "it exists to prevent";
+
+            // BOUNDED BY THE OUTCOME, NOT BY A CLOCK: a bootstrap that failed must RELEASE the host.
+            var dead = new NewCampaignBootstrap();
+            dead.Arm();
+            dead.Conclude();                              // ConcludeNewCampaignBootstrap(failure) path
+            if (HeldWith(sessionStarted: false, latch: dead))
+                yield return "L94 failed-bootstrap-strands-the-host: a bootstrap that concluded WITHOUT " +
+                             "launching a transfer still holds the curtain. The host is then behind a " +
+                             "loading screen for a session that will never start, with the clients told over " +
+                             "system chat to expect nothing — the widened arm eating its own escape hatch";
+
+            // ── REACHABILITY: the gate must ASK the wide question. (l)'s lesson, one level up. ──
+            // Every aggregate above can be perfect while the gate quietly reads SessionStarted again.
+            var gate = typeof(Multiplayer.Harmony.CurtainTakedownGate).GetMethod("Hold", AllMembers);
+            var wide = typeof(SaveTransferCoordinator).GetMethod("get_CurtainHoldArmed", AllMembers);
+            var pending = typeof(SaveTransferCoordinator).GetField("_newCampaign", AllMembers);
+            if (gate == null || wide == null || pending == null)
+            {
+                yield return "L94 premise-changed: CurtainTakedownGate.Hold / SaveTransferCoordinator" +
+                             ".CurtainHoldArmed / ._newCampaign are no longer all present, so this law can no " +
+                             "longer prove WHICH question the one curtain gate asks";
+                yield break;
+            }
+            if (!CallsMethod(gate, wide))
+                yield return "L94 gate-asks-the-narrow-question: CurtainTakedownGate.Hold — the single " +
+                             "predicate behind all three loading-screen take-down paths — no longer reads " +
+                             "SaveTransferCoordinator.CurtainHoldArmed. Reading SessionStarted instead is the " +
+                             "regression itself: it is false for the whole of the host's native new-campaign " +
+                             "creation, so the host's screen comes down and its world goes live while the " +
+                             "clients are still in the lobby";
+            if (!ReadsField(wide, pending))
+                yield return "L94 arm-narrowed-again: SaveTransferCoordinator.CurtainHoldArmed no longer " +
+                             "reads _newCampaign, so it has collapsed back into SessionStarted under a wider " +
+                             "name. The gate would ask the right method and get the wrong answer";
+        }
+
+        // The gate's live decision, expressed exactly as CurtainTakedownGate.Hold expresses it: a live
+        // engine, the WIDE arm, and no reveal yet.
+        private static bool HeldWith(bool sessionStarted, NewCampaignBootstrap latch) =>
+            SaveTransferMath.HoldCurtain(
+                engineActive: true,
+                sessionStarted: SaveTransferMath.CurtainHoldArmed(sessionStarted, latch.Armed),
+                revealed: false);
 
         /// <summary>
         /// ARM (l) — EVERY WAY THE LOADING SCREEN CAN COME DOWN IS GATED, NOT JUST THE ONE WE FOUND.

@@ -287,6 +287,17 @@ namespace Multiplayer.Network
         /// <summary>True once BEGIN has released this peer into the level (session has started).</summary>
         public bool SessionStarted => _begun;
 
+        /// <summary>
+        /// THE CURTAIN GATE'S ARM — the single input <see cref="Multiplayer.Harmony.CurtainTakedownGate"/>
+        /// asks, and deliberately WIDER than <see cref="SessionStarted"/>. A host creating a fresh campaign
+        /// natively reaches an interactive geoscape seconds before <c>Begin()</c> exists to be started, so
+        /// gating on <c>_begun</c> alone let the host play a live world while the clients were still in the
+        /// lobby (see <see cref="SaveTransferMath.CurtainHoldArmed"/> for the measured run). Reading the
+        /// pending bootstrap here — and not adding a second gate for it — keeps ONE predicate behind all
+        /// three loading-screen take-down paths.
+        /// </summary>
+        public bool CurtainHoldArmed => SaveTransferMath.CurtainHoldArmed(_begun, _newCampaign.Armed);
+
         /// <summary>True once the deferred reveal (native LiftCurtain + overlay hide) has run; used by
         /// CurtainShowPatch.Prefix so a later Loaded→Playing after RevealAll is NOT suppressed.</summary>
         public bool Revealed => _revealed;

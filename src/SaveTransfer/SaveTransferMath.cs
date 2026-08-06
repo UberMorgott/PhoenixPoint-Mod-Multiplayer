@@ -48,6 +48,31 @@ namespace Multiplayer.Network
             => engineActive && sessionStarted && !revealed;
 
         /// <summary>
+        /// THE HOLD'S ARM — which windows a co-op load boundary owns this peer's screen for. It is NOT
+        /// simply "the session has begun", and that gap is the 2026-08-06 report: on the host's NEW
+        /// CAMPAIGN the native flow reaches a playable, INTERACTIVE geoscape long before any barrier
+        /// exists. <c>_begun</c> is set by <c>Begin()</c>, which runs inside <c>LaunchTransfer</c>, which
+        /// runs only once the campaign has been created AND autosaved — measured live at 20:36:40.948
+        /// against a curtain that had already lifted UNHELD at 20:36:37.633 ("engineActive=True
+        /// sessionStarted=False revealed=False", multiplayer-2.log:40). For those seconds the host had a
+        /// live geoscape — its DiffEngine was already shipping 233 changed fields at 20:36:38.778 — while
+        /// two clients still sat in the lobby without a byte of the save. That is the desync the barrier
+        /// exists to prevent, arriving through the ARM instead of through the release.
+        ///
+        /// So the arm starts at the ARMED BOOTSTRAP, not at BEGIN. The two windows abut with no gap by
+        /// construction: <c>LaunchTransfer</c> returns only after <c>Begin()</c> has set the session
+        /// started, and only then does <c>ConcludeNewCampaignBootstrap</c> drop the pending flag.
+        ///
+        /// THE BOUND IS THE OUTCOME, NOT A CLOCK (L94 e2 unchanged). This adds no deadline to anybody's
+        /// wait: the pending flag is cleared by <c>NewCampaignBootstrap.Conclude</c>, which is reached on
+        /// the launch AND on every failure path AND on the latch's own liveness watchdog. A bootstrap that
+        /// dies therefore RELEASES the host's screen — loudly, on the same call that logs the ERROR and
+        /// tells the clients — instead of stranding it.
+        /// </summary>
+        public static bool CurtainHoldArmed(bool sessionStarted, bool newCampaignPending)
+            => sessionStarted || newCampaignPending;
+
+        /// <summary>
         /// BEGIN'S SINGLE-FIRE GUARD — true means "do NOT broadcast SessionBegin". A BARRIER THAT WAS
         /// OPENED MUST ALWAYS PRODUCE ITS BEGIN, so <paramref name="barrierOpen"/> vetoes the suppression
         /// outright: it is the only one of the three flags that belongs to the transfer currently in
