@@ -211,6 +211,8 @@ namespace RailCheck
             laws.AddRange(L136_RosterPeerIsBroadcastable.Check());
             laws.AddRange(L137_AbilityTraitSetIsRailed.Check());
             laws.AddRange(L138_ClientWritableLeafHasAnIntentSeam.Check());
+            laws.AddRange(L139_MirroredOrderReleasesTheLocalUi.Check());
+            laws.AddRange(L140_MirroredTargetIsResolvedNotApproximated.Check());
             laws.AddRange(L141_EveryPeerReachesTheSquadScreen.Check());
             laws.AddRange(L142_RevealLeavesNoInputLock.Check());
             laws.AddRange(L143_EveryLoadBoundaryCurtainsEveryPeer.Check());

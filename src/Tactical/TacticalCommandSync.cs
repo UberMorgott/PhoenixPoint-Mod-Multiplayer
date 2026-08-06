@@ -2161,25 +2161,144 @@ namespace Multiplayer.Tactical
 
         /// <summary>Play the host's order with the game's own code, inside an apply scope so the capture
         /// postfix does not echo it straight back as a fresh intent (law 8).</summary>
+        /// <summary>THE SETUP THE MIRRORED PATH SKIPPED — and it is not on the ability, it is on the VIEW.
+        ///
+        /// The local input path does not activate through <c>Activate</c> alone. It goes through
+        /// <c>TacticalViewState.ActivateAbility</c> (<c>TacticalViewState.cs</c>:259-277), which does TWO
+        /// things: <c>ability.Activate(target)</c> (:270) and then <c>SwitchToState(new UIStateWaiting(),
+        /// ClearStackAndPush)</c> (:274-275) — it takes the local view OUT of the state that was holding that
+        /// soldier BEFORE the engine starts driving him. The mirror path called only the first, and nothing
+        /// else in the game closes the gap: <c>TacticalView</c> subscribes to <c>AbilityExecutedEvent</c>
+        /// (<c>TacticalView.cs</c>:259) but <c>OnAbilityExecuted</c>:542-575 only refreshes prompts, and
+        /// neither <c>UIStateShoot</c> nor <c>UIStateFreeCam</c> subscribes to ANY cancel/end callback — they
+        /// exit on local INPUT only. So a mirrored order left this peer's UI running over an actor the engine
+        /// had just taken, for as long as that order lasted. Both live reports are that one gap.
+        ///
+        ///  • THE CRASH (defect 1). <c>UIModuleFreeFirstPersonShooting.Update</c>:132-137 gates on nothing but
+        ///    <c>gameObject.activeInHierarchy &amp;&amp; _context != null</c>, and <c>_context</c> is written
+        ///    once (<c>InitFirstPersonShootingLayout</c>:141) and NEVER cleared. Left running, its
+        ///    <c>UpdateAccuracyIndicator</c>:259-321 dereferences <c>CurrentBehavior as FirstPersonCamera</c>
+        ///    (:316-317, an <c>as</c> cast with no null test) and <c>_context.View.SelectedActor</c>
+        ///    (:264-265, nulled by <c>TacticalView</c>:1150/:1175) — both of which a mirrored activation and a
+        ///    forced settle move out from under it. That is the report verbatim: the SAME NRE 797 times, one
+        ///    per frame, then a native crash. The game already ships the fix as that state's own teardown
+        ///    (<c>UIStateFreeCam.ExitState</c>:447 → <c>ClearFirstPersonShootingLayout</c>:170 turns the
+        ///    module's GameObject off, which is exactly what stops <c>Update</c>).
+        ///  • THE 10-SECOND STALL (defect 2). <c>UIStateCharacterSelected</c> reads <c>ValidMoves</c>:158-160 —
+        ///    i.e. <c>ActorMoveAbility.GetTargetsData()</c> — every frame it is drawing (:142-148, :1594-1597),
+        ///    and <c>MoveAbility.GetTargetsData</c>:170-173 is the exact line that logs "shouldn't be called
+        ///    while X is executing abilities. This will invalidate the situation cache at wrong time." The
+        ///    engine names its own damage. That call re-enters the path-request machinery WHILE the actor's
+        ///    navigation is live: <c>GetTargetsDataInRange</c>:207-236 → <c>MoveAbilityTargets.CacheTargets</c>
+        ///    :17-28, which <c>Clear()</c>s and <c>Calculate()</c>s a request AND mutates the STATIC
+        ///    <c>NavigationSettings.Defaults</c> singleton (<c>TacticalPathRequest</c>:34-38 assigns that
+        ///    reference; <c>NavigationSettings</c>:46 declares it <c>static readonly</c>), turning
+        ///    <c>PathRequestPostProcess</c> off — read at <c>TacticalPathRequest</c>:64, where it clears
+        ///    <c>PointInfos</c> and returns. On the ACTING peer this is structurally impossible, because its
+        ///    view left for <c>UIStateWaiting</c> before <c>Activate</c> ever ran. On a mirror it ran every
+        ///    frame for 403 frames while the actor covered 0.14 of 1.41 units and never terminated.
+        ///
+        /// THE RELEASE IS THE GAME'S OWN AND IT IS ONE CALL FOR EVERY ABILITY (postulate 3):
+        /// <c>TacticalView.ResetViewState</c> (<c>TacticalView.cs</c>:262-268) switches the stack to
+        /// <c>UIStateInitial</c>, which runs <c>ExitState</c> on whatever was holding the actor — free-aim,
+        /// shoot, character-selected, or anything a mod adds later. No per-state code, no module poked by
+        /// hand, no ability named anywhere in this seam.
+        ///
+        /// WHY <c>ResetViewState</c> AND NOT <c>ToWaitViewState</c>:270-276, which is what the local path
+        /// uses: <c>UIStateWaiting</c> waits for the ability to FINISH, so on a mirror it would park this
+        /// player behind another human's action — the precise thing postulate 2 forbids, and the stall this
+        /// change exists to remove. <c>UIStateInitial</c> drops the stack and hands input straight back on the
+        /// same frame (postulate 1).
+        ///
+        /// NARROW, BY THE ONLY PREDICATE THAT MATTERS: <c>view.SelectedActor</c> IS this actor. A peer whose
+        /// UI is holding somebody else — or nobody — is not disturbed, because otherwise every mirrored order
+        /// anywhere on the map would yank this player's selection, which is just a different way of making the
+        /// game unplayable. Identity by <c>ReferenceEquals</c>, never Unity's <c>==</c> (L113).</summary>
+        /// <summary>MAY THIS MIRRORED COMMAND BE PLAYED AT ALL — pure, so RailCheck L140 can execute it.
+        ///
+        /// A mirrored order carries its actor-shaped fields as shared KEYS, never as positions
+        /// (<see cref="TacAbilityTargetCodec"/> writes <c>Actor</c>, <c>ShootTargetActor</c> and
+        /// <c>DamageReceiver</c> through <c>TacticalActorKey</c>), and <c>Read</c> collects a sentence for every
+        /// key that did not resolve on THIS peer. Either failure means the same thing: the target this peer
+        /// would rebuild is not the target the host shot at. Replaying it anyway is worse than not replaying it,
+        /// because <c>TacticalAbilityTarget.GetWorkingPosition</c>:175-192 does not fail loudly — it walks a
+        /// nine-step fallback chain and, if every step is empty, returns <c>InvalidPosition</c> (NaN). The 2026
+        /// -08-06 crash log shows that tail four times over
+        /// (<c>Trying to get working position from TacticalAbilityTarget that has no valid one set</c>).
+        ///
+        /// NOT a bounds test on the position, deliberately: a free-aim shot's <c>PositionToApply</c> IS a
+        /// far-off ray point by construction — the host's own log for the crashing shot carries
+        /// <c>(-806.8, 66.4, -615.6)</c> on a map whose tiles are ±20, and the host played it natively without
+        /// incident because the SAME target also names <c>Soldier_4</c>. Refusing on distance would refuse every
+        /// legal free-aim shot in the game. What must hold is not "the position is sane" but "everything this
+        /// target names, this peer can name too".</summary>
+        internal static bool CommandMustBeRefused(bool actorResolved, int unresolvedFieldCount) =>
+            !actorResolved || unresolvedFieldCount > 0;
+
+        /// <summary>The release decision with the Unity half taken out, so RailCheck L139 can EXECUTE it rather
+        /// than assert that a call to it exists (L137's lesson: a law that checks the call stayed green for four
+        /// days while the thing it named was broken). Two axes and no more: is there a tactical view at all,
+        /// and is the actor it is holding THIS one. Nothing about the ability, nothing about the order — a
+        /// mirrored Move and a mirrored Overwatch reach this seam identically (postulate 3).
+        ///
+        /// The `!holds` half is not a formality, it is the postulate-2 half: a peer whose UI is holding someone
+        /// else must be left alone, or a busy host turns every other player's selection over once per order.</summary>
+        internal static bool LocalUiMustRelease(bool viewExists, bool viewHoldsThisActor) =>
+            viewExists && viewHoldsThisActor;
+
+        /// <summary>What the local UI is LEFT holding once a mirrored order for this actor has been through the
+        /// seam — the outcome L139 asserts, as a pure function so it can be run to exhaustion. TRUE is the bug:
+        /// the view is still holding an actor the engine is now driving, which is the state
+        /// <c>MoveAbility.GetTargetsData</c>:170-173 declares invalid in its own words ("This will invalidate
+        /// the situation cache at wrong time") and the state <c>UIModuleFreeFirstPersonShooting.Update</c>:132
+        /// keeps drawing from.</summary>
+        internal static bool LocalUiStillHoldsAfterMirror(bool viewHeldThisActor, bool releaseReached) =>
+            viewHeldThisActor && !releaseReached;
+
+        internal static void ReleaseLocalUiHolding(TacticalActorBase actor, string why)
+        {
+            if (actor == null) return;
+            try
+            {
+                var tlc = Tlc();
+                var view = tlc == null ? null : tlc.View;
+                if (!LocalUiMustRelease(view != null, view != null && ReferenceEquals(view.SelectedActor, actor)))
+                    return;
+                var before = view.CurrentState;
+                view.ResetViewState();
+                if (ReferenceEquals(before, view.CurrentState)) return;   // already neutral — nothing to report
+                Debug.Log("[Multiplayer][tac] released this peer's UI from " + SafeActorName(actor) + " (" + why +
+                          ") — it was held in " + (before == null ? "<none>" : before.GetType().Name) +
+                          ", the state the game's own activation path leaves before an ability runs.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[Multiplayer][tac] could not release this peer's UI from " +
+                                 SafeActorName(actor) + " (" + why + "): " + ex.Message + ". The order still " +
+                                 "plays; a local aim HUD may keep drawing over an actor the engine now owns.");
+            }
+        }
+
         private static void ApplyActivate(int key, string guid, TacticalAbilityTarget target, bool fumbled,
                                           List<string> unresolved)
         {
             string why;
             var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
-            if (actor == null)
+            // ONE VERDICT, TWO SENTENCES. The decision is pure so RailCheck L140 can execute it; the branch
+            // below only chooses which of the two failures to name. Playing a command whose actor-shaped keys
+            // did not resolve would aim it somewhere else entirely — TacticalAbilityTarget.GetWorkingPosition
+            // :175-192 falls through its whole chain and ends at InvalidPosition with an engine error — so the
+            // order is REFUSED here rather than half-played. The DAMAGE still arrives on 0x84 and is
+            // authoritative; only this peer's animation is missing.
+            if (CommandMustBeRefused(actor != null, unresolved == null ? 0 : unresolved.Count))
             {
-                Debug.LogError("[Multiplayer][tac] host command for actor " + key + " cannot be played here — " +
-                               why + ". That soldier will stand still on this screen while it acts on the host's.");
-                return;
-            }
-            if (unresolved != null && unresolved.Count > 0)
-            {
-                // Playing a shot whose target this peer could not name would aim it somewhere else entirely
-                // (GetWorkingPosition falls through to the map origin). The DAMAGE still arrives on 0x84 and is
-                // authoritative — only this peer's animation is missing.
-                Debug.LogError("[Multiplayer][tac] host command for " + actor.name + " NOT played here — " +
-                               string.Join("; ", unresolved.ToArray()) + ". The host's damage still applies; " +
-                               "only the animation is missing on this screen.");
+                if (actor == null)
+                    Debug.LogError("[Multiplayer][tac] host command for actor " + key + " cannot be played here — " +
+                                   why + ". That soldier will stand still on this screen while it acts on the host's.");
+                else
+                    Debug.LogError("[Multiplayer][tac] host command for " + actor.name + " NOT played here — " +
+                                   string.Join("; ", unresolved.ToArray()) + ". The host's damage still applies; " +
+                                   "only the animation is missing on this screen.");
                 return;
             }
             var ability = actor.GetAbilityFiltered<TacticalAbility>(a => a.AbilityDef != null && a.AbilityDef.Guid == guid);
@@ -2207,6 +2326,11 @@ namespace Multiplayer.Tactical
             if (ability.TrackWithCamera) _mirrorSkipsCameraWait.Add(ability);
             ArmRelayedAim(key);   // law L104(j), same arm as the acting path's
             FillLiveTargetObject(ability, target);
+            // BEFORE the engine takes this actor, not after — the local input path leaves its state BEFORE
+            // Activate runs (TacticalViewState.ActivateAbility:270 vs :274-275 is the same order), and after
+            // is too late for the frame the FPS HUD is already drawing.
+            ReleaseLocalUiHolding(actor, "a mirrored " +
+                                  (ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name));
             using (SyncApplyScope.Enter()) ability.Activate(target);
             // DID IT START, OR ONLY GET IN LINE? PlayingAction.SetState(Playing) calls StartPlayingAction
             // SYNCHRONOUSLY (PlayingAction:47-53 -> TacticalActorBase.AddExecutingAbility:709), so the moment
@@ -2500,6 +2624,17 @@ namespace Multiplayer.Tactical
             {
                 if (actor.HasExecutingAbility())
                 {
+                    // AND THE CANCEL MAY NOT LAND UNDER A LIVE AIM HUD. The cancel below is a TEAR (see the
+                    // paragraph further down), and it tears the CAMERA too: a local free-aim state holding
+                    // this actor keeps its module updating afterwards over a camera behavior that is no longer
+                    // a FirstPersonCamera — UIModuleFreeFirstPersonShooting.UpdateAccuracyIndicator:316-317
+                    // then NREs once per frame forever, which is the 797-NRE storm that ended in a native
+                    // crash. Same one call, same reason, same seam as the mirrored activation: let the local
+                    // UI go FIRST, through the game's own ExitState, and there is nothing left to tear.
+                    // Only in this branch — a settle for an actor that is executing NOTHING tears nothing, so
+                    // it must not disturb a player who simply has that soldier selected.
+                    ReleaseLocalUiHolding(actor, s.Forced ? "a FORCED settle cancelling its actions"
+                                                          : "a settle cancelling its actions");
                     if (actor.TacticalNav != null) actor.TacticalNav.CancelNavigation();
                     if (actor.ActionComponent != null) actor.ActionComponent.CancelActions(ActionChannel.ActorActions);
                 }
