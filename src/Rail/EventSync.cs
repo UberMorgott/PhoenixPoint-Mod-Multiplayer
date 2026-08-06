@@ -126,14 +126,23 @@ namespace Multiplayer.Network.Sync
             Debug.Log("[MP][events] HOST answered '" + eventId + "' choice=" + index + " → record=" + rec.State +
                       " selected=" + rec.SelectedChoice + " nonce=" + nonce + " peer=" + senderPeerId);
 
-            // Native tail (:604-613). WHICH peer plays the mission is tactical scope (law 5); dropping the
-            // mission silently is not an option — that is the swallow class.
+            // Native tail (:604-613), BOTH HALVES. WHICH peer plays the mission is tactical scope (law 5);
+            // dropping the mission silently is not an option — that is the swallow class.
+            //
+            // :611 BEFORE :612, and the order is the whole point (RailCheck L144). LaunchMission only QUEUES
+            // the squad screen, and that queue is dead while this peer's OWN encounter window is the current
+            // queried state switch — so a tail that copied only :612 left the losing host staring at a stale
+            // picker with a deployment request behind it that nothing would ever serve. Native never separates
+            // the two: UIModuleSiteEncounters.SelectChoice:611-612 is FinishEncounter(); LaunchMission(…).
             var mission = reward?.ApplyResult?.StartMission;
             if (mission == null) return;
             if (geo.View == null)
                 Debug.LogWarning("[MP][events] '" + eventId + "' generated a mission but there is no GeoscapeView to launch it");
             else
-                geo.View.LaunchMission(mission, ev.Context.Vehicle);
+            {
+                MissionEncounterNav.FinishOwnEncounterWindow(geo.View, eventId, true);   // :611
+                geo.View.LaunchMission(mission, ev.Context.Vehicle);                     // :612
+            }
         }
     }
 

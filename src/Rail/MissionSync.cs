@@ -317,6 +317,51 @@ namespace Multiplayer.Network.Sync
                    q.TryGetStateSwitchRequestForState<UIStateRosterDeployment>(out _);
         }
 
+        /// <summary>PURE (RailCheck L144). May a peer that resolved a mission-start encounter OFF THE RAIL
+        /// leave its own encounter window standing? NO — and that, not the <see cref="ShouldOpenDeployment"/>
+        /// predicate above, is what the 2026-08-06 host actually hit.
+        ///
+        /// <c>ToDeploymentState</c>:596 QUEUES the squad screen, and <c>GeoscapeViewSwitchQuery
+        /// .ProcessQueriedStateSwitch</c> RETURNS IMMEDIATELY while <c>_currentStateSwitchRequest != null</c>.
+        /// The open encounter window IS that request — it was pushed by the same queue (`Queuerd state switch
+        /// …UIStateGeoscapeEvent with priority 0`) — so the ONLY thing that ever serves the deployment request
+        /// is <c>FinishQueriedState</c>, and the only thing that calls it here is
+        /// <c>UIModuleSiteEncounters.FinishEncounter</c>:618. Native knows this and pairs the two in one
+        /// breath at <c>SelectChoice</c>:611-612: <c>FinishEncounter(); Context.View.LaunchMission(…)</c>.
+        /// <see cref="EventSync"/>'s native tail copied :612 and not :611, so the losing host queued a screen
+        /// behind a window nothing would ever close and sat on a stale picker until another peer's launch
+        /// curtained it. MEASURED (host log, one clock): 118,239 s `Queuerd state switch
+        /// …UIStateRosterDeployment with priority 2147483647` — then NOT ONE view-state line until 121,075 s
+        /// `Entering Geoscape UI state: UIStateLoading`, the battle. The client, which reaches :611 through
+        /// <see cref="MissionEncounterNav"/>'s own <c>FinishEncounter</c> postfix, entered the screen nine
+        /// frames after queueing it.</summary>
+        internal static bool MustFinishOwnEncounterWindow(bool missionStarted, bool ownWindowShowsThisEvent)
+            => missionStarted && ownWindowShowsThisEvent;
+
+        /// <summary>The missing :611. Calls the GAME's own <c>FinishEncounter</c> rather than
+        /// <c>view.FinishQueriedState()</c> directly: that method also runs <c>AudioPlayer.EndEvent()</c>
+        /// (:620 → <c>NarrationSound.EndEvent</c>:67), so skipping it would carry the encounter narration into
+        /// the squad screen. Guarded on the CURRENT view state showing THIS event, so it can never pop a state
+        /// it does not own — <c>FinishCurrentStateSwitch</c> also runs <c>SwitchToPreviousState</c>, and a
+        /// blind second call would pop one screen too many.</summary>
+        internal static void FinishOwnEncounterWindow(GeoscapeView view, string eventId, bool missionStarted)
+        {
+            var open = (view?.CurrentViewState as UIStateGeoscapeEvent)?.Event;
+            bool mine = !string.IsNullOrEmpty(eventId) &&
+                        string.Equals(open?.EventID, eventId, StringComparison.Ordinal);
+            if (!MustFinishOwnEncounterWindow(missionStarted, mine)) return;
+            var module = view.GeoscapeModules?.SiteEncountersModule;
+            if (module == null || FinishEncounterMethod == null) return;
+            FinishEncounterMethod.Invoke(module, null);
+            Debug.Log("[MP][mission] closing this peer's own encounter window for '" + eventId + "' — the " +
+                      "squad screen was QUEUED behind it (ToDeploymentState:596, priority int.MaxValue) and " +
+                      "GeoscapeViewSwitchQuery.ProcessQueriedStateSwitch serves nothing while this window is " +
+                      "the current request; SelectChoice:611 makes the same call before :612's LaunchMission");
+        }
+
+        private static readonly MethodInfo FinishEncounterMethod =
+            AccessTools.Method(typeof(UIModuleSiteEncounters), "FinishEncounter");
+
         private static void Postfix(UIModuleSiteEncounters __instance)
         {
             var engine = NetworkEngine.Instance;
