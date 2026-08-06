@@ -83,6 +83,7 @@ namespace Multiplayer.Network.Sync
         private const byte OpTftvRedeploy = 9;    // TFTV RedeployDismissedOperative(level, char, targetBase) — base→base move
         private const byte OpTftvTrainDeploy = 10; // TFTV FinalizeRecruitTrainingForUI(level, char, early) — training deploy/relocate
         private const byte OpTftvPromote = 11;     // TFTV PromoteCivilianToOperative(level, char, targetBase, spec) — civilian→operative CREATION
+        private const byte OpCustomize = 12;       // appearance/name commit → every rail-covered CharacterIdentity leaf
 
         // ─── Reflection: UIModuleCharacterProgression's private view-model — READ-ONLY here ──
         // _character = the soldier the panel is bound to; _bought* = the staged ability purchase the
@@ -136,6 +137,7 @@ namespace Multiplayer.Network.Sync
                 [OpTftvRedeploy] = HandleTftvMove,     // TFTV base→base moves / promote — host runs the SAME TFTV method
                 [OpTftvTrainDeploy] = HandleTftvMove,
                 [OpTftvPromote] = HandleTftvMove,
+                [OpCustomize] = HandleIntentOp,   // charId + the whole identity leaf set (no Progression requirement)
             };
             IntentRail.Register(SurfaceIds.GeoPersonnelIntent, "personnel", ops);
         }
@@ -755,7 +757,8 @@ namespace Multiplayer.Network.Sync
                 if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character))
                 { Reject(senderPeerId, charId, "unresolved character"); return; }
                 // Reassign moves ground vehicles/mutogs too — no Progression (same relaxation as op=fire).
-                if (character.Progression == null && op != OpReassign)
+                // Customize is identity, not progression: a mutog/ground vehicle has an identity to rename.
+                if (character.Progression == null && op != OpReassign && op != OpCustomize)
                 { Reject(senderPeerId, charId, "no progression"); return; }
                 // Ownership: the rail resolves ANY character — never let a client intent drive an
                 // NPC-faction soldier's progression.
@@ -777,6 +780,9 @@ namespace Multiplayer.Network.Sync
                         break;
                     case OpSkillReset:
                         ok = ApplySkillReset(senderPeerId, character);
+                        break;
+                    case OpCustomize:
+                        ok = ApplyCustomize(senderPeerId, geo, character, r);
                         break;
                     default: // OpSecondSpec (the op set is table-gated upstream)
                         ok = ApplySecondSpec(senderPeerId, character, r.ReadString());
@@ -1020,6 +1026,196 @@ namespace Multiplayer.Network.Sync
                 catch (Exception ex) { Debug.LogError("[MP][personnel] skill-reset capture failed: " + ex); }
                 return false;
             }
+        }
+
+        // ─── CUSTOMIZATION + RENAME (op=12) — the gap-class-(iv) seam ────────────────────────────────
+        //
+        // THE GAP THIS CLOSES. `CharacterIdentity` is REAL persisted state (15 [SerializeMember] leaves,
+        // CharacterIdentity.cs:21) and the rail has ALWAYS covered it whole (rail-baseline.txt:168
+        // "CharacterIdentity [direct] covered=15/15", reached by `Descend _identity` under root "U#").
+        // What was missing was the OTHER half of a rail-covered leaf: a HOST-SIDE MUTATION. Every
+        // customization writer is a bare field assignment on the LIVE identity
+        // (UIModuleUnitCustomization.cs:72-91, UIModuleSoldierCustomization.cs:163-235) and the rename is
+        // `GeoCharacter.Rename`:826 — so a CLIENT's clicks moved SHARED state locally, the host diffed
+        // host-now against host-before, found nothing, and shipped nothing. The colours stayed on the one
+        // instance that made them until the CRC backstop quietly reverted them.
+        //
+        // ONE OP, NO NEW SURFACE, AND THE SEAM IS PRESENTATION — which is what this gesture actually is.
+        // The identity writes are staging on the peer that is dragging a colour swatch (a live preview IS
+        // the feature), exactly like the stat click's view-model staging in <see cref="StatClickPatch"/>;
+        // the INTENT is the commit. So the capture sits on the game's own presentation funnels, never on
+        // `GeoCharacter.RefreshTags`/`Rename` themselves: a postfix on a MODEL method ships a RESULT after
+        // the authoritative write, which is what RailCheck L19 refuses (it was RED on exactly that shape
+        // here before this seam moved up one level).
+        //   • `UIStateSoldierCustomization.RefreshUnitDisplay`:44 and
+        //     `UIStateVehicleCustomization.RefreshUnitDisplay`:24 — the two concrete overrides of the
+        //     single funnel EVERY customization gesture reaches. All individual controls and the Randomize
+        //     button raise `OnCustomizationChanged` (UIModuleUnitCustomization.cs:64-70/:92-99,
+        //     UIModuleVehicleCustomization.cs:31/:40), and `UIStateUnitCustomization.EnterState`:60 binds
+        //     that event to `RefreshUnitDisplay`:128 → `SelectedCharacter.RefreshTags()`:132. Two patches
+        //     because the game has two customization screens, not because there are two kinds of gesture —
+        //     the shared generic base is the funnel, and these are its only closed forms.
+        //   • `UIModuleActorCycle.RenameCharacter`:739 — the sole UI path into `GeoCharacter.Rename`:825
+        //     (which itself has one caller game-wide, :746). A rename never reaches `RefreshTags` (a name
+        //     is not a game tag), so it needs its own capture — but no op of its own: `Name` is one of the
+        //     15 leaves the payload already carries, and by postfix time the native line has staged it.
+        //
+        // NO-OP FIRES ARE ACCEPTED, NOT SUPPRESSED. `RefreshUnitDisplay` also runs on screen-enter and on
+        // every character cycle (UIStateUnitCustomization.cs:54, UIStateSoldierCustomization.cs:29/:53),
+        // so cycling a roster ships one small intent per soldier whose leaves already match the host's.
+        // The host applies them, the diff sees no change and NOTHING goes out to any peer. A local
+        // "last shipped" cache would suppress those packets and would also suppress the RE-ship a rejected
+        // or CRC-reverted edit needs, so the cheap correct answer is to let the diff swallow them.
+        // Nothing waits on another player (postulate 2).
+        //
+        // THE PAYLOAD KNOWS NO FIELD NAMES. It is driven by the rail's OWN leaf table for
+        // `CharacterIdentity` (<see cref="EncodeIdentity"/>), so it carries exactly the 15 leaves the
+        // value rail mirrors back and gains a 16th automatically if the game ever adds one. Deliberately
+        // NOT `CharacterIdentity.InitFromTags`:355 — that helper cannot express a CLEARED slot (removing a
+        // beard ships no tag, so a tag-list payload silently keeps the old one) and it skips `Name`,
+        // `CountryTag` and `ConditionalCustiomizationTag` entirely. A bare per-leaf assignment IS the
+        // game's own write shape here — it is literally what every `Change*` callback above does.
+
+        /// <summary>WHAT A CUSTOMIZATION-FUNNEL HIT IS, kept pure so RailCheck L138 can execute the real
+        /// decision instead of reading a constant. THREE ways this must stay silent, and the middle one is
+        /// the loop that would otherwise be invisible in the field (no exception, no log line):
+        ///   • SOLO — no session, nothing to say.
+        ///   • APPLY SCOPE — THE ECHO GUARD. A mirrored identity leaf marks the open screen dirty
+        ///     (UiEventMap's default arm), and <see cref="OpenUiRepaint"/>'s fallback repaint re-ENTERS the
+        ///     open customization state — whose `EnterState`:54 → `OnNewCharacter` raises
+        ///     `OnCustomizationChanged` → straight back through this funnel. That repaint runs inside
+        ///     <see cref="SyncApplyScope"/> for precisely this reason (OpenUiRepaint.cs:474, "a native
+        ///     refresh can fire UI events an intent-capture seam listens to"), so this arm is what stops a
+        ///     client shipping the host's own mirror back at it once per batch, forever (law 8).
+        ///   • HOST — a host edit mutates the SHARED state directly, so the generic diff already carries it
+        ///     to every peer, and the host's replay of a client intent (<see cref="ApplyCustomize"/>) ends
+        ///     in `RefreshTags()` with its own screen repainting afterwards. There is no host→client
+        ///     customization message and there must not be one.</summary>
+        internal enum CustomizeAction { Silent = 0, Ship = 1 }
+
+        internal static CustomizeAction CustomizeShipDecision(bool isActiveSession, bool isHost, bool applyScopeActive)
+        {
+            if (!isActiveSession) return CustomizeAction.Silent; // solo — the native write is the truth
+            if (applyScopeActive) return CustomizeAction.Silent; // law 8: a mirror re-derivation is not a gesture
+            if (isHost) return CustomizeAction.Silent;           // the host's own write IS the shared state
+            return CustomizeAction.Ship;
+        }
+
+        /// <summary>The whole identity as rail leaves: [count:u8] then (fieldIdx:u16, leaf)×count, using the
+        /// SAME <see cref="RailType"/> table and the SAME <see cref="RailMeta.EncodeLeaf"/> codec the value
+        /// rail uses for these exact 15 members — so a cleared slot rides as a real <c>LeafKind.Null</c> and
+        /// a def rides as its guid. Field NAMES appear nowhere.</summary>
+        internal static void EncodeIdentity(BinaryWriter w, CharacterIdentity identity)
+        {
+            var rt = RailType.Get(typeof(CharacterIdentity));
+            var fields = rt?.Fields;
+            if (fields == null) { w.Write((byte)0); return; }
+            byte n = 0;
+            for (int i = 0; i < fields.Count && i <= ushort.MaxValue; i++)
+                if (fields[i].Class == FieldClass.Leaf && fields[i].CanRead && n < byte.MaxValue) n++;
+            w.Write(n);
+            byte written = 0;
+            for (int i = 0; i < fields.Count && written < n; i++)
+            {
+                var f = fields[i];
+                if (f.Class != FieldClass.Leaf || !f.CanRead) continue;
+                w.Write((ushort)i);
+                RailMeta.EncodeLeaf(w, f.ValueType, f.GetValue(identity));
+                written++;
+            }
+        }
+
+        /// <summary>Inverse of <see cref="EncodeIdentity"/>, into the LIVE instance (never a fresh object:
+        /// swapping <c>_identity</c> would hand the diff engine a new instance under the same path for no
+        /// gain). An <see cref="RailMeta.Unresolved"/> member is SKIPPED, not written — the sender named a
+        /// real def this peer's def graph does not have, and clobbering a valid live ref with null is the
+        /// one failure the value rail already refuses. Every unread member is still decoded so the stream
+        /// stays in step. Returns how many leaves landed.</summary>
+        internal static int ApplyIdentity(CharacterIdentity identity, BinaryReader r, GeoLevelController geo)
+        {
+            var rt = RailType.Get(typeof(CharacterIdentity));
+            var fields = rt?.Fields;
+            int n = r.ReadByte(), applied = 0;
+            for (int k = 0; k < n; k++)
+            {
+                int idx = r.ReadUInt16();
+                var f = fields != null && idx < fields.Count ? fields[idx] : null;
+                var v = RailMeta.DecodeLeaf(r, f?.ValueType ?? typeof(object), geo);
+                if (f == null || f.Class != FieldClass.Leaf || !f.IsWritable()) continue;
+                if (ReferenceEquals(v, RailMeta.Unresolved)) continue;
+                f.SetValue(identity, v);
+                applied++;
+            }
+            return applied;
+        }
+
+        /// <summary>HOST: land the client's appearance/name on the host's OWN identity, then run the game's
+        /// own <c>RefreshTags()</c> so the host's derived tag cache matches. Nothing is echoed by hand — all
+        /// 15 leaves are rail-covered, so the next diff carries the result to EVERY peer (including the
+        /// author, whose optimistic local copy is thereby confirmed or corrected).</summary>
+        private static bool ApplyCustomize(ulong peer, GeoLevelController geo, GeoCharacter character, BinaryReader r)
+        {
+            var identity = character.Identity;
+            if (identity == null) { Reject(peer, (int)character.Id, "no identity"); return false; }
+            int applied = ApplyIdentity(identity, r, geo);
+            // The game's OWN derived-cache rebuild (GeoCharacter.cs:568) — same call the customization
+            // screen makes. Re-enters the capture postfix below and is silenced there by the isHost arm.
+            character.RefreshTags();
+            Debug.Log("[MP][personnel] customize U#" + (int)character.Id + " leaves=" + applied +
+                      " name=" + (identity.Name ?? "?"));
+            return true;
+        }
+
+        private static void ShipCustomize(GeoCharacter character, string why)
+        {
+            if (character == null) return;
+            var engine = NetworkEngine.Instance;
+            if (CustomizeShipDecision(engine != null && engine.IsActiveSession,
+                                      engine != null && engine.IsHost,
+                                      SyncApplyScope.Active) != CustomizeAction.Ship) return;
+            var identity = character.Identity;
+            if (identity == null) return;
+            try
+            {
+                IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpCustomize,
+                    "customize U#" + (int)character.Id + " (" + why + ")",
+                    w => { w.Write((int)character.Id); EncodeIdentity(w, identity); });
+            }
+            catch (Exception ex) { Debug.LogError("[MP][personnel] customize capture failed: " + ex); }
+        }
+
+        /// <summary>The customization funnel, soldier screen — see the block comment above. Postfix: the
+        /// native body has already re-derived this peer's tags off the identity the controls just wrote, so
+        /// what is read here is the FINAL appearance the player chose.</summary>
+        [HarmonyPatch(typeof(PhoenixPoint.Geoscape.View.ViewStates.UIStateSoldierCustomization), "RefreshUnitDisplay")]
+        internal static class SoldierCustomizeCapturePatch
+        {
+            private static void Postfix(PhoenixPoint.Geoscape.View.ViewStates.UIStateSoldierCustomization __instance)
+                => ShipCustomize(__instance.SelectedCharacter, "soldier");
+        }
+
+        /// <summary>The same funnel's other closed form — the vehicle/aircraft livery screen
+        /// (UIStateVehicleCustomization.cs:24, module UIModuleVehicleCustomization.cs:38 writes
+        /// <c>FancyTag</c> and inherits the colour/pattern controls).</summary>
+        [HarmonyPatch(typeof(PhoenixPoint.Geoscape.View.ViewStates.UIStateVehicleCustomization), "RefreshUnitDisplay")]
+        internal static class VehicleCustomizeCapturePatch
+        {
+            private static void Postfix(PhoenixPoint.Geoscape.View.ViewStates.UIStateVehicleCustomization __instance)
+                => ShipCustomize(__instance.SelectedCharacter, "vehicle");
+        }
+
+        /// <summary>The rename funnel — the SAME gap class and the SAME op, because <c>Name</c> is one of
+        /// the identity leaves the payload already carries. Captured at the presentation call site
+        /// (UIModuleActorCycle.cs:739, the sole UI path to <c>GeoCharacter.Rename</c>:825) rather than on
+        /// the model method: the native line has already staged the new name into the live identity by
+        /// postfix time, and the module has already repainted its own labels (:747-749), so the author sees
+        /// his rename immediately and the host's mirror confirms it.</summary>
+        [HarmonyPatch(typeof(PhoenixPoint.Common.View.ViewModules.UIModuleActorCycle),
+                      nameof(PhoenixPoint.Common.View.ViewModules.UIModuleActorCycle.RenameCharacter))]
+        internal static class RenameCapturePatch
+        {
+            private static void Postfix(PhoenixPoint.Common.View.ViewModules.UIModuleActorCycle __instance)
+                => ShipCustomize(__instance.CurrentCharacter, "rename");
         }
 
         /// <summary>Inverse of <see cref="Charge"/> for the undo round-trip — mutoids get mutagens back in

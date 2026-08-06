@@ -11,6 +11,8 @@ using PhoenixPoint.Geoscape.Entities.PhoenixBases;
 using PhoenixPoint.Geoscape.Entities.Sites;
 using PhoenixPoint.Geoscape.Levels;
 using UnityEngine;
+using CharacterIdentity = PhoenixPoint.Common.Entities.Characters.CharacterIdentity;
+using GeoCharacter = PhoenixPoint.Geoscape.Entities.GeoCharacter;
 using GeoSite = PhoenixPoint.Geoscape.Entities.GeoSite;
 using GeoVehicle = PhoenixPoint.Geoscape.Entities.GeoVehicle;
 
@@ -427,7 +429,7 @@ namespace Multiplayer.Network.Sync
             else LogMissOnce("descend create at " + rootKey + ": no native wiring for " +
                              owner.GetType().Name + "." + field.Name + " — field assigned RAW");
             touched.Add(owner);
-            MarkOrderChange(owner, field.Name); // the mission wrapper is a MARKER, not a view state (law 11)
+            MarkOrderChange(geo, rootKey, owner, field.Name); // the mission wrapper is a MARKER, not a view state (law 11)
             OpenUiRepaint.MarkDirty(); // law 11: the open geoscape shows the new marker NOW
             Debug.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + t.Name + ")");
             return true;
@@ -446,7 +448,7 @@ namespace Multiplayer.Network.Sync
             // The retired mission's blue wrapper hangs off GeoSiteVisualsController.RefreshMissionVisuals:620
             // (`site.ActiveMission as GeoUpdateableMission`), a globe MonoBehaviour that no view-state
             // re-enter touches — so MarkDirty alone leaves the wrapper on screen. Same seam as the leaf path.
-            MarkOrderChange(owner, field.Name);
+            MarkOrderChange(geo, rootKey, owner, field.Name);
             OpenUiRepaint.MarkDirty();
             Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied");
         }
@@ -844,7 +846,7 @@ namespace Multiplayer.Network.Sync
                         return; // Descend never carries values
                 }
                 touched.Add(entity);
-                MarkOrderChange(entity, field.Name);
+                MarkOrderChange(geo, path, entity, field.Name);
             }
             catch (Exception ex)
             {
@@ -917,8 +919,26 @@ namespace Multiplayer.Network.Sync
             reseedParked = IsSiteAuthorityLeaf(fieldName);
         }
 
-        private static void MarkOrderChange(object entity, string fieldName)
+        /// <summary>WHAT A RAIL WRITE ON A <c>CharacterIdentity</c> MUST TRIGGER — the derived-cache half of
+        /// the customization fix, and the one consequence in this file that deliberately takes NO field name.
+        ///
+        /// <c>GeoCharacter.GameTags</c> is NOT serialized: it is re-derived from the identity by the game's
+        /// own <c>GeoCharacter.RefreshTags()</c> (GeoCharacter.cs:568-573 → <c>Identity.ApplyGameTags</c>),
+        /// and the mesh/material addon builder renders off THOSE TAGS, not off the identity. So mirroring
+        /// the 15 identity leaves perfectly still left every other peer's soldier wearing his old colours
+        /// until the next reload — the value arrived, the derivation never re-ran.
+        ///
+        /// NAMELESS ON PURPOSE, unlike <see cref="IsOrderLeaf"/>: <c>CharacterIdentity.GetGameTags()</c>
+        /// (CharacterIdentity.cs:104-121) reads THIRTEEN of the fifteen members, so a name list here would
+        /// be a transcription of that method that silently rots the day the game adds a tag — which is
+        /// exactly the per-field knowledge this fix exists to avoid. Any identity leaf ⇒ re-derive. The
+        /// cost of a redundant re-derive is a list rebuild, not a five-second freeze (the reason the
+        /// NAVIGATION re-seed next door must stay named).</summary>
+        internal static bool IdentityWriteConsequence(object entity) => entity is CharacterIdentity;
+
+        private static void MarkOrderChange(GeoLevelController geo, string path, object entity, string fieldName)
         {
+            if (IdentityWriteConsequence(entity)) { MarkTagRefresh(geo, path); return; }
             if (IsOrderLeaf(fieldName) && entity is GeoVehicle v) { _reseed.Add(v); return; }
             if (!(entity is GeoSite s)) return;
             SiteWriteConsequences(fieldName, out var repaintMarker, out var reseedParked);
@@ -958,8 +978,41 @@ namespace Multiplayer.Network.Sync
 
         private static readonly HashSet<GeoSite> _siteRepaint = new HashSet<GeoSite>();
 
+        /// <summary>The characters whose tag cache this batch invalidated. The identity is a DESCEND child,
+        /// so the applied entity is the <c>CharacterIdentity</c> itself and carries no back-reference to its
+        /// owner — but the path's ROOT segment names one ("U#&lt;charId&gt;"), and the batch-local
+        /// <c>_pathCache</c> makes that resolution free after the first leaf of the same soldier.</summary>
+        private static readonly HashSet<GeoCharacter> _tagRefresh = new HashSet<GeoCharacter>();
+
+        private static void MarkTagRefresh(GeoLevelController geo, string path)
+        {
+            if (geo == null || string.IsNullOrEmpty(path)) return;
+            int dot = path.IndexOf('.');
+            var rootKey = dot < 0 ? path : path.Substring(0, dot);
+            if (IdentityResolver.Resolve(geo, rootKey, _pathCache) is GeoCharacter c) _tagRefresh.Add(c);
+            else LogMissOnce("identity write at " + path + " has no resolvable GeoCharacter root — " +
+                             "the mirrored appearance will not re-derive on this peer");
+        }
+
         private static void FlushOrderReseed()
         {
+            // INSIDE SyncApplyScope (law 8 hygiene): this is a native call made during an apply, and
+            // GeoCharacter.RefreshTags is the tail of the game's own customization funnel — the funnel
+            // PersonnelSync's capture watches one level up. The capture's own apply-scope arm is what
+            // actually stops the mirror echoing back (the repaint path, OpenUiRepaint.cs:474), so this
+            // scope is not the guard; it is what keeps the guard true if the capture ever moves down here.
+            // Safe to scope: RefreshTags only rebuilds a tag list (GeoCharacter.cs:568-573) — it pumps no
+            // network and starts no coroutine, unlike the navigation re-seed below, which must stay
+            // OUTSIDE so its arrival callback meets VehicleArrivalGate with no apply exemption.
+            if (_tagRefresh.Count > 0)
+                using (SyncApplyScope.Enter())
+                    foreach (var c in _tagRefresh)
+                    {
+                        try { c.RefreshTags(); }
+                        catch (Exception ex)
+                        { LogMissOnce("tag re-derive failed for " + (IdentityResolver.RootRef(c) ?? "U#?") + ": " + ex.Message); }
+                    }
+            _tagRefresh.Clear();
             foreach (var v in _reseed)
             {
                 try { ReseedNavigation(v); }
