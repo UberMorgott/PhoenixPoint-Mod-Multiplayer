@@ -40,6 +40,21 @@ namespace Multiplayer.Network
         private readonly List<ChatMessageData> _chatHistory = new List<ChatMessageData>();
         private const int ChatHistoryCap = 500;
 
+        // A CHAT LINE HAS AN IDENTITY, AND THAT IS THE WHOLE FIX. The backlog above is replayed to a
+        // joiner at OnSessionRequest, but the joiner is on the TRANSPORT's broadcast set from the first
+        // packet it ever sends (SteamTransport.Update registers it, 5e6ab9d) — which is BEFORE the JOIN it
+        // sent has been handled. Any line the host fans out inside that window is delivered LIVE to the
+        // joiner and then again in its backlog replay, and until now the two copies were indistinguishable:
+        // same sender, same text, no key. Reported 2026-08-06 — one message doubled at the moment a peer
+        // connected and never again, which is exactly the shape of a one-time window.
+        // Host stamps (_chatSeq, session-monotonic, carried into _chatHistory so the replay copy keeps the
+        // live copy's number); every receiver drops a number it has already rendered (_seenChatSeq). This
+        // also covers the other replay shapes for free — a repeated JOIN, or a retransmit.
+        private uint _chatSeq;
+        // ponytail: unbounded set, 4 bytes per line ever received; a session that overran it would have to
+        // send millions of chat lines. Bound it to a ring only if that ever stops being absurd.
+        private readonly HashSet<uint> _seenChatSeq = new HashSet<uint>();
+
         public ulong? HostPeerId { get; private set; }
         public IReadOnlyDictionary<ulong, ClientInfo> Clients => _clients;
 
@@ -1232,7 +1247,11 @@ namespace Multiplayer.Network
                 SenderNick = senderNick ?? "",
                 Text = text,
                 IsSystem = isSystem,
-                IsNotice = isNotice
+                IsNotice = isNotice,
+                // Stamped HERE, the one place a line becomes a line, and stamped BEFORE the backlog append
+                // below so the stored copy and the wire copy carry the SAME number. That identity is what
+                // lets a receiver drop the second delivery of one line (see _seenChatSeq).
+                Seq = ++_chatSeq
             };
             // Record into the host-authoritative backlog (arrival order) BEFORE fan-out so late
             // joiners can be replayed the full session history. Bounded ring: drop the oldest line
@@ -1268,7 +1287,12 @@ namespace Multiplayer.Network
                     SenderNick = chat.SenderNick,
                     Text = chat.Text,
                     IsSystem = chat.IsSystem,
-                    IsNotice = false
+                    IsNotice = false,
+                    // THE ONE FIELD THE REPLAY MUST NOT DEMOTE. IsNotice is deliberately cleared above (a
+                    // backlog is not news); the identity is the opposite — it is what tells a joiner that
+                    // already got this exact line live, in the window between its first packet and this
+                    // replay, that it is holding the same line twice.
+                    Seq = chat.Seq
                 };
                 _engine.SendToClient(clientId, new NetworkMessage(PacketType.ChatMessage,
                     MessageSerializer.SerializeChat(replay)));
@@ -1291,6 +1315,18 @@ namespace Multiplayer.Network
             }
             else
             {
+                // EXACTLY ONCE. The host stamps every line it fans out and the backlog replay carries the
+                // same stamp, so a line delivered twice — live inside the join window AND in the replay,
+                // or by any retransmit/repeated JOIN — is recognisable and the second copy stops here,
+                // before it can reach a screen. Never-silent: say which line was dropped, because a
+                // duplicate that vanishes without a trace is how this one survived a whole session.
+                if (chat.Seq != 0 && !_seenChatSeq.Add(chat.Seq))
+                {
+                    Debug.Log("[Multiplayer] chat DUPLICATE dropped (seq " + chat.Seq + ", from " +
+                              (string.IsNullOrEmpty(chat.SenderNick) ? "system" : chat.SenderNick) +
+                              ") — already rendered; this is the join-window live+replay overlap.");
+                    return;
+                }
                 // Client: render exactly what the host broadcast.
                 OnChatReceived?.Invoke(chat.SenderNick, chat.Text, chat.IsSystem);
                 // …and, for a session EVENT, put it on screen too — this peer is in the geoscape or in a

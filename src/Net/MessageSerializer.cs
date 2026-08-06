@@ -252,6 +252,11 @@ namespace Multiplayer.Network.MessageLayer
                 // every peer must SEE (a player left / lost connection / came back). Same byte, same
                 // length — a reader that only knows 0/1 still classifies a notice as a system line.
                 bw.Write((byte)(chat.IsNotice ? 2 : chat.IsSystem ? 1 : 0));
+                // IDENTITY, appended last so the frame stays back-compatible. The host stamps every line it
+                // fans out with a session-monotonic number and the BACKLOG keeps it, so the replayed copy of
+                // a line is byte-identical in identity to the live one and a receiver can tell them apart
+                // from nothing else — see SessionManager._seenChatSeq. 0 = unstamped (never dedup'd).
+                bw.Write(chat.Seq);
                 return ms.ToArray();
             }
         }
@@ -265,13 +270,15 @@ namespace Multiplayer.Network.MessageLayer
                 var senderNick = br.ReadString();
                 var text = br.ReadString();
                 var kind = br.ReadByte();
+                var seq = ms.Position < ms.Length ? br.ReadUInt32() : 0u; // unstamped sender → 0 → never dedup'd
                 return new ChatMessageData
                 {
                     SenderSteamId = senderSteamId,
                     SenderNick = senderNick,
                     Text = text,
                     IsSystem = kind != 0,
-                    IsNotice = kind == 2
+                    IsNotice = kind == 2,
+                    Seq = seq
                 };
             }
         }
@@ -596,5 +603,11 @@ namespace Multiplayer.Network.MessageLayer
         /// lines stay in the log. Replayed history is deliberately shipped with this FALSE — a backlog is
         /// not news, and toasting it would fire the whole session's events at a late joiner at once.</summary>
         public bool IsNotice { get; set; }
+
+        /// <summary>THE LINE'S IDENTITY. Host-stamped, session-monotonic, assigned once in
+        /// <c>BroadcastChat</c> and CARRIED BY THE BACKLOG, so the replay of a line and its live fan-out
+        /// are the same line and a receiver can say so. 0 = unstamped (an old sender) → rendered, never
+        /// dedup'd.</summary>
+        public uint Seq { get; set; }
     }
 }
