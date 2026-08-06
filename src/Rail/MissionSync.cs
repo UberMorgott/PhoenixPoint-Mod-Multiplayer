@@ -9,7 +9,9 @@ using PhoenixPoint.Common.Core;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Events;
 using PhoenixPoint.Geoscape.Levels;
+using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewModules;
+using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
 
 namespace Multiplayer.Network.Sync
@@ -246,6 +248,15 @@ namespace Multiplayer.Network.Sync
     /// the host wins and the second is refused by <see cref="Validate"/>'s "no runnable mission any more"
     /// arm — law 5's first-to-act-wins, no ownership table.
     ///
+    /// AND IT IS NOT A CLIENT SEAM (2026-08-06, law L141). The bail read "solo/host ran SelectChoice
+    /// natively" off <c>engine.IsHost</c>, and that is false for a HOST THAT LOST THE EVENT RACE: its click
+    /// is REPLAYED (<c>EventPopup.ResolutionIsNotOurs</c> → <c>ReplayResolution</c> → return false), so not
+    /// one line of <c>SelectChoice</c>:598-613 ran there either — including :612. Reported live: the host
+    /// pressed the mission choice and went into the battle without ever seeing the squad screen. The term is
+    /// "this peer's native SelectChoice did not run", carried by <c>EventPopup.ClickWasReplayed</c>, and the
+    /// second term <see cref="ShouldOpenDeployment"/> adds keeps the widened predicate from double-queueing
+    /// the screen the losing host is usually already headed for.
+    ///
     /// Hooked at <c>FinishEncounter</c> (:618) rather than at the click, because that is the one point
     /// BOTH native arms reach and, more importantly, the point by which the host's answer has come back:
     /// the client's result page is drawn from the arriving record delta (<c>EventPopup</c>'s "resolved by
@@ -258,11 +269,58 @@ namespace Multiplayer.Network.Sync
     internal static class MissionEncounterNav
     {
         private static readonly FieldInfo GeoEventField = AccessTools.Field(typeof(UIModuleSiteEncounters), "_geoEvent");
+        private static readonly FieldInfo SwitchQueryField = AccessTools.Field(typeof(GeoscapeView), "_viewSwichQuery");
+
+        /// <summary>PURE (RailCheck L141). THE OUTCOME this seam owes every peer is "headed for the
+        /// pre-mission squad screen"; this answers the only question left, WHO STILL OWES ITSELF THE CALL.
+        ///
+        /// "MY NATIVE SelectChoice DID NOT RUN", not "I am a client", is the term — that was the defect. The
+        /// old predicate was <c>inSession &amp;&amp; !isHost</c>, commented "solo/host ran SelectChoice
+        /// natively", which is false for a HOST THAT LOST THE EVENT RACE: its click is replayed
+        /// (<c>EventPopup.ResolutionIsNotOurs</c> → <c>ReplayResolution</c> → return false), so :612's
+        /// <c>LaunchMission</c> never ran there either. A client's click is ALWAYS relayed, so
+        /// <paramref name="clickWasReplayed"/> is only ever asked of the host.
+        ///
+        /// <paramref name="alreadyHeaded"/> is the other half, and it is what keeps the widened predicate from
+        /// becoming a SECOND bug. A losing host is normally already headed: <c>EventSync.HandleAnswer</c>'s
+        /// native tail runs <c>geo.View.LaunchMission</c> the moment it applies the winning answer, and
+        /// <c>GeoscapeView.ToDeploymentState</c>:592 QUEUES the state
+        /// (<c>GeoscapeViewSwitchQuery.QueryStateSwitch</c>, priority int.MaxValue) rather than entering it —
+        /// it is served only when the peer's own encounter window finishes. MEASURED in the reported session
+        /// (host log 36869/632,002 s): `Queuerd state switch …UIStateRosterDeployment with priority
+        /// 2147483647`, 4 s before that host clicked its stale picker. Re-issuing blind would leave a SECOND
+        /// request in a queue that is part of the SAVE (<c>GeoscapeViewSwitchQuery.GetRestorableData</c>) —
+        /// a deployment screen for a finished mission, waiting for the player after the battle.</summary>
+        internal static bool ShouldOpenDeployment(bool inSession, bool isHost, bool clickWasReplayed, bool alreadyHeaded)
+            => inSession && !NativeSelectChoiceRan(isHost, clickWasReplayed) && !alreadyHeaded;
+
+        /// <summary>PURE. Did <c>UIModuleSiteEncounters.SelectChoice</c>:598-613 execute ON THIS PEER for this
+        /// resolution — the single fact the old bail got wrong.</summary>
+        internal static bool NativeSelectChoiceRan(bool isHost, bool clickWasReplayed) => isHost && !clickWasReplayed;
+
+        /// <summary>Is this peer already in, or queued for, the pre-mission squad screen? Asked of the game's
+        /// OWN queue (<c>TryGetStateSwitchRequestForState</c>) and current state, so it stays true for the
+        /// whole window between HandleAnswer's queue and the state actually being entered.
+        ///
+        /// TFTV-SAFE WITHOUT KNOWING TFTV: the screen the player edits his squad on with TFTV installed IS
+        /// <c>UIStateRosterDeployment</c> — TFTV adds no view state of its own, it decorates that one
+        /// (<c>TFTVUI/Geoscape/MissionDeployment.cs</c>:36/:101 EnterState/ExitState,
+        /// <c>TFTVHarmonyGeoscapeUI.cs</c>:249 OnDeploySquad, <c>TFTVAircraftRework/
+        /// AircraftReworkMissionDeployment.cs</c>:26/:133 OnEnrollmentChanged/CheckForDeployment) and only
+        /// flips <c>SkipDeploymentSelection</c> on some mission defs. So this file names ZERO TFTV types,
+        /// needs no <c>TftvLateBinder</c> arm, and behaves identically with and without TFTV loaded.</summary>
+        private static bool AlreadyHeadedForDeployment(GeoscapeView view)
+        {
+            if (view == null) return false;
+            if (view.CurrentViewState is UIStateRosterDeployment) return true;
+            return SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery q &&
+                   q.TryGetStateSwitchRequestForState<UIStateRosterDeployment>(out _);
+        }
 
         private static void Postfix(UIModuleSiteEncounters __instance)
         {
             var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return; // solo/host ran SelectChoice natively
+            if (engine == null || !engine.IsActiveSession) return; // solo: SelectChoice ran end to end
             try
             {
                 var ev = GeoEventField?.GetValue(__instance) as GeoscapeEvent;
@@ -273,13 +331,17 @@ namespace Multiplayer.Network.Sync
                 // MissionTypeDef is (GeoEventChoiceOutcome:315, same test EventPopup.StartsMission uses).
                 if (choices[idx].Outcome?.StartMission?.MissionTypeDef == null) return;
 
+                var view = __instance.Context?.View;
+                if (!ShouldOpenDeployment(true, engine.IsHost, EventPopup.ClickWasReplayed(ev),
+                                          AlreadyHeadedForDeployment(view))) return;
+
                 var site = ev.Context?.Site;
                 var mission = site?.ActiveMission;
                 if (mission == null || !mission.IsRunnable)
                 {
                     // Never silent: the choice DID start a mission, so a missing one means the structural
                     // create has not landed yet and this peer is about to sit on a geoscape with no screen.
-                    Debug.LogWarning("[MP][mission] CLIENT deployment for '" + ev.EventID + "' at " +
+                    Debug.LogWarning("[MP][mission] deployment for '" + ev.EventID + "' at " +
                                      (IdentityResolver.RootRef(site) ?? "S#?") + " NOT opened — the host's mission " +
                                      "has not arrived on this peer yet (ActiveMission " +
                                      (mission == null ? "missing" : "not runnable") + "); reach it from the " +
@@ -287,14 +349,16 @@ namespace Multiplayer.Network.Sync
                     return;
                 }
 
-                __instance.Context.View.LaunchMission(mission, ev.Context.Vehicle);
-                Debug.Log("[MP][mission] CLIENT deployment screen opened for '" + ev.EventID + "' at " +
-                          (IdentityResolver.RootRef(site) ?? "S#?") + " — re-issuing the LaunchMission call " +
-                          "SelectChoice:612 could not make here; the squad picked rides out as a 0xB8 launch intent");
+                view.LaunchMission(mission, ev.Context.Vehicle);
+                Debug.Log("[MP][mission] " + (engine.IsHost ? "HOST" : "CLIENT") + " squad screen opened for '" +
+                          ev.EventID + "' at " + (IdentityResolver.RootRef(site) ?? "S#?") + " — re-issuing the " +
+                          "LaunchMission call SelectChoice:612 could not make here (this peer's click " +
+                          (engine.IsHost ? "was replayed: another peer's answer won the race" : "is always relayed") +
+                          "); the squad picked rides out as a 0xB8 launch intent");
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][mission] CLIENT deployment navigation failed — this peer stays on the " +
+                Debug.LogError("[MP][mission] deployment navigation failed — this peer stays on the " +
                                "geoscape and can still reach the mission from the aircraft's Launch button: " + ex);
             }
         }

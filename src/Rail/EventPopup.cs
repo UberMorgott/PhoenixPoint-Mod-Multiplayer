@@ -1074,6 +1074,34 @@ namespace Multiplayer.Network.Sync
         private static int _pendingTrigger;
         private static int _pendingChoice = NothingPending;
 
+        private static string _replayedId;
+        private static int _replayedTrigger;
+
+        /// <summary>Remember that THIS PEER'S CLICK ON THIS RAISE WAS REPLAYED — i.e. the native
+        /// <c>UIModuleSiteEncounters.SelectChoice</c> body never ran here, because
+        /// <see cref="ResolutionIsNotOurs"/> turned the click into a result page instead. It is the ONE fact
+        /// that separates a HOST that resolved the event itself (its <c>SelectChoice</c>:598-613 ran, tail and
+        /// all) from a HOST that LOST the race (nothing of that method ran), and nothing else records it: the
+        /// arriving record delta names the CHOICE and never the chooser, and by the time the peer clicks
+        /// through the replayed page the record reads Completed on every peer alike. <see cref="MissionSync"/>
+        /// reads it to decide whether this peer still owes itself the <c>LaunchMission</c> call :612 makes.
+        /// Keyed on the RAISE as well as the id, for <see cref="AnswerIsOurs"/>'s third reason: a re-triggered
+        /// event opens a fresh window, and a memo from the previous raise says nothing about this one.</summary>
+        internal static void NoteReplayedClick(GeoscapeEvent ev)
+        {
+            _replayedId = ev?.EventID;
+            _replayedTrigger = RaiseTriggerOf(ev);
+        }
+
+        /// <summary>Was THIS peer's click on this window replayed rather than executed? Not consumed: the
+        /// replayed page's own OK button walks the same window through <c>SelectChoice</c> a second time
+        /// (:1302's closing-page arm) and <c>FinishEncounter</c> — where the answer is needed — is reached
+        /// from THERE, after the memo would already have been retired.</summary>
+        internal static bool ClickWasReplayed(GeoscapeEvent ev)
+            => !string.IsNullOrEmpty(ev?.EventID) &&
+               string.Equals(_replayedId, ev.EventID, StringComparison.Ordinal) &&
+               _replayedTrigger == RaiseTriggerOf(ev);
+
         /// <summary>Remember the answer this peer is about to relay. Called from the capture seam at the
         /// moment the click is converted into a 0xB4 intent — the last point at which "this peer chose it"
         /// is known anywhere.</summary>
@@ -1306,6 +1334,12 @@ namespace Multiplayer.Network.Sync
             // get either, and that charge happens two calls before any funnel EventCompleteArbiter guards.
             if (EventPopup.ResolutionIsNotOurs(ev, out var winner))
             {
+                // The native body below this line is what NEVER RUNS on this peer — including
+                // SelectChoice:612's LaunchMission, the one call that carries a mission-start encounter to the
+                // pre-mission squad screen. Record it here, at the only point where "my click was replayed"
+                // is known, so MissionEncounterNav can re-issue it for a LOSING HOST exactly as it already
+                // does for a client (MissionSync.cs).
+                EventPopup.NoteReplayedClick(ev);
                 var rec = EventPopup.LiveRecord(ev.EventID, ev.Record);
                 Debug.Log("[MP][events] click on '" + ev.EventID + "' REPLAYED — the answer is not this peer's " +
                           "(record=" + (rec == null ? "none" : rec.State.ToString()) + ", choice " +
