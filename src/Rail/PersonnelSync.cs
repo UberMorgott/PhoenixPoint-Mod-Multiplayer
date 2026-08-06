@@ -48,8 +48,9 @@ namespace Multiplayer.Network.Sync
     ///   • <c>BuyAbility</c> (:389) / <c>ChoseSecondSpecialization</c> (:813) — purchase funnels;
     ///     client blocks + ships op=2/3, host replays the native model calls (LearnAbility/AddAbility/
     ///     AddSecondaryClass) with the SP economy re-derived from HOST numbers (<see cref="Charge"/>).
-    ///     Host's own buys run the untouched native bodies (their internal ConsumeAbilityCost +
-    ///     CommitStatChanges now flush natively).
+    ///     Host's own buys run the native bodies behind <see cref="PersonnelSync.HostSpendGate"/>, which
+    ///     asks the SAME <see cref="PersonnelSync.CanAfford"/> verdict at the COMMIT (native asks only at
+    ///     the offer) and re-seeds the stage's snapshot of the SHARED purse first.
     ///   • <c>GeoSite.AddCharacter/RemoveCharacter</c> (:983/:989) + the <c>GeoVehicle</c> twins
     ///     (:759/:766) — roster membership on its MODEL funnel (see the membership guard patches).
     ///   • <c>GeoCharacter.ResetCharacterProgression</c> (:604) — the free respec (SkillResetPatch).
@@ -85,11 +86,14 @@ namespace Multiplayer.Network.Sync
         private const byte OpTftvPromote = 11;     // TFTV PromoteCivilianToOperative(level, char, targetBase, spec) — civilian→operative CREATION
         private const byte OpCustomize = 12;       // appearance/name commit → every rail-covered CharacterIdentity leaf
 
-        // ─── Reflection: UIModuleCharacterProgression's private view-model — READ-ONLY here ──
+        // ─── Reflection: UIModuleCharacterProgression's private view-model ──
         // _character = the soldier the panel is bound to; _bought* = the staged ability purchase the
-        // capture ships. The stage itself (_current*/_starting*) is native presentation the law leaves
-        // alone — the one exception is _currentFactionPoints, READ (never written) around the native
-        // click to learn which pool the native split just chose (see StatClickPatch).
+        // capture ships. The stat half of the stage (_current*/_starting* strength/will/speed) is native
+        // presentation the law leaves alone — it is this visit's undo floor. The two POOL fields are the
+        // exception and always were: _currentFactionPoints is READ around the native click to learn which
+        // pool the native split chose (see StatClickPatch), and both pools are RE-SEEDED from the live
+        // model by HostSpendGate, because they are a per-visit snapshot of a SHARED purse that
+        // CommitStatChanges:375-378 writes back ABSOLUTELY.
         private static readonly FieldInfo FCharacter = AccessTools.Field(typeof(UIModuleCharacterProgression), "_character");
         private static readonly FieldInfo FFactionPool = AccessTools.Field(typeof(UIModuleCharacterProgression), "_currentFactionPoints");
         private static readonly FieldInfo FBoughtSlot = AccessTools.Field(typeof(UIModuleCharacterProgression), "_boughtAbilitySlot");
@@ -253,12 +257,119 @@ namespace Multiplayer.Network.Sync
         /// inverses (AbilityTrack.cs:38-63), so this is a stable address, not an index into a live list.
         /// The ability guid rides along because a mutoid slot can be EMPTY until the buy stamps it
         /// (UIModuleCharacterProgression.cs:393-395).</summary>
+        // ─── The stage's own copy of the SHARED purse (host gate only — read AND written here) ──────
+        private static readonly FieldInfo FCurSp = AccessTools.Field(typeof(UIModuleCharacterProgression), "_currentSkillPoints");
+        private static readonly FieldInfo FStartSp = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingSkillPoints");
+        private static readonly FieldInfo FStartPool = AccessTools.Field(typeof(UIModuleCharacterProgression), "_startingFactionPoints");
+
+        /// <summary>
+        /// THE HOST'S OWN PURCHASE IS A SPEND ON SHARED STATE AND HAD NO CHECK BETWEEN THE OFFER AND THE
+        /// COMMIT. Reported 2026-08-06 (two peers, one soldier, one skill's worth of points): both peers
+        /// opened the confirmation window on DIFFERENT skills, both pressed confirm, both skills were
+        /// learned and the balance went NEGATIVE. The client half was never the hole — its purchase rides
+        /// <see cref="OpBuyAbility"/> and the host answers it with <see cref="Charge"/>, which refuses an
+        /// over-spend and says so. The HOST's own purchase runs fully native, and native asks about
+        /// affordability exactly ONCE, at the CLICK that opens the window
+        /// (<c>OnTrackSlotPointerClicked</c>:1029 → <c>CanAffordSkill</c>:1052) and NEVER again at the
+        /// confirm — while <c>ConsumeAbilityCost</c>:428-441 clamps only the PERSONAL pool at zero and lets
+        /// <c>_currentFactionPoints</c> go straight through it, which <c>CommitStatChanges</c>:375-378 then
+        /// writes back into <c>GeoPhoenixFaction.Skillpoints</c> ABSOLUTELY. That is the reported negative
+        /// balance, arrived at with no exception and no log line — the silent-swallow class.
+        ///
+        /// SO THE GATE IS THE SAME VERDICT ASKED AT THE COMMIT INSTEAD OF AT THE OFFER, and it is
+        /// <see cref="CanAfford"/> — the identical predicate the client's intent is judged by, so there is
+        /// one affordability rule on this mod and not two. NOT A QUORUM and nothing waits on a human: the
+        /// host reads its OWN authoritative model and answers in the same frame.
+        ///
+        /// AND THE STAGE IS RE-SEEDED BEFORE NATIVE PAYS FROM IT. <c>_current*</c> is a per-visit SNAPSHOT
+        /// of a SHARED purse, and <c>CommitStatChanges</c>'s two pool lines are ABSOLUTE writes — so a
+        /// purchase computed from a snapshot taken before a foreign spend does not merely mis-charge, it
+        /// REFUNDS the other peer's spend (a lost update). Only the two POOL fields move, and only to what
+        /// the model already says; the stat floors are left alone because they are this visit's undo floor,
+        /// and <c>_startingFactionPoints</c> — which native's refund SPLIT reads as a ceiling
+        /// (ChangeCharacterStat:915-931) — is raised, never lowered, by the same
+        /// <see cref="UiNativeRepaint.ClampBaseline"/> rule the repaint checkpoint uses.
+        ///
+        /// SOLO IS UNTOUCHED: with no session there is no second spender, and a solo player who somehow
+        /// reaches an unaffordable confirm is native's business, not ours.
+        /// </summary>
+        internal static bool HostSpendGate(UIModuleCharacterProgression module)
+        {
+            try
+            {
+                var slot = FBoughtSlot == null ? null : FBoughtSlot.GetValue(module) as AbilityTrackSlot;
+                var character = FCharacter == null ? null : FCharacter.GetValue(module) as GeoCharacter;
+                var progression = character == null ? null : character.Progression;
+                if (progression == null || slot == null) return true;     // native no-ops on a null slot too
+                // native :391-395 stamps an empty (mutoid) slot from _boughtAbility before it prices it
+                var ability = slot.Ability ?? (FBoughtAbility.GetValue(module) as TacticalAbilityDef);
+                return HostSpendGate(module, character,
+                                     AbilityCost(character, progression, slot, ability),
+                                     ability == null ? "an ability" : ability.name,
+                                     module.ClearBoughtAbility);
+            }
+            catch (Exception ex)
+            {
+                // A throwing gate must not eat the player's purchase — native still runs, and the client
+                // leg's Charge stays the backstop for every OTHER peer's spend.
+                Debug.LogError("[MP][personnel] host ability gate failed: " + ex);
+                return true;
+            }
+        }
+
+        /// <summary>The gate itself, shared by every native purchase funnel the host still runs (an ability
+        /// and the second specialization are the same spend out of the same purse). <paramref name="release"/>
+        /// is that funnel's own native widget release, run only on a refusal.</summary>
+        internal static bool HostSpendGate(UIModuleCharacterProgression module, GeoCharacter character,
+                                           int cost, string what, Action release)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return true;   // solo — fully native
+            if (!BindOk() || FCurSp == null || FStartSp == null || FStartPool == null) return true;
+            var progression = character == null ? null : character.Progression;
+            if (progression == null) return true;
+            if (!CanAfford(character, cost))
+            {
+                Debug.Log("[MP][personnel] HOST spend REFUSED U#" + (int)character.Id + " — cannot afford " +
+                          what + " (cost " + cost + ", personal " + progression.SkillPoints +
+                          " + shared " + SharedPool(character) +
+                          ") — another peer spent the points while this confirmation was open");
+                if (release != null) release();   // native's own tail — releases the confirm widgets
+                OpenUiRepaint.MarkDirty();        // the tree re-greys the slot from the model it can afford
+                return false;
+            }
+            ReseedStagePurse(module, character, progression);
+            return true;
+        }
+
+        /// <summary>Native's own price for the bought slot (BuyAbility:397-404): mutagen for a pandoran
+        /// progression, skill points otherwise. Pure so the L150 law can execute it.</summary>
+        internal static int AbilityCost(GeoCharacter character, CharacterProgression progression,
+                                        AbilityTrackSlot slot, TacticalAbilityDef ability)
+        {
+            if (character != null && character.IsMutoid)
+                return ability == null ? 0 : ability.CharacterProgressionData.MutagenCost;
+            return progression == null || slot == null ? 0 : progression.GetAbilitySlotCost(slot);
+        }
+
+        /// <summary>Point the stage's two pool fields at the live model, so native's ABSOLUTE commit
+        /// (CommitStatChanges:375-378) writes `live - cost` instead of `snapshot - cost`.</summary>
+        private static void ReseedStagePurse(UIModuleCharacterProgression module, GeoCharacter character,
+                                             CharacterProgression progression)
+        {
+            int personal = progression.SkillPoints, shared = SharedPool(character);
+            FCurSp.SetValue(module, personal);
+            FStartSp.SetValue(module, personal);
+            FFactionPool.SetValue(module, shared);
+            FStartPool.SetValue(module, UiNativeRepaint.ClampBaseline((int)FStartPool.GetValue(module), shared, ceiling: true));
+        }
+
         [HarmonyPatch(typeof(UIModuleCharacterProgression), nameof(UIModuleCharacterProgression.BuyAbility))]
         internal static class BuyAbilityCapturePatch
         {
             private static bool Prefix(UIModuleCharacterProgression __instance)
             {
-                if (IntentRail.ShouldRunNative()) return true;
+                if (IntentRail.ShouldRunNative()) return HostSpendGate(__instance);
                 if (!BindOk()) return false;
                 try
                 {
@@ -304,7 +415,18 @@ namespace Multiplayer.Network.Sync
         {
             private static bool Prefix(UIModuleCharacterProgression __instance, SpecializationDef specialization)
             {
-                if (IntentRail.ShouldRunNative()) return true;
+                // Same purse, same missing check as the ability buy (see HostSpendGate): the dual-class
+                // click gates on the STAGE (:1007) and nothing re-asks at the commit. Native's own release
+                // here is closing the popup, which is also its first act (:815).
+                if (IntentRail.ShouldRunNative())
+                {
+                    var owner = FCharacter == null ? null : FCharacter.GetValue(__instance) as GeoCharacter;
+                    var levels = owner == null || owner.Progression == null ? null : owner.Progression.LevelProgression;
+                    if (levels == null || levels.Def == null) return true;
+                    return HostSpendGate(__instance, owner, levels.Def.SecondSpecializationSpCost,
+                                         "a second specialization",
+                                         () => { if (__instance.DualClassPopupWindow != null) __instance.DualClassPopupWindow.SetActive(false); });
+                }
                 if (!BindOk()) return false;
                 try
                 {
@@ -1405,33 +1527,76 @@ namespace Multiplayer.Network.Sync
         private static void RejectReassign(ulong peer, int charId, string why, string srcRef, string dstRef) =>
             IntentRail.Reject(SurfaceIds.GeoPersonnelIntent, peer, "char=U#" + charId + " — " + why, srcRef, dstRef);
 
+        /// <summary>The SHARED half of the SP purse — <c>GeoPhoenixFaction.Skillpoints</c>:96, which is what
+        /// makes an ability purchase a CONTESTED resource rather than a per-soldier one. 0 when the owner is
+        /// not on the Phoenix faction (a captured/other-faction unit has no shared pool to draw on).</summary>
+        internal static int SharedPool(GeoCharacter character)
+        {
+            var phoenix = character == null ? null : character.Faction as GeoPhoenixFaction;
+            return phoenix == null ? 0 : phoenix.Skillpoints;
+        }
+
+        /// <summary>
+        /// THE AFFORDABILITY VERDICT, PURE — no debit, no side effect, so it can be asked from anywhere the
+        /// answer matters: the host's own gate before a native purchase, the open confirm window's live
+        /// re-check, and the RailCheck law that executes it. Native rule (ChangeCharacterStat:892-903 and
+        /// ConsumeAbilityCost:435-441): personal <c>CharacterProgression.SkillPoints</c> pays first and the
+        /// SHARED <c>GeoPhoenixFaction.Skillpoints</c> pool covers the overflow, so the purse is the SUM.
+        /// Mutoids pay MUTAGEN out of the faction wallet instead (ConsumeAbilityCost:430-433).
+        ///
+        /// A FREE COST IS ALWAYS AFFORDABLE and that is deliberate: <c>cost &lt;= 0</c> is how the native
+        /// tracks express a slot that costs nothing, and refusing those would refuse legal purchases.
+        /// </summary>
+        internal static bool CanAfford(GeoCharacter character, int cost)
+        {
+            if (cost <= 0) return true;
+            if (character == null) return false;
+            var faction = character.Faction;
+            if (character.IsMutoid)
+                return faction != null && faction.Wallet != null &&
+                       faction.Wallet.HasResources(new ResourceUnit(ResourceType.Mutagen, cost));
+            var progression = character.Progression;
+            return progression != null && CanAfford(progression.SkillPoints, SharedPool(character), cost);
+        }
+
+        /// <summary>The verdict with the game peeled off — the two pools and a price, nothing else — so a
+        /// console harness can drive whole SEQUENCES of concurrent confirmations through it and assert the
+        /// outcome (L150) instead of reading this line and believing it.</summary>
+        internal static bool CanAfford(int personal, int shared, int cost) => cost <= 0 || personal + shared >= cost;
+
+        /// <summary>Native's debit ORDER, also peeled (ConsumeAbilityCost:435-441 / ChangeCharacterStat
+        /// :892-903): the soldier's own points pay first, the shared pool covers the overflow. Assumes the
+        /// caller already asked <see cref="CanAfford(int,int,int)"/> — which is exactly the assumption L150
+        /// exists to keep true, because native makes it too and native never re-asks.</summary>
+        internal static void Debit(int cost, ref int personal, ref int shared)
+        {
+            if (cost <= 0) return;
+            if (personal >= cost) { personal -= cost; return; }
+            shared -= cost - personal;
+            personal = 0;
+        }
+
         /// <summary>
         /// The SP economy, re-derived from the HOST's own numbers — the reason the wire never carries a
-        /// balance. Native rule (ChangeCharacterStat:892-903 and ConsumeAbilityCost:435-441): personal
-        /// <c>CharacterProgression.SkillPoints</c> pays first and the SHARED
-        /// <c>GeoPhoenixFaction.Skillpoints</c> pool covers the overflow. Mutoids pay MUTAGEN instead
-        /// (ConsumeAbilityCost:430-433). Returns false = unaffordable and NOTHING was debited, so every
-        /// caller can validate by calling this last.
+        /// balance. Debits <see cref="CanAfford"/>'s purse in native's own order. Returns false =
+        /// unaffordable and NOTHING was debited, so every caller can validate by calling this last.
         /// </summary>
         private static bool Charge(GeoCharacter character, int cost)
         {
+            if (!CanAfford(character, cost)) return false;
             if (cost <= 0) return true;
             var faction = character.Faction;
             if (character.IsMutoid)
             {
-                var price = new ResourceUnit(ResourceType.Mutagen, cost);
-                if (faction == null || faction.Wallet == null || !faction.Wallet.HasResources(price)) return false;
-                faction.Wallet.Take(price, OperationReason.Purchase);
+                faction.Wallet.Take(new ResourceUnit(ResourceType.Mutagen, cost), OperationReason.Purchase);
                 return true;
             }
             var progression = character.Progression;
             var phoenix = faction as GeoPhoenixFaction;
-            int pool = phoenix == null ? 0 : phoenix.Skillpoints;
-            if (progression.SkillPoints + pool < cost) return false;
-            if (progression.SkillPoints >= cost) { progression.SkillPoints -= cost; return true; }
-            int overflow = cost - progression.SkillPoints;
-            progression.SkillPoints = 0;
-            if (phoenix != null) phoenix.Skillpoints = pool - overflow;
+            int personal = progression.SkillPoints, shared = phoenix == null ? 0 : phoenix.Skillpoints;
+            Debit(cost, ref personal, ref shared);
+            progression.SkillPoints = personal;
+            if (phoenix != null) phoenix.Skillpoints = shared;
             return true;
         }
 

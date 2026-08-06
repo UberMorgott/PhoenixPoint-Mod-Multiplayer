@@ -9,7 +9,9 @@ using HarmonyLib;
 using PhoenixPoint.Common.Core;
 using PhoenixPoint.Common.Entities.Addons;
 using PhoenixPoint.Common.Entities.Characters;
+using PhoenixPoint.Common.Utils;
 using PhoenixPoint.Common.View.ViewModules;
+using PhoenixPoint.Geoscape.View.ViewControllers.Modal;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.Research;
 using PhoenixPoint.Geoscape.Levels;
@@ -382,14 +384,15 @@ namespace Multiplayer.Network.Sync
                 // fallback re-enter is doubly forbidden here — its ExitState answers a still-Triggered
                 // event with Choices.Last() (UIStateGeoscapeEvent.cs:61-65). RailCheck L21 asserts this key.
                 [typeof(UIStateGeoscapeEvent)] = (s, v) => EventPopup.RepaintDialog(s, v),
-                // Modal dialog: a DELIBERATE no-op, and the entry exists only to keep the Exit+Enter fallback
-                // away from it. A modal renders a frozen snapshot of something that already happened — there is
-                // nothing on it to re-read from the model — while a re-enter would run UIStateGeoModal
-                // .ExitState:116, which (a) invokes the HOST's own DialogCallback with ModalResult.Close on a
-                // window nobody closed (ResearchCompleteModalHandler, a mission Cancel arm…) and (b) fires
+                // Modal dialog: still never Exit+Enter'd — a re-enter would run UIStateGeoModal.ExitState:116,
+                // which (a) invokes the HOST's own DialogCallback with ModalResult.Close on a window nobody
+                // closed (ResearchCompleteModalHandler, a mission Cancel arm…) and (b) fires
                 // GeoscapeView.ModalClosed, the very signal a future host→all hide would read as "the host
-                // dismissed it". Returning true is the whole entry.
-                [typeof(UIStateGeoModal)] = (s, v) => true,
+                // dismissed it". Almost every modal renders a frozen snapshot of something that ALREADY
+                // HAPPENED and genuinely has nothing to re-read. The ability-purchase confirmation is the one
+                // that is not: it is an OFFER, still unpaid, standing over a SHARED purse — see
+                // CloseUnaffordableBuyConfirm.
+                [typeof(UIStateGeoModal)] = (s, v) => { CloseUnaffordableBuyConfirm(s, v); return true; },
                 // Kaos marketplace: also a queued window, so the fallback Exit+Enter skips it (and must —
                 // re-entering re-posts the shop's opening narration). Its rows come off 0xBF and its prices
                 // are paid from the SHARED wallet, so a spend anywhere else must re-gate this screen's buttons.
@@ -544,6 +547,61 @@ namespace Multiplayer.Network.Sync
             {
                 [typeof(UIStateEditSoldier)] = new HashSet<Type>(WorldLayerKinds),
             };
+
+        /// <summary>
+        /// AN UNPAID OFFER OVER A SHARED PURSE IS NOT A FROZEN SNAPSHOT. Reported 2026-08-06: two peers
+        /// opened the ability-purchase confirmation on the SAME soldier for DIFFERENT skills with one
+        /// skill's worth of points between them, both pressed confirm, both skills were learned and the
+        /// balance went negative. <see cref="PersonnelSync.HostSpendGate"/> is the correctness half — the
+        /// host now asks <see cref="PersonnelSync.CanAfford"/> at the COMMIT, so the loser is simply refused
+        /// and the balance cannot go below zero whoever wins the race. This is the REACTIVITY half
+        /// (postulate 1): the loser should not still be standing in front of a live-looking Confirm button
+        /// for points that are gone.
+        ///
+        /// THE WINDOW IS CLOSED, NOT GREYED, and the reason is that closing is the only version made of
+        /// native parts. <c>ConfirmBuyAbilityDataBind</c> holds references to the cost text, the icon, the
+        /// name and the description — and to NO BUTTON (the Confirm button is wired to
+        /// <c>UIModal.Confirm()</c> in the prefab), and <c>UIModal</c> exposes none either, so greying it
+        /// would mean hunting a button down the modal's transform tree and guessing which one it is: a
+        /// hand-rolled widget lookup that FAILS SILENTLY when it misses, which is the exact bug class this
+        /// repo fights. Closing is one call to the game's OWN modal dismissal —
+        /// <c>GeoscapeView.FinishQueriedState</c>:2164, which is literally what <c>UIStateGeoModal.OnCancel</c>
+        /// :151-155 does when the player presses cancel — and its <c>ExitState</c>:116-119 then hands the
+        /// still-unhandled callback <c>ModalResult.Close</c>, i.e. <c>UIStateEditSoldier.ConfirmationHandler</c>
+        /// :719-722 runs <c>ClearBoughtAbility()</c> and the offer is properly released.
+        ///
+        /// AND THE GREYING THE PLAYER ASKED FOR IS WHAT THEY LAND ON. The screen underneath is
+        /// UIStateEditSoldier, whose Table entry above reseeds the whole progression panel from the model,
+        /// and the ability tree greys an unaffordable slot NATIVELY (<c>AbilityTrackContainerElement
+        /// .SetAbilitySlot</c>:230-248 → <c>IsAbilityBuyable</c> → <c>SetSkillState(isBuyable:false)</c>, and
+        /// <c>AbilityTrackSkillEntryElement.OnPointerClick</c>:153-158 will not even fire for a slot that is
+        /// not buyable). So the window drops away and the skill behind it is already grey — with no widget
+        /// of ours anywhere in it.
+        ///
+        /// NOT A QUORUM and nothing waits: this peer reads its own mirrored model and decides alone.
+        /// Deliberately narrow — only <c>CharacterProgressionConfirmCharacter</c>, only when the offer has
+        /// become unaffordable. Every other modal keeps the old no-op.
+        /// </summary>
+        private static void CloseUnaffordableBuyConfirm(GeoscapeViewState s, GeoscapeView v)
+        {
+            if (!(s is UIStateGeoModal modal) || v == null) return;
+            if (modal.ModalType != ModalType.CharacterProgressionConfirmCharacter) return;
+            if (!(modal.ModalData is ConfirmBuyAbilityDataBind.Data data) || data.AbilitySlot == null) return;
+            // The offer's owner without a registry scan: this modal is only ever opened by UIStateEditSoldier
+            // for the soldier the actor cycle is showing (UIStateEditSoldier.cs:693-707 builds Data from
+            // _currentCharacter, which is that module's CurrentCharacter). Identity-checked, and if the two
+            // ever disagree we leave the offer alone rather than price the wrong soldier's purse.
+            var owner = v.GeoscapeModules?.ActorCycleModule?.CurrentCharacter;
+            if (owner == null || owner.Progression == null ||
+                !ReferenceEquals(owner.Progression, data.Progression)) return;
+            int cost = PersonnelSync.AbilityCost(owner, data.Progression, data.AbilitySlot, data.Ability);
+            if (PersonnelSync.CanAfford(owner, cost)) return;
+            Debug.Log("[MP][personnel] buy-confirm CLOSED U#" + (int)owner.Id + " — " +
+                      (data.Ability == null ? "the offer" : data.Ability.name) + " costs " + cost +
+                      " and only " + (owner.Progression.SkillPoints + PersonnelSync.SharedPool(owner)) +
+                      " is left; another peer spent the points while this window was open");
+            v.FinishQueriedState();   // GeoscapeView.cs:2164 — the game's own modal dismissal
+        }
 
         /// <summary>True = the open screen has a native rebuild and it ran (caller skips the re-enter).
         /// Called inside OpenUiRepaint's SyncApplyScope + try/catch — a throwing rebuild is logged there
