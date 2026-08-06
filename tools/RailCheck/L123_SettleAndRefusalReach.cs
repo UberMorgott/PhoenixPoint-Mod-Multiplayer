@@ -256,6 +256,13 @@ namespace RailCheck
                 "Multiplayer.Tactical.TacticalTurnSync.HandleLeaveBattle",
                 "Multiplayer.Network.Sync.MissionSync.Reject",
                 "Multiplayer.Network.Sync.EventSync.HandleAnswer",
+                // L146: two peers commanded ONE soldier and this peer lost the race. Purely co-op-invented —
+                // single player cannot produce a second commander, so vanilla has no control to grey and the
+                // player is left with a soldier that wound up and cancelled for no visible reason (measured:
+                // the reject nudge reached the client's log and never its screen, 22:28:30). The notify bit is
+                // computed per refusal (ReferenceEquals(refusal, BusyRefusal)), so every OTHER arm of Validate
+                // — the game's own ability gate, AP, WP, target-not-offered — still crosses quietly.
+                "Multiplayer.Tactical.TacticalCommandSync.HandleActivate",
             };
             var optIns = mod.GetTypes()
                             .SelectMany(Methods)

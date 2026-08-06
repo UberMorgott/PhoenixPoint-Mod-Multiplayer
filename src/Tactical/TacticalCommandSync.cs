@@ -1051,6 +1051,12 @@ namespace Multiplayer.Tactical
         /// coroutine it starts runs later, on the game loop, with this already cleared.</summary>
         private static ulong _replayOriginPeer;
 
+        /// <summary>Non-zero exactly while the HOST is replaying a named peer's intent through the native
+        /// path. Read by <see cref="TacticalActorDrive"/>: on the host that is the ONLY way an order can be
+        /// somebody else's, because a host click and a host replay both reach <c>Activate</c> natively and are
+        /// otherwise indistinguishable.</summary>
+        internal static ulong ReplayOriginPeer => _replayOriginPeer;
+
         /// <summary>When the 0x82 record now being decoded reached this peer, for the mirror telemetry's
         /// arrival delta. A plain field: the decode and the play are one synchronous call.</summary>
         private static float _recordArrived;
@@ -1162,6 +1168,7 @@ namespace Multiplayer.Tactical
             _relayedAim.Clear();              // L104(j): keys belong to ONE battle
             _saidKeyless.Clear();
             _replayOriginPeer = 0;
+            TacticalActorDrive.Reset();       // live ability refs: a drive mark belongs to ONE battle
             _burstFrame = 0;
             _burstCount = 0;
             TacticalActorKey.Reset();   // A3b: the derived alien keys belong to ONE battle and to no other
@@ -1549,7 +1556,7 @@ namespace Multiplayer.Tactical
         /// <summary>Ship one actor's authoritative position + AP + WP to every peer. Broadcast to ALL,
         /// including whoever gestured: the acting peer is the one whose speculative local play most needs
         /// correcting.</summary>
-        private static void HostSettle(TacticalActorBase actor, bool forced = false)
+        internal static void HostSettle(TacticalActorBase actor, bool forced = false)
         {
             var tacActor = actor as TacticalActor;
             if (tacActor == null) return;                 // no CharacterStats to settle (structural targets, etc.)
@@ -1690,6 +1697,14 @@ namespace Multiplayer.Tactical
         /// nothing at activation — which is why <paramref name="abilityDisabledReason"/> is carried too: it is
         /// the game's OWN gate and for movement it is <c>NeedsMovementLeft</c> at <c>ActionPoints &lt; 1</c>
         /// (<c>MoveAbility.GetDisabledStateInternal</c>:94-97). Both arms matter; neither subsumes the other.</summary>
+        /// <summary>THE ONE FIRST-COME-FIRST-SERVED SENTENCE, named once because three seams say it: the
+        /// host's arbitration below, the reject that carries it back to the losing CLIENT, and
+        /// <see cref="TacticalActorDrive.RefuseLocalCommand"/>, which refuses the LOCAL half of the same race
+        /// (the host's own click, or a client's speculative play) before it can start. Two peers racing for one
+        /// soldier must read the same words whichever side of the wire they are on.</summary>
+        internal const string BusyRefusal =
+            "that actor is already executing an ability — another peer commanded it first (first-to-act-wins)";
+
         internal static string Validate(bool actorFound, bool actorAlive, bool actorIsPlayerControlled,
                                         bool factionIsPlayingTurn, bool abilityFound, bool abilityIsRider,
                                         bool actorBusy, string abilityDisabledReason, bool targetIsOffered,
@@ -1710,8 +1725,7 @@ namespace Multiplayer.Tactical
             if (!abilityIsRider)
                 return "that ability is not a declared rider — only movement and the attack abilities cross the wire";
             if (actorBusy)
-                return "that actor is already executing an ability — another peer commanded it first " +
-                       "(first-to-act-wins)";
+                return BusyRefusal;
             if (!string.IsNullOrEmpty(abilityDisabledReason))
                 return "the game's own gate refuses this ability: " + abilityDisabledReason;
             // WHICH target, not WHETHER there is one. GetDisabledState's NoValidTarget arm
@@ -1993,8 +2007,14 @@ namespace Multiplayer.Tactical
                 // NUDGE is what repaints the gesturing client's own screen.
                 // Named, not keyed: since L123 this string is shipped to the refused peer and put on its
                 // screen, so it is read by a player and not only by whoever opens the host's log.
+                // NOTIFY, for this refusal only. IntentRail's own doc reserves the popup for a MOD-PROTOCOL
+                // refusal that leaves the player with a dead gesture and no other feedback — "another peer
+                // already took this soldier" is the textbook case, and it was the one arriving silently: the
+                // reason reached the client's LOG and never its screen, so the second player saw a wind-up,
+                // a cancel and no word. Every other arm keeps the quiet form (vanilla greys those controls).
                 IntentRail.Reject(SurfaceIds.TacCommandIntent, senderPeerId,
-                                  "command for " + SafeActorName(actor) + ": " + refusal);
+                                  "command for " + SafeActorName(actor) + ": " + refusal,
+                                  ReferenceEquals(refusal, BusyRefusal));
                 // Snap his speculative local play back — but only if the actor is idle HERE. If it is busy, the
                 // command that won is still running and its own end-of-action settle is the corrector; a settle
                 // taken mid-flight would ship a position the host itself is about to leave.
