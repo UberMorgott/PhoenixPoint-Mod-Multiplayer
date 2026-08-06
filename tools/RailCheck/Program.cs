@@ -222,6 +222,8 @@ namespace RailCheck
             laws.AddRange(L151_AnnouncedBoundaryPublishesProgress.Check());
             laws.AddRange(L152_ChatDeliveredExactlyOnce.Check());
             laws.AddRange(L144_QueuedSquadScreenIsServable.Check());
+            laws.AddRange(L148_MirroredIdentityRepaintsTheOpenScreen.Check());
+            laws.AddRange(L149_HelmetTogglesShareOneReactiveFunnel.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

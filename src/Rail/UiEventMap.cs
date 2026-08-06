@@ -7,6 +7,7 @@ using Base.Entities.Statuses;
 using Base.UI;
 using HarmonyLib;
 using PhoenixPoint.Common.Core;
+using PhoenixPoint.Common.Entities.Addons;
 using PhoenixPoint.Common.Entities.Characters;
 using PhoenixPoint.Common.View.ViewModules;
 using PhoenixPoint.Geoscape.Entities;
@@ -131,6 +132,16 @@ namespace Multiplayer.Network.Sync
                             // Site encounter labels etc. ride the same universal repaint like any other kind.
                             OpenUiRepaint.MarkDirty(entity.GetType(), geo);
                             break;
+                        case CharacterIdentity ci:
+                            // THE REPAINT WAS FIRING ALL ALONG AND PAINTED NOTHING (live 2026-08-06:
+                            // "no per-kind mapping for CharacterIdentity — universal open-screen repaint").
+                            // Identity is the one kind whose whole presentation sits behind TWO caches the
+                            // game only ever invalidates from its OWN write path, so a mirrored write is
+                            // invisible until the visit is torn down and rebuilt — the "leave the screen and
+                            // come back" the user measured. Both are re-seeded here, before the flush.
+                            ReseedIdentityDisplay(OwnerOf(ci, geo), geo);
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
+                            break;
                         case ItemStorage storage:
                             RaiseStorageChanged(storage);
                             // Manufacturing + equip screens are PULL-model: NO StorageChanged subscription
@@ -169,12 +180,97 @@ namespace Multiplayer.Network.Sync
         /// <summary>Owner of a touched progression: CharacterProgression carries no back-ref, so scan the
         /// level's U# root registry (same _tacUnits dict IdentityResolver roots from) for the character
         /// whose Progression IS this instance.</summary>
-        private static GeoCharacter OwnerOf(CharacterProgression cp, GeoLevelController geo)
+        internal static GeoCharacter OwnerOf(CharacterProgression cp, GeoLevelController geo)
         {
             if (geo == null || !(LevelTacUnitsField?.GetValue(geo) is IDictionary units)) return null;
             foreach (var u in units.Values)
                 if (u is GeoCharacter c && ReferenceEquals(c.Progression, cp)) return c;
             return null;
+        }
+
+        /// <summary>Owner of a touched identity — same scan, same registry, same reason as
+        /// <see cref="OwnerOf(CharacterProgression, GeoLevelController)"/>: <c>CharacterIdentity</c> carries
+        /// no back-ref to its character either.</summary>
+        internal static GeoCharacter OwnerOf(CharacterIdentity identity, GeoLevelController geo)
+        {
+            if (geo == null || identity == null || !(LevelTacUnitsField?.GetValue(geo) is IDictionary units)) return null;
+            foreach (var u in units.Values)
+                if (u is GeoCharacter c && ReferenceEquals(c.Identity, identity)) return c;
+            return null;
+        }
+
+        private static readonly FieldInfo ActorCycleUnitsField =
+            AccessTools.Field(typeof(UIModuleActorCycle), "_units");        // List<UnitDisplayData>, :126
+        private static readonly FieldInfo ActorCycleBuilderField =
+            AccessTools.Field(typeof(UIModuleActorCycle), "_charBuilder");  // AddonsCharacterBuilder, :130
+
+        /// <summary>
+        /// THE TWO CACHES BETWEEN A MIRRORED IDENTITY AND THE PIXELS, invalidated the way the game itself
+        /// invalidates them. Diagnosis 2026-08-06, in-game: a rename and a recolour landed on the rail, the
+        /// universal repaint ran, and the open screen kept the old name and the old armour until the player
+        /// left to the geoscape and came back. The state was never the problem — the two reads were.
+        ///
+        ///   (1) THE NAME IS A SNAPSHOT, NOT A READ. Every name label on these screens reads
+        ///       <c>UIModuleActorCycle.CurrentUnit.Name</c> (<c>RefreshSoldierInfo</c>:514), and
+        ///       <c>UnitDisplayData.Name</c> is assigned ONCE, in the constructor, from
+        ///       <c>character.GetName()</c> (UnitDisplayData.cs:41) — a per-visit copy that no refresh path
+        ///       re-reads. The GAME KNOWS: its own rename handler hand-patches the copy
+        ///       (<c>RenameCharacter</c>:743 <c>CurrentUnit.Name = currentCharacter.GetName()</c>) precisely
+        ///       because nothing else would. So do the same, for every cached unit — a batch can rename more
+        ///       than one, and re-reading a name costs nothing. (The sibling fields are NOT snapshots:
+        ///       <c>GameTags</c> is the live list reference and the item lists are deferred LINQ, so the rest
+        ///       of the identity is already current.)
+        ///
+        ///   (2) THE MODEL REBUILD IS SKIPPED FOR AN IDENTITY-ONLY CHANGE. <c>DisplaySoldier</c> — the funnel
+        ///       every one of these screens repaints through — pushes the fresh <c>GameTags</c> into the
+        ///       addons manager with autorefresh OFF (:613), then EARLY-RETURNS at :636-644 whenever the
+        ///       addon set (armour + weapon) is unchanged, without ever reaching
+        ///       <c>CommonCharacterUtils.RebuildCharacter</c>. A recolour, a new face, a haircut change no
+        ///       armour, so they take that early return every time, and re-enabling autorefresh afterwards
+        ///       (:642) does not replay a change made while it was off (<c>AddonsManager
+        ///       .SetAutorefreshOnTagsChanged</c>:197 only flips the flag). Removing a HELMET does change the
+        ///       set, which is exactly why the user saw the helmet start working while the recolour never did.
+        ///       The fix is a cache INVALIDATION, not a rebuild of our own: empty <c>AddonsCharacterBuilder
+        ///       .Addons</c> — the very list that comparison reads — and the game's own next
+        ///       <c>DisplaySoldier</c> takes the rebuild branch and refills it (<c>RebuildCharacter</c> starts
+        ///       with <c>addons.Clear()</c>, CommonCharacterUtils.cs:56-58). Nothing is torn off the model by
+        ///       clearing it: the list is the REQUEST for the next rebuild, never a description of what is
+        ///       currently worn.
+        ///
+        /// WHICH ALSO COVERS BOTH HELMET TOGGLES WITHOUT NAMING EITHER. The vanilla tick
+        /// (<c>UIStateSoldierCustomization</c>:24/:44/:51) and TFTV's edit-screen icon (its prefix on this
+        /// same <c>UIModuleActorCycle.DisplaySoldier(GeoCharacter,bool,bool,bool)</c> overload,
+        /// TFTVUI/Personnel/ShowWithoutHelmet.cs:319-321) are both just the <c>showHelmet</c> ARGUMENT to the
+        /// funnel we are un-blocking — neither is replicated state and neither should be, since which helmet
+        /// a player looks at is that player's own view. So the reactive property that must hold is that a
+        /// mirrored identity change repaints UNDERNEATH whichever toggle this peer is holding, and it does,
+        /// with zero TFTV types named here and therefore no <c>TftvLateBinder</c> arm to bind late and
+        /// nothing to degrade when TFTV is absent.
+        ///
+        /// Scoped like every other raiser (law 8): <c>RefreshTags</c> and <c>RefreshSoldierInfo</c> fire
+        /// native UI events that an intent-capture seam listens to.
+        /// </summary>
+        private static void ReseedIdentityDisplay(GeoCharacter owner, GeoLevelController geo)
+        {
+            var cycle = geo?.View?.GeoscapeModules?.ActorCycleModule;
+            if (cycle == null) return;
+            using (SyncApplyScope.Enter())
+            {
+                // GeoCharacter.cs:568 — Identity → GameTags. Idempotent (ApplyGameTags MERGES), and needed
+                // here because the mirrored write lands on the identity leaves, never on the tag list.
+                if (owner != null) owner.RefreshTags();
+
+                if (ActorCycleUnitsField?.GetValue(cycle) is IEnumerable cached)
+                    foreach (var u in cached)
+                        if (u is UnitDisplayData d && d.BaseObject is GeoCharacter c) d.Name = c.GetName();
+
+                if (ActorCycleBuilderField?.GetValue(cycle) is AddonsCharacterBuilder builder)
+                    builder.Addons?.Clear();
+
+                // The label itself: no repaint path calls this (UIStateEditSoldier.DisplaySoldier:580-585
+                // rebuilds the equip lists and the doll, never the header), and it now reads a fresh copy.
+                if (cycle.CurrentUnit != null) cycle.RefreshSoldierInfo();
+            }
         }
 
         /// <summary>Native derived recompute, scoped like the other raisers (law 8: UpdateStats fires the
