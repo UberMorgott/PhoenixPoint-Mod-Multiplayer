@@ -1943,22 +1943,12 @@ namespace Multiplayer.Network
             catch (Exception e) { Debug.LogError("[Multiplayer] HideLoadOverlay failed: " + e.Message); }
         }
 
-        // The reveal machinery above REMOVES the game's only input-unlock edge; this puts it back.
-        // GeoscapeView.InitView():340 takes RequestOverrideInputSet(LoadingScreenInputSet), and the sole
-        // native release is GeoscapeView.OnCurtainLifted():2160 (ClearOverrideInputSet), raised only at the
-        // tail of a COMPLETED LevelSwitchCurtainController.LiftCurtainCrt (:113-114). Co-op breaks that edge
-        // on purpose — CurtainShowPatch.Prefix suppresses the Loaded→Playing auto-lift and CurtainLiftGatePatch
-        // parks every lift — and re-issues it from PerformDeferredLift. Any run where the re-issued lift never
-        // reaches its tail (stopped by a competing _currentFadingRoutine?.Stop(), or completing before
-        // InitView:340 re-applies the lock) latches the override forever, and the failure is SILENT:
-        // InputController.SetInputSets:520-527 applies a new set ONLY while no override is held, so every
-        // UIState*.EnterState SetInputState("VehicleSelected"/…) is stored and discarded. The world still
-        // renders at full fps (PauseObjectRendering is cleared at LiftCurtainCrt:108, BEFORE the yield) with
-        // zero exceptions — camera and clicks simply dead. An edge we can lose must be held as a STATE, so
-        // converge on it every frame. Engine-scoped by construction: keyed on _revealed, which EVERY peer
-        // sets in PerformDeferredLift — no IsHost branch here or anywhere below it.
-        private static readonly System.Reflection.FieldInfo OverrideSetsField =
-            AccessTools.Field(typeof(InputController), "_overrideInputSets");
+        // The reveal machinery above REMOVES the game's only input-unlock edge; RevealInputLock puts it back
+        // and HOLDS it — see that file for the whole mechanism. This is only the reporting shell: the decision
+        // and the clear are level-agnostic and live on the game-scoped InputController, so ONE convergence
+        // loop covers the geoscape, tactical, the pre-view-state window and the geo→tac carry of a latch.
+        // Engine-scoped by construction: keyed on _revealed, which EVERY peer sets in PerformDeferredLift —
+        // no IsHost branch here or anywhere below it.
 
         // When the last reveal happened — lets the repair belt below distinguish the harmless
         // early-clear during the normal ~0.5 s lift fade from a genuinely LOST lift tail (metric).
@@ -1966,21 +1956,9 @@ namespace Multiplayer.Network
 
         private void RepairRevealInputLock()
         {
-            if (!_revealed) return;
             try
             {
-                var view = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.View;
-                // CurrentViewState non-null ⇒ the geoscape state machine is live, so the only legitimate
-                // holder of the loading-screen override is a lift still fading — and clearing a frame early
-                // there is harmless, it is exactly what that fade's own tail is about to do.
-                if (view == null || view.CurrentViewState == null || view.LoadingScreenInputSet == null) return;
-                var input = GameUtl.GameComponent<InputController>();
-                if (input == null || !input.HaveOverrideInput) return;
-                // Identity-checked: a MessageBox (MessageBoxPromptController:97) or cure-confirmation
-                // (UIModuleCureConfirmation:76) override is a DIFFERENT set and must never be cleared here.
-                if (!(OverrideSetsField?.GetValue(input) is InputSetDef[] active)) return;
-                if (Array.IndexOf(active, view.LoadingScreenInputSet) < 0) return;
-                input.ClearOverrideInputSet();
+                if (!RevealInputLock.Converge(_revealed)) return;
                 // METRIC: firing LATE (past any plausible lift fade) means a lift tail was lost DESPITE
                 // the parked-lift root fix in PerformDeferredLift — loud, so a regression is unmissable.
                 // An early clear within the fade window stays quiet (it is exactly what the fade's own
