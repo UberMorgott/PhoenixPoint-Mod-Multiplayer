@@ -255,6 +255,11 @@ namespace Multiplayer.UI
         {
             DropCurtainEarly();
             NativeWidgetFactory.BeginDownloadBar(label);
+            // 0x48 now also announces the LOBBY seams (host PLAY press, new-campaign arm), where the lobby
+            // canvas sits on top of the native curtain and would leave the client looking at a live lobby
+            // while every other peer loads. Gated on IsVisible so this stays the no-op it always was in-game
+            // — HideForNativeScreen also runs RestoreMenuChrome, which has no business on a live geoscape.
+            if (_lobby?.IsVisible == true) _lobby.HideForNativeScreen();
         }
 
         /// <summary>Stage-3 hand-off: stop driving OUR bar so the native level-load bar + default label take
@@ -422,6 +427,9 @@ namespace Multiplayer.UI
                 _lobbyController.CancelStart();
                 HideLoadOverlay();
                 LiftCurtainEarly();
+                // …and the clients we curtained at the press must come back with us: LiftCurtainEarly is the
+                // HOST's screen only, and no save transfer will ever start to lift theirs.
+                NetworkEngine.Instance?.SaveTransfer?.BroadcastLoadBoundaryAbort("host start failed");
                 var failBox = GameUtl.GetMessageBox();
                 if (failBox != null)
                 {
@@ -438,6 +446,11 @@ namespace Multiplayer.UI
 
             if (_lobbyController.CommitStart())
             {
+                // THE ENTER HALF, at the seam where the boundary is DECIDED. DropCurtainEarly below is the
+                // HOST's own screen; on its own it is exactly the asymmetry the user reported — the host
+                // curtains at the press and every client keeps a live, clickable lobby until its first save
+                // byte lands. Broadcast-and-go: no ack, no quorum, the very next statement is our own load.
+                engine.SaveTransfer?.BroadcastLoadBoundaryBegin("lobby-play");
                 DropCurtainEarly();           // phase-1 looks like one seamless vanilla load
                 // NOTE: do NOT ShowLoadOverlay() here. The overlay visibility is fully state-driven
                 // (LoadOverlayController.Update → LoadOverlayVisibility.ShouldShow) and now gates on the

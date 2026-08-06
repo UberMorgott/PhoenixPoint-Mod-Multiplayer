@@ -213,6 +213,7 @@ namespace RailCheck
             laws.AddRange(L138_ClientWritableLeafHasAnIntentSeam.Check());
             laws.AddRange(L141_EveryPeerReachesTheSquadScreen.Check());
             laws.AddRange(L142_RevealLeavesNoInputLock.Check());
+            laws.AddRange(L143_EveryLoadBoundaryCurtainsEveryPeer.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

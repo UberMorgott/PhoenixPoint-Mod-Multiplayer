@@ -1050,7 +1050,14 @@ namespace Multiplayer.Network
         public void ArmNewCampaignBootstrap()
         {
             if (!_newCampaign.Armed)
+            {
                 _engine.Session?.SystemChat(NewCampaignCreatingNotice);
+                // THE ENTER HALF. A chat line is not a loading screen: everything after this call is native
+                // campaign creation on the HOST, which curtains alone, and the clients' only enter used to be
+                // the arrival of the first save byte (:1473-1475) — 11.4 s later in the 2026-08-06 session.
+                // Same instant, same arm edge, same idempotence as the notice above.
+                BroadcastLoadBoundaryBegin("new-campaign");
+            }
             _newCampaign.Arm();
             Debug.Log("[Multiplayer] New-campaign co-op bootstrap ARMED — native campaign creation " +
                       "runs on the host; transfer fires at the first playable geoscape frame.");
@@ -1065,6 +1072,9 @@ namespace Multiplayer.Network
         {
             if (!_newCampaign.Armed) return;
             _newCampaign.Disarm();
+            // The arm curtained every client; the disarm must un-curtain them, or a host that backs out of the
+            // native new-game settings leaves two peers on a loading screen for a campaign nobody is creating.
+            BroadcastLoadBoundaryAbort("host left the new-campaign flow");
             Debug.Log("[Multiplayer] New-campaign co-op bootstrap disarmed.");
         }
 
@@ -1317,8 +1327,62 @@ namespace Multiplayer.Network
             // "OnSaveChunk FIRST"). A peer that can still click for 13 s is not merely a UX complaint — it
             // is how a peer ends up INSIDE a sub-screen when its level is torn down, which is law L70's
             // blocker. So this broadcast is the preventive half of that fix, not decoration.
-            Debug.Log("[Multiplayer] tac-entry: broadcasting EntryTransferBegin — every peer curtains NOW.");
+            // Emitted INLINE and not through BroadcastLoadBoundaryBegin below: L71's `never-announced` arm
+            // (Program.cs:9222) asserts this seam by DIRECT callee (`Reaches` walks CalleeSequence, not the
+            // transitive graph), so hiding the send behind a helper would take that law down with it. Same
+            // packet, same instant, same meaning as the helper — L143 asserts the three seams together.
+            Debug.Log("[Multiplayer] load boundary (tac-entry): broadcasting EntryTransferBegin — every peer curtains NOW.");
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferBegin));
+        }
+
+        /// <summary>
+        /// HOST, the ENTER half of "everyone enters the loading screen at the same time and leaves it at the
+        /// same time". The LEAVE half is the reveal barrier (L94 arm (n)); this is its mirror, and it is the
+        /// SAME mechanism at every load boundary — <see cref="PacketType.EntryTransferBegin"/> (0x48), whose
+        /// body was already fully generic, only ever wired to the tactical entry.
+        ///
+        /// BROADCAST-AND-GO: there is no ack, no quorum and no wait of any kind here (postulate 2). The host
+        /// tells every peer to curtain and then curtains itself in the very next statement; a peer that is
+        /// gone leaves the ROSTER, and a peer that is merely slow is waited on by the EXISTING exit barrier
+        /// (<c>AllDone(GetRosterSlots())</c>) and by nothing added here.
+        ///
+        /// Call it at the instant the boundary is DECIDED, not when this peer's own bytes start moving — the
+        /// missing enters were exactly the two seams where the host's decision produced host-local work first:
+        /// the lobby PLAY press and the new-campaign arm. Measured cost of the gap in the 2026-08-06 session:
+        /// host curtained at 21:16:58.750, client only at 21:17:10.126 — 11.4 s of one screen loading alone.
+        /// </summary>
+        public void BroadcastLoadBoundaryBegin(string seam)
+        {
+            if (!_engine.IsHost) return;
+            // Law L71 — THE CURTAIN IS EVERYONE'S, and it falls when the LOAD starts, not when this peer's own
+            // bytes start arriving. A peer that can still click while another peer loads is not merely a UX
+            // complaint — it is how a peer ends up INSIDE a sub-screen when its level is torn down (law L70).
+            Debug.Log("[Multiplayer] load boundary (" + seam +
+                      "): broadcasting EntryTransferBegin — every peer curtains NOW.");
+            try { _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferBegin)); }
+            catch (Exception e) { Debug.LogError("[Multiplayer] EntryTransferBegin broadcast failed: " + e.Message); }
+        }
+
+        /// <summary>
+        /// HOST: the boundary announced by <see cref="BroadcastLoadBoundaryBegin"/> will never produce a load
+        /// (the start failed at the press, or the host backed out of the new-game flow). Take the curtain back
+        /// down on every peer over the EXISTING abort packet, whose client handler already un-curtains through
+        /// the RCA-hardened <c>PerformDeferredLift</c>.
+        ///
+        /// Deliberately NOT <see cref="AbortTacticalEntryTransfer"/>: that one also tears down a barrier and
+        /// self-reveals, and at these two seams no barrier was ever opened — there is nothing to close and
+        /// lifting a curtain the host itself never held would be a second bug.
+        /// </summary>
+        public void BroadcastLoadBoundaryAbort(string reason)
+        {
+            if (!_engine.IsHost) return;
+            Debug.LogWarning("[Multiplayer] load boundary ABORT (" + reason + ") — every peer un-curtains.");
+            try
+            {
+                _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferAbort,
+                    MessageSerializer.SerializeEntryTransferAbort(reason)));
+            }
+            catch (Exception e) { Debug.LogError("[Multiplayer] EntryTransferAbort broadcast failed: " + e.Message); }
         }
 
         /// <summary>
@@ -1340,15 +1404,20 @@ namespace Multiplayer.Network
         {
             if (_engine.IsHost) return;   // the host ignores its own broadcast (0x47 does the same)
             if (_downloadCurtain) return; // already curtained (duplicate delivery / a transfer in flight)
-            Debug.Log("[Multiplayer] tac-entry BEGUN on the host — dropping the curtain now (no bytes yet).");
+            Debug.Log("[Multiplayer] load boundary BEGUN on the host — dropping the curtain now (no bytes yet).");
             _downloadCurtain = true;
             _rxStarted = false;   // (a): the curtain is up and NOT one byte has been sent yet
             // The client half of the host's reset above: our tracker still carries the LAST load's
             // terminal (1,100) for slot 0, and Merge would reject every phase-0 host sample against it —
             // the bar would read 100% before the host had loaded a thing.
             _tracker.Reset();
-            Multiplayer.UI.MultiplayerUI.Instance?.EnterTacLoadCurtain("Waiting for host…");
+            Multiplayer.UI.MultiplayerUI.Instance?.EnterTacLoadCurtain(LoadBoundaryWaitLabel);
         }
+
+        /// <summary>The label every 0x48 curtain wears, whatever boundary raised it. Deliberately says nothing
+        /// about a battle: the same packet now announces the lobby PLAY press and the new-campaign arm, and
+        /// "the host is working, you are waiting" is the one true statement at all three.</summary>
+        public const string LoadBoundaryWaitLabel = "Waiting for host…";
 
         /// <summary>
         /// Tactical→geoscape RETURN barrier: re-arm the synchronized-reveal hold on THIS peer at tactical
