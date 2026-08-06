@@ -28,6 +28,15 @@ namespace Multiplayer.Transport
         void Send(ulong peerId, byte[] data, bool reliable = true);
         void Broadcast(byte[] data, bool reliable = true);
 
+        // WILL A BROADCAST REACH THIS PEER? Every transport keeps a peer set that Broadcast iterates
+        // (SteamTransport._connectedPeers, DirectTransport._clients, StunTransport._peers, and the
+        // Composite's outward map on top of them), while Send/unicast does NOT consult it. Those two
+        // reaches drifting apart is invisible from outside — a peer got its unicast accept and then
+        // waited forever for the broadcast-only PEER_LIST, which is precisely the shape of the bug this
+        // predicate exists to make visible (see SteamTransport.Update's registration comment). It answers
+        // the OUTCOME, not the storage: "if I Broadcast right now, does this peer get the bytes".
+        bool CanReach(ulong peerId);
+
         // Drop ONE peer (heartbeat timeout / graceful leave): close its session/socket AND remove it
         // from the transport's peer set so Send/Broadcast stop writing to the dead id. Returns true if
         // the peer was known — an OnPeerDisconnected raise follows (inline, or on the next Update for

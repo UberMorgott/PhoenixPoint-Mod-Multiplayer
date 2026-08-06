@@ -362,6 +362,12 @@ namespace Multiplayer.Transport
             if (peer != null) EnqueueFrame(peer, data);
         }
 
+        // Same set Broadcast fans out to (_clients), so it answers the real reach.
+        public bool CanReach(ulong peerId)
+        {
+            lock (_lock) { return _clients.ContainsKey(peerId); }
+        }
+
         public void Broadcast(byte[] data, bool reliable = true)
         {
             List<Peer> peers;

@@ -971,8 +971,32 @@ namespace Multiplayer.Network
         {
             if (!_peerListDirty || !_engine.IsHost) return;
             _peerListDirty = false;
-            var payload = MessageSerializer.SerializePeerList(BuildPeerList());
+            var roster = BuildPeerList();
+            var payload = MessageSerializer.SerializePeerList(roster);
             _engine.BroadcastToAll(new NetworkMessage(PacketType.PlayerListUpdate, payload));
+
+            // NEVER-SILENT FAN-OUT. PEER_LIST is the one message a joiner cannot do without — it is what
+            // ends its "Connecting…" box — and it travels by BROADCAST only. A peer the session has a
+            // roster row for but the TRANSPORT will not broadcast to therefore waits forever, and until
+            // this line existed that happened without a single log entry on either side: the host saw a
+            // normal join, the joiner saw nothing at all. Coalesced to one flush per frame (see
+            // _peerListDirty), and only ever on a roster CHANGE, so this is not per-packet spam.
+            var transport = _engine.Transport;
+            var recipients = new List<string>();
+            var unreachable = new List<string>();
+            foreach (var id in _clients.Keys)
+            {
+                recipients.Add(id.ToString());
+                if (transport == null || !transport.CanReach(id)) unreachable.Add(id.ToString());
+            }
+            Debug.Log($"[Multiplayer] PEER_LIST fan-out: {roster.Count} row(s) → {recipients.Count} peer(s) " +
+                      $"[{string.Join(",", recipients.ToArray())}]");
+            if (unreachable.Count > 0)
+                Debug.LogError($"[Multiplayer] PEER_LIST fan-out MISSES {unreachable.Count} roster peer(s) " +
+                               $"[{string.Join(",", unreachable.ToArray())}] — the " +
+                               $"transport will not broadcast to them, so they never get the roster and stay stuck " +
+                               $"on \"Connecting…\" until their heartbeat gives up. Unicast to them still works, " +
+                               $"which is why nothing else looks wrong.");
         }
 
         // Client receives the authoritative roster; mirror into local _clients map.

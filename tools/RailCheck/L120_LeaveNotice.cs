@@ -550,6 +550,7 @@ namespace RailCheck
             public void Disconnect() { }
             public void Send(ulong peerId, byte[] data, bool reliable = true) { }
             public void Broadcast(byte[] data, bool reliable = true) { }
+            public bool CanReach(ulong peerId) => true;
             public bool DisconnectPeer(ulong peerId) => true;
             public void Update() { }
 

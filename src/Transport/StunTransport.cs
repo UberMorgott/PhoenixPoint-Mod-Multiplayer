@@ -390,6 +390,12 @@ namespace Multiplayer.Transport
             }
         }
 
+        // Same set Broadcast fans out to (_peers), so it answers the real reach.
+        public bool CanReach(ulong peerId)
+        {
+            lock (_lock) { return _peers.ContainsKey(peerId); }
+        }
+
         public void Broadcast(byte[] data, bool reliable = true)
         {
             lock (_lock)

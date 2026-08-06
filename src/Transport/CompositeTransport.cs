@@ -259,6 +259,21 @@ namespace Multiplayer.Transport
             }
         }
 
+        // Broadcast delegates to the CHILDREN, so the composite's own mapping proves nothing about reach:
+        // the authority is the owning child's peer set. Resolve the outward id to (child, rawId) — the
+        // same lookup Send uses — and ask the child. An unmapped outward id is unreachable by definition.
+        public bool CanReach(ulong peerId)
+        {
+            ITransport child;
+            ulong rawId;
+            lock (_lock)
+            {
+                if (!_peerToChild.TryGetValue(peerId, out child)) return false;
+                rawId = _outwardToRaw[peerId];
+            }
+            return child.CanReach(rawId);
+        }
+
         // Per-peer kick: route to the owning child by outward id. The child's OnPeerDisconnected raise
         // funnels back through HandleChildDisconnected, which unmaps the peer and re-raises outward.
         public bool DisconnectPeer(ulong peerId)
@@ -296,7 +311,29 @@ namespace Multiplayer.Transport
         {
             // Normally the peer is already mapped (connect precedes packets). Lazily map
             // on the off chance a packet races ahead so the payload is never dropped.
+            bool wasMapped;
+            lock (_lock) { wasMapped = _rawToOutward[child].ContainsKey(rawId); }
             var outwardId = MapOrGet(child, rawId);
+
+            // DELIBERATELY NOT AN OnPeerConnected RAISE. It looks like the natural place for one — the
+            // peer is evidently there — but Broadcast delegates to the CHILD, and the child's own peer
+            // set is what it fans out to. Raising here would tell the session layer "peer connected", so
+            // it would build the roster row and unicast the accept, while the child below still could not
+            // broadcast to it. That is not a fix for this bug, it IS this bug: unicast reached the joiner
+            // and the broadcast-only PEER_LIST did not, and nothing said so. The invariant therefore lives
+            // in the child that owns the set (SteamTransport.Update registers on first packet,
+            // DirectTransport on accept, StunTransport by endpoint table) — and a lazy mint HERE now means
+            // a child broke it, so report it loudly instead of papering over it.
+            //
+            // Not a false positive on a leaver's trailing packets: HandleChildDisconnected keeps the
+            // reverse (rawId → outwardId) entry alive on purpose, so those stay mapped and stay quiet.
+            if (!wasMapped)
+                LogError($"[Multiplayer] CompositeTransport: packet from an UNANNOUNCED peer on " +
+                         $"{child.TransportType} (raw {rawId}) — minted outward id {outwardId} to deliver it, " +
+                         $"but that child never raised OnPeerConnected for it, so its Broadcast may not " +
+                         $"reach this peer (unicast would still work — the exact split that hides as a " +
+                         $"client stuck on \"Connecting…\").");
+
             OnPacketReceived?.Invoke(outwardId, data);
         }
 

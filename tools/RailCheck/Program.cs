@@ -208,6 +208,7 @@ namespace RailCheck
             laws.AddRange(L133_MirroredAbilityTerminates.Check());
             laws.AddRange(L134_BootstrapSpentOnlyByAnOutcome.Check());
             laws.AddRange(L135_OneProducerPerMirroredWindow.Check(game));
+            laws.AddRange(L136_RosterPeerIsBroadcastable.Check());
             laws.AddRange(L137_AbilityTraitSetIsRailed.Check());
             laws.Sort(StringComparer.Ordinal);
 

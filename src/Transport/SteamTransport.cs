@@ -44,6 +44,9 @@ namespace Multiplayer.Transport
         // (RemoveClient → BroadcastPeerList → nested Broadcast) never re-enters from inside a send loop.
         // Mirrors Direct/Stun's _peerEventQueue marshaling.
         private readonly List<ulong> _pendingSendFailureDrops = new List<ulong>();
+        // One-shot log gate for CLIENT-side senders that are not the dialed host (see Update's drain
+        // loop). Keyed by SteamId so a stranger spraying packets costs one line, not one per packet.
+        private readonly HashSet<ulong> _unregisteredSendersLogged = new HashSet<ulong>();
         // Grace before CloseP2PSessionWithUser after a terminal send: Steam DISCARDS queued
         // not-yet-sent reliable packets on session close, so an immediate close right after a
         // SendHostDisconnected / ConnectionRejected silently ate the notice and the peer only found
@@ -431,6 +434,10 @@ namespace Multiplayer.Transport
             SendPacket(peerId, data, reliable);
         }
 
+        // Answers from the EXACT set Broadcast iterates below — that is the whole point (L136 arm (c)
+        // pins the two to the same field, so this can never become a comforting lie).
+        public bool CanReach(ulong peerId) => _connectedPeers.Contains(peerId);
+
         public void Broadcast(byte[] data, bool reliable = true)
         {
             // Snapshot: SendPacket → RegisterSendFailure removes a dead peer from _connectedPeers
@@ -466,6 +473,63 @@ namespace Multiplayer.Transport
             while (_incomingQueue.Count > 0)
             {
                 var (steamId, data) = _incomingQueue.Dequeue();
+
+                // ─── THE PEER REGISTRATION STEAM NEVER GIVES US ───────────────────────────────
+                //
+                // OnP2PSessionRequest is EDGE-triggered: Steam raises it only when NO P2P session with
+                // that SteamId exists yet, and the session is PROCESS-global — it outlives our transport.
+                // So on any RETRY with the same SteamId (a rejoin after a failed attempt, i.e. exactly
+                // what a beta user does) the callback never fires again, OnSessionRequest below never
+                // runs, and _connectedPeers — which until now was written ONLY by Connect() and
+                // OnSessionRequest — never learns the peer exists.
+                //
+                // The peer is not silent, though: its packets arrive right here, and every UNICAST reply
+                // reaches it, because Send/SendPacket do not consult _connectedPeers. Broadcast does
+                // (see the loop above). That split is the whole bug: the host accepted the JOIN and
+                // unicast the acceptance, then BroadcastPeerList → FlushPeerList → BroadcastToAll
+                // silently skipped the joiner — and PEER_LIST is the ONLY thing that ends the client's
+                // "Connecting…" box (MultiplayerUI.Update). No exception, no dropped packet, no log line:
+                // the joiner just waited out its heartbeat and left.
+                //
+                // THE INVARIANT, and it is transport-wide rather than a Steam special case: ANY PEER WE
+                // HAVE EVER RECEIVED A PACKET FROM IS A KNOWN PEER. DirectTransport upholds it via
+                // accept(), StunTransport via its endpoint table (it discards packets from endpoints it
+                // has not registered); Steam's shared per-process read queue is the one place that can
+                // hand us bytes from a peer we never registered, so this is where it has to be closed.
+                //
+                // HOST/CLIENT ASYMMETRY — deliberately the SAME predicate as OnSessionRequest's guard
+                // below: a HOST may learn a peer from its packets, a CLIENT may not. A client's only
+                // legitimate peer is the host it DIALED, and every peer in the session knows our SteamId
+                // (PEER_LIST broadcasts it), so registering an arbitrary sender would hand
+                // NetworkEngine's client OnPeerConnected a stranger to re-point the host link at
+                // (SetHostPeer + JOIN). Packet DELIVERY is unchanged on both sides — only registration
+                // is gated.
+                if (IsHost || steamId == _dialedHost)
+                {
+                    // Raised BEFORE the packet on purpose, so the session layer holds the peer's roster
+                    // row before it parses the JOIN riding in this very packet — the "connect precedes
+                    // packets" ordering Direct/Stun get for free from their peer-event queues.
+                    // HashSet.Add gates this to ONCE per peer, so the downstream one-shots stay one-shot:
+                    // SessionManager.AddClient (itself ContainsKey-guarded), the SteamLobbySetJoinable
+                    // advertising toggle, and BroadcastPeerList (which only marks a dirty flag that
+                    // FlushPeerList collapses to one roster per frame) cannot double-fire.
+                    if (_connectedPeers.Add(steamId))
+                    {
+                        UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport: packet from UNREGISTERED peer " +
+                                                     $"{steamId} — no P2P session-request fired for it (stale " +
+                                                     $"process-global Steam session, typical on a retry). " +
+                                                     $"Registering it now so Broadcast reaches it too.");
+                        OnPeerConnected?.Invoke(steamId, $"Steam({steamId})");
+                    }
+                }
+                else if (_unregisteredSendersLogged.Add(steamId))
+                {
+                    // Never-silent, once per stranger: this is the client half of the same invisible event.
+                    UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport(client): packet from {steamId}, " +
+                                                 $"which is not the dialed host ({_dialedHost}) — NOT registering " +
+                                                 $"it as a peer (host-link hijack guard).");
+                }
+
                 OnPacketReceived?.Invoke(steamId, data);
             }
 
