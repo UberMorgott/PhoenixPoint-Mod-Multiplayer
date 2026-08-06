@@ -1016,9 +1016,10 @@ namespace Multiplayer.Network
         //  geoscape frame, then autosave + the SAME chunked transfer + 2-phase barrier as any start
         // ══════════════════════════════════════════════════════════════════
 
-        // Pure single-shot latch (Core, pinned by NewCampaignBootstrapTests): armed at the native
-        // new-game CONFIRM (NewCampaignInterceptPatch), consumed exactly once at the first playable
-        // geoscape frame (CurtainShowPatch "Playing" seam → OnNewCampaignPlayableFrame).
+        // Pure single-shot latch (Core, pinned EXECUTED by RailCheck L134): armed at the native new-game
+        // CONFIRM (NewCampaignInterceptPatch), attempted at the geoscape-READY seam (GeoscapeReadyPatch →
+        // OnGeoscapeReady), and consumed by an OUTCOME — ConcludeNewCampaignBootstrap, never by an
+        // evaluation. A refused evaluation stays armed; a failed attempt says so out loud.
         private readonly NewCampaignBootstrap _newCampaign = new NewCampaignBootstrap();
 
         /// <summary>True while a host new-campaign bootstrap is armed (native confirm ran, geoscape
@@ -1056,17 +1057,47 @@ namespace Multiplayer.Network
             Debug.Log("[Multiplayer] New-campaign co-op bootstrap disarmed.");
         }
 
+        /// <summary>The lobby system-chat line clients see when the bootstrap could not be completed.</summary>
+        public const string NewCampaignFailedNotice =
+            "— the host could not start the new campaign; you are still in the lobby, the host can try again —";
+
         /// <summary>
-        /// CurtainShowPatch "Playing" seam: this peer just reached a playable frame. Single
-        /// consumption point of the armed bootstrap: on the first playable GEOSCAPE frame the latch
-        /// disarms and — when the fire guard is open (still host, session live, no transfer in
-        /// flight) — the host autosaves the freshly created campaign and feeds that autosave into the
-        /// EXISTING chunked transfer + LOADED/BEGIN barrier (LaunchTransfer), exactly like a lobby
-        /// start / F2 reload. Non-geoscape playable frames (a tutorial mission would be one — the
-        /// intercept forces the tutorial off; this is belt+braces) keep the latch armed until the
-        /// geoscape is reached. No-op on every peer that never armed (clients, single-player).
+        /// CurtainShowPatch "Playing" seam: this peer just reached a playable frame. THE BOOTSTRAP DOES
+        /// NOT FIRE HERE, and that is the whole fix. Level.State.Playing is the edge on which
+        /// GeoLevelController.OnLevelStart merely STARTS LevelCrt (GeoLevelController.cs:377-379 → :464):
+        /// not one line of it has run, so no faction sub-manager exists yet and AutosaveGame() throws
+        /// NullReferenceException in GeoAlienFaction.RecordExtendedInstanceData (AlienRaidManager is
+        /// constructed later, at GeoLevelController.cs:651-653 → GeoFaction.cs:418 → GeoAlienFaction.cs:246).
+        /// Worse, an autosave started here runs on the geoscape Timing INTERLEAVED with LevelCrt's whole
+        /// init block — the collection-modified exception that killed LevelCrt two seconds later.
+        ///
+        /// All this seam does now is ARM the liveness deadline; the attempt starts at
+        /// <see cref="OnGeoscapeReady"/>. No-op on every peer that never armed (clients, single-player).
         /// </summary>
         public void OnNewCampaignPlayableFrame()
+        {
+            if (!_newCampaign.Armed || _newCampaign.Firing) return;
+            if (!Sync.GeoRuntime.Instance.IsGeoscapeActive) return;
+            _newCampaign.NoteGeoscapeEntered(NowMs());
+            Debug.Log("[Multiplayer] New-campaign bootstrap: geoscape playable — waiting for the geoscape-ready " +
+                      "seam (ModManager.OnGeoscapeStart), deadline " + NewCampaignBootstrap.ReadyTimeoutMs + " ms.");
+        }
+
+        /// <summary>
+        /// THE geoscape-READY seam — the game's OWN "the geoscape is fully initialised" callback,
+        /// GeoLevelController.cs:757 (<c>ModManager.GetInstance().OnGeoscapeStart(this)</c>), the last line
+        /// of LevelCrt before it parks in its GameOverCheck loop (:762). Everything a savegame write walks
+        /// is already built by then: factions and their sub-managers (:651-661), the event + objective
+        /// systems (:655-657), the scanner history and Phoenixpedia (:672-673), the mission scheduler
+        /// (:682) and the view state (:735). No frame counting, no polling a hand-picked field, and it
+        /// stays correct however long a mod makes that init take — the game itself decides when it is done.
+        ///
+        /// Single START point of the armed bootstrap: when the fire guard is open (still host, session
+        /// live, no transfer in flight) the host autosaves the freshly created campaign and feeds that
+        /// autosave into the EXISTING chunked transfer + LOADED/BEGIN barrier (LaunchTransfer), exactly
+        /// like a lobby start / F2 reload. The latch is NOT consumed here — see NewCampaignBootstrap.
+        /// </summary>
+        public void OnGeoscapeReady()
         {
             if (!_newCampaign.Armed) return;
             bool geoscape = Sync.GeoRuntime.Instance.IsGeoscapeActive;
@@ -1075,20 +1106,59 @@ namespace Multiplayer.Network
             bool wasStarted = SessionStarted;
             if (!_newCampaign.TryFire(_engine.IsHost, _engine.IsActiveSession, geoscape, TransferActive))
             {
-                if (geoscape)
-                    Debug.LogWarning("[Multiplayer] New-campaign bootstrap reached the geoscape but the " +
-                                     "fire guard is closed (transfer in flight or session gone) — dropped.");
+                if (geoscape && !_newCampaign.Firing)
+                    Debug.LogWarning("[Multiplayer] New-campaign bootstrap reached the READY seam but the " +
+                                     "fire guard is closed (transfer in flight or session gone) — still armed; " +
+                                     "the liveness deadline releases everyone if it never opens.");
                 return;
             }
 
             PhoenixGame game;
             PhoenixSaveManager saveManager;
-            if (!TryGetGame(out game, out saveManager)) return;
-            var timing = GetTiming();
-            if (timing == null) return;
+            var timing = TryGetGame(out game, out saveManager) ? GetTiming() : null;
+            if (timing == null)
+            {
+                ConcludeNewCampaignBootstrap("the game's SaveManager/Timing could not be resolved at the " +
+                                             "geoscape-ready seam");
+                return;
+            }
 
-            Debug.Log("[Multiplayer] New-campaign bootstrap: first playable geoscape frame → autosave + transfer.");
+            Debug.Log("[Multiplayer] New-campaign bootstrap: geoscape READY → autosave + transfer.");
             timing.Start(NewCampaignAutosaveAndTransferCrt(saveManager, reseedAfterReveal: wasStarted));
+        }
+
+        // Host liveness backstop, pumped from Update: the geoscape reached a playable frame but never
+        // reported ready (a mod threw inside LevelCrt, the level was torn down mid-init, …). Postulate 2
+        // forbids a permanent wait, so the deadline concludes the bootstrap out loud instead.
+        private void PumpNewCampaignWatchdog()
+        {
+            if (!_newCampaign.ReadyWaitExpired(NowMs())) return;
+            ConcludeNewCampaignBootstrap("the geoscape never reported ready (ModManager.OnGeoscapeStart) " +
+                                         "within " + NewCampaignBootstrap.ReadyTimeoutMs +
+                                         " ms of its playable frame");
+        }
+
+        /// <summary>
+        /// THE one place the bootstrap's single shot is spent — on the launch and on every failure path
+        /// alike. NO SILENT SWALLOW (this repo's dominant bug class): a failure is an ERROR line naming the
+        /// real cause, a notice to the clients on the SAME system-chat rail that told them the campaign was
+        /// being created, and — stated as evidence, not assumed — the host's own curtain gate, which holds
+        /// only while a session is STARTED and un-revealed and is therefore already open on every path that
+        /// gets here (no barrier was opened: LaunchTransfer either never ran or restored the flags it
+        /// touched). The host stays playable solo; the clients stay in an unlocked lobby.
+        /// </summary>
+        private void ConcludeNewCampaignBootstrap(string failure)
+        {
+            _newCampaign.Conclude();
+            if (failure == null)
+            {
+                Debug.Log("[Multiplayer] New-campaign bootstrap concluded: transfer launched.");
+                return;
+            }
+            Debug.LogError("[Multiplayer] New-campaign co-op bootstrap FAILED: " + failure +
+                           " — no transfer was launched. Host continues solo (curtain gate: " +
+                           Multiplayer.Harmony.CurtainTakedownGate.State() + "); clients told over system chat.");
+            _engine.Session?.SystemChat(NewCampaignFailedNotice);
         }
 
         // Coroutine: autosave the freshly created campaign (AutosaveGame, the game's own state-capture
@@ -1100,44 +1170,57 @@ namespace Multiplayer.Network
         // starts from the byte-identical autosave. reseedAfterReveal: only the mid-session second
         // fresh campaign arms the rca-4 post-reveal re-seed; on a lobby FIRST start the transferred
         // save itself is the seed (same rule as HostStartSession vs HostStartSessionInGame).
+        // SINGLE EXIT BY CONSTRUCTION. Every former `yield break` is now a `failure` string that falls
+        // through to the ONE ConcludeNewCampaignBootstrap call at the bottom, and the whole non-yielding
+        // tail sits in a try/catch — because the defect this fixes was not the autosave throwing, it was
+        // an exit path that spent the one shot and told nobody. There is no yield after the CallSafe, so
+        // the try/catch is legal C# here and covers a LaunchTransfer that throws as well.
         private IEnumerator<NextUpdate> NewCampaignAutosaveAndTransferCrt(
             PhoenixSaveManager saveManager, bool reseedAfterReveal)
         {
             var oldAutoSave = saveManager.AutoSave;
             var ex = new ByRef<Exception>();
             yield return Timing.Current.CallSafe(saveManager.AutosaveGame(), ex);
-            if (ex.Value != null)
-            {
-                Debug.LogError("[Multiplayer] New-campaign bootstrap: autosave capture failed: " + ex.Value.Message);
-                yield break;
-            }
 
-            var meta = saveManager.AutoSave;
-            if (!SessionLifecycle.FreshAutosaveCaptured(oldAutoSave, meta))
+            string failure = null;
+            try
             {
-                Debug.LogError("[Multiplayer] New-campaign bootstrap: no fresh autosave captured (write " +
-                               "failure?) — clients were NOT started; use CHOOSE SAVE with a manual save instead.");
-                yield break;
+                var meta = saveManager.AutoSave;
+                if (ex.Value != null)
+                {
+                    failure = "autosave capture failed: " + ex.Value;
+                }
+                else if (!SessionLifecycle.FreshAutosaveCaptured(oldAutoSave, meta))
+                {
+                    failure = "no fresh autosave was captured (write failure?) — use CHOOSE SAVE with a " +
+                              "manual save instead";
+                }
+                else
+                {
+                    // Same terminal-flag reset as HostStartSessionInGame: a mid-session second fresh campaign
+                    // re-runs the SAME barrier/reveal state machine; on a lobby first start these are already
+                    // false (no-op). OpenBarrier itself resets the per-run state per fresh barrier. Same
+                    // restore-on-failure too: a failed launch must not strand a mid-session host with
+                    // SessionStarted==false inside a live co-op level.
+                    bool wasBegun = _begun, wasLoadComplete = _loadCompleteSent, wasRevealAll = _revealAllSent;
+                    _begun = false;
+                    _loadCompleteSent = false;
+                    _revealAllSent = false;
+                    if (!LaunchTransfer(meta))
+                    {
+                        _begun = wasBegun;
+                        _loadCompleteSent = wasLoadComplete;
+                        _revealAllSent = wasRevealAll;
+                        failure = "the transfer launch was refused (see the prior log line)";
+                    }
+                    else if (reseedAfterReveal) _reseedGate.Arm();
+                }
             }
-
-            // Same terminal-flag reset as HostStartSessionInGame: a mid-session second fresh campaign
-            // re-runs the SAME barrier/reveal state machine; on a lobby first start these are already
-            // false (no-op). OpenBarrier itself resets the per-run state per fresh barrier. Same
-            // restore-on-failure too: a failed launch must not strand a mid-session host with
-            // SessionStarted==false inside a live co-op level.
-            bool wasBegun = _begun, wasLoadComplete = _loadCompleteSent, wasRevealAll = _revealAllSent;
-            _begun = false;
-            _loadCompleteSent = false;
-            _revealAllSent = false;
-            if (!LaunchTransfer(meta))
+            catch (Exception e)
             {
-                _begun = wasBegun;
-                _loadCompleteSent = wasLoadComplete;
-                _revealAllSent = wasRevealAll;
-                Debug.LogError("[Multiplayer] New-campaign bootstrap: transfer launch failed (see prior log).");
-                yield break;
+                failure = "unexpected exception after the autosave: " + e;
             }
-            if (reseedAfterReveal) _reseedGate.Arm();
+            ConcludeNewCampaignBootstrap(failure);
         }
 
         private void OpenBarrier()
@@ -2131,7 +2214,7 @@ namespace Multiplayer.Network
             // Host: keep handing the start blob out, a few peers at a time (see PumpBlobQueue), and
             // serve anyone who joined at a moment we could not onboard them. Both are cheap no-ops once
             // there is nothing left to hand out.
-            if (_engine.IsHost) { PumpBlobQueue(); PumpDeferredJoins(); }
+            if (_engine.IsHost) { PumpBlobQueue(); PumpDeferredJoins(); PumpNewCampaignWatchdog(); }
 
             // Phase-1 (download) native bottom-bar driver — client only. While the save blob is arriving,
             // feed the game's own loading-screen bar the exact download fraction so it fills 0..100% under

@@ -206,6 +206,7 @@ namespace RailCheck
             laws.AddRange(L131_StatusSetIsRailed.Check());
             laws.AddRange(L132_ChosenTargetIsOffered.Check());
             laws.AddRange(L133_MirroredAbilityTerminates.Check());
+            laws.AddRange(L134_BootstrapSpentOnlyByAnOutcome.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

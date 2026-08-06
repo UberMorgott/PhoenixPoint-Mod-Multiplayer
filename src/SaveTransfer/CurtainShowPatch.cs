@@ -12,7 +12,8 @@ namespace Multiplayer.Harmony
     /// Presentation seam on the native curtain (LevelSwitchCurtainController.OnLevelStateChanged),
     /// ported from the quarry. Drives the SaveTransferCoordinator barrier machinery:
     /// Loading → SetLoadingLevel(level) (phase-2 pump source); Playing/Loaded → SetLoadingLevel(null);
-    /// Playing → OnNewCampaignPlayableFrame() (P0 bootstrap consume) + OnReachedPlaying() (hold +
+    /// Playing → OnNewCampaignPlayableFrame() (P0 bootstrap LIVENESS deadline only — the bootstrap itself
+    /// fires at the geoscape-ready seam, GeoscapeReadyPatch) + OnReachedPlaying() (hold +
     /// LoadComplete). Overlay visibility is NOT driven here — LoadOverlayController.Update is
     /// state-driven per frame. Type resolved dynamically (no hard ref to the controller).
     /// </summary>
@@ -82,8 +83,9 @@ namespace Multiplayer.Harmony
 
                 if (state == "Playing")
                 {
-                    // P0 new-campaign bootstrap: no-op unless the HOST armed it at the native
-                    // new-game confirm; consumed at the first playable GEOSCAPE frame.
+                    // P0 new-campaign bootstrap: no-op unless the HOST armed it at the native new-game
+                    // confirm. Arms the liveness deadline ONLY — a fresh campaign is not save-able at
+                    // this edge (LevelCrt has not run); GeoscapeReadyPatch is where it fires.
                     coord.OnNewCampaignPlayableFrame();
 
                     if (coord.SessionStarted)

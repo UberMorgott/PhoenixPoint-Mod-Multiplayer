@@ -9,6 +9,7 @@ using PhoenixPoint.Common.Game;
 using PhoenixPoint.Common.Levels;
 using PhoenixPoint.Common.Levels.Params;
 using PhoenixPoint.Home.View.ViewStates;
+using PhoenixPoint.Modding;
 using UnityEngine;
 
 namespace Multiplayer.Harmony
@@ -30,8 +31,8 @@ namespace Multiplayer.Harmony
     ///
     /// BOOTSTRAP: the confirm prefix below ARMS <see cref="SaveTransferCoordinator.ArmNewCampaignBootstrap"/>
     /// (durable gate — fires whether the host reached the screen via the lobby's NEW CAMPAIGN button or
-    /// any other native route) and lets the NATIVE campaign creation run. When the new campaign reaches
-    /// its first playable GEOSCAPE frame (CurtainShowPatch "Playing" seam), the coordinator autosaves
+    /// any other native route) and lets the NATIVE campaign creation run. When the new campaign's geoscape
+    /// reports itself READY (<see cref="GeoscapeReadyPatch"/> below), the coordinator autosaves
     /// (AutosaveGame — the established P1 join state-capture path) and feeds that autosave into the
     /// EXISTING chunked transfer + 2-phase barrier, so every peer — host included — loads the
     /// byte-identical campaign start. Clients meanwhile wait in the lobby (a system-chat notice tells
@@ -214,6 +215,38 @@ namespace Multiplayer.Harmony
             {
                 Debug.LogError("[Multiplayer] OpenNativeNewGameScreen failed: " + e.Message);
                 return false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// THE GEOSCAPE-READY SEAM. The bootstrap used to fire at the curtain's Loaded→Playing edge, and that
+    /// edge is not readiness — it is the moment GeoLevelController.OnLevelStart merely STARTS LevelCrt
+    /// (GeoLevelController.cs:377-379 → :464). At that instant the campaign has no faction sub-managers,
+    /// so the game's own AutosaveGame() dies in GeoAlienFaction.RecordExtendedInstanceData (AlienRaidManager
+    /// is built later, at :651-653 → GeoFaction.cs:418 → GeoAlienFaction.cs:246-251) and the save that was
+    /// supposed to become the co-op start never exists.
+    ///
+    /// <c>ModManager.OnGeoscapeStart</c> (GeoLevelController.cs:757) is the game's OWN answer to the same
+    /// question, and it is the LAST line of LevelCrt's init block before the level parks in its
+    /// GameOverCheck loop (:762) — every structure a savegame write walks is already built. It is the
+    /// modding API's geoscape-start callback, so it is also the one point that stays correct when another
+    /// mod makes that init slower or longer: no frame counts, no polled field, no guessing. Postfix (not
+    /// prefix) so any mod's own OnGeoscapeStart work is included in what gets captured.
+    ///
+    /// Fires on EVERY geoscape start, load and new campaign alike; the coordinator's latch makes it a
+    /// no-op unless the host armed a bootstrap.
+    /// </summary>
+    [HarmonyPatch(typeof(ModManager), "OnGeoscapeStart")]
+    public static class GeoscapeReadyPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix()
+        {
+            try { NetworkEngine.Instance?.SaveTransfer?.OnGeoscapeReady(); }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multiplayer] geoscape-ready seam failed: " + e.Message);
             }
         }
     }
