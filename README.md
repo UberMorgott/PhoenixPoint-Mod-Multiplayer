@@ -100,6 +100,12 @@ cd tools/RailCheck
 dotnet run -c Debug
 ```
 
+## Reporting a bug
+
+[Open an issue](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/issues/new/choose). The form asks for three things only: where it happened, what happened, and how to reproduce it. Everything else is optional, but a log and a save turn a guess into a fix.
+
+The mod writes its own log to `%USERPROFILE%\AppData\LocalLow\Snapshot Games Inc\Phoenix Point\Multiplayer\multiplayer.log`, rotated to `multiplayer-prev.log` on the next launch. Attach it from every player if you can: most sync bugs are only visible when the host's log and a client's log are read side by side.
+
 ## Architecture
 
 The technical deep dive lives in [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`docs/rail-baseline.txt`](docs/rail-baseline.txt).

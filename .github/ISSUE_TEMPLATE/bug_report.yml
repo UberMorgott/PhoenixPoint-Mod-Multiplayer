@@ -1,0 +1,160 @@
+name: Bug report
+description: Something broke in a co-op session. Только 3 поля обязательны, остальное по возможности.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Only three fields are required: **where**, **what happened**, **how to reproduce**.
+        Everything else is optional, but each extra piece makes the fix faster. Logs and a save
+        are the two that turn a guess into a fix.
+
+        Обязательны только три поля: **где**, **что случилось**, **как повторить**.
+        Остальное по желанию, но каждый пункт ускоряет починку. Лог и сейв важнее всего.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where did it happen? / Где это случилось?
+      options:
+        - Lobby (before the campaign loads) / Лобби
+        - Geoscape / Геоскейп
+        - Tactical mission / Тактика
+        - Loading, joining or save transfer / Загрузка, подключение, передача сейва
+        - Somewhere else / Другое
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened? / Что случилось?
+      description: What you expected, and what you got instead. Two lines are enough. / Что ожидали и что получили. Двух строк достаточно.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce / Как повторить
+      description: Numbered steps starting from loading the save. / Пронумерованные шаги, начиная с загрузки сейва.
+      placeholder: |
+        1. Host loads the save, one client joins by direct IP
+        2. Client opens the manufacturing screen
+        3. Host scraps an item
+        4. Client's list still shows the old item
+    validations:
+      required: true
+
+  - type: dropdown
+    id: role
+    attributes:
+      label: Were you the host or a client? / Вы были хостом или клиентом?
+      options:
+        - Host / Хост
+        - Client / Клиент
+        - Both sides saw it / Видели обе стороны
+        - Not sure / Не знаю
+    validations:
+      required: false
+
+  - type: dropdown
+    id: desync
+    attributes:
+      label: Did the other players see the same thing? / Другие игроки видели то же самое?
+      description: This single answer splits a local UI glitch from a broken sync rail. / Этот ответ отделяет локальный глюк интерфейса от поломки синхронизации.
+      options:
+        - "No: our screens showed different state / Нет, экраны показывали разное"
+        - "Yes: everyone saw the same thing / Да, все видели одно и то же"
+        - Did not check / Не проверял
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Логи
+      description: |
+        Drag the files into this box. **From every player if you can, host included**: most sync bugs
+        are only visible when the host's log and the client's log are read side by side.
+
+        Folder: `%USERPROFILE%\AppData\LocalLow\Snapshot Games Inc\Phoenix Point\`
+        - `Multiplayer\multiplayer.log` (mod log, this is the important one)
+        - `Multiplayer\multiplayer-prev.log` (previous run, if the game was restarted after the bug)
+        - `Player.log` (engine log, attach it too if the game crashed or froze)
+
+        Перетащите файлы сюда. **По возможности от каждого игрока, включая хоста**: большинство
+        багов синхронизации видно только при сравнении лога хоста и лога клиента.
+    validations:
+      required: false
+
+  - type: textarea
+    id: save
+    attributes:
+      label: Save file / Сейв
+      description: |
+        The save you were playing, zipped. `.zsav` files live in the same
+        `Snapshot Games Inc\Phoenix Point\` folder, in a store-specific subfolder.
+        A save that reproduces the bug is worth more than any description.
+
+        Сейв, на котором играли, в архиве. Файлы `.zsav` лежат в той же папке
+        `Snapshot Games Inc\Phoenix Point\`, в подпапке своего магазина.
+    validations:
+      required: false
+
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or video / Скриншоты или видео
+      description: Drag them in. For a visual bug a 10-second clip beats a page of text. / Перетащите сюда. Для визуального бага 10 секунд видео полезнее страницы текста.
+    validations:
+      required: false
+
+  - type: input
+    id: versions
+    attributes:
+      label: Versions / Версии
+      description: Mod version (from the release you downloaded), Phoenix Point version, TFTV version. / Версия мода, версия Phoenix Point, версия TFTV.
+      placeholder: "Multiplayer 0.9.4-beta, Phoenix Point 1.21, TFTV 1.x"
+    validations:
+      required: false
+
+  - type: textarea
+    id: mods
+    attributes:
+      label: Other mods / Остальные моды
+      description: Everything else that was enabled, with versions. All players must run the same set. / Всё остальное, что было включено, с версиями. У всех игроков набор должен совпадать.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often? / Как часто?
+      options:
+        - Every time / Каждый раз
+        - Sometimes / Иногда
+        - Happened once / Случилось один раз
+    validations:
+      required: false
+
+  - type: input
+    id: players
+    attributes:
+      label: How many players were in the session? / Сколько игроков было в сессии?
+      placeholder: "3"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: How were you connected? / Как подключались?
+      options:
+        - Steam invite / Приглашение Steam
+        - STUN invite code / Код приглашения STUN
+        - Direct IP or domain / Прямой IP или домен
+        - Not sure / Не знаю
+    validations:
+      required: false

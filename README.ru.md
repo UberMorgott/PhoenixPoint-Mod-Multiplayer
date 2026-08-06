@@ -100,6 +100,12 @@ cd tools/RailCheck
 dotnet run -c Debug
 ```
 
+## Как сообщить о баге
+
+[Создайте issue](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/issues/new/choose). Форма спрашивает всего три вещи: где случилось, что случилось и как повторить. Остальное необязательно, но лог и сейв превращают догадку в исправление.
+
+Мод пишет собственный лог в `%USERPROFILE%\AppData\LocalLow\Snapshot Games Inc\Phoenix Point\Multiplayer\multiplayer.log`, при следующем запуске он переименовывается в `multiplayer-prev.log`. Приложите его от каждого игрока, если можете: большинство багов синхронизации видно только при сравнении лога хоста и лога клиента.
+
 ## Архитектура
 
 Технические подробности: [`ARCHITECTURE.md`](ARCHITECTURE.md) и [`docs/rail-baseline.txt`](docs/rail-baseline.txt).
