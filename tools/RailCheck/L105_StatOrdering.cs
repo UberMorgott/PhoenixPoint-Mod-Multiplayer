@@ -100,7 +100,10 @@ namespace RailCheck
                 {
                     const int key = 4243;
                     int atArrival = (int)stamp.GetValue(null, null);
-                    queue.Invoke(null, new object[] { key, new Vector3(1f, 0f, 1f), 9f, 5f, false, new List<string>() });
+                    // Trailing args = the settle's carried sets (statuses, ability traits — L131/L137); this
+                    // arm is about the arrival STAMP, so both are empty.
+                    queue.Invoke(null, new object[] { key, new Vector3(1f, 0f, 1f), 9f, 5f, false,
+                                                      new List<string>(), new List<string>() });
                     var entry = pending[key];
                     var epoch = entry == null ? null : entry.GetType().GetField("Epoch", All);
                     if (epoch == null)

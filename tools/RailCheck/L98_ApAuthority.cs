@@ -280,8 +280,12 @@ namespace RailCheck
             try
             {
                 const int key = 4242;
-                queue.Invoke(null, new object[] { key, new Vector3(1f, 0f, 1f), 9f, 5f, false, new List<string>() });
-                queue.Invoke(null, new object[] { key, new Vector3(2f, 0f, 2f), 1f, 5f, false, new List<string>() });
+                // Trailing args are the settle's carried SETS (statuses, then ability traits — L131/L137).
+                // Both empty here: this arm is about which ENTRY survives, not what rides in it.
+                queue.Invoke(null, new object[] { key, new Vector3(1f, 0f, 1f), 9f, 5f, false,
+                                                  new List<string>(), new List<string>() });
+                queue.Invoke(null, new object[] { key, new Vector3(2f, 0f, 2f), 1f, 5f, false,
+                                                  new List<string>(), new List<string>() });
 
                 var entry = pending[key];
                 var ap = entry == null ? null : entry.GetType().GetField("Ap", AllMembers);

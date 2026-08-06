@@ -1083,6 +1083,18 @@ namespace Multiplayer.Tactical
             /// one actor's state AND it already sweeps every keyed live actor at the turn edge — so the set is
             /// re-asserted routinely instead of only when a peer notices a hole in the 0x84 stream.</summary>
             public List<string> Statuses;
+
+            /// <summary>The host's ABILITY-TRAIT set for that actor (<c>TacticalActor.AbilityTraits</c>:103).
+            /// The same argument as <see cref="Statuses"/>, for the field class that had it worse: "this
+            /// soldier's turn is over" is not a field at all but a trait — <c>TacticalActor</c>:198
+            /// <c>HasEndedTurn => HasAbilityTrait("terminal")</c>, written only by
+            /// <c>TacticalAbility.ApplyAbilityTraits</c>:915-919 as a side effect of replaying the ability.
+            /// So it rode NOTHING: a peer that ended a soldier's turn locally could not be corrected by any
+            /// host message, and a dropped or refused order left that soldier permanently actionable on the
+            /// other peers. Carried on the settle for the same two reasons the statuses are: it is already
+            /// the host's closer for one actor, and the turn-edge sweep re-asserts it for every keyed live
+            /// actor.</summary>
+            public List<string> Traits;
         }
 
         /// <summary>HOST: which peer's order started the ability an actor is currently executing — 0 = the
@@ -1549,10 +1561,11 @@ namespace Multiplayer.Tactical
             float ap = stats.ActionPoints;
             float wp = stats.WillPoints;
             var statuses = TacticalStatusSet.Collect(tacActor);
+            var traits = tacActor.AbilityTraits;   // Send runs writeBody synchronously; no copy needed
             Send(OpSettle, "settle " + tacActor.name + " @ " + Fmt(pos) + " ap=" + ap.ToString("0.##") +
                  " wp=" + wp.ToString("0.##") + (forced ? " FORCED" : ""), 0,
                  w => { w.Write(key); w.Write(pos.x); w.Write(pos.y); w.Write(pos.z); w.Write(ap); w.Write(wp);
-                        w.Write(forced); TacticalStatusSet.Write(w, statuses); });
+                        w.Write(forced); TacticalStatusSet.Write(w, statuses); WriteTraits(w, traits); });
         }
 
         /// <summary>A5 adds the HAS-TARGET flag, and it is not thrift: the codec writes mask 0 for a null
@@ -1568,6 +1581,59 @@ namespace Multiplayer.Tactical
             w.Write(abilityGuid);
             w.Write(target != null);
             if (target != null) TacAbilityTargetCodec.Write(w, target);
+        }
+
+        /// <summary>The trait codec. Plain strings and no key: a trait names nothing but itself, so unlike a
+        /// status it needs no resolution on the far side and cannot fail to rebuild. Always consumes its
+        /// bytes — the stream is shared with whatever follows it in the same message.</summary>
+        internal static void WriteTraits(BinaryWriter w, IList<string> traits)
+        {
+            w.Write(traits == null ? 0 : traits.Count);
+            if (traits == null) return;
+            foreach (var t in traits) w.Write(t ?? "");
+        }
+
+        internal static List<string> ReadTraits(BinaryReader r)
+        {
+            int n = r.ReadInt32();
+            var traits = new List<string>(n < 0 ? 0 : n);
+            for (int i = 0; i < n; i++) traits.Add(r.ReadString());
+            return traits;
+        }
+
+        /// <summary>Do these two trait lists say different things? <c>OrdinalIgnoreCase</c> because that is
+        /// the comparer the game's own readers use (<c>TacticalActor.HasAbilityTrait</c>:1330). Pure, so
+        /// RailCheck L137 can execute the reconcile OUTCOME rather than assert a call exists.</summary>
+        internal static bool TraitsDiffer(IList<string> local, IList<string> host)
+        {
+            if (local == null || host == null) return !ReferenceEquals(local, host);
+            if (local.Count != host.Count) return true;
+            for (int i = 0; i < local.Count; i++)
+                if (!string.Equals(local[i], host[i], StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        /// <summary>Make this actor's trait set BE the host's, through the game's OWN replace-set
+        /// (<c>TacticalActor.SetAbilityTraits</c>:1317 = <c>Clear</c> + <c>AddRange</c>). No plan and no
+        /// per-trait apply, unlike the status set: a trait is an inert string with no <c>OnApply</c>, so the
+        /// whole reconcile is the assignment. Silent when the two already agree — the turn-edge sweep settles
+        /// every keyed live actor and that is the overwhelmingly common case.</summary>
+        private static void ApplyTraits(TacticalActor actor, List<string> host)
+        {
+            if (actor == null || host == null) return;
+            var local = actor.AbilityTraits;
+            if (!TraitsDiffer(local, host)) return;
+            string was = local == null ? "" : string.Join(",", local.ToArray());
+            actor.SetAbilityTraits(host);
+            // Law 11 / postulate 1: HasEndedTurn gates the whole ability bar, and nothing native repaints it
+            // for a model change this peer did not click. The AP/WP comparator inside TacticalUiRepaint does
+            // not see a trait, so a settle that only hands a soldier back would leave him greyed out on the
+            // very screen that is watching him.
+            TacticalUiRepaint.MarkDirty();
+            Debug.LogWarning("[Multiplayer][tac] ability traits of " + actor.name + " reconciled at the host's " +
+                             "settle — [" + was + "] -> [" + string.Join(",", host.ToArray()) + "]. 'terminal' " +
+                             "in either list IS that soldier's turn (TacticalActor:198 HasEndedTurn), so a " +
+                             "difference here was a soldier one peer could still move and another could not.");
         }
 
         private static TacticalAbilityTarget ReadCommandTarget(BinaryReader r, List<string> unresolved) =>
@@ -1777,25 +1843,57 @@ namespace Multiplayer.Tactical
         {
             if (ability == null || chosen == null) return true;
             if (!DeclaresOwnTargets(ability.GetType())) return true;
-            try
+            // BOTH questions are properties of the two SETS, so both are asked at this altitude — see
+            // ChoiceIsOffered. Asking "is this a choice at all?" inside the loop body (where it used to live,
+            // in TargetMatches) means an ability that publishes NOTHING never asks it: the loop body never
+            // runs, and every order it ever sends is refused.
+            bool namesATarget = chosen.GetTargetActor() != null || chosen.HasPositionToApply;
+            bool published = false, matched = false;
+            if (namesATarget)
             {
-                foreach (var offered in ability.GetTargets())
+                try
                 {
-                    if (offered == null) continue;
-                    if (TargetMatches(offered.GetTargetActor(), offered.PositionToApply, offered.HasPositionToApply,
-                                      chosen.GetTargetActor(), chosen.PositionToApply, chosen.HasPositionToApply))
-                        return true;
+                    foreach (var offered in ability.GetTargets())
+                    {
+                        if (offered == null) continue;
+                        published = true;
+                        if (TargetMatches(offered.GetTargetActor(), offered.PositionToApply, offered.HasPositionToApply,
+                                          chosen.GetTargetActor(), chosen.PositionToApply, chosen.HasPositionToApply))
+                        { matched = true; break; }
+                    }
                 }
-                return false;
+                catch (Exception ex)
+                {
+                    Debug.LogError("[Multiplayer][tac] could not enumerate the targets of " +
+                                   (ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name) +
+                                   " to check the one a peer picked — the order is ACCEPTED on the game's own gate " +
+                                   "alone: " + ex);
+                    return true;
+                }
             }
-            catch (Exception ex)
-            {
-                Debug.LogError("[Multiplayer][tac] could not enumerate the targets of " +
-                               (ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name) +
-                               " to check the one a peer picked — the order is ACCEPTED on the game's own gate " +
-                               "alone: " + ex);
-                return true;
-            }
+            return ChoiceIsOffered(namesATarget, published, matched);
+        }
+
+        /// <summary>THE WHOLE VERDICT WITH THE ENUMERATION TAKEN OUT — pure, so RailCheck L132 executes the
+        /// OUTCOME an order is owed instead of asserting that a call to a gate exists (the gate below was
+        /// green for four days while it refused every overwatch a client ever sent).
+        ///
+        /// An empty offer set is NOT "the host offers nothing here, refuse". It means the ability publishes no
+        /// list at all, and there is then nothing to hold the order to — the game's own <c>GetDisabledState</c>
+        /// stays the only authority, exactly as for an ability that never overrides <c>GetTargets</c>. The
+        /// shipped instance is <c>OverwatchAbility.GetTargets</c>:42-45, a bare <c>yield break</c> whose
+        /// <c>HasValidTargets</c>:19 is hardcoded <c>true</c> — so the game itself does not read that
+        /// enumeration as a statement about validity, and neither may we. The trigger is STRUCTURAL, not
+        /// overwatch's: every ability that overrides <c>GetTargets</c> without publishing a free-aim choice —
+        /// shipped, modded or future — was refused identically, which is why the answer is here and not a
+        /// type in a skip list.
+        ///
+        /// The gate the law is FOR is the third line: an ability that DOES publish a list is held to it.</summary>
+        internal static bool ChoiceIsOffered(bool chosenNamesATarget, bool abilityPublishedAnyTarget, bool matched)
+        {
+            if (!chosenNamesATarget) return true;        // a direction, an inventory item, the actor itself
+            if (!abilityPublishedAnyTarget) return true; // no list to be held to
+            return matched;
         }
 
         private static readonly Dictionary<Type, bool> _declaresTargets = new Dictionary<Type, bool>();
@@ -2008,7 +2106,7 @@ namespace Multiplayer.Tactical
                     else if (op == OpSettle) QueueSettle(r.ReadInt32(),
                                                         new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
                                                         r.ReadSingle(), r.ReadSingle(), r.ReadBoolean(),
-                                                        TacticalStatusSet.Read(r));
+                                                        TacticalStatusSet.Read(r), ReadTraits(r));
                     else if (op == OpSelectEquipment) ApplySelectEquipment(r.ReadInt32(), r.ReadString());
                     else
                     {
@@ -2271,10 +2369,12 @@ namespace Multiplayer.Tactical
             return waitedFrames >= SettleHoldCeilingFrames;
         }
 
-        private static void QueueSettle(int key, Vector3 pos, float ap, float wp, bool forced, List<string> statuses)
+        private static void QueueSettle(int key, Vector3 pos, float ap, float wp, bool forced,
+                                        List<string> statuses, List<string> traits)
         {
             _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced,
-                                                Statuses = statuses, Epoch = TacticalDamageSync.StatEpoch };
+                                                Statuses = statuses, Traits = traits,
+                                                Epoch = TacticalDamageSync.StatEpoch };
         }
 
         /// <summary>The standing settle applier (driven from <c>SyncEngine.Tick</c>, client-only inside). A
@@ -2432,6 +2532,12 @@ namespace Multiplayer.Tactical
                 // as the tear that needed it, and it is the same line that heals a status lost to a dropped
                 // order or a refused one.
                 TacticalStatusSet.Reconcile(actor, Tlc(), s.Statuses, "the host's settle");
+                // AND THE TURN ITSELF. The same argument one line up, for the field the tear leaves in the
+                // worst state of all: the cancel above ends the mirrored ability wherever it stands, so the
+                // ApplyAbilityTraits its native run would have done never happens — and on the REFUSED path
+                // there was no host run to copy in the first place. Either way "this soldier has ended his
+                // turn" was decided locally and permanently. The host's list is the answer.
+                ApplyTraits(actor, s.Traits);
                 RefreshVisionTowards(actor);
             }
             Debug.Log("[Multiplayer][tac] CLIENT settled " + actor.name + " @ " + Fmt(s.Pos) +
