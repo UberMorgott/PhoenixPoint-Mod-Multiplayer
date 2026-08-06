@@ -172,6 +172,17 @@ namespace Multiplayer.Network
         // flag lets Begin() still fire (broadcast SessionBegin for the client) despite _begun being true.
         private bool _hostEntryHold;
 
+        // THE HOST HAS TOLD EVERY PEER TO WAIT, SO IT OWES THEM A NUMBER. Armed in
+        // BroadcastLoadBoundaryBegin — the ONE place a boundary is announced by helper — and cleared at the
+        // reveal / on the abort that takes the same curtain back down. _hostEntryHold covers only the
+        // tac-ENTRY boundary (OpenTacticalEntryBarrier sets it and emits 0x48 inline), so the other two
+        // seams the helper serves — the lobby PLAY press and the new-campaign arm — had no publish window at
+        // all: measured 2026-08-06, host announced at 22:25:13.567 and its first RosterProgress SEND was
+        // 22:25:27.734, 14.2 s in which every client's mirrored bar sat on BeginDownloadBar's 0f under
+        // "Host is loading…". This flag is that window; the disjunction in HostEntryLoad is what makes the
+        // publish rule "every announced boundary" instead of "one of them".
+        private bool _loadBoundaryAnnounced;
+
         // ─── rca-4: host post-reload full re-seed (once per F2 mid-session reload) ───
         // Armed ONLY when HostStartSessionInGame actually launches a reload transfer; consumed ONCE at the
         // RevealAll moment (HostReseedAfterReveal). The lobby FIRST start never arms it — the transferred
@@ -313,8 +324,16 @@ namespace Multiplayer.Network
         /// broadcast gate returned early. The host was radio-silent through its own load and every client
         /// stared at a bar nothing was driving. This is that window, and it ends the moment the curtain
         /// hands over (<see cref="LoadPhaseStarted"/> → false at Playing/Loaded).
+        ///
+        /// AND IT IS EVERY BOUNDARY, NOT ONE. <c>_hostEntryHold</c> is armed only by
+        /// <see cref="OpenTacticalEntryBarrier"/>, so the two seams that announce through
+        /// <see cref="BroadcastLoadBoundaryBegin"/> — the lobby PLAY press and the new-campaign arm — fell
+        /// outside this window and the host published nothing through them (see
+        /// <c>_loadBoundaryAnnounced</c> for the measurement). The disjunction is the whole fix: same pump,
+        /// same widget, same phase, one more way in.
         /// </summary>
-        private bool HostEntryLoad => _engine.IsHost && _hostEntryHold && LoadPhaseStarted;
+        private bool HostEntryLoad =>
+            _engine.IsHost && (_hostEntryHold || _loadBoundaryAnnounced) && LoadPhaseStarted;
 
         /// <summary>
         /// The phase number the host's own entry load publishes under — 0, never 1 and never 2.
@@ -1359,6 +1378,18 @@ namespace Multiplayer.Network
             // complaint — it is how a peer ends up INSIDE a sub-screen when its level is torn down (law L70).
             Debug.Log("[Multiplayer] load boundary (" + seam +
                       "): broadcasting EntryTransferBegin — every peer curtains NOW.");
+            // THE ANNOUNCEMENT AND THE PUBLISH WINDOW ARE THE SAME EVENT. Telling every peer to curtain and
+            // then saying nothing for the next 14 s is what put them on an empty bar; from here the phase-2
+            // pump samples the host's own native load and the snapshot gate lets it out (HostEntryLoad).
+            // The two resets are the client-side pair of OnEntryTransferBegin's _tracker.Reset(): Merge is
+            // monotone, so the PREVIOUS load's terminal (1,100) for this slot would reject every phase-0
+            // sample the pump is about to publish and the bar would read FULL from the first frame —
+            // L118 arm (c), which OpenTacticalEntryBarrier already obeys on its own path.
+            _loadBoundaryAnnounced = true;
+            _slotProgress.Clear();
+            _tracker.Reset();
+            _lastSnapshotMs = -1;
+            _lastReportedLoadPct = -1;
             try { _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferBegin)); }
             catch (Exception e) { Debug.LogError("[Multiplayer] EntryTransferBegin broadcast failed: " + e.Message); }
         }
@@ -1377,6 +1408,8 @@ namespace Multiplayer.Network
         {
             if (!_engine.IsHost) return;
             Debug.LogWarning("[Multiplayer] load boundary ABORT (" + reason + ") — every peer un-curtains.");
+            // The announced load will never happen, so the publish window it opened closes with it.
+            _loadBoundaryAnnounced = false;
             try
             {
                 _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferAbort,
@@ -1953,6 +1986,7 @@ namespace Multiplayer.Network
             _revealedAtMs = NowMs();
             _loadPhaseActive = false; // THE one release of the hold this flag names (see its declaration)
             _hostEntryHold = false; // Batch 2: reveal done → drop the entry-hold flag (next Begin re-guards on _begun)
+            _loadBoundaryAnnounced = false; // the announced boundary is over — close its publish window too
             // THE LATCH THAT SKIPPED THE NEXT BOUNDARY'S ARM. _barrierOpen used to be cleared ONLY by
             // Begin() and AbortTacticalEntryTransfer, so any reveal reached without Begin() having run left
             // it stuck true — and OpenReturnBarrier's own guard reads it, so EVERY later boundary silently

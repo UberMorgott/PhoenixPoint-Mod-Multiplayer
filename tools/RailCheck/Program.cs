@@ -216,6 +216,7 @@ namespace RailCheck
             laws.AddRange(L141_EveryPeerReachesTheSquadScreen.Check());
             laws.AddRange(L142_RevealLeavesNoInputLock.Check());
             laws.AddRange(L143_EveryLoadBoundaryCurtainsEveryPeer.Check());
+            laws.AddRange(L151_AnnouncedBoundaryPublishesProgress.Check());
             laws.AddRange(L144_QueuedSquadScreenIsServable.Check());
             laws.Sort(StringComparer.Ordinal);
 
