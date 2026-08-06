@@ -61,8 +61,6 @@ Instead of waiting for one person to finish their turn, everyone can move, shoot
   - Steam Workshop: https://steamcommunity.com/sharedfiles/filedetails/?id=2872311902
   - Discord: https://discord.gg/Ypt5p5trNx
 - **All players need the same mods at the same versions and the same DLC entitlements.** A mismatch blocks the join.
-- **Player count:** the Steam invite lobby holds two, host plus one. Direct IP and STUN have no engine-side cap.
-- The mod cannot be safely disabled mid-session.
 
 You bring your own legally owned copy of Phoenix Point. This mod is built on Snapshot Games' official modding framework and ships no game code or assets. It is a fan project, not affiliated with, endorsed by, or supported by Snapshot Games.
 
