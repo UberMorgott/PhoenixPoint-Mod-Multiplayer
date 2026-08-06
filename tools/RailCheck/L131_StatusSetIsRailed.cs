@@ -38,11 +38,17 @@ namespace RailCheck
         private const BindingFlags All = BindingFlags.Public | BindingFlags.NonPublic |
                                          BindingFlags.Instance | BindingFlags.Static;
 
-        // Keys as the rail mints them: "<actorKeyTheStatusNames>@<statusDefName>".
-        private const string Mounted = "-7@MountedStatus_StatusDef";
-        private const string MountedElsewhere = "-9@MountedStatus_StatusDef";
-        private const string Panic = "0@Panic_StatusDef";
-        private const string Buff = "0@Rage_StatusDef";
+        // Keys as the rail mints them:
+        // "<actorKeyTheStatusNames>@<statusDefName>|<sourceDefName>" — the source joined the identity with
+        // L147 (a status rebuilt without the def it was applied FROM throws in its own OnApply/OnUnapply).
+        // Overwatch below is the case that drove it: two overwatch statuses from different weapons are NOT
+        // interchangeable, and the plan must not treat them as such.
+        private const string Mounted = "-7@MountedStatus_StatusDef|";
+        private const string MountedElsewhere = "-9@MountedStatus_StatusDef|";
+        private const string Panic = "0@Panic_StatusDef|";
+        private const string Buff = "0@Rage_StatusDef|";
+        private const string Overwatch = "0@Overwatch_StatusDef|PDW_WeaponDef";
+        private const string OverwatchOtherWeapon = "0@Overwatch_StatusDef|AssaultRifle_WeaponDef";
 
         internal static IEnumerable<string> Check()
         {
@@ -70,6 +76,8 @@ namespace RailCheck
             foreach (var v in Converges("mounted in the WRONG vehicle",
                                         new[] { MountedElsewhere }, new[] { Mounted })) yield return v;
             foreach (var v in Converges("stacks", new[] { Buff }, new[] { Buff, Buff })) yield return v;
+            foreach (var v in Converges("overwatch from the WRONG weapon",
+                                        new[] { OverwatchOtherWeapon }, new[] { Overwatch })) yield return v;
             foreach (var v in Converges("this peer is empty", new string[0], new[] { Panic, Mounted })) yield return v;
             foreach (var v in Converges("the host is empty", new[] { Panic, Mounted }, new string[0])) yield return v;
 
@@ -91,7 +99,7 @@ namespace RailCheck
 
             // ── (b) the codec: what the host wrote is what the peer reads ────
             {
-                var sent = new List<string> { Mounted, Panic, Buff };
+                var sent = new List<string> { Mounted, Panic, Buff, Overwatch };
                 List<string> got = null;
                 string threw = null;
                 try

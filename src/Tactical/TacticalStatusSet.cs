@@ -6,7 +6,11 @@ using System.Reflection;
 using Base.Core;
 using Base.Defs;
 using Base.Entities.Statuses;
+using HarmonyLib;
+using Multiplayer.Network;
+using Multiplayer.Network.Sync;
 using PhoenixPoint.Tactical.Entities;
+using PhoenixPoint.Tactical.Entities.Statuses;
 using PhoenixPoint.Tactical.Levels;
 using UnityEngine;
 
@@ -57,21 +61,38 @@ namespace Multiplayer.Tactical
 
         // ─── the key ───────────────────────────────────────────────────────
 
-        /// <summary>The stable identity of one applied status: its def NAME plus the actor it names (0 = it
-        /// names none). Two statuses with the same pair are interchangeable, which is what makes the plan a
-        /// multiset comparison rather than an instance one.</summary>
-        internal static string Key(string defName, int refKey) =>
-            refKey.ToString(CultureInfo.InvariantCulture) + "@" + (defName ?? "");
+        /// <summary>The stable identity of one applied status: its def NAME, the actor it names (0 = it names
+        /// none) and its SOURCE def name ("" = its source is not a def, or it has none). Two statuses with the
+        /// same triple are interchangeable, which is what makes the plan a multiset comparison rather than an
+        /// instance one.
+        ///
+        /// WHY THE SOURCE IS PART OF THE IDENTITY AND NOT A LOOSE FIELD. A status is applied by the game as
+        /// <c>ApplyStatus(def, source)</c> — <c>OverwatchAbility</c>:89 passes
+        /// <c>OverwatchWeapon.ItemDef</c> — and its own lifecycle READS that source back:
+        /// <c>OverwatchStatus.GetWeapon</c>:59-68 casts <c>Source</c> to a <c>WeaponDef</c> and looks the live
+        /// weapon up by it. A rebuilt status with a null source is not "the same status minus a detail", it is
+        /// a status whose <c>OnApply</c> AND <c>OnUnapply</c> both throw at <c>GetWeapon().Detached</c> — which
+        /// is the 2026-08-06 client log verbatim, three times. Carrying it in the key means the plan can never
+        /// call two differently-sourced statuses interchangeable, and both peers compute the name the same way
+        /// from the same def. NAME, never guid: TFTV mints defs at runtime with <c>Guid.NewGuid()</c> (L130).
+        /// A non-def source (an actor, a live equipment instance) is "" on EVERY peer, so it still matches
+        /// itself and nothing regresses — it is simply not rebuildable, exactly as before.</summary>
+        internal static string Key(string defName, int refKey, string sourceDefName) =>
+            refKey.ToString(CultureInfo.InvariantCulture) + "@" + (defName ?? "") + "|" + (sourceDefName ?? "");
 
-        private static bool Split(string key, out string defName, out int refKey)
+        private static bool Split(string key, out string defName, out int refKey, out string sourceDefName)
         {
-            defName = null; refKey = 0;
+            defName = null; refKey = 0; sourceDefName = "";
             if (string.IsNullOrEmpty(key)) return false;
             int at = key.IndexOf('@');
             if (at <= 0) return false;
             if (!int.TryParse(key.Substring(0, at), NumberStyles.Integer, CultureInfo.InvariantCulture, out refKey))
                 return false;
-            defName = key.Substring(at + 1);
+            string rest = key.Substring(at + 1);
+            int bar = rest.LastIndexOf('|');
+            if (bar < 0) { defName = rest; return defName.Length != 0; }   // pre-source key, still readable
+            defName = rest.Substring(0, bar);
+            sourceDefName = rest.Substring(bar + 1);
             return defName.Length != 0;
         }
 
@@ -129,10 +150,11 @@ namespace Multiplayer.Tactical
             if (keys == null) return;
             foreach (var k in keys)
             {
-                string name; int refKey;
-                Split(k, out name, out refKey);
+                string name; int refKey; string source;
+                Split(k, out name, out refKey, out source);
                 w.Write(name ?? "");
                 w.Write(refKey);
+                w.Write(source ?? "");
             }
         }
 
@@ -146,7 +168,8 @@ namespace Multiplayer.Tactical
             {
                 string name = r.ReadString();
                 int refKey = r.ReadInt32();
-                keys.Add(Key(name, refKey));
+                string source = r.ReadString();
+                keys.Add(Key(name, refKey, source));
             }
             return keys;
         }
@@ -210,8 +233,8 @@ namespace Multiplayer.Tactical
         private static void ApplyOne(TacticalActorBase actor, StatusComponent comp,
                                      TacticalLevelController tlc, string key)
         {
-            string defName; int refKey;
-            if (!Split(key, out defName, out refKey)) return;
+            string defName; int refKey; string sourceName;
+            if (!Split(key, out defName, out refKey, out sourceName)) return;
             try
             {
                 var def = Resolve(defName);
@@ -227,6 +250,22 @@ namespace Multiplayer.Tactical
                 var status = repo.Instantiate<Status>(def);
                 if (status == null) return;
                 if (refKey != 0 && !SetActorRef(status, tlc, refKey, actor, defName)) return;
+                // THE SOURCE, BEFORE ApplyStatus AND NOT AFTER — StatusComponent.ApplyStatus runs OnApply
+                // synchronously, and OnApply is the first thing that reads it. Missing, OverwatchStatus
+                // .OnApply:38 NREs at GetWeapon().Detached (client log, 22:31:53 / 22:32:45 / 22:32:48), and
+                // the SAME null then kills OnUnapply:53 one line before SetCone(null) — so the red cone can
+                // never be torn down on the peer that received the status through this rail. Generic: any
+                // status whose lifecycle reads its own source is repaired by this, none of them named here.
+                if (!string.IsNullOrEmpty(sourceName))
+                {
+                    var source = ResolveAnyDef(sourceName);
+                    if (source == null)
+                        Debug.LogWarning("[Multiplayer][tac] the host's status '" + defName + "' on " + actor.name +
+                                         " was applied from def '" + sourceName + "', which does not exist on this " +
+                                         "peer. It is applied without one — a status that reads its source " +
+                                         "(OverwatchStatus.GetWeapon) will throw and leave its visuals behind.");
+                    else status.Source = source;
+                }
                 comp.ApplyStatus(status);
             }
             catch (Exception ex)
@@ -242,7 +281,8 @@ namespace Multiplayer.Tactical
         {
             var def = s == null ? null : s.BaseDef;
             if (def == null || string.IsNullOrEmpty(def.name)) return null;
-            return Key(def.name, RefKeyOf(s));
+            var source = s.Source as BaseDef;
+            return Key(def.name, RefKeyOf(s), source == null ? "" : source.name);
         }
 
         private static int RefKeyOf(Status s)
@@ -286,6 +326,26 @@ namespace Multiplayer.Tactical
             return f;
         }
 
+        /// <summary>Any def by NAME — the source a status was applied from is not a <c>StatusDef</c> (it is a
+        /// <c>WeaponDef</c> for overwatch, and whatever a mod chose for a modded status), so this walks the
+        /// whole repository rather than one def family. Cached with the same rebuild-on-miss rule as
+        /// <see cref="Resolve"/>, so a runtime-minted def resolves on its first use.</summary>
+        private static BaseDef ResolveAnyDef(string name)
+        {
+            BaseDef def;
+            if (_anyByName.TryGetValue(name, out def) && def != null) return def;
+            var repo = GameUtl.GameComponent<DefRepository>();
+            if (repo == null) return null;
+            _anyByName.Clear();
+            foreach (var d in repo.GetAllDefs<BaseDef>())
+                if (d != null && !string.IsNullOrEmpty(d.name)) _anyByName[d.name] = d;
+            _anyByName.TryGetValue(name, out def);
+            return def;
+        }
+
+        private static readonly Dictionary<string, BaseDef> _anyByName =
+            new Dictionary<string, BaseDef>(StringComparer.Ordinal);
+
         private static StatusDef Resolve(string name)
         {
             StatusDef def;
@@ -297,6 +357,74 @@ namespace Multiplayer.Tactical
                 if (d != null && !string.IsNullOrEmpty(d.name)) _byName[d.name] = d;
             _byName.TryGetValue(name, out def);
             return def;
+        }
+    }
+
+    /// <summary>
+    /// A STATUS CHANGE IS A STATE CHANGE, SO IT SETTLES LIKE ONE (postulate 1).
+    ///
+    /// THE HOLE, and it is generic rather than about any one visual. The status set rides only on the 0x82
+    /// settle, and <c>TacticalCommandSync.OnAbilityActionEnded</c> emits one only for a declared RIDER —
+    /// i.e. for an ORDER. Everything else that changes a status changed nothing on any other peer until the
+    /// next turn-edge sweep: a REACTION (the game's overwatch shot is
+    /// <c>TacticalLevelController.ExecuteOverwatch</c>:1353-1391, driven by <c>TriggerOverwatch</c> off the
+    /// victim's navigation and never an order), an effect, an expiry, a status a mod removes.
+    ///
+    /// AND THE RECEIVING PEER CANNOT RUN THAT TEARDOWN ITSELF, by design: law L83 blocks a client's own
+    /// reaction ("a local Overwatch reaction was BLOCKED here", client log 22:31:49) because raising it would
+    /// be a second shot from one actor. So the client never reaches :1381 <c>SetConeVisualsMode(false,false)</c>
+    /// nor :1387 <c>UnapplyStatus(overwatch)</c> — the two lines that destroy the red cone
+    /// (<c>OverwatchStatus.OnUnapply</c>:53 → <c>SetCone(null)</c> → <c>Destroy(_coneGameObject)</c>:96-102).
+    /// The shot arrived, the damage arrived, and the cone hung in the air for the rest of the battle. That is
+    /// the whole report, and it is not an overwatch bug: it is every visual owned by a status the host removed
+    /// outside an order.
+    ///
+    /// ONE SEAM, ON THE GAME'S OWN WRITERS — and specifically on <c>CallApplyStatus</c>:219 /
+    /// <c>CallUnapplyStatus</c>:227, not on the public <c>ApplyStatus</c>/<c>UnapplyStatus</c> above them.
+    /// Those two private calls are where <c>OnApply</c>/<c>OnUnapply</c> actually run, and they are the ONLY
+    /// funnel: the public <c>UnapplyStatus</c>:192 may merely queue into <c>_statusesToRemove</c> and let
+    /// <c>ApplyStatus</c>:249 do the removal later, and a TIMED status expires straight out of
+    /// <c>UpdateStatuses</c>:256-262 without touching either public method. Patching the pair catches every
+    /// route, and the mod's own <c>Reconcile</c> is scoped out on the receiving side, so no per-status code
+    /// and no ability is named anywhere in the seam (postulate 3). The receiving peer's repaint is then the
+    /// game's own: <see cref="TacticalStatusSet.Reconcile"/> calls <c>comp.UnapplyStatus</c>, whose
+    /// <c>OnUnapply</c> destroys the visual in that same frame.
+    ///
+    /// BOUNDED: host-only, never inside an apply scope, and only while a turn is actually playing
+    /// (<c>TacticalLevelController.TurnIsPlaying</c>:251 — <c>_nextTurnUpdateable != null</c>), which keeps
+    /// mission setup's hundreds of initial status applications off the wire. <c>HostSettle</c> itself drops
+    /// anything unkeyed or not a <c>TacticalActor</c>.
+    /// </summary>
+    [HarmonyPatch]
+    internal static class StatusChangeSettlesTheActor
+    {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            yield return AccessTools.Method(typeof(StatusComponent), "CallApplyStatus", new[] { typeof(Status) });
+            yield return AccessTools.Method(typeof(StatusComponent), "CallUnapplyStatus", new[] { typeof(Status) });
+        }
+
+        private static void Postfix(StatusComponent __instance)
+        {
+            try
+            {
+                if (SyncApplyScope.Active) return;               // law 8: this change IS a mirror being applied
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+                var tac = __instance as TacStatusComponent;
+                var actor = tac == null ? null : tac.TacticalActorBase;
+                if (actor == null) return;
+                var level = GameUtl.CurrentLevel();
+                var tlc = level == null ? null : level.GetComponent<TacticalLevelController>();
+                if (ReferenceEquals(tlc, null) || !tlc.TurnIsPlaying) return;   // L113
+                TacticalCommandSync.HostSettle(actor);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[Multiplayer][tac] a status change could not be settled: " + ex.Message +
+                                 ". Every other peer keeps the status set it already had until the next " +
+                                 "turn-edge sweep — a visual the host has just torn down stays on their screen.");
+            }
         }
     }
 }
