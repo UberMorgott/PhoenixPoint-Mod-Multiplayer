@@ -278,6 +278,18 @@ namespace Multiplayer.Network.Sync
             Rebase(t, TimeUnit.FromTimeSpan(TimeSpan.FromSeconds(derived)));
         }
 
+        /// <summary>Seconds since the host last latched, or -1 when it never has. READ-ONLY, and it exists
+        /// for exactly one caller: <see cref="ClockPhaseDiag"/>, which needs the latch age to tell an error
+        /// that ACCUMULATES between latches apart from one that is merely constant. Nothing here decides
+        /// anything — see that file for what the resulting number cannot see.</summary>
+        internal static float HostLatchAgeSeconds
+            => _hostDto == null ? -1f : Time.realtimeSinceStartup - _latchedAt;
+
+        /// <summary>Client counterpart of <see cref="HostLatchAgeSeconds"/>: seconds since the last anchor
+        /// APPLY (the client's own prediction base), -1 when no anchor has ever been applied.</summary>
+        internal static float ClientAnchorAgeSeconds
+            => _appliedAt <= 0f ? -1f : Time.realtimeSinceStartup - _appliedAt;
+
         /// <summary>Drop both halves. The host MUST re-latch across a reload or a full resend, because a
         /// resend re-emits the stored anchor and a stale one would rewind every client to the latch instant;
         /// the client must re-seed because its clock was just replaced by the transferred save.</summary>

@@ -31,7 +31,7 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 - **P6 — DETERMINISM / CANONICALITY.** Sorted roots/children/subkeys, fixed metadata field order, byte-identical deltas on both peers. Serializer blobs licensed ONLY as structural payloads.
   - laws: L2 L4 L5 L6 L7 L10 L13 L15 L16 L20 L34 L35 L43 L66 L73 L76a L103 L126 L128
 - **P7 — CONVERGENCE.** Idempotence under redelivery; seq-gap → resync; CRC per path-subtree = drift backstop; reject → scoped `ForceReemit` + the family's reconverge. Never log-only.
-  - laws: L1 L7 L8 L12 L13 L25 L27 L41 L44 L57 L58 L98 L100 L105 L123 L131 L133 L137 L146 L150 L152
+  - laws: L1 L7 L8 L12 L13 L25 L27 L41 L44 L57 L58 L98 L100 L105 L123 L131 L133 L137 L146 L150 L152 L153
 - **P8 — APPLY SCOPE.** Every client apply wraps itself in `SyncApplyScope`: an apply never echoes back as an intent; apply-driven repaints stay suppressed at intent seams + the storage gates.
   - laws: L21 L51 L65
 - **P9 — THE JOURNAL IS OBSERVATIONAL.** Written post-pipeline, never in the decision path; debug builds OK.
@@ -49,7 +49,7 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 - **P15 — DERIVED, NOT MIRRORED.** Unnumbered in `ARCHITECTURE.md`, asserted in the coverage rules. State a peer can recompute closed-form from already-mirrored inputs is RE-DERIVED locally, never shipped: mirror the ORDER, derive the pose. Inverse holds — what cannot be re-derived (mist) MUST ride.
   - laws: L43 L53 L55 L59 L73 L77 L102 L115
 - **P16 — FRAME BUDGET.** Unnumbered in `ARCHITECTURE.md`, asserted by the sliced walk. No unbudgeted graph walk on either peer; the rail never spends a frame the player is using; urgency never outbids local input. Also may not IDLE — a sim fact waits no longer than it must.
-  - laws: L50 L74 L100
+  - laws: L50 L74 L100 L153
 
 ## Law index
 
@@ -202,9 +202,10 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 | L150 | no sequence of concurrent skill confirmations drives the balance below zero | P13 P7 | incident | 2026-08-06 exploit, verbatim: both peers confirmed, BOTH skills learned, points went NEGATIVE | premise-changed |
 | L151 | a peer waiting on another peer's load sees that load advance | P11 P13 | incident | 2026-08-06: first `RosterProgress SEND []` 14.2 s after the boundary, and empty | premise-changed |
 | L152 | a chat line delivered to a peer appears exactly once | P7 | incident | 2026-08-06: "instead of one message he received TWO … it happened only ONCE" | premise-changed |
+| L153 | the host↔client clock phase error has a seam that can read it, and that seam writes nothing | P16 P7 | incident | 2026-08-04 23:22 three-instance session: client-derived aircraft/exploration trail the host, and all three peer logs carry not one `TimeAnchor` line | both |
 
 - inline (private method in `Program.cs`, no file): L1–L25, L27–L76b, L81, L82, L83
-- files (`L<n>_<Name>.cs`): L26, L77, L79, L80, L84, L91–L152
+- files (`L<n>_<Name>.cs`): L26, L77, L79, L80, L84, L91–L153
 
 ## Unassigned / retired numbers
 

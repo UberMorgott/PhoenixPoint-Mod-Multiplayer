@@ -79,6 +79,10 @@ namespace Multiplayer.Network.Sync
                 || CutsceneMirror.HandleInbound(_engine, peer, surfaceId, payload)
                 || MissionOutcomeMirror.HandleInbound(_engine, peer, surfaceId, payload)
                 || MarketplaceSync.HandleInbound(_engine, peer, surfaceId, payload)
+                // 0xC0 clock-phase probe (diagnostic band). Registered unconditionally so the id is CLAIMED
+                // whether MpDiag is on or off — an unclaimed surface would fall through to the value rail.
+                // Client-side inside, and it applies nothing: it logs one [MP][clockphase] line.
+                || ClockPhaseDiag.HandleInbound(_engine, peer, surfaceId, payload)
                 || IntentRail.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
@@ -123,6 +127,10 @@ namespace Multiplayer.Network.Sync
             DiffEngine.HostTick(_engine);
             t = RailCost.Charge("walk", t);
             TimeSync.ClientTick(_engine); // client-only inside: TimeAnchor drift enforcement (~1 Hz)
+            // host-only inside, and OFF unless MpDiag.On: ship the host clock reading so the client can
+            // print the ABSOLUTE phase error nothing else in this repo can see (0xC0, ClockPhaseDiag).
+            // Its first line is `if (!MpDiag.On) return;`, so a normal session pays one static bool read.
+            ClockPhaseDiag.HostTick(_engine);
             // client-only inside: release the client's PLAYER-faction turn once the host has left it. A
             // STANDING condition, not a one-shot in the applier — PlayTurnCrt clears _endTurnRequested on
             // its own first line, so a flag set a frame too early is silently erased and parks the client.
