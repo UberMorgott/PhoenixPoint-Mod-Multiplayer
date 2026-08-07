@@ -501,11 +501,29 @@ namespace Multiplayer.Tactical
         /// <see cref="TacticalReadyRowFollower.Apply"/> — this method makes the footprint one button wide
         /// either way, so the answer stops mattering.
         ///
-        /// KEEP EXACTLY ONE: <c>Selectable.targetGraphic</c>, which is Unity's OWN answer to "which graphic
-        /// is this button's clickable face" — the same one it tints on hover — rather than a name or a
-        /// depth we would be guessing. If the prefab names none, the clone is left ALONE and says so: a
-        /// button with every graphic silenced is not clickable at all, and trading a possible swallowed map
-        /// click for a certainly dead ready button is not a fix.
+        /// KEEP EXACTLY ONE, AND BUILD IT RATHER THAN GUESS IT (2026-08-08, law L182). The first version
+        /// kept <c>Selectable.targetGraphic</c> — Unity's own answer to "which graphic is this button's
+        /// clickable face" — and left the clone ALONE when the prefab named none, on the reasoning that
+        /// silencing every graphic leaves a button nothing can click. The live log says the prefab names
+        /// none: <c>ready button raycast NOT trimmed — its Button names no targetGraphic</c>, and one line
+        /// later <c>OVERHANGS its HUD container ... -> that part of the clone is drawn over the tactical
+        /// map</c>. So the cautious branch was not a safety net, it was the defect: the WHOLE cloned
+        /// footprint stayed raycastable over the battlefield and ate map clicks, which is the reported
+        /// symptom exactly.
+        ///
+        /// The way out is not a better guess. A full-rect transparent <c>Image</c> is added to the Button's
+        /// OWN GameObject and made the single click surface — so "the clickable face" is a thing this class
+        /// owns and knows the bounds of, instead of a serialized field an asset may or may not have filled
+        /// in. It is parented to the Button's own object, not to the clone root, because Unity routes a
+        /// click by walking UP from the graphic it hit to the first handler: a hit surface hung off the
+        /// root would miss a Button that sits on a CHILD. Every other graphic on the clone is then silenced
+        /// unconditionally — there is no "leave it alone" branch left to take.
+        ///
+        /// It is also given to <c>Selectable.targetGraphic</c>, which was null: that is the field Unity's
+        /// colour transition drives, so the button had no hover feedback either. The tint overlay is
+        /// deliberately NOT reused for this — <see cref="Repaint"/> toggles its <c>enabled</c>, and a
+        /// disabled <c>Graphic</c> leaves the raycast graph, which would make the button clickable only
+        /// while this peer was already ready.
         ///
         /// The width is deliberately NOT narrowed. The clone mirrors the native End Turn button's
         /// <c>sizeDelta</c> every frame (<see cref="TacticalReadyRowFollower.Apply"/>), so its rect is the
@@ -516,24 +534,37 @@ namespace Multiplayer.Tactical
         {
             var pgb = go.GetComponent<PhoenixGeneralButton>();
             var btn = pgb != null && pgb.BaseButton != null ? pgb.BaseButton : go.GetComponentInChildren<Button>();
-            var keep = btn == null ? null : btn.targetGraphic;
-            if (keep == null)
+            if (btn == null)
             {
-                Debug.LogWarning("[Multiplayer][tac] ready button raycast NOT trimmed — its Button names no " +
-                                 "targetGraphic, so there is no way to tell the clickable face from the " +
-                                 "decoration and silencing them all would leave a button nothing can click. " +
-                                 "The clone keeps the whole cloned footprint; if map clicks die near it, this " +
-                                 "line is why.");
+                // WireClick has already logged the missing Button as an error. Silence everything anyway:
+                // a clone that cannot be clicked must at least not stop the map being clicked.
+                int muted = 0;
+                foreach (var g in go.GetComponentsInChildren<Graphic>(true))
+                    if (g != null && g.raycastTarget) { g.raycastTarget = false; muted++; }
+                _raycastReport = "no Button — kept 0, silenced " + muted;
                 return;
             }
+
+            var hit = new GameObject("MP_ReadyHit", typeof(Image));
+            var rt = hit.GetComponent<RectTransform>();
+            rt.SetParent(btn.transform, false);
+            rt.anchorMin = Vector2.zero;
+            rt.anchorMax = Vector2.one;
+            rt.offsetMin = Vector2.zero;
+            rt.offsetMax = Vector2.zero;
+            var face = hit.GetComponent<Image>();
+            face.color = new Color(1f, 1f, 1f, 0f);   // invisible, still raycastable: alpha is not consulted
+            face.raycastTarget = true;                //   unless alphaHitTestMinimumThreshold is raised
+
             int silenced = 0;
             foreach (var g in go.GetComponentsInChildren<Graphic>(true))
             {
-                if (g == null || !g.raycastTarget || ReferenceEquals(g, keep)) continue;
+                if (g == null || !g.raycastTarget || ReferenceEquals(g, face)) continue;
                 g.raycastTarget = false;
                 silenced++;
             }
-            _raycastReport = "kept 1 (" + keep.gameObject.name + "), silenced " + silenced;
+            btn.targetGraphic = face;
+            _raycastReport = "kept 1 (MP_ReadyHit, built on " + btn.gameObject.name + "), silenced " + silenced;
         }
 
         /// <summary>What <see cref="TrimRaycast"/> did, carried to the settled-layout diagnostic — where the

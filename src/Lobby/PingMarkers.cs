@@ -48,12 +48,34 @@ namespace Multiplayer.UI
     /// name prefix to match the band. One packet type serves both screens. Client → host → everyone else,
     /// exactly like <c>ChatMessage</c>; the sender shows its own ping locally the same frame it sends.
     ///
-    /// NATIVE VISUALS ONLY. Geoscape: <c>GeoscapeGlobeMarkers.AddMarker</c> (:54 point, :82 actor) with the
-    /// game's OWN 5 s expiry timer — no timer of ours. Tactical: the <c>LocatedBeaconPrefab</c> shaft
-    /// (<c>TacticalView.cs:83</c>) the game already raises over a heard-but-unseen actor, i.e. the native
-    /// "something is HERE" idiom, instantiated exactly as <c>TacticalActorViewBase.RefreshLocatedBeacon</c>
-    /// :439-449 does it. AND A NATIVE SOUND — a silent marker is easy to miss, so every shown ping also
-    /// plays the game's own modal-appears cue through the game's own audio path; see <see cref="Cue"/>.
+    /// NATIVE VISUALS ONLY, AND THE MOD OWNS EVERY INSTANCE. Geoscape: the game's own
+    /// <c>SitePointOfInterest</c> marker prefab, taken from <c>GeoscapeGlobeMarkers.Binds</c> via
+    /// <c>GetMarkerPrefab</c>. Tactical: the <c>LocatedBeaconPrefab</c> shaft (<c>TacticalView.cs:83</c>)
+    /// the game already raises over a heard-but-unseen actor, i.e. the native "something is HERE" idiom.
+    /// AND A NATIVE SOUND — a silent marker is easy to miss, so every shown ping also plays the game's own
+    /// modal-appears cue through the game's own audio path; see <see cref="Cue"/>.
+    ///
+    /// WHY NOT <c>GeoscapeGlobeMarkers.AddMarker</c>, WHICH THIS USED TO CALL AND WHICH DREW NOTHING (fixed
+    /// 2026-08-08, law L182). <c>AddMarker</c> has two branches and only ONE of them activates the marker:
+    /// the POOLED branch calls <c>gameObject.SetActive(true)</c> (GeoscapeGlobeMarkers.cs:72 point, :101
+    /// actor), the FRESH-INSTANTIATE branch (:62-66) does not. <c>SitePointOfInterest</c> has no pooled
+    /// instance sitting in <c>MarkersContainer</c> when a ping lands, so every ping took the fresh branch
+    /// and got back a marker that was never switched on. <c>AddMarker</c> RETURNED NORMALLY — which is why
+    /// the cue, which fires downstream of it in <see cref="Track"/>, was audible over an empty globe. The
+    /// game itself never hits that hole: it is the only caller and it explicitly activates the prefabs it
+    /// instantiates by hand (<c>AncientSiteProbeAbilityView.cs:88 SetActive(true)</c>,
+    /// <c>UIStateVehicleSelected.cs:728</c>, <c>TacticalActorViewBase.cs:449</c>).
+    ///
+    /// So the marker is instantiated here, by the game's OWN free-standing recipe — the one
+    /// <c>AncientSiteProbeAbilityView</c> uses for its probe preview, verbatim: instantiate the prefab
+    /// under a geoscape container, <c>SetActive(true)</c>, then place it by ROTATION ALONE,
+    /// <c>transform.rotation = Quaternion.Euler(SceneReferences.GetSphericalCoordinates(worldPos))</c>
+    /// (AncientSiteProbeAbilityView.cs:87-89). Rotation alone is not a shortcut: every globe object is a
+    /// CENTRE-pivot whose art hangs off a child at globe radius (<c>GeoActor.PivotTransform</c> +
+    /// <c>Surface = PivotTransform.Find("GlobeOffset")</c>, GeoAncientSiteProbe.cs:44), which is also why
+    /// <c>GlobeMarker.SetWorldPosition</c> (GlobeMarker.cs:70-74) writes a rotation and never a position.
+    /// Owning the instance is what buys the two things the pool could not give: the expiry is ours (one
+    /// <see cref="Expire"/> for both screens) and so is the COLOUR (see <see cref="Tint"/>).
     ///
     /// THE OFF-SCREEN ARROW IS OURS, and the recon's <c>UIObjectTracker.KeepOnScreen</c> route is NOT
     /// usable: <c>UIObjectTrackersController.LateUpdate</c>'s <c>shouldUpdateTracker</c>
@@ -64,9 +86,15 @@ namespace Multiplayer.UI
     /// </summary>
     public sealed class PingMarkers : MonoBehaviour
     {
-        /// <summary>Marker lifetime. Passed verbatim to the geoscape's own expiry timer, and the deadline
-        /// for the beacon and the arrow this class owns.</summary>
+        /// <summary>Marker lifetime, and now the ONLY one: every marker on both screens is this class's own
+        /// instance, so <see cref="Expire"/> is the single deadline for the marker, the beacon and the
+        /// arrow. Nothing is handed to the geoscape's pooled expiry timer any more.</summary>
         public const float LifetimeSeconds = 5f;
+
+        /// <summary>MY OWN PING vs SOMEBODY ELSE'S — the owner's ask, in the two colours he named. Applied
+        /// per-instance in <see cref="Tint"/>, so it costs the game's shared marker prefab nothing.</summary>
+        private static readonly Color Own = new Color(0.20f, 0.90f, 0.35f, 1f);
+        private static readonly Color Peer = new Color(0.25f, 0.55f, 1f, 1f);
 
         /// <summary>The arrow fades over its last second. The native markers animate themselves; only what
         /// this class draws is faded here.</summary>
@@ -91,8 +119,8 @@ namespace Multiplayer.UI
             public bool Geo;
             public Transform Follow;
             public Vector3 Local;
-            /// <summary>The beacon shaft this class owns and must destroy (tactical only; the geoscape
-            /// marker is pooled and expired by the game).</summary>
+            /// <summary>The marker this class instantiated and must destroy — the geoscape POI marker or
+            /// the tactical beacon shaft. Never a pooled object: nothing here is the game's to reclaim.</summary>
             public GameObject Beacon;
         }
 
@@ -130,7 +158,11 @@ namespace Multiplayer.UI
             if (payload == null) return;
 
             // Local first: the sender never receives its own packet (host) or waits a round trip (client).
-            Show(payload);
+            // ShowLocal, not Show — the two entry points ARE the peer distinction. Nothing on the wire says
+            // who sent a ping, and nothing needs to: the only peer that ever reaches this line is the one
+            // whose key was pressed, so "mine" is answered by WHICH DOOR the payload came through. That
+            // keeps the packet byte-identical to what every build already speaks.
+            ShowLocal(payload);
             var msg = new NetworkMessage(PacketType.PingMarker, payload);
             if (engine.IsHost) engine.BroadcastToAll(msg);
             else engine.SendToHost(msg);
@@ -205,13 +237,40 @@ namespace Multiplayer.UI
         /// already-open geoscape or battle with no re-entry, no state change and no reload.</summary>
         public static void Show(byte[] payload)
         {
-            try { ShowCore(payload); }
+            try { ShowCore(payload, false); }
             catch (Exception e) { Debug.LogWarning("[Multiplayer] ping marker not shown: " + e.Message); }
         }
 
-        private static void ShowCore(byte[] payload)
+        /// <summary>THE SENDER'S OWN DOOR, called from <see cref="Update"/> and from nowhere else. Same
+        /// work as <see cref="Show"/>, one flag apart — see the note at the call site for why the peer
+        /// distinction lives in the entry point rather than on the wire.</summary>
+        public static void ShowLocal(byte[] payload)
         {
-            if (_instance == null || payload == null || payload.Length < 2) return;
+            try { ShowCore(payload, true); }
+            catch (Exception e) { Debug.LogWarning("[Multiplayer] own ping marker not shown: " + e.Message); }
+        }
+
+        private static void ShowCore(byte[] payload, bool mine)
+        {
+            // BOTH OF THESE USED TO RETURN IN SILENCE, and that is how a feature whose every visible half
+            // was broken still produced no line to read. Silent swallow is this repo's dominant bug class;
+            // a ping is cheap, so it can afford to say why it vanished.
+            if (_instance == null)
+            {
+                Debug.LogWarning("[Multiplayer] ping DROPPED — PingMarkers has no live instance, so there is " +
+                                 "nothing holding the marker list. The component is created with the mod's UI " +
+                                 "host, so this is a packet that arrived before that host existed or after it " +
+                                 "was torn down. Nothing else is affected.");
+                return;
+            }
+            if (payload == null || payload.Length < 2)
+            {
+                Debug.LogWarning("[Multiplayer] ping DROPPED — payload is " +
+                                 (payload == null ? "null" : payload.Length + " byte(s)") + " and the header " +
+                                 "alone is 2 (scene, kind). Either the datagram was truncated or the sender " +
+                                 "speaks a different build's ping format.");
+                return;
+            }
 
             byte scene, kind;
             var pos = Vector3.zero;
@@ -229,17 +288,45 @@ namespace Multiplayer.UI
                 else pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
             }
 
-            if (scene == SceneGeo) ShowGeo(kind, pos, entityRef);
-            else ShowTac(kind, pos, actorKey);
+            if (scene == SceneGeo) ShowGeo(kind, pos, entityRef, mine);
+            else ShowTac(kind, pos, actorKey, mine);
         }
 
-        private static void ShowGeo(byte kind, Vector3 local, string entityRef)
+        private static void ShowGeo(byte kind, Vector3 local, string entityRef, bool mine)
         {
             var geo = GeoLevel();
+            var refs = geo?.SceneReferences;
             var markers = geo?.View?.Markers;
             var root = GlobeRoot(geo);
-            if (markers == null || root == null) return;
+            if (markers == null || root == null || refs?.MarkersContainer == null)
+            {
+                // Not an error — a peer on another screen legitimately has no globe to draw on — but it is
+                // the difference between "he is in a battle" and "the ping broke", so it says which.
+                Debug.LogWarning("[Multiplayer] geoscape ping DROPPED — no live globe to draw it on (level=" +
+                                 (geo == null ? "not geoscape" : "geoscape") + ", view=" +
+                                 (geo?.View == null ? "none" : "live") + ", markers=" +
+                                 (markers == null ? "none" : "live") + ", globe root=" +
+                                 (root == null ? "none" : "live") + ", container=" +
+                                 (refs?.MarkersContainer == null ? "none" : "live") + "). The sender still " +
+                                 "saw his own marker.");
+                return;
+            }
 
+            // The game's own POI marker, taken from the game's own bind table. If the type is unbound there
+            // is no native widget for this and we do NOT draw a substitute — a hand-rolled overlay is
+            // exactly what "native UI first" forbids, and a named log line is worth more than a stray quad.
+            var prefab = markers.GetMarkerPrefab(GlobeMarkerType.SitePointOfInterest);
+            if (prefab == null)
+            {
+                Debug.LogWarning("[Multiplayer] geoscape ping DROPPED — GeoscapeGlobeMarkers.Binds names no " +
+                                 "prefab for SitePointOfInterest, so the game ships no widget to show. Nothing " +
+                                 "is drawn on purpose; the fix is a different bound GlobeMarkerType, not an " +
+                                 "overlay of ours.");
+                return;
+            }
+
+            Transform follow = null;
+            Transform parent;
             if (kind == KindObject)
             {
                 var actor = IdentityResolver.Resolve(geo, entityRef, null) as GeoActor;
@@ -249,16 +336,29 @@ namespace Multiplayer.UI
                                      "this peer — nothing to point at.");
                     return;
                 }
-                markers.AddMarker(actor, GlobeMarkerType.SitePointOfInterest, LifetimeSeconds);
-                _instance.Track(new Live { Geo = true, Follow = actor.transform });
-                return;
+                // Under the actor's own PIVOT, at local zero — the same frame AddMarker(actor, …) parents
+                // into (GeoscapeGlobeMarkers.cs:92/:99). The pivot is at the globe centre and already
+                // carries the actor's lat/long as its rotation, so the marker needs no placement of its
+                // own and follows a moving aircraft for free.
+                parent = actor.transform;
+                follow = actor.transform;
+            }
+            else
+            {
+                parent = refs.MarkersContainer;
             }
 
-            markers.AddMarker(root.TransformPoint(local), GlobeMarkerType.SitePointOfInterest, LifetimeSeconds);
-            _instance.Track(new Live { Geo = true, Local = local });
+            var go = Instantiate(prefab, parent);
+            if (kind == KindPoint)
+                go.transform.rotation = Quaternion.Euler(refs.GetSphericalCoordinates(root.TransformPoint(local)));
+            // THE LINE AddMarker's fresh-instantiate branch is missing, and the whole reason nothing was
+            // ever visible. The game writes it by hand at every one of its own instantiate sites.
+            go.SetActive(true);
+            Tint(go, mine);
+            _instance.Track(new Live { Geo = true, Follow = follow, Local = local, Beacon = go });
         }
 
-        private static void ShowTac(byte kind, Vector3 pos, int actorKey)
+        private static void ShowTac(byte kind, Vector3 pos, int actorKey, bool mine)
         {
             var tlc = Tlc();
             var view = tlc?.View;
@@ -281,6 +381,11 @@ namespace Multiplayer.UI
                 // expiry then clears a highlight the game still wants — silently.
                 var beacon = Instantiate(prefab, actor.transform);
                 beacon.transform.ResetTransform();
+                // SetActive, exactly as RefreshLocatedBeacon:449 does on the line after its own
+                // Instantiate+ResetTransform pair. The geoscape half proved what happens when an
+                // instantiated native prefab is assumed to arrive switched on.
+                beacon.SetActive(true);
+                Tint(beacon, mine);
                 _instance.Track(new Live { Follow = actor.transform, Beacon = beacon });
                 return;
             }
@@ -291,6 +396,8 @@ namespace Multiplayer.UI
             var stand = Instantiate(prefab, view.Markers.SpecialMarkersRoot);
             stand.transform.ResetTransform();
             stand.transform.position = pos;
+            stand.SetActive(true);
+            Tint(stand, mine);
             _instance.Track(new Live { Local = pos, Beacon = stand });
         }
 
@@ -300,6 +407,58 @@ namespace Multiplayer.UI
             _live.Add(p);
             Cue();
         }
+
+        // ─── the coloured half ───────────────────────────────────────────────
+
+        /// <summary>
+        /// GREEN IS MINE, BLUE IS SOMEBODY ELSE'S — the owner's ask, on every surface the ping has
+        /// (geoscape, battle, and deployment, which is the battle screen).
+        ///
+        /// COLOUR IS NOT SETTABLE ON THE NATIVE WIDGET ITSELF: <c>GlobeMarker</c> exposes <c>Type</c>,
+        /// <c>Animator</c> and <c>Range</c> and nothing else (GlobeMarker.cs:13-48), and the marker the
+        /// game hands out through <c>AddMarker</c> is POOLED — it is handed back and re-used, so a tint
+        /// written onto it would leak into the game's own next point-of-interest. The tint is possible only
+        /// BECAUSE this class stopped borrowing from the pool and instantiates its own copy, which nothing
+        /// else will ever see (the same reason <c>UIStateVehicleSelected.cs:714</c> instantiates its
+        /// selection marker from the prefab rather than asking the pool for one).
+        ///
+        /// <c>MaterialPropertyBlock</c>, never <c>renderer.material</c>: the block writes per-renderer
+        /// without instancing a material — so there is no clone to leak when the marker is destroyed — and,
+        /// the point here, a property the shader does not declare is silently IGNORED rather than logged as
+        /// an error. That is what makes it safe to offer both of the two names Unity's own shaders use for
+        /// a tint (<c>_Color</c> on the standard/UI family, <c>_TintColor</c> on the particle/additive one)
+        /// without knowing which family an asset-only prefab was authored against.
+        /// ponytail: if the marker still draws in its stock colour, the one-shot log below names the shader
+        /// per renderer — that is the property to add, and it is one line.
+        /// </summary>
+        private static void Tint(GameObject go, bool mine)
+        {
+            var colour = mine ? Own : Peer;
+            var block = new MaterialPropertyBlock();
+            List<string> seen = _loggedTint ? null : new List<string>();
+            foreach (var r in go.GetComponentsInChildren<Renderer>(true))
+            {
+                if (r == null) continue;
+                r.GetPropertyBlock(block);
+                block.SetColor(ColorId, colour);
+                block.SetColor(TintColorId, colour);
+                r.SetPropertyBlock(block);
+                var mat = r.sharedMaterial;
+                if (seen != null)
+                    seen.Add(r.gameObject.name + "<" + (mat == null || mat.shader == null ? "no-shader" : mat.shader.name) + ">");
+            }
+            if (seen == null) return;
+            _loggedTint = true;
+            Debug.Log("[Multiplayer] ping marker tinted " + (mine ? "OWN green" : "PEER blue") +
+                      " over _Color/_TintColor on " + seen.Count + " renderer(s): " +
+                      string.Join(", ", seen.ToArray()) + " (logged once per run). A count of 0, or a marker " +
+                      "still drawing in its stock colour, means the visual is not a Renderer or does not " +
+                      "declare either property — the shader names above are what to write instead.");
+        }
+
+        private static readonly int ColorId = Shader.PropertyToID("_Color");
+        private static readonly int TintColorId = Shader.PropertyToID("_TintColor");
+        private static bool _loggedTint;
 
         // ─── the audible half ────────────────────────────────────────────────
 

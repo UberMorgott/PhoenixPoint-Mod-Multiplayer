@@ -154,20 +154,30 @@ namespace RailCheck
 
         /// <summary>
         /// ARM (d). A mod method that CLONES a native tactical widget has taken on the whole cloned raycast
-        /// footprint, so it must also hand it back down to one surface — and "one surface" has exactly one
-        /// non-guessed definition: <c>Selectable.targetGraphic</c>, Unity's own answer to which graphic is
-        /// this button's clickable face. Both halves are required and they mean different things: writing
-        /// <c>raycastTarget</c> without reading <c>targetGraphic</c> is a blanket sweep that leaves the
-        /// button unclickable (or spares the wrong child), and reading <c>targetGraphic</c> without writing
-        /// <c>raycastTarget</c> silences nothing at all.
+        /// footprint, so it must also hand it back down to one surface, and that surface must not be
+        /// GUESSED. Both halves are required and they mean different things: writing <c>raycastTarget</c>
+        /// without settling which face survives is a blanket sweep that leaves the button unclickable (or
+        /// spares the wrong child), and settling the face without writing <c>raycastTarget</c> silences
+        /// nothing at all.
+        ///
+        /// "NOT GUESSED" HAS TWO HONEST SPELLINGS, and this arm demanded only the first until 2026-08-08.
+        /// Reading <c>Selectable.targetGraphic</c> asks Unity which graphic is the button's clickable face;
+        /// WRITING it declares one the mod built itself. The read alone was written in on the assumption
+        /// that a cloned prefab always names a face — and the live tactical log falsified that assumption
+        /// on the one button this arm exists for: <c>ready button raycast NOT trimmed — its Button names no
+        /// targetGraphic</c>. A law that can only be satisfied by asking a question with no answer stops
+        /// being a guard: the code obeyed it by reading the field, finding null, and silencing NOTHING,
+        /// which left a ~250x40 invisible click-eater over the tactical map. So the write counts too, and
+        /// L182 arm (d) holds <c>TacticalReadyButton.TrimRaycast</c> to the stronger of the two.
         /// </summary>
         private static IEnumerable<string> RaycastArm()
         {
             var uiAsm = typeof(Graphic).Assembly;
             var setRaycast = typeof(Graphic).GetProperty("raycastTarget")?.GetSetMethod();
             var getTarget = typeof(Selectable).GetProperty("targetGraphic")?.GetGetMethod();
+            var setTarget = typeof(Selectable).GetProperty("targetGraphic")?.GetSetMethod();
             var instantiate = typeof(UnityEngine.Object).Assembly;
-            if (setRaycast == null || getTarget == null)
+            if (setRaycast == null || getTarget == null || setTarget == null)
             {
                 yield return "L127 premise-changed: Graphic.raycastTarget or Selectable.targetGraphic no longer " +
                              "resolves in UnityEngine.UI, so 'one clickable surface' cannot be expressed against " +
@@ -190,16 +200,17 @@ namespace RailCheck
             foreach (var m in cloners)
             {
                 bool silences = Reaches(m, setRaycast, 4);
-                bool asksUnity = Reaches(m, getTarget, 4);
-                if (silences && asksUnity) continue;
+                bool namesTheFace = Reaches(m, getTarget, 4) || Reaches(m, setTarget, 4);
+                if (silences && namesTheFace) continue;
                 yield return "L127 mod-gui-raycast-unsilenced: " + Describe(m) + " clones a native tactical " +
                              "widget but " +
-                             (!silences && !asksUnity
+                             (!silences && !namesTheFace
                                  ? "never silences one graphic's raycastTarget"
                                  : !silences
-                                     ? "reads Selectable.targetGraphic without ever writing raycastTarget"
-                                     : "writes raycastTarget without asking Selectable.targetGraphic which face " +
-                                       "to keep") +
+                                     ? "settles Selectable.targetGraphic without ever writing raycastTarget"
+                                     : "writes raycastTarget without ever settling Selectable.targetGraphic — " +
+                                       "neither reading which face Unity says is clickable nor writing one it " +
+                                       "built") +
                              ". Every extra raycast-enabled graphic it carries answers " +
                              "EventSystem.IsPointerOverGameObject() for the cursor, and TacticalView." +
                              "IsCursorOverGUI() gates the tactical MAP click on exactly that — so the clone " +
