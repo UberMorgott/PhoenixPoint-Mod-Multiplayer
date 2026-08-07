@@ -269,6 +269,10 @@ namespace RailCheck
             Add(laws, () => L85_RestartedHostStreamIsApplied.Check());
             Add(laws, () => L193_TheHarnessCannotReportAVerdictItDidNotEarn.Check());
             Add(laws, () => L86_AnnouncedBoundaryHoldsItsAnnouncer.Check());
+            Add(laws, () => L194_TheHostsOwnWindowWaitsForItsOwnCurtain.Check());
+            Add(laws, () => L195_AFullScreenOneShotHoldsTheQueue.Check());
+            Add(laws, () => L196_TheUnlockLandsBeforeTheQueueDoes.Check());
+            Add(laws, () => L197_TheSquadScreenOpensOnTheMissionsArrival.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

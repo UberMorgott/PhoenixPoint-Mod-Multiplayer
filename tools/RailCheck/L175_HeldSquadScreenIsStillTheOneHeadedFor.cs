@@ -144,6 +144,27 @@ namespace RailCheck
                                  "them to release, so holding one behind a player who is reading the research " +
                                  "tree is a queue with nothing able to drain it — strictly worse than the yank.";
 
+            // ── (d) ARMED 2026-08-08: THE ARM THAT WOULD HAVE FIRED ────────────────────────────────
+            // This law EXECUTED HoldsHead and passed while the exact defect it was written for reproduced,
+            // because every arm above asks about UIStateResearch — and `queue HELD` fired ZERO times in that
+            // whole session. The reason is MapStates (WindowOrder.cs:185-191): it contains
+            // UIStateVehicleSelected, which every peer bounces back to between windows, so the hold was inert
+            // for the entire post-reveal burst. An arm is only worth what its CURRENT STATE is, so here is one
+            // whose current state is the screen the report was actually about: a full-screen one-shot.
+            // Widen MapStates to include UIStateGeoCutscene and this goes red while every arm above stays green.
+            if (!Hold(predicate, 0, typeof(UIStateGeoscapeEvent), typeof(UIStateGeoCutscene)))
+                yield return "L175 hold-is-inert-on-the-screen-that-reported-it: a priority-0 event window is " +
+                             "NOT held while UIStateGeoCutscene is the current state. That is the 2026-08-08 " +
+                             "report's own screen — the campaign intro, with three IntroBetterGeo dialogs " +
+                             "released on top of it inside 130 ms, on a peer whose cutscene skip was already " +
+                             "dead (the stale loading override, RevealInputLock:19-23). A hold that engages " +
+                             "only on screens the player OPENED cannot see the one-shot the game pushed.";
+            if (Hold(predicate, 0, typeof(UIStateGeoscapeEvent), typeof(UIStateVehicleSelected)))
+                yield return "L175 hold-is-inert-on-the-screen-that-reported-it: an event window is held on " +
+                             "UIStateVehicleSelected — the MAP with an aircraft selected. That is where a peer " +
+                             "sits between windows all game long, so holding there is a queue that never drains " +
+                             "and the exact inverse of the defect this arm exists for.";
+
             // ── (c) the predicate reads this peer and nothing else ─────────────────────────────────
             var peerTypes = new[] { "NetworkEngine", "SessionManager", "PingTable", "PeerListEntry",
                                     "LobbyController" };
