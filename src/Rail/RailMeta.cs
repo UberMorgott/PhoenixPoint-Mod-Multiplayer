@@ -1612,7 +1612,7 @@ namespace Multiplayer.Network.Sync
         internal const byte EntityListMarker = 15; // distinct from LeafKinds 0-13 and ListMarker 14
 
         private const byte TagNull = 0, TagLeaf = 1, TagBlob = 2, TagBackRef = 3, TagList = 4, TagLeafList = 5,
-                           TagLeafDict = 6, TagValueItem = 7;
+                           TagLeafDict = 6, TagValueItem = 7, TagPolyLeaf = 8;
 
         /// <summary>KeyValuePair&lt;,&gt; — the pair element type of a whole-dict blob (unkeyable-element
         /// dictionaries riding as EntityList; see BuildField's dict arm).</summary>
@@ -2304,6 +2304,27 @@ namespace Multiplayer.Network.Sync
             for (int i = 0; i < locals.Count; i++)
                 if (ReferenceEquals(locals[i], v)) { w.Write(TagBackRef); w.Write((ushort)i); return; }
             var t = v.GetType();
+            // A DEF REFERENCE WEARING AN INTERFACE. This is NOT object polymorphism and does not become it:
+            // a BaseDef is already a LEAF here (LeafKindOf → LeafKind.DefRef), i.e. its entire wire form is
+            // its guid, and the only reason it reached the blob path at all is that the DECLARED slot is an
+            // interface the leaf test cannot see through. Without this arm the encode aborts the whole field
+            // — `FactionDiplomacy._factionsDiplomacyState: polymorphic value PPFactionDef as
+            // IDiplomaticPartyKey` (2026-08-07, ×3 factions at the first campaign walk), after which faction
+            // diplomacy never crossed to a client again for the whole session. Both reaching paths are
+            // interface-DECLARED slots holding a def: the `_relations` dict key (Dictionary
+            // <IDiplomaticPartyKey, Relation> → PairBlobField → the IsKvpType arm above) and Relation's
+            // [SerializeCustomCreate] `WithParty` create param (EncodeObjectBody's ci.Params loop).
+            //
+            // Tagged rather than silent, and NARROW rather than general: only a runtime BaseDef, only under a
+            // non-leaf declared slot. Everything else — a derived CLASS under a base class, an abstract
+            // element type — still throws exactly as before, so `polymorphic-codec: no` and the reviewed type
+            // closure it gates (RailCheck ProbePolymorphicCodec / Closure) are untouched by construction: the
+            // probe's PolyDerived is not a def. Encode and decode both speak `typeof(BaseDef)` so the ONE
+            // DefRef codec carries it — the leaf arms ignore `declared` beyond its kind, and decode's
+            // DefRepository lookup returns the concrete def, which IS the interface the slot declares.
+            // Nothing here can launder def state into the graph: a DefRef leaf REPLACES a reference and never
+            // writes into the shared instance (the same reason the ownership law exempts leaves).
+            if (v is BaseDef) { w.Write(TagPolyLeaf); EncodeLeaf(w, typeof(BaseDef), v); return; }
             if (t != declared) throw new NotSupportedException("polymorphic value " + t.Name + " as " + declared.Name);
             if (depth >= MaxBlobDepth) throw new NotSupportedException("blob depth cap at " + t.Name);
             if (typeof(UnityEngine.Object).IsAssignableFrom(t)) throw new NotSupportedException("Unity object " + t.Name);
@@ -2496,6 +2517,11 @@ namespace Multiplayer.Network.Sync
             {
                 case TagNull: return null;
                 case TagLeaf: return DecodeLeaf(r, declared, geo);
+                // A def under an interface-declared slot (EncodeValue's BaseDef arm). Decoded through the ONE
+                // DefRef codec by naming its kind rather than the slot's: the lookup returns the concrete def,
+                // which IS whatever interface the slot declares. Unknown guid is LOUD and Unresolved inside
+                // DecodeLeaf, exactly as for a leaf that rode under its own type.
+                case TagPolyLeaf: return DecodeLeaf(r, typeof(BaseDef), geo);
                 // Unknown def is LOUD inside FromRec; the sentinel makes ApplyList drop the hole rather
                 // than insert a null element into a list native code dereferences (AmmoManager.cs:119-127).
                 case TagValueItem: return GeoItemCodec.FromRec(GeoItemCodec.ReadRec(r)) ?? Unresolved;
