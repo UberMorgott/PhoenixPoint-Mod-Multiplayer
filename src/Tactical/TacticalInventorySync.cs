@@ -680,6 +680,16 @@ namespace Multiplayer.Tactical
         internal static void FlushGesture(UIStateInventory state)
         {
             if (state == null || TacticalDamageSync.LiveEngine() == null) return;
+            // P3/L67 — THE MIRRORED REPAINT COMES BACK THROUGH HERE. <c>TacticalUiRepaint.RepaintContainerView</c>
+            // ends its both-panel rebuild by invoking <c>UIStateInventory.RefreshUI</c>, which is the exact
+            // method <see cref="InventoryGestureSeam"/> postfixes. Without this line every mirrored batch makes
+            // a peer that is only WATCHING run the game's own commit against its own model — AttemptMoveItems +
+            // ApplyInventoryActions → <c>InventoryQuery.SyncItems</c> → real
+            // <c>InventoryComponent.AddItem/RemoveItem</c> — and SyncItems:61 then Resets every query, throwing
+            // away whatever that player had staged and not yet confirmed. Nothing ships (OnBatchCommitting
+            // checks the same scope), which is precisely what makes it this repo's silent-swallow shape: a
+            // model write on a non-authoritative peer with not one line to show for it.
+            if (SyncApplyScope.Active) return;
             if (_attemptMove == null)
             {
                 _attemptMove = AccessTools.Method(typeof(UIStateInventory), "AttemptMoveItems");

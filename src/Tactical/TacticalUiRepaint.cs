@@ -559,6 +559,11 @@ namespace Multiplayer.Tactical
                             ReadyItems(state, secondary, secondaryIsVehicle));
                     }
                     if (InvRefreshUi != null) InvRefreshUi.Invoke(state, null);
+                    // ALWAYS AUDIBLE, the same posture InventoryCommitSeam takes and for the same reason: a
+                    // repaint that succeeds in silence is indistinguishable from one that never ran, and
+                    // "the other peer sees nothing" was reported twice with no way to tell those two apart.
+                    Debug.Log("[Multiplayer][tac] rebuilt the open inventory panels for " + primary.name +
+                              (secondary == null ? " (no second soldier on screen)" : " and " + secondary.name));
                 }
             }
             catch (Exception ex)

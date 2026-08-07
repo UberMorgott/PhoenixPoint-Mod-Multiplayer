@@ -229,6 +229,7 @@ namespace RailCheck
             laws.AddRange(L154_OneShotGestureKeepsItsUrgency.Check());
             laws.AddRange(L155_EachEntryPointKeepsItsTransport.Check());
             laws.AddRange(L156_InventoryReorderRepaintsTheOpenEquipScreen.Check());
+            laws.AddRange(L157_MirroredInventoryBatchMarksTheOpenScreen.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
