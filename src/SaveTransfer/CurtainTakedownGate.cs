@@ -74,10 +74,20 @@ namespace Multiplayer.Harmony
         }
 
         /// <summary>
-        /// The three inputs behind <see cref="Hold"/>, verbatim. THE EVIDENCE LINE: until now a lift that
+        /// The inputs behind <see cref="Hold"/>, verbatim. THE EVIDENCE LINE: until now a lift that
         /// sailed through the gate was indistinguishable in the logs from no lift at all — CurtainLiftGate's
         /// PARKED/RELEASED pair appears ZERO times in all three captured runs, so five fixes were written
         /// with no way to tell which of "it was not held" and "it never fired" had happened.
+        ///
+        /// AND IT HAS TO NAME EVERY TERM, NOT THE TERMS IT HAPPENED TO BE BORN WITH (law L173). 17bf9fe
+        /// added <c>loadBoundaryAnnounced</c> to <see cref="SaveTransferMath.CurtainHoldArmed"/> and did not
+        /// add it here, so this line kept printing <c>holdArmed=</c> followed by a parenthesis accounting
+        /// for two of three terms. That is not cosmetic: on a lobby FIRST start and on the new-campaign arm
+        /// the announcement is the ONLY term that can be true (<c>_begun</c> is false and the latch is spent
+        /// by the time the transfer runs), so the exact boundary the newest fix exists for was the one the
+        /// log could say nothing about — and the 2026-08-07 host+client capture could not settle whether the
+        /// host's screen had been held. An evidence line that omits an input is worse than none: it reads
+        /// like a complete account.
         /// </summary>
         internal static string State()
         {
@@ -88,7 +98,8 @@ namespace Multiplayer.Harmony
                 return "engineActive=" + (engine != null && engine.IsActive) +
                        " holdArmed=" + (coord != null && coord.CurtainHoldArmed) +
                        " (sessionStarted=" + (coord != null && coord.SessionStarted) +
-                       " newCampaignPending=" + (coord != null && coord.NewCampaignPending) + ")" +
+                       " newCampaignPending=" + (coord != null && coord.NewCampaignPending) +
+                       " loadBoundaryAnnounced=" + (coord != null && coord.LoadBoundaryAnnounced) + ")" +
                        " revealed=" + (coord == null || coord.Revealed);
             }
             catch (Exception e) { return "gate state unreadable: " + e.Message; }

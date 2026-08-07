@@ -310,6 +310,15 @@ namespace Multiplayer.Network
         public bool CurtainHoldArmed =>
             SaveTransferMath.CurtainHoldArmed(_begun, _newCampaign.Armed, _loadBoundaryAnnounced);
 
+        /// <summary>THE THIRD INPUT OF <see cref="CurtainHoldArmed"/>, READABLE — exposed for the gate's
+        /// evidence line and for nothing else. 17bf9fe made the announcement an input of the arm and left
+        /// <c>CurtainTakedownGate.State()</c> naming only the other two, so every "curtain lift PASSED gate
+        /// unheld" line in the 2026-08-07 session reports <c>holdArmed=</c> and then a parenthesis that
+        /// accounts for two of three terms. On a lobby FIRST start this is the ONLY term that can be true,
+        /// so the one boundary the newest fix exists for is the one the log cannot speak about — and two
+        /// captured logs could not settle whether the host's screen was held. Law L173.</summary>
+        public bool LoadBoundaryAnnounced => _loadBoundaryAnnounced;
+
         /// <summary>True once the deferred reveal (native LiftCurtain + overlay hide) has run; used by
         /// CurtainShowPatch.Prefix so a later Loaded→Playing after RevealAll is NOT suppressed.</summary>
         public bool Revealed => _revealed;

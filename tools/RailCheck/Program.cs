@@ -248,6 +248,7 @@ namespace RailCheck
             laws.AddRange(L175_HeldSquadScreenIsStillTheOneHeadedFor.Check());
             laws.AddRange(L176_AQueuedWindowIsStillAnswerable.Check());
             laws.AddRange(L177_TheDropCountsDownAloneAndOneVetoStopsIt.Check());
+            laws.AddRange(L173_GateEvidenceNamesEveryInput.Check());
             laws.AddRange(L85_RestartedHostStreamIsApplied.Check());
             laws.AddRange(L86_AnnouncedBoundaryHoldsItsAnnouncer.Check());
             laws.Sort(StringComparer.Ordinal);
