@@ -8,6 +8,7 @@ using HarmonyLib;
 using PhoenixPoint.Common.Core;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Events;
+using PhoenixPoint.Geoscape.Events.Eventus;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewModules;
@@ -324,7 +325,7 @@ namespace Multiplayer.Network.Sync
         /// AircraftReworkMissionDeployment.cs</c>:26/:133 OnEnrollmentChanged/CheckForDeployment) and only
         /// flips <c>SkipDeploymentSelection</c> on some mission defs. So this file names ZERO TFTV types,
         /// needs no <c>TftvLateBinder</c> arm, and behaves identically with and without TFTV loaded.</summary>
-        private static bool AlreadyHeadedForDeployment(GeoscapeView view)
+        internal static bool AlreadyHeadedForDeployment(GeoscapeView view)
         {
             if (view == null) return false;
             if (view.CurrentViewState is UIStateRosterDeployment) return true;
@@ -405,23 +406,58 @@ namespace Multiplayer.Network.Sync
                   (missionMissing ? "missing" : "not runnable") + "); reach it from the aircraft's Launch " +
                   "button once it lands";
 
+        /// <summary>EVERY EXIT OF THIS POSTFIX SAYS WHY (RailCheck L197 arm). It had FOUR unlogged returns,
+        /// and on the peer that did not answer the 2026-08-07 mission event it emitted NOTHING AT ALL — not
+        /// the success, not the warning, not the catch — so which of the four it took was unknowable from the
+        /// log and the squad screen simply never appeared. Silent swallow is this repo's dominant bug class;
+        /// a bail nobody can see is a bug nobody can find.</summary>
         private static void Postfix(UIModuleSiteEncounters __instance)
         {
             var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession) return; // solo: SelectChoice ran end to end
+            if (engine == null || !engine.IsActiveSession)
+            {
+                Debug.Log("[MP][mission] deployment not opened because this peer is not in a session — solo, " +
+                          "where UIModuleSiteEncounters.SelectChoice:598-613 ran end to end and :612 already " +
+                          "opened the squad screen natively.");
+                return;
+            }
             try
             {
                 var ev = GeoEventField?.GetValue(__instance) as GeoscapeEvent;
                 var choices = ev?.EventData?.Choices;
-                int idx = ev?.Record == null ? -1 : ev.Record.SelectedChoice;
-                if (choices == null || idx < 0 || idx >= choices.Count) return;
+                // The LIVE record, not the dialog's own ref: on a mirroring peer ev.Record can still be the
+                // placeholder RaiseMirrored minted (EventPopup:568), whose SelectedChoice is nobody's answer.
+                var rec = EventPopup.LiveRecord(ev?.EventID, ev?.Record);
+                int idx = rec == null ? -1 : rec.SelectedChoice;
+                if (choices == null || idx < 0 || idx >= choices.Count)
+                {
+                    Debug.Log("[MP][mission] deployment for '" + (ev?.EventID ?? "?") + "' not opened because " +
+                              "this peer has no answered choice to read (choices=" +
+                              (choices == null ? "none" : choices.Count.ToString()) + ", selected=" + idx +
+                              ") — the record delta has not landed here yet. MissionArrivalNav still owns it.");
+                    return;
+                }
                 // Unity default-constructs an EMPTY OutcomeStartMission, so non-null is not the signal —
                 // MissionTypeDef is (GeoEventChoiceOutcome:315, same test EventPopup.StartsMission uses).
-                if (choices[idx].Outcome?.StartMission?.MissionTypeDef == null) return;
+                if (choices[idx].Outcome?.StartMission?.MissionTypeDef == null)
+                {
+                    Debug.Log("[MP][mission] deployment for '" + ev.EventID + "' not opened because the answered " +
+                              "choice (" + idx + ") starts no mission — correct, and the ordinary case for " +
+                              "every event window that is not a mission-start.");
+                    return;
+                }
 
                 var view = __instance.Context?.View;
                 if (!ShouldOpenDeployment(true, engine.IsHost, EventPopup.ClickWasReplayed(ev),
-                                          AlreadyHeadedForDeployment(view))) return;
+                                          AlreadyHeadedForDeployment(view)))
+                {
+                    Debug.Log("[MP][mission] deployment for '" + ev.EventID + "' not opened because this peer " +
+                              "does not owe itself the call — " +
+                              (NativeSelectChoiceRan(engine.IsHost, EventPopup.ClickWasReplayed(ev))
+                                  ? "its own SelectChoice:612 already ran"
+                                  : "it is already in, or queued for, UIStateRosterDeployment"));
+                    return;
+                }
 
                 var site = ev.Context?.Site;
                 var mission = site?.ActiveMission;
@@ -446,6 +482,178 @@ namespace Multiplayer.Network.Sync
                 Debug.LogError("[MP][mission] deployment navigation failed — this peer stays on the " +
                                "geoscape and can still reach the mission from the aircraft's Launch button: " + ex);
             }
+        }
+    }
+
+    /// <summary>
+    /// THE SQUAD SCREEN OPENS ON THE MISSION'S ARRIVAL, NOT ON A DIALOG'S TEARDOWN (2026-08-08).
+    ///
+    /// THE REPORT. Two peers were shown the same mission-start event; one answered, the other did not. The
+    /// answering peer reached <c>UIStateRosterDeployment</c>; the other never did, and its
+    /// <see cref="MissionEncounterNav"/> postfix emitted NO LINE AT ALL — not the success, not the warning,
+    /// not the catch — so it bailed at one of four unlogged returns and the screen was simply gone. Those
+    /// four returns now all speak (see there), but LOGGING A BAIL IS NOT A FIX FOR IT.
+    ///
+    /// WHY THE FUNNEL WAS THE WRONG THING TO DEPEND ON. <c>UIModuleSiteEncounters.FinishEncounter</c> is a
+    /// LOCAL DIALOG event: it fires only if this peer's own window was built, was clicked through and tore
+    /// down, and only reads state that this peer's own dialog happens to be holding at that instant — a
+    /// mirrored instance whose <c>Record</c> may still be the placeholder <c>RaiseMirrored</c> minted, on a
+    /// peer whose record delta rides a different surface at a different cadence. Every one of those is a
+    /// race, and each one loses the whole screen.
+    ///
+    /// SO THE TRIGGER IS THE STATE, WHICH ARRIVES ON EVERY PEER BY ITSELF: the event's own record resolving
+    /// (whoever answered it) plus the host's <c>S#&lt;id&gt;…ActiveMission</c> structural create landing on
+    /// this peer's own site. Both are replicated facts on the rail, both converge without anybody clicking
+    /// anything, and the watch is polled from <c>SyncEngine.Tick</c> — the same driver
+    /// <c>EventPopup.DrainHeldRaises</c> and <c>ReplenishSync.ClientArrivalTick</c> already run on.
+    ///
+    /// IT IS NOT A QUORUM AND CANNOT BECOME ONE (P13). Every term is this peer's own: its own record, its
+    /// own site graph, its own view queue. It counts no peers, waits for no acknowledgement and asks nobody
+    /// to press anything — a peer whose partners are all AFK opens its squad screen exactly as fast.
+    ///
+    /// IT DOES NOT YANK, AND IT DOES NOT DOUBLE-QUEUE. <c>GeoscapeView.LaunchMission</c> →
+    /// <c>ToDeploymentState</c>:596 QUEUES the screen, and <see cref="WindowOrder"/>'s open-screen hold keeps
+    /// it in the queue until this peer is back on the map — the owner's 2026-08-07 ruling, unchanged.
+    /// <see cref="MissionEncounterNav.ShouldOpenDeployment"/> and
+    /// <see cref="MissionEncounterNav.AlreadyHeadedForDeployment"/> are REUSED rather than re-derived, so the
+    /// peer that already answered (or already got there through the funnel) is never queued twice.
+    ///
+    /// AND IT WATCHES ONLY WINDOWS IT WAS SHOWN. <see cref="Watch"/> is armed from the raise itself and only
+    /// when some choice can start a mission, so the sites that sprout missions all over the geoscape all game
+    /// long can never navigate anybody: a mission this peer was not offered has no watch to fire.
+    /// </summary>
+    internal static class MissionArrivalNav
+    {
+        private sealed class Watched
+        {
+            internal string SiteRef;
+            internal string VehicleRef;
+            internal float ResolvedAt;   // realtimeSinceStartup of the first tick the record read Completed
+        }
+
+        // Bounded like EventPopup._held for the same reason: a peer sees a handful of mission windows, and a
+        // map that only grows is a leak wearing a feature's name. Keyed by event id — a re-raise replaces.
+        private const int MaxWatched = 32;
+
+        /// <summary>How long a resolved mission event may wait for its <c>ActiveMission</c> to arrive before
+        /// the watch gives up LOUDLY. The structural create rides the same diff cycle as the record delta, so
+        /// this is orders of magnitude over the real gap — long enough to cover a peer that is mid-load, short
+        /// enough that a mission which is never coming does not sit here for the rest of the session.</summary>
+        internal const float ArrivalWindowSeconds = 60f;
+
+        private static readonly Dictionary<string, Watched> _watched = new Dictionary<string, Watched>();
+
+        internal static void Reset() { _watched.Clear(); }
+
+        /// <summary>Arm the watch for a window this peer was actually shown. Called from BOTH raise paths —
+        /// the host's own (<c>EventPopup.HostBroadcast</c>) and the mirror's
+        /// (<c>EventPopup.RaiseMirrored</c>) — because a HOST can lose the answer race too, and then its
+        /// native <c>SelectChoice</c>:612 never ran here either.</summary>
+        internal static void Watch(string eventId, GeoscapeEventData data, string siteRef, string vehicleRef)
+        {
+            if (string.IsNullOrEmpty(eventId) || string.IsNullOrEmpty(siteRef)) return;
+            if (!EventPopup.AnyChoiceStartsMission(data)) return;
+            if (!_watched.ContainsKey(eventId) && _watched.Count >= MaxWatched)
+            {
+                Debug.LogWarning("[MP][mission] not watching '" + eventId + "' for its squad screen — " +
+                                 MaxWatched + " mission windows are already being watched, which means the " +
+                                 "watches are not retiring; this peer can still reach the mission from the " +
+                                 "aircraft's Launch button");
+                return;
+            }
+            _watched[eventId] = new Watched { SiteRef = siteRef, VehicleRef = vehicleRef, ResolvedAt = 0f };
+        }
+
+        /// <summary>PURE (RailCheck L197). Has the mission this window promised ARRIVED on this peer?
+        /// Both halves are replicated state that converges on its own — the answer (whoever gave it) and the
+        /// mission the host minted from it.</summary>
+        internal static bool MissionHasArrived(bool answerResolved, bool choiceStartsMission, bool missionRunnable)
+            => answerResolved && choiceStartsMission && missionRunnable;
+
+        /// <summary>PURE (RailCheck L197). Has a resolved window waited too long for a mission that is never
+        /// coming? Monotone in <paramref name="now"/> and bounded by a constant, so it cannot become an
+        /// unbounded wait — the same argument <c>WindowOrder.SettleExpired</c> rests on.</summary>
+        internal static bool ArrivalGivenUp(float resolvedAt, float now)
+            => resolvedAt > 0f && now - resolvedAt >= ArrivalWindowSeconds;
+
+        /// <summary>Driven from <c>SyncEngine.Tick</c>. One decision per watched window per frame; every exit
+        /// retires the watch or says why it is still waiting.</summary>
+        internal static void Tick(NetworkEngine engine)
+        {
+            if (_watched.Count == 0) return;
+            if (engine == null || !engine.IsActiveSession) { _watched.Clear(); return; }
+            var geo = GameUtl.CurrentLevel() == null
+                ? null : GameUtl.CurrentLevel().GetComponent<GeoLevelController>();
+            var view = geo?.View;
+            if (view == null) return;   // no geoscape to navigate yet; the watch keeps waiting
+
+            // Snapshot: the loop retires entries as it goes.
+            foreach (var id in new List<string>(_watched.Keys))
+            {
+                try { Step(engine, geo, view, id, _watched[id]); }
+                catch (Exception ex)
+                {
+                    _watched.Remove(id);
+                    Debug.LogError("[MP][mission] arrival watch for '" + id + "' failed — this peer can still " +
+                                   "reach the mission from the aircraft's Launch button: " + ex);
+                }
+            }
+        }
+
+        private static void Step(NetworkEngine engine, GeoLevelController geo, GeoscapeView view,
+                                 string id, Watched w)
+        {
+            var rec = EventPopup.LiveRecord(id, null);
+            var choices = geo.EventSystem?.GetEventByID(id, canFail: true)?.GeoscapeEventData?.Choices;
+            int idx = rec == null ? -1 : rec.SelectedChoice;
+            bool resolved = rec != null && rec.State == GeoscapeEventRecordState.Completed &&
+                            choices != null && idx >= 0 && idx < choices.Count;
+            if (!resolved) return;                       // still open on somebody's screen — nothing to open yet
+            if (w.ResolvedAt <= 0f) w.ResolvedAt = Time.realtimeSinceStartup;
+
+            if (!EventPopup.StartsMission(choices[idx]))
+            {
+                _watched.Remove(id);
+                Debug.Log("[MP][mission] arrival watch for '" + id + "' retired — the answer (choice " + idx +
+                          ") starts no mission, so there is no squad screen owed to anybody.");
+                return;
+            }
+
+            var site = IdentityResolver.Resolve(geo, w.SiteRef, null) as GeoSite;
+            var mission = site?.ActiveMission;
+            if (!MissionHasArrived(true, true, mission != null && mission.IsRunnable))
+            {
+                if (!ArrivalGivenUp(w.ResolvedAt, Time.realtimeSinceStartup)) return;
+                _watched.Remove(id);
+                Debug.LogWarning("[MP][mission] arrival watch for '" + id + "' at " + w.SiteRef + " GIVEN UP — " +
+                                 ArrivalWindowSeconds + "s after the answer resolved the site still has " +
+                                 (site == null ? "not resolved at all" : mission == null
+                                     ? "no ActiveMission" : "a mission that is not runnable") +
+                                 ". " + MissionEncounterNav.NoDeploymentReason(engine.IsHost, mission == null));
+                return;
+            }
+
+            // clickWasReplayed: TRUE on purpose. This seam holds no GeoscapeEvent instance to ask the memo
+            // about, and it does not need one — the ONLY case NativeSelectChoiceRan answers true for is a host
+            // whose own SelectChoice:598-613 ran, and :612 inside that same call already queued the screen, so
+            // AlreadyHeadedForDeployment answers it one term over. Assuming "native did not run" can therefore
+            // only ever cost a redundant question, never a duplicate screen.
+            if (!MissionEncounterNav.ShouldOpenDeployment(true, engine.IsHost, true,
+                                                          MissionEncounterNav.AlreadyHeadedForDeployment(view)))
+            {
+                _watched.Remove(id);
+                Debug.Log("[MP][mission] arrival watch for '" + id + "' retired — this peer is already in, or " +
+                          "queued for, UIStateRosterDeployment; re-issuing LaunchMission would leave a SECOND " +
+                          "deployment request in a queue that is part of the save.");
+                return;
+            }
+
+            _watched.Remove(id);
+            view.LaunchMission(mission, IdentityResolver.Resolve(geo, w.VehicleRef, null) as GeoVehicle);
+            Debug.Log("[MP][mission] " + (engine.IsHost ? "HOST" : "CLIENT") + " squad screen opened for '" + id +
+                      "' at " + w.SiteRef + " from the MISSION'S ARRIVAL — the answer resolved (choice " + idx +
+                      ") and this peer's own site now holds a runnable ActiveMission. Nothing here waited on a " +
+                      "dialog teardown, and nothing waited on another player.");
         }
     }
 

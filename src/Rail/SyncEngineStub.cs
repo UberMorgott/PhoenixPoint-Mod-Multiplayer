@@ -166,6 +166,10 @@ namespace Multiplayer.Network.Sync
             // in (still in tactical, mid-load). Not a pump over the mirrored records — the 1 Hz record scan
             // deleted 2026-07-30 is not coming back; this drains only raises 0xB6 actually DELIVERED here.
             EventPopup.DrainHeldRaises(_engine);
+            // BOTH roles inside: open the pre-mission squad screen from the MISSION'S ARRIVAL rather than
+            // from this peer's own dialog teardown. The peer that did not answer the event reached neither
+            // on 2026-08-07 — see MissionArrivalNav for why the local funnel could not be the trigger.
+            MissionArrivalNav.Tick(_engine);
             // client-only inside, and the same shape of problem one screen over: the post-mission resupply
             // gate is asked at UIStateInitial.EnterState, a frame or two before the host's own post-mission
             // writes land on 0xAC. Re-asks the GAME'S own GetMissingItems() over a bounded window.
@@ -196,6 +200,7 @@ namespace Multiplayer.Network.Sync
             DiffEngine.Reset();
             GenericApplier.Reset();
             EventPopup.Reset();   // 0xB6 raise seq stream (teardown only — see EventPopup.Reset)
+            MissionArrivalNav.Reset();  // a watch belongs to the session whose sites it names
             GeoModalMirror.Reset();  // 0xB7 modal raise seq stream, same teardown-only contract
             CutsceneMirror.Reset();  // 0xBA cutscene raise seq stream, same teardown-only contract
             MarketplaceSync.Reset();  // 0xBF offer-list seq stream, same teardown-only contract

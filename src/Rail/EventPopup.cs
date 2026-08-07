@@ -81,7 +81,95 @@ namespace Multiplayer.Network.Sync
         /// monotonic stream and a client last-writer guard, so it must NOT be touched at a mid-session
         /// reload boundary (rca-3 contract: a host counter that restarts mid-session makes every following
         /// raise look stale to a client that kept its own high-water mark, and the windows vanish silently).</summary>
-        public static void Reset() { Seq.Reset(); _held.Clear(); _unanswered.Clear(); _rewards.Clear(); }
+        public static void Reset()
+        { Seq.Reset(); _held.Clear(); _hostCurtained.Clear(); _unanswered.Clear(); _rewards.Clear(); }
+
+        /// <summary>The HOST's OWN raises, parked behind the HOST's OWN curtain, in the order its sim made
+        /// them. See <see cref="HostRaiseWaitsForReveal"/> for why this list has to exist at all.</summary>
+        private static readonly List<GeoscapeEvent> _hostCurtained = new List<GeoscapeEvent>();
+
+        // GeoscapeView.OnGeoscapeEventRaised:2034 — the game's own handler, private, and re-invoked (not
+        // re-implemented) when the curtain lifts. The game itself calls it out of band at ToMarketplace:737,
+        // so a second manual call is a shape the class already supports.
+        private static readonly System.Reflection.MethodInfo NativeRaiseMethod =
+            AccessTools.Method(typeof(GeoscapeView), "OnGeoscapeEventRaised", new[] { typeof(GeoscapeEvent) });
+
+        /// <summary>PURE (RailCheck L194). MUST A HOST-LOCAL RAISE WAIT FOR THIS HOST'S OWN REVEAL?
+        ///
+        /// THE REPORT (2026-08-08): the host got three intro dialogs and THEN the intro cutscene; both
+        /// clients got the cutscene and THEN the three dialogs. All four requests are priority 0, so
+        /// <c>GeoscapeViewSwitchQuery</c> serves them in INSERT order and insert order was the only thing
+        /// that differed. It differed for one reason: a client cannot carry a window while it is still at the
+        /// loading screen, so its three raises sat in <see cref="_held"/> and were replayed AFTER the reveal,
+        /// i.e. after the cutscene had been queued — while the host, whose own geoscape is fully live behind
+        /// the curtain, queued and SERVED all three before the cutscene existed. <c>GeoscapeView.Update</c>
+        /// keeps calling <c>ProcessQueriedStateSwitch</c> throughout a curtain; the curtain hides the screen,
+        /// it does not stop the queue.
+        ///
+        /// So the host is given the SAME wait it already imposes on every client, out of the state it already
+        /// owns: <c>SaveTransferCoordinator.Revealed</c>. This is NOT a quorum and cannot become one — the
+        /// predicate reads this peer's session flag, this peer's role and this peer's own reveal, and that
+        /// reveal is released by the load barrier (<c>AllDone(GetRosterSlots())</c> → <c>RevealAll</c>), which
+        /// ends by itself and SHRINKS when a peer drops. Nobody waits on a human ACTING.
+        ///
+        /// A client answers FALSE here on purpose. Its raises are mirrored, not local, and they already have
+        /// their own wait in <see cref="CanCarryWindow"/>; adding a second one would hold a window that the
+        /// drain is the only thing able to release.</summary>
+        internal static bool HostRaiseWaitsForReveal(bool inSession, bool isHost, bool revealed)
+            => inSession && isHost && !revealed;
+
+        /// <summary>Has this peer revealed? TRUE when there is no coordinator at all (solo, or a session that
+        /// never ran a transfer), because "no curtain" must never read as "curtained forever".</summary>
+        private static bool Revealed(NetworkEngine engine)
+            => engine?.SaveTransfer == null || engine.SaveTransfer.Revealed;
+
+        /// <summary>Park the host's own raise until its curtain lifts, so every peer inserts this window
+        /// AFTER its own reveal. Returns true when the native raise must be SKIPPED this time — the caller is
+        /// the prefix on the game's own handler, and <see cref="DrainHostCurtained"/> re-invokes that same
+        /// handler later, so nothing about the window is re-implemented here.</summary>
+        internal static bool HoldHostRaiseBehindCurtain(GeoscapeEvent ev)
+        {
+            if (ev == null) return false;
+            var engine = NetworkEngine.Instance;
+            if (!HostRaiseWaitsForReveal(engine != null && engine.IsActiveSession,
+                                         engine != null && engine.IsHost, Revealed(engine))) return false;
+            if (_hostCurtained.Count >= MaxHeld)
+            {
+                Debug.LogError("[MP][events] HOST raise of '" + ev.EventID + "' queued BEHIND ITS OWN CURTAIN — " +
+                               MaxHeld + " are already parked, so this host is not 'loading', and holding more " +
+                               "would trade a window-order defect for a lost window. It keeps the host's order.");
+                return false;
+            }
+            _hostCurtained.Add(ev);
+            Debug.LogWarning("[MP][events] HOST raise of '" + ev.EventID + "' PARKED — this host has not revealed " +
+                             "yet, and a window queued behind its own curtain is served before the cutscene every " +
+                             "client queues at ITS reveal (" + _hostCurtained.Count + " parked)");
+            return true;
+        }
+
+        /// <summary>Replay ONE parked host raise per frame, through the game's own handler, once this host has
+        /// revealed and its geoscape can carry a window. One per frame for the same reason the client drain
+        /// is: each raise inserts into the game's priority queue and draining one at a time keeps that queue's
+        /// insert order the order the sim produced.</summary>
+        private static void DrainHostCurtained(NetworkEngine engine)
+        {
+            if (_hostCurtained.Count == 0) return;
+            if (HostRaiseWaitsForReveal(true, true, Revealed(engine))) return;
+            var geo = GeoLevel();
+            if (!CanCarryWindow(geo) || NativeRaiseMethod == null) return;
+
+            var ev = _hostCurtained[0];
+            _hostCurtained.RemoveAt(0);
+            try
+            {
+                Debug.Log("[MP][events] replaying PARKED host raise of '" + ev.EventID + "' — this host has " +
+                          "revealed, so its window now enters the queue behind the same cutscene every client " +
+                          "queued at its own reveal (" + _hostCurtained.Count + " still parked)");
+                NativeRaiseMethod.Invoke(geo.View, new object[] { ev });
+            }
+            catch (Exception ex)
+            { Debug.LogError("[MP][events] parked host raise replay failed for '" + ev.EventID + "': " + ex); }
+        }
 
         /// <summary>Raises that ARRIVED but had nowhere to go yet, oldest first. See
         /// <see cref="ClientTick"/> for why this exists and why it is bounded.</summary>
@@ -234,6 +322,9 @@ namespace Multiplayer.Network.Sync
                           " site=" + (p.SiteRef == "" ? "none" : p.SiteRef) + " vehicle=" +
                           (p.VehicleRef == "" ? "none" : p.VehicleRef) + " titleLen=" + p.Title.Length +
                           " narrLen=" + p.Narrative.Length);
+                // The host watches its own mission windows for the same reason a client does — it can LOSE
+                // the race, and then its native SelectChoice:612 never ran here either (MissionArrivalNav).
+                MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
             }
             catch (Exception ex)
             {
@@ -315,7 +406,18 @@ namespace Multiplayer.Network.Sync
         /// <summary>Does this choice launch a tactical mission? Unity default-constructs an EMPTY
         /// <c>OutcomeStartMission</c>, so non-null is not the signal — <c>MissionTypeDef</c> is
         /// (GeoEventChoiceOutcome:315 → RewardStartCustomMission).</summary>
-        private static bool StartsMission(GeoEventChoice choice) => choice?.Outcome?.StartMission?.MissionTypeDef != null;
+        internal static bool StartsMission(GeoEventChoice choice) => choice?.Outcome?.StartMission?.MissionTypeDef != null;
+
+        /// <summary>Can ANY answer to this window end in a tactical mission? The one question
+        /// <see cref="MissionArrivalNav"/> asks before it watches an event at all, so a peer never watches
+        /// (and can never be navigated by) a window that has no mission behind any of its buttons.</summary>
+        internal static bool AnyChoiceStartsMission(GeoscapeEventData data)
+        {
+            var choices = data?.Choices;
+            if (choices == null) return false;
+            for (int i = 0; i < choices.Count; i++) if (StartsMission(choices[i])) return true;
+            return false;
+        }
 
         /// <summary>Does this choice carry a REAL outcome beyond declining? Walked GENERICALLY over the
         /// outcome's public fields rather than against a hand-listed set: <c>GeoEventChoiceOutcome</c> has
@@ -431,8 +533,11 @@ namespace Multiplayer.Network.Sync
         /// </summary>
         internal static void DrainHeldRaises(NetworkEngine engine)
         {
+            if (engine == null || !engine.IsActiveSession) { _held.Clear(); _hostCurtained.Clear(); return; }
+            // The host no longer walks away from this drain: it has a hold of its OWN now (the curtain), and
+            // exempting it here is what let its intro dialogs run ahead of every client's cutscene.
+            if (engine.IsHost) { DrainHostCurtained(engine); return; }
             if (_held.Count == 0) return;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) { _held.Clear(); return; }
             if (!CanCarryWindow(GeoLevel())) return;
 
             var entry = _held[0];
@@ -500,9 +605,31 @@ namespace Multiplayer.Network.Sync
         {
             var view = geo?.View;
             if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery)) return false;
+            var current = view.CurrentViewState;
+            if (OneShotHoldsWindow(current == null ? null : current.GetType())) return false;
             var es = geo.EventSystem;
             return es != null && EventsField?.GetValue(es) != null;
         }
+
+        /// <summary>PURE (RailCheck L195). IS A FULL-SCREEN ONE-SHOT PLAYING RIGHT NOW?
+        ///
+        /// THE SECOND HALF OF THE 2026-08-08 REPORT. The gate above asked only whether the EVENT SYSTEM had
+        /// finished loading; it knew nothing about what is on screen, so the drain released all three intro
+        /// dialogs 0-130 ms after the intro cutscene started. That alone is only a cosmetic pile-up — what
+        /// made it unrecoverable is that the cutscene's own <c>SetInputState("Cutscene")</c>
+        /// (<c>UIStateGeoCutscene.EnterState</c>) is STORED AND DISCARDED while a stale loading override is
+        /// still held (<c>RevealInputLock</c>:19-23, <c>InputController.SetInputSets</c>:520-527), so Escape
+        /// does nothing and the peer sits through the entire video with three modals stacked behind it.
+        ///
+        /// ONE TERM, and it is a HOLD rather than a drop: the drain retries every tick, so a window that
+        /// arrives during a cinematic is served the moment the cinematic ends — the shape L189 already
+        /// blesses ("held, not lost"). Keyed on <c>UIStateGeoCutscene</c> and assignability, which is the same
+        /// state name <see cref="WindowOrder"/> and <c>GeoWindowCoverage</c> already declare on, so a mod
+        /// subclassing it is covered without naming the mod. The input latch itself is NOT re-fixed here —
+        /// <c>RevealInputLock</c> owns it, and L196 asserts the override is gone before any queued state
+        /// enters.</summary>
+        internal static bool OneShotHoldsWindow(Type currentViewState)
+            => currentViewState != null && typeof(UIStateGeoCutscene).IsAssignableFrom(currentViewState);
 
         /// <summary>Rebuild the host's window here: resolve the shipped refs, build the REAL context, apply
         /// the wire texts to a PRIVATE copy of the event data, and push the NATIVE view state through the
@@ -589,6 +716,9 @@ namespace Multiplayer.Network.Sync
             // The window now exists on this peer; keep its carrier so a battle cannot delete it (see
             // RequeueUnanswered). Overwrites any earlier raise of the same id — the newest is the live one.
             _unanswered[p.EventId] = new KeyValuePair<uint, Raise>(seq, p);
+            // The squad screen must not depend on this peer's own dialog teardown running to completion —
+            // see MissionArrivalNav. Armed from the RAISE, fired from the mission's ARRIVAL.
+            MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
             return true;
         }
 
@@ -1286,9 +1416,24 @@ namespace Multiplayer.Network.Sync
     [HarmonyPatch(typeof(GeoscapeView), "OnGeoscapeEventRaised", new[] { typeof(GeoscapeEvent) })]
     internal static class EventRaiseBroadcast
     {
-        private static void Postfix(GeoscapeView __instance, GeoscapeEvent geoEvent)
+        /// <summary>THE HOST'S OWN CURTAIN HOLD (2026-08-08). False = skip the native body this time; the
+        /// event is parked and <c>EventPopup.DrainHostCurtained</c> re-invokes THIS method after the reveal,
+        /// so the window is queued by the game's own code and the postfix below still mirrors it — one raise,
+        /// one broadcast, just later. See <see cref="EventPopup.HostRaiseWaitsForReveal"/>.</summary>
+        private static bool Prefix(GeoscapeView __instance, GeoscapeEvent geoEvent, out bool __state)
         {
-            if (__instance == null || __instance.SuppressEvents) return;
+            __state = __instance != null && !__instance.SuppressEvents &&
+                      EventPopup.HoldHostRaiseBehindCurtain(geoEvent);
+            return !__state;
+        }
+
+        /// <summary><paramref name="__state"/> = "the raise was PARKED". Harmony runs a postfix even when the
+        /// prefix skipped the body, and mirroring a window this host has not queued yet would invert the very
+        /// order the park exists to align — the clients would insert it while the host still had not. The
+        /// replay re-enters this method, so the broadcast happens then, with the real queued priority.</summary>
+        private static void Postfix(GeoscapeView __instance, GeoscapeEvent geoEvent, bool __state)
+        {
+            if (__state || __instance == null || __instance.SuppressEvents) return;
             EventPopup.HostBroadcast(__instance, geoEvent);
         }
     }
