@@ -295,7 +295,15 @@ namespace Multiplayer.Network.Sync
         /// decision reads nothing about WHICH peer sent it, because every peer's veto is the same veto.</summary>
         internal static void Cancel(string who)
         {
-            if (_pending == null && string.IsNullOrEmpty(State.SiteRef)) return;
+            if (_pending == null && string.IsNullOrEmpty(State.SiteRef))
+            {
+                // NEVER SILENT (P1, and the bug class that hid the dead click for a whole session): a veto
+                // that lands on nothing still says so, because "the click did nothing" and "the click never
+                // arrived" are the same symptom and only a log tells them apart.
+                Debug.Log("[MP][deploy] cancel from " + who + " arrived with NO countdown running — nothing to " +
+                          "stop. Either it had already reached zero, or another peer's veto got here first.");
+                return;
+            }
             Debug.Log("[MP][deploy] countdown CANCELLED by " + who + " at " +
                       (string.IsNullOrEmpty(State.SiteRef) ? "S#?" : State.SiteRef) +
                       " — the mission is NOT cancelled, only the drop: the deployment screen is still there " +
@@ -308,8 +316,17 @@ namespace Multiplayer.Network.Sync
         internal static void RequestCancel()
         {
             var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession) return;
+            if (engine == null || !engine.IsActiveSession)
+            {
+                Debug.LogWarning("[MP][deploy] CANCEL pressed with no active co-op session — the veto goes " +
+                                 "nowhere. The panel should not have been on screen at all (SyncCore gates on " +
+                                 "IsActiveSession), so this is a stale overlay rather than a lost cancel.");
+                return;
+            }
             if (engine.IsHost) { Cancel("this host"); return; }
+            Debug.Log("[MP][deploy] CANCEL leaving this client as op " + MissionSync.OpCancelLaunch + " on 0x" +
+                      SurfaceIds.GeoMissionIntent.ToString("X2") + " — the host owns the countdown, so the veto " +
+                      "takes one round trip and then clears the overlay on every peer through the rail.");
             IntentRail.Send(SurfaceIds.GeoMissionIntent, MissionSync.OpCancelLaunch, "cancel the deployment countdown");
         }
 

@@ -48,7 +48,11 @@ namespace Multiplayer.UI
     {
         private static int Pad => LobbyTheme.Scale(10);
         private static int PanelW => LobbyTheme.Scale(260);
-        private static int TitleH => LobbyTheme.Scale(26);
+        /// <summary>Two wrapped lines' worth, not one. The caption is "MISSION STARTS IN 25 SECONDS" at its
+        /// longest and the plate is deliberately narrow; a one-line box forced best-fit down to an
+        /// unreadable size instead of letting it wrap. The panel's own height is derived from this, so
+        /// nothing else moves.</summary>
+        private static int TitleH => LobbyTheme.Scale(44);
         private static int ButtonW => LobbyTheme.Scale(120);
         private static int ButtonH => LobbyTheme.Scale(30);
         private static int PanelH => Pad * 3 + TitleH + ButtonH;
@@ -71,6 +75,7 @@ namespace Multiplayer.UI
         internal void Attach(Transform barCanvas)
         {
             _canvasRect = barCanvas as RectTransform;
+            EnsureRaycaster(barCanvas);
 
             _root = new GameObject("MultiplayerDeployCountdown");
             _root.transform.SetParent(barCanvas, false);
@@ -91,14 +96,108 @@ namespace Multiplayer.UI
                                           "", LobbyTheme.ScaledHeaderFontSize, TextAnchor.MiddleCenter,
                                           new Vector2(0.5f, 1f));
             _title.raycastTarget = false;
+            FitInsideRect(_title);
 
             // CENTRED, as asked: the button sits on the panel's own horizontal centre, under the line that
             // says how long is left. It is the ONLY raycastable thing this class builds.
             _cancel = UiToolkit.CreateButton(_root, "Cancel", "CANCEL", new Vector2(0f, Pad),
                                              new Vector2(ButtonW, ButtonH), new Vector2(0.5f, 0f),
-                                             DeployCountdown.RequestCancel);
+                                             OnCancelClicked);
+            SkinButton(_cancel);
 
             _root.SetActive(false);
+        }
+
+        /// <summary>
+        /// THE CLICK THAT NEVER ARRIVED (2026-08-08, live, three peers). The owner pressed CANCEL and the
+        /// countdown ran to zero — and NOT ONE of the three mod logs carried a single line about it, on any
+        /// peer. That is the whole diagnosis: the press never reached a handler, because the mod's overlay
+        /// canvas carried a <c>Canvas</c> and a <c>CanvasScaler</c> AND NO <c>GraphicRaycaster</c>
+        /// (<c>MultiplayerUI.EnsureBarCanvas</c>). Unity's EventSystem can only hit a Graphic on a canvas
+        /// that carries a raycaster, so every widget on this canvas was decorative BY CONSTRUCTION.
+        ///
+        /// It went unnoticed for as long as it did because nothing on that canvas was ever CLICKABLE before:
+        /// the in-game bar and <see cref="PlayerPanel"/> both set <c>raycastTarget = false</c> on every
+        /// Graphic they build, deliberately. The countdown's Cancel is the first interactive thing to land
+        /// there, and it inherited a canvas that had never had to answer a pointer.
+        ///
+        /// The game's own from-code canvas is the three components together —
+        /// <c>Assembly-CSharp/src/LlockhamIndustries.Misc/SceneSingleton.cs:81-83</c> adds
+        /// <c>Canvas</c> + <c>CanvasScaler</c> + <c>GraphicRaycaster</c> in one breath. Added here rather
+        /// than in the canvas factory only because that file is another agent's this session; the raycaster
+        /// belongs on the canvas and this is idempotent either way.
+        /// </summary>
+        private void EnsureRaycaster(Transform barCanvas)
+        {
+            if (barCanvas == null) return;
+            if (barCanvas.GetComponent<GraphicRaycaster>() != null) return;
+            barCanvas.gameObject.AddComponent<GraphicRaycaster>();
+            Debug.Log("[Multiplayer] deployment-countdown panel added the missing GraphicRaycaster to the mod " +
+                      "overlay canvas — without it no click on this canvas reaches any handler at all, which " +
+                      "is why the CANCEL press produced no log line on any peer.");
+        }
+
+        /// <summary>The one place a cancel press is recorded, BEFORE any decision can drop it. The dead
+        /// click above was unknowable precisely because the path started at a silent method; from here on a
+        /// press that changes nothing still leaves a line saying it happened.</summary>
+        private static void OnCancelClicked()
+        {
+            Debug.Log("[MP][deploy] CANCEL pressed on this peer at " +
+                      (string.IsNullOrEmpty(DeployCountdown.State.SiteRef) ? "S#?" : DeployCountdown.State.SiteRef) +
+                      " with " + DeployCountdown.State.SecondsLeft + " s left — one peer's veto stops the drop " +
+                      "for everyone (no vote, nobody else has to agree).");
+            DeployCountdown.RequestCancel();
+        }
+
+        /// <summary>
+        /// THE LABEL RAN OUTSIDE THE PLATE (same live report). <see cref="UiToolkit.CreateText"/> leaves
+        /// <c>horizontalOverflow = Overflow</c>, so "MISSION STARTS IN 5 SECONDS" at header size simply drew
+        /// past both edges of a 260-wide panel.
+        ///
+        /// Fixed with the auto-size component uGUI already has, and with the SAME settings the mod already
+        /// puts on the NATIVE End Turn button's own caption (<c>TacticalReadySync.FitLabel</c>:625-635) —
+        /// which is the owner's reference for a correct button. No hardcoded font size and no magic offset:
+        /// the frame is fixed and the text shrinks and wraps inside it, never the other way round.
+        /// </summary>
+        private static void FitInsideRect(Text t)
+        {
+            if (t == null) return;
+            t.resizeTextForBestFit = true;
+            t.resizeTextMaxSize = t.fontSize > 0 ? t.fontSize : 24;
+            t.resizeTextMinSize = 8;
+            t.horizontalOverflow = HorizontalWrapMode.Wrap;
+            t.verticalOverflow = VerticalWrapMode.Truncate;
+        }
+
+        /// <summary>
+        /// Give the button the hover feedback a native one has. A <c>Button</c> added at RUNTIME has a NULL
+        /// <c>targetGraphic</c> — Unity only fills that field from the editor's <c>Reset</c> — and that is
+        /// the field the colour transition drives, so the button reacted to nothing. Exactly the defect
+        /// L182 already had to repair on the cloned End Turn button
+        /// (<c>TacticalReadySync.cs:522</c>, "the button had no hover feedback either"), and the game's own
+        /// from-code button assigns it in the same breath as the Image:
+        /// <c>Assembly-CSharp/src/UnityTools.UI.SnapshotText.Lib/SnapshotTextPooling.cs:145-148</c>.
+        ///
+        /// The hover colour is the theme's captured NATIVE accent, not an invented one, so the highlight is
+        /// the same amber the rest of the game's UI lights up with.
+        /// </summary>
+        private static void SkinButton(Button b)
+        {
+            if (b == null) return;
+            var face = b.GetComponent<Image>();
+            if (face == null) return;
+            face.raycastTarget = true;          // the ONE click surface this class keeps
+            b.targetGraphic = face;
+            var c = b.colors;
+            c.normalColor = Color.white;        // ColorTint multiplies the skinned plate; white = as skinned
+            c.highlightedColor = LobbyTheme.Accent;
+            var a = LobbyTheme.Accent;
+            c.pressedColor = new Color(a.r * 0.7f, a.g * 0.7f, a.b * 0.7f, 1f);
+            c.selectedColor = Color.white;
+            c.fadeDuration = 0.1f;
+            b.colors = c;
+
+            foreach (var label in b.GetComponentsInChildren<Text>(true)) FitInsideRect(label);
         }
 
         /// <summary>The repaint, and the containment point L158 names: one try/catch, because this is called
