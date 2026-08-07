@@ -375,6 +375,7 @@ namespace Multiplayer.Network.Sync
             _kindIds.Clear(); _kinds.Clear();
             _rootTouchedSeq.Clear(); // the seq stream restarts, so recorded touch-seqs would over-gate
             _reportWritten = false;
+            ForgetIncidentCounts();  // a new session re-earns its verdict from its own walks
         }
 
         /// <summary>Reload boundary: drop snapshot + baseline (post-reload state reaches clients via the
@@ -1315,11 +1316,52 @@ namespace Multiplayer.Network.Sync
         /// stage-1 harness to assert the detector above still fires.</summary>
         internal static ICollection<string> WalkIncidents => _walkIncidents;
 
+        /// <summary>How many walks an exclusion has to survive before it stops being news and starts being a
+        /// verdict. The walk cadence is ≤0.5 s, so this is ~10 s of a field failing every single time.</summary>
+        internal const int PermanentAfterWalks = 20;
+
+        /// <summary>Walks in which each incident line has fired. An incident is emitted at most once per walk
+        /// per (type, field, path), so this counts walks, not calls.</summary>
+        private static readonly Dictionary<string, int> _incidentWalks = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        /// <summary>THE DECISION, pure so the harness can falsify it (RailCheck L188): the FIRST sighting is
+        /// news and rides the existing warn-once; the <see cref="PermanentAfterWalks"/>-th is the verdict and
+        /// escalates ONCE. Escalating on every walk after that would be a per-frame error storm, and never
+        /// escalating is the bug — so the answer is exactly one line, at the count where "transient" is dead.</summary>
+        internal static bool EscalateAt(int walks) => walks == PermanentAfterWalks;
+
+        /// <summary>Count one more walk in which this exclusion fired, and answer whether THIS is the walk
+        /// that turns it from news into a verdict. Separated from the logging so RailCheck L188 can drive the
+        /// real counter — the state machine is the claim, the Debug call is not.</summary>
+        internal static bool NoteIncidentWalk(string line)
+        {
+            _incidentWalks.TryGetValue(line, out int walks);
+            _incidentWalks[line] = ++walks;
+            return EscalateAt(walks);
+        }
+
+        /// <summary>Teardown for the counts above (see <see cref="Reset"/>): a new session re-earns every
+        /// verdict from its own walks, or the second session gets the silence the first one was fixed for.</summary>
+        internal static void ForgetIncidentCounts() => _incidentWalks.Clear();
+
         private static void Incident(Type t, string field, string reason, string path)
         {
             var line = t.Name + "." + field + ": " + reason + " [" + path + "]";
             if (_walkIncidents.Add(line) && _reportWritten)
                 Debug.LogWarning("[Multiplayer][rail] DiffEngine excluded: " + line);
+
+            // A FIELD THAT FAILS ON EVERY WALK IS NOT A WARNING, IT IS A DEAD FIELD (2026-08-07 session).
+            // `FactionDiplomacy._factionsDiplomacyState` threw at the first campaign walk, kept throwing for
+            // the remaining 16 minutes, and said so exactly once — at Warning, in the same shape a genuinely
+            // one-off exclusion uses. The set above dedups the LOG, never the retry, so the reader had no
+            // way to tell "this happened once during a load" from "this state has never reached a client and
+            // never will". That distinction is the whole content of the report, so it is now stated.
+            if (NoteIncidentWalk(line))
+                Debug.LogError("[Multiplayer][rail] DiffEngine PERMANENTLY excluded (failed " +
+                               PermanentAfterWalks + " walks in a row, ~" + PermanentAfterWalks / 2 +
+                               "s): " + line + " — this field has NEVER " +
+                               "crossed to a client and will not until the code changes. Every peer is " +
+                               "running on whatever the save transfer left there.");
         }
 
         // ─── Structural emit (root create/destroy — law 3) ─────────────────

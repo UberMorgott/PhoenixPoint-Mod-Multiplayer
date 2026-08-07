@@ -94,6 +94,10 @@ namespace Multiplayer.Network.Sync
         // ─── HOST state: last committed loadout per character (the revert guard, see CheckLastApplyStuck) ─
         private static readonly Dictionary<int, byte[]> _appliedBefore = new Dictionary<int, byte[]>();
         private static readonly Dictionary<int, byte[]> _appliedAfter = new Dictionary<int, byte[]>();
+        /// <summary>Who asked for the loadout the host is now holding — the ONE peer that has to be told if
+        /// that apply is ever undone behind its back (<see cref="CheckLastApplyStuck"/>). Written beside
+        /// <see cref="_appliedAfter"/> by every remote apply, so the pair can never name different intents.</summary>
+        private static readonly Dictionary<int, ulong> _appliedPeer = new Dictionary<int, ulong>();
 
         /// <summary>Hard cap on a wire list length — the only untrusted count in this payload, and the one
         /// value a malformed/hostile peer could turn into an allocation. Loadout lists are single digits.</summary>
@@ -105,6 +109,7 @@ namespace Multiplayer.Network.Sync
         {
             _appliedBefore.Clear();
             _appliedAfter.Clear();
+            _appliedPeer.Clear();
             _sent.Clear();
         }
 
@@ -132,6 +137,7 @@ namespace Multiplayer.Network.Sync
                                        IEnumerable<GeoItem> equipment, IEnumerable<GeoItem> inventory, bool freeReload)
             {
                 SelfCheckGestureCommit(); // in-session only; the flush about to happen is the commit
+                if (BlockStaleHostRevert(__instance, armour, equipment, inventory, freeReload)) return false;
                 if (IntentRail.ShouldRunNative()) return true;
                 if (IsAugmentStaging()) return true;
                 try
@@ -720,7 +726,7 @@ namespace Multiplayer.Network.Sync
                 catch (Exception ex) { Debug.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
                 Debug.Log("[MP][equip] HOST intent APPLIED char=U#" + charId + " nonce=" + nonce +
                           " peer=" + senderPeerId + " took=" + took + " returned=" + pool.Count + " freeReload=" + freeReload);
-                _appliedAfter[charId] = EncodeBody(false, Slots(character));
+                RecordApplied(character, charId, senderPeerId);
                 ReseedLocalScreenAfterRemoteMutation();
                 // No push needed: GeoCharacter EntityList fields + storage GeoItemDict ride DiffEngine 0xAC.
             }
@@ -824,6 +830,11 @@ namespace Multiplayer.Network.Sync
                 if (amount < 1 || live.CommonItemData.Count < amount)
                 { Reject(senderPeerId, charId, "scrap: amount " + amount + " > held " + live.CommonItemData.Count); return; }
 
+                // Same before/after pair every other remote apply records — a scrap that lands on the host
+                // while a peer holds the equip screen open is undone by the same stale flush.
+                CheckLastApplyStuck(character, charId);
+                _appliedBefore[charId] = EncodeBody(false, Slots(character));
+
                 var storage = ResolveStorage(character);
                 if (live.CommonItemData.Ammo != null && storage != null)
                     foreach (var mag in live.CommonItemData.Ammo.UnloadMagazines())
@@ -834,7 +845,7 @@ namespace Multiplayer.Network.Sync
 
                 try { (character.Faction as GeoPhoenixFaction)?.UpdatePreferredLoadout(character); }
                 catch (Exception ex) { Debug.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
-                _appliedAfter[charId] = EncodeBody(false, Slots(character));
+                RecordApplied(character, charId, senderPeerId);
                 ReseedLocalScreenAfterRemoteMutation();
                 Debug.Log("[MP][scrap] HOST equipped-scrap APPLIED char=U#" + charId + " def=" + guid +
                           " x" + amount + " nonce=" + nonce + " peer=" + senderPeerId);
@@ -918,6 +929,10 @@ namespace Multiplayer.Network.Sync
             if (removedDefs == null)
             { Reject(senderPeerId, charId, "augment does not fit: " + def.name); return false; }
 
+            // Same before/after pair every other remote apply records — see BlockStaleHostRevert.
+            CheckLastApplyStuck(character, charId);
+            _appliedBefore[charId] = EncodeBody(false, Slots(character));
+
             var current = originals.Where(i => !removedDefs.Contains(i.ItemDef)).ToList();
             current.Add(new GeoItem(def));
             var storage = ResolveStorage(character);
@@ -939,9 +954,18 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex) { Debug.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
             Debug.Log("[MP][equip] HOST augment APPLIED char=U#" + charId + " def=" + defGuid +
                       " nonce=" + nonce + " peer=" + senderPeerId);
-            _appliedAfter[charId] = EncodeBody(false, Slots(character));
+            RecordApplied(character, charId, senderPeerId);
             ReseedLocalScreenAfterRemoteMutation(); // same stale-flush hazard as OpSetItems
             return true;
+        }
+
+        /// <summary>Close one remote apply: what the host now holds, and WHO asked for it. One call, so the
+        /// two can never name different intents — <see cref="CheckLastApplyStuck"/> hands the second half to
+        /// <see cref="Reject"/> when an apply turns out to have been undone.</summary>
+        private static void RecordApplied(GeoCharacter character, int charId, ulong peer)
+        {
+            _appliedAfter[charId] = EncodeBody(false, Slots(character));
+            _appliedPeer[charId] = peer;
         }
 
         /// <summary>A remote intent mutates the model behind the back of THIS peer's open equip screen, whose
@@ -973,6 +997,90 @@ namespace Multiplayer.Network.Sync
                            " — the live loadout is back to its PRE-intent content, so a stale view→model flush " +
                            "(open-screen UpdateState) undid it. The rail can only emit what the host still holds: " +
                            "removals will silently never reach any peer.");
+            // AND TELL THE ONE PEER IT HAPPENED TO. The host used to log this to its own console and stop
+            // there: seven applies were undone in eleven seconds (log 2026-08-07 23:12:44→23:12:55, nonces
+            // 43-49) while the gesturing client's log carried no revert, reject or correction line at all —
+            // it believed all ten gestures had landed. A revert is a refusal that arrives late, so it takes
+            // the refusal path: Reject re-emits the character + storage subtrees, which converges that
+            // client's mirror onto what the host actually holds and repaints its open screen. `notify` is on
+            // because this is the exact case IntentRail reserves it for — the player is looking at a loadout
+            // that is not the one the host has, and nothing else on his screen would ever say so.
+            if (_appliedPeer.TryGetValue(charId, out var peer) && peer != 0)
+                RejectAndNotify(peer, charId, "a previous loadout change was undone on the host by a stale screen flush");
+        }
+
+        /// <summary>THE ROOT-CAUSE HALF of the revert above — the guard that stops it instead of reporting it.
+        /// <see cref="SetItemsApplyGate"/> only blocks a view→model flush taken INSIDE an apply
+        /// (<c>SyncApplyScope</c>); a HOST standing in its own equip screen while a remote intent lands is
+        /// outside every scope — <see cref="IntentRail.ShouldRunNative"/> returns true for a host — so
+        /// <c>UIStateEditSoldier.UpdateState</c>'s next flush wrote its still-PRE-intent widget lists straight
+        /// back over the applied loadout, ~150-1800 ms later, and the DiffEngine correctly emitted nothing.
+        /// That is the ordinary two-players-in-loadout case, not an edge.
+        ///
+        /// The signature is the same UNAMBIGUOUS one <see cref="CheckLastApplyStuck"/> already trusts, asked
+        /// one flush EARLIER: the model still holds exactly what the last remote apply committed, and this
+        /// flush wants to put back exactly what stood there before it. No enumeration of screens, no timer.
+        /// The three outcomes are what makes it self-limiting rather than a lock:
+        ///   • body == the PRE-intent content → stale view, block it, and mark the screen for repaint (the
+        ///     block stops the write, the repaint is what makes the screen show the new loadout — law 11);
+        ///   • body == what the host holds → an ordinary idle re-flush, nothing to decide;
+        ///   • anything else → a real host-local edit, so the memo RETIRES and a host that later drags the
+        ///     loadout back to its old layout by hand is never fought.</summary>
+        private static bool BlockStaleHostRevert(GeoCharacter character, IEnumerable<GeoItem> armour,
+                                                 IEnumerable<GeoItem> equipment, IEnumerable<GeoItem> inventory,
+                                                 bool freeReload)
+        {
+            if (freeReload || _appliedBefore.Count == 0) return false; // a free reload is a real mutation
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return false;
+            int charId = (int)character.Id;
+            if (!_appliedBefore.TryGetValue(charId, out var before)) return false;
+            if (!_appliedAfter.TryGetValue(charId, out var after)) return false;
+
+            var canon = Slots(character);
+            var incoming = new[] { ToSlots(armour), ToSlots(equipment), ToSlots(inventory) };
+            var merged = new List<SlotRef>[3];
+            for (int i = 0; i < 3; i++) merged[i] = incoming[i] ?? canon[i];
+
+            switch (JudgeHostFlush(before, after, EncodeBody(false, canon), EncodeBody(false, merged)))
+            {
+                case FlushVerdict.Native:
+                    return false;
+                case FlushVerdict.Retire:
+                    _appliedBefore.Remove(charId);   // a genuine host edit — never fight the next one
+                    return false;
+                default:
+                    Debug.LogWarning("[MP][equip] HOST stale screen flush BLOCKED for char=U#" + charId +
+                                     " — an open equip screen tried to write back the loadout as it stood BEFORE peer=" +
+                                     (_appliedPeer.TryGetValue(charId, out var p) ? p.ToString() : "?") +
+                                     "'s change. The write is dropped and this screen is repainted from the model.");
+                    ReseedLocalScreenAfterRemoteMutation();
+                    return true;
+            }
+        }
+
+        /// <summary>What a host-side loadout flush IS, decided on four byte bodies and nothing else — pure and
+        /// headless so the harness can falsify it (RailCheck L187), exactly like <see cref="ChangedBody"/>.
+        /// <paramref name="before"/>/<paramref name="after"/> are the last remote apply's pair,
+        /// <paramref name="canon"/> is what the host holds right now and <paramref name="incoming"/> is what
+        /// this flush wants to write (untouched lists already merged from canon, so all four are comparable).</summary>
+        internal enum FlushVerdict
+        {
+            /// <summary>Nothing to decide — let the native write run.</summary>
+            Native,
+            /// <summary>A wholesale write-back of the PRE-intent loadout over an apply still standing.</summary>
+            StaleRevert,
+            /// <summary>A real host-local edit — the memo no longer describes anything and must go.</summary>
+            Retire,
+        }
+
+        internal static FlushVerdict JudgeHostFlush(byte[] before, byte[] after, byte[] canon, byte[] incoming)
+        {
+            if (before == null || after == null || canon == null || incoming == null) return FlushVerdict.Native;
+            if (RailMeta.BytesEqual(before, after)) return FlushVerdict.Native;   // that intent was a no-op
+            if (!RailMeta.BytesEqual(canon, after)) return FlushVerdict.Native;   // the model already moved on
+            if (RailMeta.BytesEqual(incoming, after)) return FlushVerdict.Native; // idle re-flush of what is there
+            return RailMeta.BytesEqual(incoming, before) ? FlushVerdict.StaleRevert : FlushVerdict.Retire;
         }
 
         /// <summary>Law-7 convergence for a REFUSED equip intent — the origin of the IntentRail reject
@@ -983,12 +1091,26 @@ namespace Multiplayer.Network.Sync
         /// <see cref="IntentRail.Reject"/> re-emits current host values for everything the gesture could
         /// have touched — the character subtree + the faction storage subtree — and the client's ordinary
         /// Apply converges it (no new wire concept).</summary>
-        private static void Reject(ulong peer, int charId, string why)
+        private static void Reject(ulong peer, int charId, string why) =>
+            IntentRail.Reject(SurfaceIds.GeoEquipIntent, peer, "equip char=U#" + charId + " — " + why,
+                              ReemitPrefixes(charId));
+
+        /// <summary>The family's ONE notifying refusal, kept as its own call site so RailCheck L123's
+        /// allowlist names exactly this case and every ORDINARY equip refusal above stays quiet. Reserved for
+        /// a refusal that arrives AFTER the player was told yes — see <see cref="CheckLastApplyStuck"/>.</summary>
+        private static void RejectAndNotify(ulong peer, int charId, string why) =>
+            IntentRail.Reject(SurfaceIds.GeoEquipIntent, peer, "equip char=U#" + charId + " — " + why, true,
+                              ReemitPrefixes(charId));
+
+        /// <summary>Everything an equip gesture could have touched: the character subtree + faction storage.</summary>
+        private static string[] ReemitPrefixes(int charId)
         {
             var phoenix = GeoLevel()?.PhoenixFaction;
-            IntentRail.Reject(SurfaceIds.GeoEquipIntent, peer, "equip char=U#" + charId + " — " + why,
+            return new[]
+            {
                 charId >= 0 ? "U#" + charId : null,
-                phoenix?.Def != null ? "F#" + phoenix.Def.Guid + ".ItemStorage" : null);
+                phoenix?.Def != null ? "F#" + phoenix.Def.Guid + ".ItemStorage" : null,
+            };
         }
 
         /// <summary>The storage the equip screens trade against (UIStateEditSoldier.StorageItems()).

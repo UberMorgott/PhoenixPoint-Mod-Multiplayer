@@ -263,6 +263,17 @@ namespace RailCheck
                 // computed per refusal (ReferenceEquals(refusal, BusyRefusal)), so every OTHER arm of Validate
                 // — the game's own ability gate, AP, WP, target-not-offered — still crosses quietly.
                 "Multiplayer.Tactical.TacticalCommandSync.HandleActivate",
+                // L187: a loadout change this peer MADE was undone on the host by a stale open-screen flush
+                // (2026-08-07, seven applies in eleven seconds). Co-op-invented in the strongest sense —
+                // single player has no second screen to flush over your change, so vanilla has no control to
+                // grey — and it is the one refusal that arrives AFTER the player was told yes: he watched the
+                // item move and the host's own log carried the only word that it had not. Reject's re-emit
+                // snaps his screen back, which without a line reads as a bug rather than a verdict. Fires
+                // only from CheckLastApplyStuck, i.e. only when the guard that now blocks the flush outright
+                // has already failed; every other equip refusal (no storage, unknown def, not a Phoenix
+                // soldier) still crosses quietly through EquipSync.Reject, which is a SEPARATE call site on
+                // the non-notifying overload precisely so this entry cannot widen into the whole family.
+                "Multiplayer.Network.Sync.EquipSync.RejectAndNotify",
             };
             var optIns = mod.GetTypes()
                             .SelectMany(Methods)

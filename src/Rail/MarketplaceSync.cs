@@ -120,7 +120,7 @@ namespace Multiplayer.Network.Sync
         /// <summary>Teardown only, same contract as <see cref="CutsceneMirror.Reset"/>: the seq stream is
         /// per-session on both sides, and a stale host counter would make the next session's first offer
         /// list look older than the dead session's last one.</summary>
-        internal static void Reset() => Seq.Reset();
+        internal static void Reset() { Seq.Reset(); ClearHeldOffers(); } // a held list belongs to the dead session's seq stream
 
         internal static void RegisterIntents()
         {
@@ -344,6 +344,7 @@ namespace Multiplayer.Network.Sync
                 }
                 if (!Seq.ShouldApply(SurfaceIds.GeoMarketplaceOffers, seq)) return true;
                 if (ApplyOffers(rows)) Seq.Mark(SurfaceIds.GeoMarketplaceOffers, seq);
+                else HoldOffers(seq, rows);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][rail] MarketplaceSync inbound failed: " + ex); }
             return true;
@@ -358,7 +359,7 @@ namespace Multiplayer.Network.Sync
             if (market?.MarketplaceChoices == null)
             {
                 Debug.Log("[MP][market] offer list DROPPED — this peer has no live marketplace (in a battle, " +
-                          "mid-load, or no Kaos Engines); the next push converges it");
+                          "mid-load, or no Kaos Engines); HELD and re-applied when this peer's shop comes up");
                 return false;
             }
             int dropped = 0;
@@ -377,9 +378,65 @@ namespace Multiplayer.Network.Sync
                                "when the wire carried a row index — every row after a dropped one was shifted.");
             market.MarketplaceChoices.Clear();
             market.MarketplaceChoices.AddRange(rebuilt);
+            ClearHeldOffers();    // whatever was held is now older than what just landed
             Debug.Log("[MP][market] mirrored " + rebuilt.Count + " offer(s) from the host");
             RepaintOpenMarketplace();
             return true;
+        }
+
+        // ─── THE HELD PUSH: a one-shot broadcast a peer could not take, and the moment it can ───
+
+        /// <summary>The last offer list this peer had to drop, kept until its shop exists. Value = default
+        /// (null rows) when there is nothing held. Cleared by any list that DOES apply, and by
+        /// <see cref="Reset"/> at teardown with the seq stream it belongs to.</summary>
+        private static KeyValuePair<uint, List<KeyValuePair<string, float>>> _pending;
+
+        /// <summary>Keep a list this peer could not place. Named (rather than an assignment at the drop site)
+        /// so RailCheck L189 can drive the hold and prove the drop path still reaches it.</summary>
+        internal static void HoldOffers(uint seq, List<KeyValuePair<string, float>> rows) =>
+            _pending = new KeyValuePair<uint, List<KeyValuePair<string, float>>>(seq, rows);
+
+        internal static void ClearHeldOffers() => _pending = default;
+
+        internal static bool HasHeldOffers => _pending.Value != null;
+
+        /// <summary>THE FALSIFIED PROMISE. <see cref="ApplyOffers"/> used to drop a list it could not place
+        /// and say "the next push converges it" — but a push happens only on a reroll, a purchase or a reject,
+        /// so in a 16-minute session (log 2026-08-07) there was exactly ONE, `seq=1` at host 23:09:06.209, and
+        /// the client was GUARANTEED to be mid-load when it arrived (its own SendPrepared for that same load
+        /// is 23:09:15.484, host+7.5 s = 23:09:13.7). The client's shop stayed 14 offers behind for the rest
+        /// of the session and neither peer's log ever said so again. A one-shot push with no retry is not a
+        /// convergence mechanism; it is a race the receiver always loses.
+        ///
+        /// The retry belongs on the RECEIVER, because the receiver is the only peer that knows when the drop
+        /// condition ended — and it ends in exactly one place. <c>GeoMarketplace.OnLevelStart</c>
+        /// (decompile GeoMarketplace.cs:41-60) is where <c>MarketplaceChoices</c> is constructed at all, on
+        /// every geoscape level start: the first campaign load, and the return from every battle. Whatever the
+        /// reason the list was dropped — battle, mid-load, shop not built yet — this is the frame after which
+        /// it can land. The host is not asked for anything, so a peer that was away converges without costing
+        /// every other peer a re-broadcast, and the seq guard still decides which list wins.
+        ///
+        /// This is not a new idea in this codebase, which is the point: <see cref="EventPopup"/> already holds
+        /// a raise its peer cannot carry (<c>_held</c> + <c>DrainHeldRaises</c>:432) and replays it when the
+        /// geoscape can take a window — all three of the 2026-08-07 session's HELD raises did land. The same
+        /// hold is still MISSING from the two remaining one-shot host→all pushes with this shape:
+        /// <c>GeoModalMirror</c>:591 and <c>CutsceneMirror</c>:201 both drop on "this peer has no live …" and
+        /// nothing re-sends. A one-shot push is a fine wire form; a one-shot push with no hold is a race.</summary>
+        [HarmonyPatch(typeof(GeoMarketplace), nameof(GeoMarketplace.OnLevelStart))]
+        internal static class HeldOfferRetryPatch
+        {
+            private static void Postfix()
+            {
+                if (!HasHeldOffers) return;
+                var rows = _pending.Value;
+                uint seq = _pending.Key;
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || engine.IsHost) { ClearHeldOffers(); return; }
+                if (!Seq.ShouldApply(SurfaceIds.GeoMarketplaceOffers, seq)) { ClearHeldOffers(); return; }
+                Debug.Log("[MP][market] re-applying the offer list held from seq=" + seq +
+                          " — this peer's marketplace is live again");
+                if (ApplyOffers(rows)) Seq.Mark(SurfaceIds.GeoMarketplaceOffers, seq);
+            }
         }
 
         /// <summary>Reactivity (law 11) for a window the universal repaint deliberately will not touch — see
