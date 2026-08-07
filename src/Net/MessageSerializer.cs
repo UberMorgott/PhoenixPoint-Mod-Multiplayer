@@ -162,6 +162,13 @@ namespace Multiplayer.Network.MessageLayer
                 bw.Write(true);
                 foreach (var peer in peers)
                     bw.Write(peer.ParityDiffs ?? "");
+                // Player panel: per-peer STATUS as one byte, appended the same way and for the same reason.
+                // Both flags are already per-peer roster bookkeeping the host maintains; they ride the
+                // roster because the roster is the message that already carries every other per-peer fact,
+                // is already coalesced to one flush per frame, and is already re-broadcast on pause/resume.
+                bw.Write(true);
+                foreach (var peer in peers)
+                    bw.Write((byte)((peer.Paused ? 1 : 0) | (peer.TacReady ? 2 : 0)));
                 return ms.ToArray();
             }
         }
@@ -190,6 +197,15 @@ namespace Multiplayer.Network.MessageLayer
                 if (ms.Position < ms.Length && br.ReadBoolean())
                     for (var i = 0; i < n; i++)
                         peers[i].ParityDiffs = br.ReadString();
+                // Trailing status block (see the writer). Absent on a sender that predates the player panel;
+                // its rows then read as connected + not-ready, which is what an unknown flag should look like.
+                if (ms.Position < ms.Length && br.ReadBoolean())
+                    for (var i = 0; i < n; i++)
+                    {
+                        var status = br.ReadByte();
+                        peers[i].Paused = (status & 1) != 0;
+                        peers[i].TacReady = (status & 2) != 0;
+                    }
                 return peers;
             }
         }
@@ -572,6 +588,14 @@ namespace Multiplayer.Network.MessageLayer
         /// <summary>Parity soft-gate: exact host-computed diff text ("" = parity OK). Drives the roster
         /// warning badge + the client-side Ready lock; the host also gates Ready authoritatively.</summary>
         public string ParityDiffs { get; set; } = "";
+        /// <summary>This peer stopped answering and is being HELD, not removed (SessionManager.PausePeer).
+        /// Renders as the grey "dropped out" marker on the player panel. Advisory: nothing gates on it
+        /// (L84 — a paused peer keeps its seat and blocks nobody).</summary>
+        public bool Paused { get; set; }
+        /// <summary>The tactical "I have finished moving" advisory flag. Same non-decision status as
+        /// <see cref="Multiplayer.Network.ClientInfo.TacReady"/> it is copied from — read by the player
+        /// panel's status column and by nothing that decides anything (L119).</summary>
+        public bool TacReady { get; set; }
     }
 
     /// <summary>One row of the host-aggregated RosterProgress snapshot (~3 bytes on the wire).</summary>

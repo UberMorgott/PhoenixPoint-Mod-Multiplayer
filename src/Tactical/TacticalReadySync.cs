@@ -231,6 +231,13 @@ namespace Multiplayer.Tactical
         private static Image _green;
         private static bool _loggedBuildFailure;
 
+        /// <summary>The clone's own rect, READ-ONLY to everyone outside this class, and the anchor the
+        /// co-op player panel hangs itself under (<c>Multiplayer.UI.PlayerPanel</c>). Exposed rather than
+        /// duplicated because the panel needs exactly two facts about this button — where its bottom edge
+        /// ended up after the row settled, and whether the game currently has it on screen — and both are
+        /// already true of this one rect. Unity-null between battles.</summary>
+        internal static RectTransform Rect { get; private set; }
+
         /// <summary>Sibling index (under the clone's root) of the shallowest label-bearing child — where the
         /// ready tint is inserted so it lands above the frame and below the caption. -1 = no label found.</summary>
         private static int _labelDepth = -1;
@@ -242,6 +249,7 @@ namespace Multiplayer.Tactical
             _setters.Clear();
             _green = null;
             _labelDepth = -1;
+            Rect = null;   // the panel stops finding a tactical anchor and falls back to its geoscape one
         }
 
         /// <summary>
@@ -305,7 +313,8 @@ namespace Multiplayer.Tactical
                                      "stray platform glyph is still drawn on it, it is not coming from the " +
                                      "native hotkey display and the subtree dump below is where to look.");
 
-                PlaceBelow(template.GetComponent<RectTransform>(), go.GetComponent<RectTransform>());
+                Rect = go.GetComponent<RectTransform>();
+                PlaceBelow(template.GetComponent<RectTransform>(), Rect);
                 WireClick(go);
                 CollectLabels(go);      // before the overlay: the overlay's depth is derived from the labels'
                 BuildGreenOverlay(go);

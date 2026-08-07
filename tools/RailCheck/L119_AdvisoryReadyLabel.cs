@@ -273,10 +273,18 @@ namespace RailCheck
                                             "than painting it, and there is no such legitimate reason"))
                     yield return v;
 
-                foreach (var v in CallerSet(all, perPeer, new[] { "SessionManager.TacReadyTally" },
+                // BuildPeerList joined this list when the player panel landed (2026-08-07). It reads the flag
+                // to PUBLISH it verbatim on the roster every peer already receives — the one reason that is
+                // not a decision about the peer, because it reaches a status column and stops there. The
+                // panel that renders it is in L158's presentation-seam set for exactly that reason, and the
+                // WRITERS (SetTacReady / ResetTacReady) are deliberately unconditional so that neither of
+                // them has to read the flag to skip a write.
+                foreach (var v in CallerSet(all, perPeer,
+                                            new[] { "SessionManager.TacReadyTally", "SessionManager.BuildPeerList" },
                                             "per-peer-flag-read-elsewhere",
-                                            "reads ClientInfo.TacReady. Only the tally may — it is the one place " +
-                                            "the flags are collapsed into two numbers for a label. Reading an " +
+                                            "reads ClientInfo.TacReady. Only the tally and the roster builder may " +
+                                            "— one collapses the flags into two numbers for a label, the other " +
+                                            "copies them onto the roster for a status column. Reading an " +
                                             "individual peer's flag anywhere else is a host decision about that " +
                                             "peer taken from something other than its own intent and the shared " +
                                             "game state, which is L91's sentence verbatim"))

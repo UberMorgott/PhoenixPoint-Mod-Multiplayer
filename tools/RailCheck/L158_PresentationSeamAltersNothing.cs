@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
+using Multiplayer.UI;
 
 namespace RailCheck
 {
@@ -70,10 +71,14 @@ namespace RailCheck
 
         internal static IEnumerable<string> Check()
         {
+            // PlayerPanel joined the set with the co-op player panel (2026-08-07). It is the ONE screen that
+            // renders a latency reading, so it is where arm (d)'s containment would leak first if the panel
+            // ever grew a decision — and it renders two advisory per-peer flags besides, which makes arms
+            // (a)/(b) worth having over it for the same reason they are worth having over UiEventMap.
             var seam = new[]
             {
                 typeof(UiEventMap), typeof(UiNativeRepaint), typeof(OpenUiRepaint),
-                typeof(ResearchSync), typeof(PingTable),
+                typeof(ResearchSync), typeof(PingTable), typeof(PlayerPanel),
             };
             var railRoots = new[]
             {
@@ -85,12 +90,17 @@ namespace RailCheck
                 typeof(UiEventMap).GetMethod("Fire", AllMembers),
                 typeof(OpenUiRepaint).GetMethod("Repaint", AllMembers),
                 typeof(ResearchSync).GetMethod("PresentFromMirror", AllMembers),
+                // PlayerPanel.Sync is called from MultiplayerUI.Update, i.e. from inside the game's own
+                // Update loop with no frame of ours between it and native code. Without its catch a panel
+                // that threw would take the session down over a status column.
+                typeof(PlayerPanel).GetMethod("Sync", AllMembers),
             };
             var dispatcher = typeof(UiNativeRepaint).GetMethod("TryRepaint", AllMembers);
 
             if (srtt == null || dispatcher == null || containment.Any(m => m == null) || seam.Any(t => t == null))
             {
                 yield return "L158 premise-changed: PingTable._srtt / UiEventMap.Fire / OpenUiRepaint.Repaint / " +
+                             "PlayerPanel.Sync / " +
                              "ResearchSync.PresentFromMirror / UiNativeRepaint.TryRepaint did not all resolve. " +
                              "The seam set or the latency reading has moved, and every arm below is asserting " +
                              "about a shape the repo no longer has.";

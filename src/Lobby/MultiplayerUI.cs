@@ -31,6 +31,9 @@ namespace Multiplayer.UI
         private GameObject _inGameBar;
         private Text _barStatusText;
 
+        // ─── Co-op player panel (name | ping | status), both scenes ─────────
+        private PlayerPanel _playerPanel;
+
         // ─── Lobby panel (built once the menu Canvas is captured) ───────────
         private LobbyPanel _lobby;
         private bool _panelsBuilt;
@@ -77,6 +80,12 @@ namespace Multiplayer.UI
             EnsureBarCanvas();
             CreateInGameBar();
             _inGameBar.SetActive(false);
+
+            // The co-op player panel shares that canvas: it is the mod's only persistent render root, so
+            // the panel outlives every scene load and simply re-pins itself (tactical → under the ready
+            // button, geoscape → the right edge). Built hidden; Update drives it.
+            _playerPanel = gameObject.AddComponent<PlayerPanel>();
+            _playerPanel.Attach(EnsureBarCanvas());
 
             // Panels are built lazily in OnMenuReady (they need the native menu Canvas).
             _lobby = new LobbyPanel(this);
@@ -1506,6 +1515,12 @@ namespace Multiplayer.UI
             if (_lobby != null && _lobby.IsVisible)
                 _lobby.Refresh();
 
+            // THE PLAYER PANEL'S REPAINT SEAM. Unconditional and every frame, for the same reason the
+            // lobby refresh above is: it is what makes a peer going ready / un-ready / silent appear on an
+            // ALREADY-OPEN panel with no edge to subscribe to and no edge to miss. Sync() self-guards (it
+            // hides itself outside a started session and catches everything), so calling it here is safe
+            // in every scene including the main menu.
+            _playerPanel?.Sync();
         }
 
         // ═══════════════════════════════════════════════════════════════════

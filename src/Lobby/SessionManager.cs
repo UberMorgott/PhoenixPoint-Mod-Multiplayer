@@ -453,13 +453,29 @@ namespace Multiplayer.Network
 
         /// <summary>The HOST's own advisory flag (the host is not in <c>_clients</c>, same shape as
         /// <see cref="HostReady"/>).</summary>
-        public bool HostTacReady { get; set; }
+        public bool HostTacReady
+        {
+            get => _hostTacReady;
+            set { if (_hostTacReady == value) return; _hostTacReady = value; BroadcastPeerList(); }
+        }
+        private bool _hostTacReady;
+
+        // EVERY write to a seat's advisory flag re-broadcasts the roster, and all three of them are on
+        // this page — the property above, SetTacReady and ResetTacReady. That is what makes the player
+        // panel reactive on every peer without a second channel or a poll: the flag is per-peer roster
+        // bookkeeping, so it rides the per-peer roster message, which is already coalesced to one flush
+        // per frame (_peerListDirty) however many seats flip in it. Still gates nothing anywhere (L119).
 
         /// <summary>Record one peer's advisory flag. Unknown peer = dropped: a flag from somebody who is
         /// not seated changes no seat, and the tally is rebuilt from the roster on every read anyway.</summary>
         public void SetTacReady(ulong peerId, bool ready)
         {
-            if (_clients.TryGetValue(peerId, out var c)) c.TacReady = ready;
+            if (!_clients.TryGetValue(peerId, out var c)) return;
+            c.TacReady = ready;
+            // Unconditional, deliberately: comparing against the flag first would make this method a READER
+            // of a peer's advisory flag, and L119's per-peer arm allows exactly one of those. The saving it
+            // would buy is nil anyway — the roster is coalesced to one flush per frame either way.
+            BroadcastPeerList();
         }
 
         /// <summary>The advisory tally the tactical ready button LABELS itself with: <paramref name="ready"/>
@@ -483,8 +499,9 @@ namespace Multiplayer.Network
         /// (TacticalReadySync.OnNewTurn off <c>TacMission.OnNewTurn</c>).</summary>
         public void ResetTacReady()
         {
-            HostTacReady = false;
+            HostTacReady = false;   // the property; it marks the roster dirty when it actually changes
             foreach (var c in _clients.Values) c.TacReady = false;
+            BroadcastPeerList();
         }
 
         // ─── Connection Handshake ─────────────────────────────────────────
@@ -998,7 +1015,9 @@ namespace Multiplayer.Network
                 Ready = HostReady,
                 IsHost = true,
                 SlotIndex = 0,
-                ParityDiffs = "" // the host is the parity reference — always OK
+                ParityDiffs = "", // the host is the parity reference — always OK
+                Paused = false,   // the host cannot be silent to itself
+                TacReady = HostTacReady
             });
 
             foreach (var c in _clients.Values)
@@ -1013,7 +1032,9 @@ namespace Multiplayer.Network
                     Ready = c.IsReady,
                     IsHost = false,
                     SlotIndex = c.SlotIndex,
-                    ParityDiffs = c.ParityDiffs ?? ""
+                    ParityDiffs = c.ParityDiffs ?? "",
+                    Paused = c.IsPaused,
+                    TacReady = c.TacReady
                 });
             }
             return peers;
