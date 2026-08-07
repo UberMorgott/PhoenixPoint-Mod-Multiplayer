@@ -21,8 +21,16 @@ namespace RailCheck
     /// THE DECISION THIS LAW PINS (the repo owner's, made 2026-08-07). Each entry point is pinned to exactly
     /// one technology, with no cascading ACROSS technologies:
     ///   • the lobby's "Invite via Steam" button       → Steam P2P
-    ///   • a pasted INVITE CODE (the GOG / Epic route) → STUN hole-punch, then plain Direct TCP to the SAME
-    ///     endpoint — that is one technology without and with the punch, not a second one
+    ///   • a pasted INVITE CODE (the GOG / Epic route) → plain Direct TCP to the endpoint, then the STUN
+    ///     hole-punch to the SAME endpoint — that is one technology with and without the punch, not a
+    ///     second one. TCP FIRST as of 2026-08-07, and the order is load-bearing rather than cosmetic:
+    ///     STUN's "reliable" send is a duplicated UDP datagram with no sequencing, ACK or retransmit
+    ///     (<c>StunTransport.Send</c>), so a session that lands on it carries the save transfer's 32 KB
+    ///     IP-fragmenting chunks on a best-effort link — one lost fragment fails the transfer outright
+    ///     (<c>SaveTransferCoordinator</c> warns exactly this at LaunchTransfer). Loopback never shows it;
+    ///     the first real path did, over ZeroTier, where STUN won the race to a host that was directly
+    ///     reachable all along and the client's save arrived 131072 of 169071 bytes. Order these by what
+    ///     the link can CARRY, not by which one connects first.
     ///   • a DIRECTLY REACHABLE host, addressed by IP or by name → Direct TCP. "Directly reachable" is the
     ///     broad case and NOT the LAN one: LAN, virtual LAN (Hamachi/ZeroTier and the like), a public white
     ///     IP, a forwarding domain, a port-forwarded or UPnP-mapped host (<c>UpnpPortMapper.TryMap</c>) are
@@ -53,10 +61,10 @@ namespace RailCheck
     /// THE ARMS, all EXECUTED against the real <c>JoinPlan.Build</c>:
     ///   (a) <c>pasted-code-tries-steam</c> — a unified code carrying BOTH a steam id and an endpoint, with
     ///       <c>JoinOrigin.PastedCode</c> and Steam ALIVE (the hostile case: everything the old branch
-    ///       needed to insert its Steam leg is present), must yield exactly [StunUDP, DirectIP]. Steam alive
+    ///       needed to insert its Steam leg is present), must yield exactly [DirectIP, StunUDP]. Steam alive
     ///       is the point — asserting this with Steam dead would pass against the OLD code too.
     ///   (b) <c>invite-order-changed</c> — the SAME target with <c>JoinOrigin.SteamInvite</c> must still
-    ///       yield [SteamP2P, StunUDP, DirectIP], and with Steam DEAD must drop to [StunUDP, DirectIP].
+    ///       yield [SteamP2P, DirectIP, StunUDP], and with Steam DEAD must drop to [DirectIP, StunUDP].
     ///       The invite path was explicitly not to change; a fix that pinned everything off Steam would
     ///       satisfy (a) and (c) and break the only path Steam users have.
     ///   (c) <c>legacy-kind-unpinned</c> — each single-format kind yields exactly ONE attempt of its own
@@ -104,7 +112,7 @@ namespace RailCheck
 
             // ── arm (a): the hostile case — steam id present, Steam ALIVE, code PASTED.
             foreach (var v in Expect("pasted-code-tries-steam", unified, true, JoinOrigin.PastedCode,
-                     new[] { TransportType.StunUDP, TransportType.DirectIP },
+                     new[] { TransportType.DirectIP, TransportType.StunUDP },
                      "A pasted code is the entry point of a player with no Steam to be invited through. " +
                      "The Steam leg in front of it " +
                      "cannot succeed for the player who needed the paste box in the first place, so it only " +
@@ -114,13 +122,13 @@ namespace RailCheck
 
             // ── arm (b): the invite path is untouched, both with and without local Steam.
             foreach (var v in Expect("invite-order-changed", unified, true, JoinOrigin.SteamInvite,
-                     new[] { TransportType.SteamP2P, TransportType.StunUDP, TransportType.DirectIP },
+                     new[] { TransportType.SteamP2P, TransportType.DirectIP, TransportType.StunUDP },
                      "An accepted Steam invite IS the user pressing Steam. Nothing about this order was to " +
                      "change; if pinning the paste box also pinned the invite away from Steam, the fix has " +
                      "taken the fast NAT-free path away from the only users who can use it."))
                 yield return v;
             foreach (var v in Expect("invite-order-changed", unified, false, JoinOrigin.SteamInvite,
-                     new[] { TransportType.StunUDP, TransportType.DirectIP },
+                     new[] { TransportType.DirectIP, TransportType.StunUDP },
                      "With local Steam DEAD an invite has no Steam leg to take, and the pre-existing " +
                      "steamAlive guard is what keeps the plan from opening with an attempt that fails by " +
                      "construction. Losing it costs every non-Steam-runtime peer a timeout."))

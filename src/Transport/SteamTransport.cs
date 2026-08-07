@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
+using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Transport
 {
@@ -504,7 +505,22 @@ namespace Multiplayer.Transport
                 // NetworkEngine's client OnPeerConnected a stranger to re-point the host link at
                 // (SetHostPeer + JOIN). Packet DELIVERY is unchanged on both sides — only registration
                 // is gated.
-                if (IsHost || steamId == _dialedHost)
+                //
+                // WHICH PACKET MAY MINT A PLAYER — the host arm only. "Bytes arrived" is not "a player
+                // connected": Steam's read queue is process-global, so a session that has ENDED keeps
+                // delivering its trailing packets into the NEXT one, and every one of them used to mint
+                // a brand-new peer (CompositeTransport.HandleChildConnected retires the previous outward
+                // id and mints a fresh one per raise, so each was a NEW player id). Observed 2026-08-07
+                // over ZeroTier as a self-sustaining storm: a stale ClientLeave minted peer N, SessionManager
+                // .HandleLeave re-broadcast that leave TO the peer it had just minted, the other side minted
+                // us right back off it and echoed — ~30 fake "Unknown left the game" prompts a second,
+                // peer ids climbing past 100, for as long as both processes stayed up.
+                // ConnectionRequest is the ONE packet that means "let me in", and it is precisely the packet
+                // 5e6ab9d's retry case is about (a rejoining client's first packet IS its JOIN), so gating
+                // on it keeps that fix whole and makes stale traffic inert. The CLIENT arm is unchanged:
+                // its sender is pinned to the host it dialed, which no stale third party can impersonate.
+                if ((IsHost && data != null && data.Length > 0 && data[0] == (byte)PacketType.ConnectionRequest)
+                    || steamId == _dialedHost)
                 {
                     // Raised BEFORE the packet on purpose, so the session layer holds the peer's roster
                     // row before it parses the JOIN riding in this very packet — the "connect precedes
@@ -524,10 +540,15 @@ namespace Multiplayer.Transport
                 }
                 else if (_unregisteredSendersLogged.Add(steamId))
                 {
-                    // Never-silent, once per stranger: this is the client half of the same invisible event.
-                    UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport(client): packet from {steamId}, " +
-                                                 $"which is not the dialed host ({_dialedHost}) — NOT registering " +
-                                                 $"it as a peer (host-link hijack guard).");
+                    // Never-silent, once per stranger. Two shapes of the same invisible event: on a CLIENT
+                    // a sender that is not the dialed host (host-link hijack guard), on a HOST a sender
+                    // whose packet is not a JOIN (a previous session's trailing traffic).
+                    UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport: packet from {steamId} did not " +
+                                                 $"register it as a peer — " +
+                                                 (IsHost ? "host, and the packet is not a ConnectionRequest "
+                                                         + "(stale process-global Steam session)"
+                                                         : $"client, and it is not the dialed host ({_dialedHost})") +
+                                                 ". Delivering it, minting nothing.");
                 }
 
                 OnPacketReceived?.Invoke(steamId, data);

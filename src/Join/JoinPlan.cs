@@ -57,9 +57,10 @@ namespace Multiplayer.Util
                 case JoinKind.Unified:
                     // ONE ENTRY POINT, ONE TECHNOLOGY. Each way into a session is pinned to the transport
                     // it actually names: the lobby's "Invite via Steam" button → Steam P2P; a pasted
-                    // invite CODE (the GOG/Epic route — no Steam to invite through) → STUN hole-punch,
-                    // then Direct TCP to the SAME endpoint, which is not a second technology but the same
-                    // address without the punch, for a host that UPnP/port-forwarded; and a DIRECTLY
+                    // invite CODE (the GOG/Epic route — no Steam to invite through) → Direct TCP to that
+                    // endpoint, then the STUN hole-punch to the SAME endpoint, which is not a second
+                    // technology but the same address WITH the punch, for a host that is not directly
+                    // reachable (the ordering note below the branch says why TCP goes first); and a DIRECTLY
                     // REACHABLE host → Direct TCP. Directly reachable is the broad case, not the LAN one:
                     // LAN, virtual LAN (Hamachi/ZeroTier and the like), a public white IP, a forwarding
                     // domain, a port-forwarded or UPnP-mapped host — JoinKind.DirectIp and
@@ -75,10 +76,23 @@ namespace Multiplayer.Util
                     // whose order is deliberately unchanged, because there Steam is what the user pressed.
                     if (origin == JoinOrigin.SteamInvite && target.SteamId != 0 && steamAlive)
                         plan.Add(new JoinAttempt(TransportType.SteamP2P, target.SteamId.ToString(), 0));
+                    // DIRECT TCP BEFORE THE PUNCH, over the same endpoint. Both legs are "that address";
+                    // the only difference is that Direct is length-prefixed TCP and STUN is raw UDP whose
+                    // "reliable" send is a duplicated datagram with no sequencing, ACK or retransmit
+                    // (StunTransport.Send). Every reliable message in the session rides that — and the save
+                    // transfer's 32 KB chunks IP-fragment on top of it, so one lost fragment fails the whole
+                    // transfer with no recovery (SaveTransferCoordinator.ChunkSize, and its own start-up
+                    // warning says as much). On loopback that never bites. It bit on the first real path:
+                    // 2026-08-07 over ZeroTier, STUN won the race to a host that was directly reachable the
+                    // whole time, and the client's save arrived 131072/169071 bytes with 2 chunks missing.
+                    // So order these by what the link can CARRY, not by which connects first: TCP when the
+                    // endpoint is reachable — LAN, virtual LAN, white IP, port-forwarded — and the punch as
+                    // the fallback for the NAT'd host that genuinely needs it, which is the only case that
+                    // now pays DirectTransport.ConnectTimeoutMs first.
                     if (!string.IsNullOrEmpty(target.Ip))
                     {
-                        plan.Add(new JoinAttempt(TransportType.StunUDP, target.Ip + ":" + target.Port, 0));
                         plan.Add(new JoinAttempt(TransportType.DirectIP, target.Ip, target.Port));
+                        plan.Add(new JoinAttempt(TransportType.StunUDP, target.Ip + ":" + target.Port, 0));
                     }
                     break;
             }

@@ -56,11 +56,23 @@ namespace Multiplayer.UI
         // dismiss it programmatically (ForceCloseAllPrompts) on confirm/fail/timeout. On user CANCEL
         // the box closes itself and fires its callback.
         private MessageBox _connectingBox;
+        // Realtime stamp of the CURRENT cascade stage's start. NOTHING else bounds the wait between
+        // "the transport says connected" and "the host accepted us": SteamTransport declares
+        // ConnectionState.Connected the instant Connect() returns (Steam P2P has no handshake to fail —
+        // SteamTransport.cs:392-397), and a one-way UDP path lets STUN's punch succeed while the host's
+        // replies never come back. Either way no ConnectionState.Failed is ever raised, so
+        // OnConnectionFailed never runs, so the cascade never advances and the box sits on
+        // "Connecting to host…" forever — the 2026-08-07 ZeroTier report, where the host could see the
+        // joiner arrive and the joiner saw nothing, three attempts in a row with no error and no timeout.
+        // Longer than the longest transport-level connect it has to contain (DirectTransport's
+        // ConnectTimeoutMs = 10 s) so this only ever fires for a stage that hangs BEYOND its own bound.
+        private const float JoinStageTimeoutSec = 20f;
+        private float _joinStageStartedAt;
 
         // ─── Client-join cascade ────────────────────────────────────────────
         // The ordered transports to try for the current join (JoinPlan.Build), pinned by how the join was
-        // started: a unified code from an accepted Steam INVITE cascades Steam → STUN → Direct, the same
-        // code PASTED is STUN → Direct with no Steam leg, and a legacy code is a single attempt of its own
+        // started: a unified code from an accepted Steam INVITE cascades Steam → Direct → STUN, the same
+        // code PASTED is Direct → STUN with no Steam leg, and a legacy code is a single attempt of its own
         // transport. So this is at most a fallback WITHIN one technology, never across them.
         // _joinAttemptIndex is the stage in
         // flight; on a stage failure OnConnectionFailed advances to the next instead of surfacing the
@@ -639,7 +651,7 @@ namespace Multiplayer.UI
 
                 // Build the ordered cascade for this target and start the first stage. The plan is pinned
                 // by the ORIGIN: a unified code that arrived through an accepted Steam invite keeps
-                // Steam/STUN/Direct, a PASTED one is STUN/Direct with no Steam leg at all (JoinPlan's
+                // Steam/Direct/STUN, a PASTED one is Direct/STUN with no Steam leg at all (JoinPlan's
                 // Unified branch states why); a legacy code is a single attempt of its own transport.
                 // Each stage's async connect is time-bounded; a stage failure advances to the next in
                 // OnConnectionFailed.
@@ -1282,6 +1294,7 @@ namespace Multiplayer.UI
         private void ShowConnectingBox(string message = "Connecting to host…")
         {
             _clientConnecting = true;
+            _joinStageStartedAt = UnityEngine.Time.realtimeSinceStartup;
             _connectingBox = GameUtl.GetMessageBox();
             _connectingBox?.ShowSimplePrompt(message,
                 MessageBoxIcon.Information, MessageBoxButtons.Cancel,
@@ -1489,6 +1502,19 @@ namespace Multiplayer.UI
                             delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
                     else
                         _lobby?.Show();       // real, populated roster — never a fake empty lobby
+                }
+
+                // STAGE DEADLINE. Checked AFTER the confirmation gate above, so a roster that lands on the
+                // deadline frame still wins. Routed through OnConnectionFailed and nowhere else: that is
+                // already the one place that advances the cascade to the next transport and, on the last
+                // stage, tears the half-open session down and names the reason — so a hung stage now behaves
+                // exactly like a stage whose transport reported Failed, which is what the join code has
+                // always documented ("failed/timed out (OnConnectionFailed)") and never actually had.
+                else if (_clientConnecting && !engine.IsHost &&
+                         UnityEngine.Time.realtimeSinceStartup - _joinStageStartedAt > JoinStageTimeoutSec)
+                {
+                    OnConnectionFailed($"the host never accepted the join ({(int)JoinStageTimeoutSec}s). " +
+                                       "It may be on a different build, or its replies are not reaching you.");
                 }
 
                 if (_barStatusText != null)
