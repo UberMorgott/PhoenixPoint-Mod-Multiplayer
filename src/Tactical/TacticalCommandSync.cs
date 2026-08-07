@@ -2333,7 +2333,7 @@ namespace Multiplayer.Tactical
         internal static bool LocalUiStillHoldsAfterMirror(bool viewHeldThisActor, bool releaseReached) =>
             viewHeldThisActor && !releaseReached;
 
-        /// <summary>MAY THE MOVE-RANGE SWEEP RUN RIGHT NOW — pure, so RailCheck L173 executes the outcome.
+        /// <summary>MAY THE MOVE-RANGE SWEEP RUN RIGHT NOW — pure, so RailCheck L168 executes the outcome.
         ///
         /// <see cref="ReleaseLocalUiHolding"/> above is a ONE-SHOT: it fires at the instant a mirrored order
         /// arrives, and only if <c>view.SelectedActor</c> happens to be that actor at that instant. A player

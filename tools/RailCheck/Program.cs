@@ -242,7 +242,7 @@ namespace RailCheck
             laws.AddRange(L169_FreeAimGroundShotIsNotHeldToAList.Check());
             laws.AddRange(L170_VehicleSecondarySurvivesTheRepaint.Check());
             laws.AddRange(L172_AScrapCartFitsThePoolItIsTakenFrom.Check());
-            laws.AddRange(L173_MoveRangeIsNotSweptOnAnActorAnotherPeerDrives.Check());
+            laws.AddRange(L168_MoveRangeIsNotSweptOnAnActorAnotherPeerDrives.Check());
             laws.AddRange(L85_RestartedHostStreamIsApplied.Check());
             laws.AddRange(L86_AnnouncedBoundaryHoldsItsAnnouncer.Check());
             laws.Sort(StringComparer.Ordinal);
