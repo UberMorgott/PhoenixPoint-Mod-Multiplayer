@@ -2041,6 +2041,44 @@ namespace Multiplayer.Tactical
             return true;
         }
 
+        /// <summary>THE FILTER THE ENGINE'S OWN CONFIRM USES, ASKED THE SAME WAY ON THE HOST — pure, so
+        /// RailCheck L210 executes the OUTCOME instead of asserting that a call exists.
+        ///
+        /// <see cref="GroundTargetingExemptsTheOrder"/> took the grid sweep out of OUR gate and left the game's
+        /// own <c>GetDisabledState()</c> standing, on the reasoning that the engine's verdict is the one to
+        /// trust. It is — but we were not asking it the way the engine does. For a shoot the engine NEVER asks
+        /// the unfiltered question at the moment of confirm: <c>UIStateShoot.ConfirmShoot</c>:1295 and
+        /// <c>UIStateFreeCam.ConfirmShoot</c>:466 both gate on
+        /// <c>_ability.IsEnabled(IgnoredAbilityDisabledStatesFilter.IgnoreNoValidTargetsFilter)</c>. The plain
+        /// call keeps the arm at <c>TacticalAbility.GetDisabledStateInternal</c>:464-466, and for a shoot that
+        /// arm is <c>ShootAbility.HasValidTargets</c>:41 — <c>GetTargets().Any()</c>, the SAME grid floor-cast
+        /// sweep :2005 already establishes a free cursor point is not drawn from. So the host was refusing every
+        /// free-aim shot on the enumeration it had just been told not to read: peer=2's Soldier_1/2/3 and
+        /// peer=1's Soldier_1/2, five refusals in 67 seconds, all "Нет подходящей цели"
+        /// (<c>NoValidTarget</c>), while the HOST'S OWN free-aim shot 7 seconds later logged that same disabled
+        /// state at its confirm and fired anyway for 76 damage — because the host's click takes the
+        /// RelayMirror branch and never reaches <see cref="Validate"/>. That asymmetry IS the defect.
+        ///
+        /// NOTHING ELSE IS WAIVED, and the filter is passed INTO the engine rather than subtracted from its
+        /// answer, because <c>GetDisabledStateInternal</c> returns the FIRST failing arm: post-filtering a
+        /// <c>NoValidTarget</c> result would silently accept the <c>OffMap</c>, <c>ActorStunned</c> and
+        /// <c>NotEnoughActionPoints</c> arms that sit BEHIND it at :467-475 and never got evaluated.
+        ///
+        /// THIS CANNOT WIDEN THE TARGET-CHOICE GATE, and the coupling is exact rather than fortunate:
+        /// <c>NoValidTarget</c> holds iff <c>GetTargets()</c> is empty, and an empty enumeration is precisely
+        /// <c>ChoiceIsOffered</c>'s <c>abilityPublishedAnyTarget == false</c> — "no list to be held to", which
+        /// already returns true. Every order this newly admits is one <see cref="TargetIsOffered"/> was already
+        /// admitting; an actor-targeted shot at somebody the host cannot see still publishes a list and is
+        /// still refused by that gate.
+        ///
+        /// NARROWED BY THE BASE TYPE, NOT BY A CONCRETE ONE. <c>is ShootAbility</c> covers every subclass the
+        /// game and TFTV mint, which a <c>GetType() ==</c> test or an <c>AccessTools.Method</c> signature match
+        /// would not. It is the same narrowing <c>UIStateAbilitySelected</c>:199 uses.</summary>
+        internal static IgnoredAbilityDisabledStatesFilter HostGateFilter(bool isShootAbility)
+        {
+            return isShootAbility ? IgnoredAbilityDisabledStatesFilter.IgnoreNoValidTargetsFilter : null;
+        }
+
         private static readonly Dictionary<Type, bool> _declaresTargets = new Dictionary<Type, bool>();
 
         private static bool DeclaresOwnTargets(Type abilityType)
@@ -2115,7 +2153,8 @@ namespace Multiplayer.Tactical
             string disabled = null;
             if (ability != null)
             {
-                var state = ability.GetDisabledState();
+                // The engine's own confirm-time question, not the display-time one — see HostGateFilter.
+                var state = ability.GetDisabledState(HostGateFilter(ability is ShootAbility));
                 if (state != AbilityDisabledState.NotDisabled) disabled = state.ToString();
             }
             var stats = actor == null ? null : actor.CharacterStats;
