@@ -6,7 +6,9 @@ where a design intention and an observed engine fact diverge, the fact below win
 
 Numbering:
 - `P<n>` = an architectural principle of this document. Was written "law N" — same numbers.
-- `L<n>` = an executable law of `tools/RailCheck`. `P11` ≠ `L11`.
+- `L<n>` = an executable law of `tools/RailCheck`. Both spaces run over the same digits in this file
+  (P1–P11 as principles, L1–L14/L17/L20 as harness laws), so the letter is the ONLY disambiguator —
+  never write a bare number. `P11` (repaint) ≠ `L11` (no `LocalizedTextBind` rides covered).
 - `L-A`…`L-F` = ride/refuse letters, [`docs/boundary-law.md`](docs/boundary-law.md).
 - Full catalog (every P, every L, origin + evidence): [`docs/laws.md`](docs/laws.md).
 

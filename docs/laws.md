@@ -25,7 +25,7 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 - **P4b — SIM GATING.** Client clock not frozen → host-only sim funnels prefix-skipped on the client (`LevelHourlyUpdateCrt`, `Research.Update`), reschedule preserved.
   - laws: L42 L63
 - **P4c — PRESENTATION SEAMS ALTER NOTHING.** Replay what the model already says. Never block, never write, never throw into game code.
-  - laws: none scoped to P4c alone (defended jointly with P11)
+  - laws: NONE. Not "jointly defended with P11" — P11 laws assert a repaint is REACHED, which a seam that also writes model state passes. Ruled a real coverage hole 2026-08-07; the argument and the three assertable clauses are in Attention.
 - **P5 — TACTICAL SCOPE IS SHARED AND CONCURRENT.** Six peers command six soldiers at once. First-to-act-wins, no ownership table, no ledger a reload can lose. Which peer plays a mission = tactical scope, not a permission.
   - laws: L27 L44 L45 L47 L65 L68 L75 L76a L78 L80 L97 L99 L104 L111 L123 L130 L132 L139 L140 L141 L144 L145 L146 L149
 - **P6 — DETERMINISM / CANONICALITY.** Sorted roots/children/subkeys, fixed metadata field order, byte-identical deltas on both peers. Serializer blobs licensed ONLY as structural payloads.
@@ -102,14 +102,14 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 | L45 | a late resolution is REPLAYED, not yanked | P5 P11 | incident | v2 dropped `IsNonInteractableWhenSelected` → a hang instead of a replay | neither |
 | L46 | every peer shows the queued windows in the HOST's order | P11 | principle | a mirror queueing everything at priority 0 | neither |
 | L47 | the peer whose OWN click resolved it is not asked to click again | P5 P11 | incident | the answerer got the observer replay and needed a second click | POSITIVE CONTROL |
-| L48 | every window the game pushes has a reviewed answer | P14 | principle | 1 of 9 queue kinds captured, 8 neither mirrored nor declared | POSITIVE CONTROL |
+| L48 | every window the game pushes has a reviewed answer | P14 | principle | 1 of 9 queue kinds captured, 8 neither mirrored nor declared | neither |
 | L49 | the MODAL family: totality over `ModalType` + a non-authoritative client copy | P14 P3 | principle | 43 `ModalType`s behind one view state | POSITIVE CONTROL |
 | L50 | the walk cannot go monolithic again | P16 P12 | incident | host log 2026-07-30, 275 ticks: walk p50=40 / p90=60 / max=95 ms; 10-37 fps across forced ticks | neither |
 | L51 | a repaint may not take an armed augment selection, nor revert the mirror | P11 P8 | incident | native `OnNewCharacter` stamped the stale visit baseline over mirrored armour; slot locked | neither |
 | L52 | click parity — an armed selection leaves its siblings clickable | P11 | incident | ported v1 fix (quarry cbb9b2c): switching part A→B swallowed | neither |
 | L53 | site-exploration progress is DERIVED, not mirrored | P15 | incident | before the derivation the client saw NOTHING until the host's counter completed | POSITIVE CONTROL |
 | L54 | the host repaints its own applied state; the persistent HUD is part of the screen | P11 | incident | the top-right tracker kept the OLD research text until the player left the screen and came back | POSITIVE CONTROL |
-| L55 | the faction objectives list is derived; it must not ride | P15 | incident | the left-hand objectives panel desyncs; abstract element would abort at encode (L-E) | POSITIVE CONTROL |
+| L55 | the faction objectives list is derived; it must not ride | P15 | principle | the left-hand objectives panel desyncs; abstract element would abort at encode (L-E) — no date, log or measurement | POSITIVE CONTROL |
 | L56 | the haven / base / alien-base status twins stay resolved | P2 | principle | alias rows the name conventions cannot reach; failure is silent | POSITIVE CONTROL |
 | L57 | a forced re-emit scope names a path the walk can produce | P7 | incident | `EventSync` shipped `"ES.EncounterRecords#<eventId>"` — the element form for an `EntityList` | neither |
 | L58 | peer-local containment (hash and order-vector) | P2 P7 | incident | three permanently diverged base roots S#98 / S#99 / S#170, host alone disagreeing, never healing | neither |
@@ -209,6 +209,32 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 - inline (private method in `Program.cs`, no file): L1–L25, L27–L76b, L81, L82, L83
 - files (`L<n>_<Name>.cs`): L26, L77, L79, L80, L84, L91–L155
 
+## Rows vs registrations — why 150 rows and 130 registered laws
+
+The two numbers count different things and always will. `tools/law-count.txt` counts REGISTRATIONS
+(one `laws.AddRange(...)` line each); this table counts NUMBERED LAWS. The mapping is many-to-many
+on the inline side. Nothing is missing and no row is invented — verified 2026-08-07.
+
+- **files: 70 rows ↔ 70 registrations, exactly 1:1.** `L26, L77, L79, L80, L84, L91–L155` — one
+  `L<n>_<Name>.cs`, one `AddRange`, one row.
+- **inline: 79 rows ↔ 60 registrations.** 60 inline methods emit 78 distinct ids; the catalogue
+  splits one of them in two, giving 79 rows.
+  - ONE method carrying MANY ids is the whole surplus. `RoundTrip()` alone emits twelve —
+    L4 L7 L8 L10 L12 L13 L14 L17 L18 L19 L20 L24. `StructuralDescendLaw` emits L29 + L30.
+  - MANY methods sharing ONE id happens too, and the catalogue names the arms itself:
+    L76a/L76b = `TacticalFunnelLaw` + `TacticalPayloadUseLaw` (both emit the bare string `"L76"` —
+    the `a`/`b` suffix exists only here, never in the code); L69 = `InventoryAndDestructionLaw` +
+    `…Part2` + `ValidateProbes`; L15 = `OwnerBackRefCodecLaw` + `OwnerBackRefLaw`;
+    L28 = `RootOwnershipLaw` + `SubEntityRefArm`; L49 = `ModalCoverageLaw` + `OneProducerPerWindow`.
+- **1 row is not executable at all:** L78, prose-only, no arm ever. See below.
+- Arithmetic: 70 file rows + 79 inline rows + L78 = 150 rows. 70 files + 60 inline = 130
+  registrations. The 20-row difference is 19 (inline ids beyond their methods) + 1 (L78).
+- The `147 vs 127` figure in the earlier handoff was the same accounting one snapshot earlier
+  (`files=67`, three fewer rows). The ratio, not the totals, is the fact.
+- **Consequence for review:** an inline law's id is NOT a registration. Deleting `RoundTrip()`
+  silently retires twelve numbered laws while `inline=` drops by one. `tools/law-integrity.ps1`
+  cannot see that. Prefer a new `L<n>_<Name>.cs` file for anything new — it restores 1:1.
+
 ## Unassigned / retired numbers
 
 - L78 — prose-only, no executable arm ever. Cited `src/Tactical/TacticalCommandSync.cs:2371/:2434/:3044`, and by L104 + L127. L104's header states it.
@@ -218,21 +244,31 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 
 ## Attention
 
-- rows in table: 147. numbers issued: 152 (L85–L90 never issued; old L26 retired).
-- origin: incident 93 | principle 52 | unclear 2 (L18, L78).
-- guard: premise-changed only 43 | POSITIVE CONTROL only 7 | both 6 | neither 91.
-- guard = POSITIVE CONTROL only: L47 L48 L49 L53 L54 L55 L56 — all inline.
-- guard = both: L77 L81 L84 L91 L92 L136 — only L81 inline.
-- guard = neither (91): L1–L25, L27–L46, L50, L51, L52, L57–L76b, L78, L80, L82, L83, L93, L96, L98, L100, L101, L103–L109, L112, L113, L114, L124, L125, L126.
-- CAVEAT on `neither`: many carry an equivalent arm under a different name — `NON-VACUITY:` (L50 L52 L61), "the law's own PREMISE, executed" (L59), "anti-vacuity" (L55), "non-vacuous in both directions" (L9 L22 L49). `neither` = the two canonical tokens are absent, NOT "the law can silently pass while checking nothing".
+- rows in table: 150. numbers issued: 155 (L85–L90 never issued; old L26 retired). Registrations: 130 — see "Rows vs registrations".
+- origin: incident 95 | principle 53 | unclear 2 (L18, L78).
+- guard: premise-changed only 43 | POSITIVE CONTROL only 6 | both 9 | neither 92.
+- guard = POSITIVE CONTROL only: L47 L49 L53 L54 L55 L56 — all inline.
+- guard = both: L77 L81 L84 L91 L92 L136 L153 L154 L155 — only L81 inline.
+- guard = neither (92): L1–L25, L27–L46, L48, L50, L51, L52, L57–L76b, L78, L80, L82, L83, L93, L96, L98, L100, L101, L103–L109, L112, L113, L114, L124, L125, L126.
+- guard tokens are matched CASE-INSENSITIVELY (`tools/law-integrity.ps1:77` uses PowerShell `-notmatch`), so `Positive control:` in a header counts. This column follows that same rule — not the literal casing.
+- CAVEAT on `neither`: many carry an equivalent arm under a different name — `NON-VACUITY:` (L50 L52 L61), "the law's own PREMISE, executed" (L59), "anti-vacuity" (L55), "non-vacuity, both halves" (L48), "non-vacuous in both directions" (L9 L22 L49). `neither` = the two canonical tokens are absent, NOT "the law can silently pass while checking nothing".
 - laws with neither token AND no differently-named equivalent visible in the header: the early codec block L1–L20.
 - P orphans: none. No law maps to `P?`.
 - P with zero laws: P9 (journal).
-- P with no law scoped to it alone: P4c (defended jointly with P11).
+- P with no law scoped to it alone: P4c. **DECIDED 2026-08-07: this is a REAL coverage hole, not a principle that is only jointly checkable.**
+  - The two are opposite directions, not two halves of one test. P11 asserts the repaint HAPPENS (reach); P4c asserts the seam CHANGES NOTHING (harmlessness). Every P11 law in this table is a reach-law, and a presentation seam that reaches the screen AND writes model state passes all forty of them.
+  - P4c is cited by NOTHING executable. `grep -rn "P4c" tools/RailCheck src` = zero hits; the only mentions in the repo are `ARCHITECTURE.md:313` and this file. L126 ("a transpiler substitutes a computation, never writes one down") is the nearest shape and it is scoped P6 P3 and covers transpilers only, not the repaint/present seams.
+  - All three of P4c's clauses are statically assertable over a named seam set (`UiEventMap` arms, `UiNativeRepaint.Table` entries, `OpenUiRepaint`, `ResearchSync.PresentFromMirror`): (a) no prefix in the set returns false / suppresses native — never BLOCK; (b) no member of the set writes a `[SerializeMember]` leaf — never WRITE; (c) every entry is exception-contained — never THROW into game code. Clause (c) is already an unasserted written promise at `ARCHITECTURE.md:192` ("a registered screen that throws keeps the screen + logs once").
+  - The hole is about to be loaded, which is why it is worth closing now rather than noting again: HANDOFF §5c option (C) moves death presentation onto the mirror's own local playback, and §5e classes both new features (pings, player panel) as presentation. Both are P4c by construction and neither has a law.
 - P13 is PROPOSED: not in `ARCHITECTURE.md`; stated only inside the corpus as a developer mandate quoted by L84 + L91; 18 laws defend it. Recommend writing it into `ARCHITECTURE.md` as a numbered principle.
 - P12, P14, P15, P16 asserted by `ARCHITECTURE.md` but never numbered there → no source cites them by id today.
 - `law 1` carries ≥3 readings in the corpus: (a) the two primitives Intent+Delta — `src/Rail/IntentRail.cs:11`; (b) join is a save transfer, not a delta — `src/Rail/DiffEngine.cs:33`, `ARCHITECTURE.md` P1 line; (c) never a silent swallow — `src/Rail/RailMeta.cs:1704/:1742`, `src/Rail/GenericApplier.cs:408`, `src/Rail/OpenUiRepaint.cs:331`. P1 states all three; not resolved to one.
 - `law 5` and `law 10` are never defined in `ARCHITECTURE.md` — used only from `src/` (34 and 26 citations). P5 and P10 reconstructed from usage.
 - HARNESS laws written in the principle spelling in `src/` prose (unfixed, outside this catalog's edit scope): `law 12` → L12 (`src/Rail/TradeSync.cs:32`, `src/Tactical/TacticalInventorySync.cs:762`); `law 19` → L19 (`src/Tactical/TacticalCommandSync.cs:1220`, `src/Tactical/TacticalInventorySync.cs:703/:902`); `law 58` → L58 (`src/Rail/DiffEngine.cs:347/:1077`, `src/Rail/RailMeta.cs:1967`); `law 91` → L91 (`src/Rail/GeoModalMirror.cs:34/:549`, `src/Rail/GeoWindowCoverage.cs:187`, + L99/L107/L109/L110/L111 headers).
-- `ARCHITECTURE.md` harness citations verified correct, no conflation with old "law 11": L17 (:82, duplicate root key), L14 (:139, twin coercions), L11 (:272, LocalizedTextBind static belt), L1–L13 (Verification section).
+- `ARCHITECTURE.md` rename RE-VERIFIED 2026-08-07, line by line. No numbered "law N" survives anywhere in the file; no principle was renumbered. Every `L<n>` in it is a harness law and reads correctly: L17 (:83, duplicate root key), L14 (:140, twin coercions), L11 (:273, LocalizedTextBind static belt), L1–L13 + L20 (:376-424, Verification section). No conflation with old "law 11" — `:273` says "no `LocalizedTextBind` rides covered", which is L11's subject verbatim, not P11's repaint.
+- AMBIGUITIES IN `ARCHITECTURE.md`, named rather than silently resolved:
+  - The file legitimately uses BOTH numbering spaces over the same digits: P1–P11 as principles and L1–L14/L17/L20 as harness laws, disambiguated only by the `P`/`L` letter and the one-line note at `:9`. That collision is structural and permanent; 11 is merely the loudest case (`P11` repaint vs `L11` text-bind belt). A bare number in any future edit is unresolvable — always write the letter.
+  - `:19` "**Implementation of the law:**" — unnumbered and genuinely ambiguous. By context (canonical byte-identical deltas + generalized field enumeration) it reads as P1 or P6, but the original text names neither. Left as-is; not renamed, because picking one would be an invention.
+  - `:254`/`:256`/`:260`/`:271` ("Walk-time ownership law", "No static signal carries the law", "law fails OPEN") and `:279` ("Anchor-not-Now law") use "law" as ordinary prose for an unnumbered rule. Not renaming errors.
+  - P5, P10, P12, P13, P14, P15, P16 appear NOWHERE in `ARCHITECTURE.md` by number — consistent with the notes below, but it means seven of sixteen principles have no prose source there.
 - laws that exist because an earlier law was GREEN through the bug it named: L102 vs L92 | L130 vs L129 | L135 vs L49+L117 | L144 vs L141 | L134 vs L124 | L138 vs L36 | L96 vs L81 | L106+L107 vs L49 | L109 vs L48 | L137 vs L131.
