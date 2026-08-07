@@ -22,11 +22,19 @@ namespace RailCheck
     /// rail (<c>LeafKindOf</c> → <c>LeafKind.DefRef</c>): its entire wire form is a guid, and the client
     /// resolves it out of its OWN def repository. The only reason it reached the blob path at all is that the
     /// DECLARED slot is an interface, which the leaf test cannot see through — and the blob path's first act
-    /// is to refuse a runtime type that is not the declared one. Two reaching slots, both interface-declared
-    /// and both holding a def: the <c>_relations</c> dictionary KEY
-    /// (<c>Dictionary&lt;IDiplomaticPartyKey, Relation&gt;</c> → PairBlobField → EncodeValue's IsKvpType arm)
-    /// and <c>Relation</c>'s <c>[SerializeCustomCreate]</c> <c>WithParty</c> create param
-    /// (EncodeObjectBody's <c>ci.Params</c> loop).
+    /// is to refuse a runtime type that is not the declared one. The slot that actually fires is
+    /// <c>Relation</c>'s <c>[SerializeCustomCreate]</c> <c>WithParty</c> create param (EncodeObjectBody's
+    /// <c>ci.Params</c> loop), reached from <c>_factionsDiplomacyState</c> →
+    /// <c>FactionDiplomacyState.Relation</c>.
+    ///
+    /// WHAT THIS DOES NOT FIX, so nobody reads the green as "diplomacy is fully mirrored": three CLASSIFY-time
+    /// exclusions in the same neighbourhood are untouched and stay loud in the reviewed baseline —
+    /// <c>FactionDiplomacy._relations</c> ("dictionary with non-simple key/value",
+    /// <c>docs/rail-baseline.txt</c>:488), <c>FactionDiplomacy.Party</c> (:486) and
+    /// <c>Relation._thisParty</c>/<c>_withParty</c> (:132-133), all "untyped/interface member". A different
+    /// class: reviewed, visible, never silent. This arm unblocks the FIELD they sit in, so the list ships
+    /// <c>AtWar</c>, <c>PointOfInterest</c>, the titles and <c>Relation._diplomacy</c> instead of nothing at
+    /// all — with <c>_withParty</c> arriving through the create param above.
     ///
     /// THE NARROWNESS IS THE LOAD-BEARING PART, so arm (c) is not decoration. `docs/rail-contract.txt`'s
     /// frozen <c>polymorphic-codec: no</c> gates the reviewed TYPE CLOSURE (<c>Closure()</c> expands to

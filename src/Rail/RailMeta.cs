@@ -2310,10 +2310,15 @@ namespace Multiplayer.Network.Sync
             // interface the leaf test cannot see through. Without this arm the encode aborts the whole field
             // — `FactionDiplomacy._factionsDiplomacyState: polymorphic value PPFactionDef as
             // IDiplomaticPartyKey` (2026-08-07, ×3 factions at the first campaign walk), after which faction
-            // diplomacy never crossed to a client again for the whole session. Both reaching paths are
-            // interface-DECLARED slots holding a def: the `_relations` dict key (Dictionary
-            // <IDiplomaticPartyKey, Relation> → PairBlobField → the IsKvpType arm above) and Relation's
-            // [SerializeCustomCreate] `WithParty` create param (EncodeObjectBody's ci.Params loop).
+            // diplomacy never crossed to a client again for the whole session. The slot that actually fires
+            // is Relation's [SerializeCustomCreate] `WithParty` create param (EncodeObjectBody's ci.Params
+            // loop), reached from `_factionsDiplomacyState` → FactionDiplomacyState.Relation (Descend). NOT
+            // the `_relations` dict key: that field never reaches encode at all — it is excluded at CLASSIFY
+            // time and says so in the reviewed baseline (docs/rail-baseline.txt:488, "dictionary with
+            // non-simple key/value"), as are FactionDiplomacy.Party and Relation._thisParty/_withParty
+            // (":486/:132-133, untyped/interface member"). Those are a different, LOUD exclusion class and
+            // this arm neither fixes nor hides them; it unblocks the field they sit in. The IsKvpType arm
+            // above is a latent second route this guard also covers, should such a dict ever classify in.
             //
             // Tagged rather than silent, and NARROW rather than general: only a runtime BaseDef, only under a
             // non-leaf declared slot. Everything else — a derived CLASS under a base class, an abstract
