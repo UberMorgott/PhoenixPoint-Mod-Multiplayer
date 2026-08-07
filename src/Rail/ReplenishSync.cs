@@ -237,7 +237,8 @@ namespace Multiplayer.Network.Sync
                         mission.GetMissionOutcomeState() == PhoenixPoint.Tactical.Levels.TacFactionState.Playing)
                         return;
 
-                    var view = GeoLevel()?.View;
+                    var geo = GeoLevel();
+                    var view = geo?.View;
                     if (view == null) return;
                     // Already queued by the native gate = the state DID arrive in time; re-asking would
                     // double the screen.
@@ -245,9 +246,20 @@ namespace Multiplayer.Network.Sync
                         return;
 
                     _recheckFrames = RecheckFrames;
-                    Debug.Log("[MP][replenish] post-mission arrival: the resupply gate said \"nothing missing\" " +
-                              "while this peer's returning squad is still the host's pre-battle save — re-asking " +
-                              "the game's own GetMissingItems() for the next " + RecheckFrames + " frames.");
+                    // THE GATE'S OWN ANSWER, at the instant UIStateInitial:125 asked it. Absence of the
+                    // screen is not evidence of WHICH clause was false, and a whole session was spent
+                    // arguing that from an empty log: 0 here proves the race (the host's post-mission
+                    // writes had not landed), non-zero proves the opposite and sends the next reader
+                    // somewhere else entirely. Costs one walk, once per mission arrival.
+                    int shortNow = geo.ViewerFaction is GeoPhoenixFaction px
+                                       ? px.GetMissingItems().Count : 0;
+                    Debug.Log("[MP][replenish] post-mission arrival: the game's own gate saw " + shortNow +
+                              " short soldier(s) at UIStateInitial:125" +
+                              (shortNow == 0 ? " — i.e. nothing missing YET, because this peer's returning squad " +
+                                               "is still the host's pre-battle save" : " — the native raise " +
+                                               "should already have happened, so watch which peer queued it") +
+                              ". Re-asking the game's own GetMissingItems() for the next " + RecheckFrames +
+                              " frames.");
                 }
                 catch (Exception ex)
                 { Debug.LogError("[MP][replenish] arming the post-mission resupply re-ask failed: " + ex); }
