@@ -100,7 +100,23 @@ namespace Multiplayer.Tactical
         private static TacticalActor _painted;
         private static float _paintedAp, _paintedWp;
 
-        private static readonly HashSet<string> _loggedFailures = new HashSet<string>();
+        // HOW OFTEN EACH REPAINT FAILURE HAS FIRED THIS BATTLE. This was a HashSet — log once, then swallow
+        // every later failure in total silence, which is this repo's dominant bug shape wearing a
+        // rate-limit costume: after the first line a screen that fails on EVERY mark and a screen that never
+        // failed again read identically. The count makes them different without a line per frame.
+        private static readonly Dictionary<string, int> _failureCounts = new Dictionary<string, int>();
+
+        /// <summary>Records one failure of <paramref name="key"/> and answers WHICH occurrence it is when it
+        /// deserves a line, or 0 to stay quiet. Audible on the 1st, 2nd, 4th, 8th... — a failure that repeats
+        /// every frame costs ~log2(frames) lines instead of one per frame, and the number it returns is
+        /// printed, so "still broken 512 times later" is visible where silence used to be.</summary>
+        private static int FailureBeat(string key)
+        {
+            int n;
+            _failureCounts.TryGetValue(key, out n);
+            _failureCounts[key] = ++n;
+            return (n & (n - 1)) == 0 ? n : 0;   // powers of two
+        }
 
         // HOW LONG THE PAINTED ACTOR HAS BEEN BUSY, in frames. An Exit+Enter re-READS the model; it cannot
         // end an ability, so once an actor is wedged mid-execution every repaint of an ability-bar state is
@@ -127,7 +143,7 @@ namespace Multiplayer.Tactical
             _squadBarDirty = false;
             _painted = null;
             _busyFrames = 0;
-            _loggedFailures.Clear();
+            _failureCounts.Clear();
         }
 
         private static NetworkEngine LiveEngine()
@@ -218,7 +234,7 @@ namespace Multiplayer.Tactical
                     // Re-arm nothing: the mark is spent. When the ability finally ends the busy memo resets
                     // and the next real change repaints normally — this only refuses to Exit+Enter a state
                     // whose actor cannot answer, and it refuses OUT LOUD.
-                    if (_loggedFailures.Add("busy:" + __instance.GetType().Name))
+                    if (FailureBeat("busy:" + __instance.GetType().Name) > 0)
                         Debug.LogError("[Multiplayer][tac] repaint of " + __instance.GetType().Name +
                                        " SKIPPED — " + (actor == null ? "<none>" : actor.name) + " has been " +
                                        "executing an ability for " + (_busyFrames / 60) + "s, so this screen " +
@@ -328,9 +344,10 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                if (_loggedFailures.Add("squadbar"))
+                int beat = FailureBeat("squadbar");
+                if (beat > 0)
                     Debug.LogWarning("[Multiplayer][tac] squad-bar repaint threw — the AP/WP under the " +
-                                     "portraits may be stale (logged once per battle): " + ex);
+                                     "portraits may be stale (failure #" + beat + " this battle): " + ex);
             }
         }
 
@@ -466,9 +483,10 @@ namespace Multiplayer.Tactical
             catch (Exception ex)
             {
                 // Same non-destructive posture as Repaint: a partial refresh, not a lost screen.
-                if (_loggedFailures.Add("modules"))
+                int beat = FailureBeat("modules");
+                if (beat > 0)
                     Debug.LogWarning("[Multiplayer][tac] module repaint threw — bottom bar may be stale " +
-                                     "(logged once per battle): " + ex);
+                                     "(failure #" + beat + " this battle): " + ex);
             }
         }
 
@@ -545,18 +563,27 @@ namespace Multiplayer.Tactical
                 using (SyncApplyScope.Enter())
                 {
                     bool primaryIsVehicle = InvIsVehicle != null && (bool)InvIsVehicle.GetValue(state);
-                    module.UpdateData(
-                        InvBackpack.Invoke(state, new object[] { primary }) as IEnumerable<ICommonItem>,
-                        ReadyItems(state, primary, primaryIsVehicle),
-                        null,
-                        InvGround.Invoke(state, new[] { InvContainers.Invoke(state, null) }) as IEnumerable<ICommonItem>);
+                    var primaryBackpack = InvBackpack.Invoke(state, new object[] { primary }) as IEnumerable<ICommonItem>;
+                    var ground = InvGround.Invoke(state, new[] { InvContainers.Invoke(state, null) }) as IEnumerable<ICommonItem>;
+                    var primaryReady = ReadyItems(state, primary, primaryIsVehicle);
+                    if (primaryIsVehicle && primaryReady != null)
+                        module.UpdateVehicleData(primaryBackpack, ground,
+                            VehicleSlot(primaryReady, 0), VehicleSlot(primaryReady, 1), VehicleSlot(primaryReady, 2),
+                            primary.CharacterStats.GetInventorySlots());
+                    else
+                        module.UpdateData(primaryBackpack, primaryReady, null, ground);
                     var secondary = InvSecondary == null ? null : InvSecondary.GetValue(state) as TacticalActor;
                     if (secondary != null)
                     {
                         bool secondaryIsVehicle = InvIsSecondaryVehicle != null && (bool)InvIsSecondaryVehicle.GetValue(state);
-                        module.UpdateSecondaryData(
-                            InvBackpack.Invoke(state, new object[] { secondary }) as IEnumerable<ICommonItem>,
-                            ReadyItems(state, secondary, secondaryIsVehicle));
+                        var secondaryBackpack = InvBackpack.Invoke(state, new object[] { secondary }) as IEnumerable<ICommonItem>;
+                        var secondaryReady = ReadyItems(state, secondary, secondaryIsVehicle);
+                        if (secondaryIsVehicle && secondaryReady != null)
+                            module.UpdateVehicleSecondaryData(secondaryBackpack,
+                                VehicleSlot(secondaryReady, 0), VehicleSlot(secondaryReady, 1), VehicleSlot(secondaryReady, 2),
+                                secondary.CharacterStats.GetInventorySlots());
+                        else
+                            module.UpdateSecondaryData(secondaryBackpack, secondaryReady);
                     }
                     if (InvRefreshUi != null) InvRefreshUi.Invoke(state, null);
                     // ALWAYS AUDIBLE, the same posture InventoryCommitSeam takes and for the same reason: a
@@ -570,11 +597,33 @@ namespace Multiplayer.Tactical
             {
                 // Same non-destructive posture as the other two repaints: a partial refresh, not a lost
                 // screen — and never a demotion to Exit+Enter, which on THIS state would commit the batch.
-                if (_loggedFailures.Add("containers"))
+                int beat = FailureBeat("containers");
+                if (beat > 0)
                     Debug.LogWarning("[Multiplayer][tac] container-view repaint threw — an open inventory panel " +
-                                     "may be stale until it is reopened (logged once per battle): " + ex);
+                                     "may be stale until it is reopened (failure #" + beat + " this battle): " + ex);
             }
             return true;
+        }
+
+        /// <summary>ONE VEHICLE EQUIPMENT SLOT, taken from the three-entry ready list by position and stripped
+        /// of a null — the game's own step, <c>UIStateInventory.UpdateSecondaryDataCommand.Execute</c>:182 and
+        /// <c>UpdatePrimaryDataCommand.Execute</c>:131, which both wrap each entry in
+        /// <c>.Where(x =&gt; x != null)</c> before it reaches a list.
+        ///
+        /// THE NULL IS NORMAL, NOT AN ERROR CASE. <c>GetVehicleReadyItems</c>:624-632 builds
+        /// <c>{ GetVehicleWeapon, GetVehicleHull, GetVehicleEngine }</c> and every one of those three is a
+        /// <c>FirstOrDefault</c> (:621, :611, :606) — a vehicle with no weapon mounted yields a list whose
+        /// first element is NULL, by design and with no complaint.
+        ///
+        /// EMPTY IS NOT NULL, and the difference is load-bearing: <c>UpdateVehicleData</c>:749-763 skips a
+        /// list entirely when its argument is null, so returning null would leave the slot painting the last
+        /// vehicle's weapon. An empty sequence still Deinit+Inits it, which is what CLEARS the slot.</summary>
+        private static IEnumerable<ICommonItem> VehicleSlot(IEnumerable<ICommonItem> ready, int index)
+        {
+            int i = 0;
+            foreach (var item in ready)
+                if (i++ == index) return item == null ? new ICommonItem[0] : new[] { item };
+            return new ICommonItem[0];
         }
 
         /// <summary>A mounted actor's "ready" list is its three vehicle slots, not its equipment
@@ -622,9 +671,10 @@ namespace Multiplayer.Tactical
                         // Exit removes the input handler BEFORE ExitState (TacticalViewState:115-120), so
                         // bailing out here would leave the screen DEAF. Always fall through to Enter — its
                         // AddUnique re-subscribes idempotently.
-                        if (_loggedFailures.Add(state.GetType().Name + ":Exit"))
+                        int exitBeat = FailureBeat(state.GetType().Name + ":Exit");
+                        if (exitBeat > 0)
                             Debug.LogWarning("[Multiplayer][tac] repaint Exit for " + state.GetType().Name +
-                                             " threw — entering anyway (logged once per screen): " + exitEx);
+                                             " threw — entering anyway (failure #" + exitBeat + "): " + exitEx);
                     }
                     state.Enter(stack);
                 }
@@ -634,9 +684,10 @@ namespace Multiplayer.Tactical
                 // NON-DESTRUCTIVE, same posture as the geoscape seam: a throw inside EnterState is a PARTIAL
                 // repaint, not a lost screen, and law 11 outranks log tidiness — we keep repainting this
                 // screen on later marks and stay quiet after the first report.
-                if (_loggedFailures.Add(state.GetType().Name))
+                int beat = FailureBeat(state.GetType().Name);
+                if (beat > 0)
                     Debug.LogWarning("[Multiplayer][tac] repaint of " + state.GetType().Name +
-                                     " threw — screen kept, part of it may be stale (logged once per screen): " + ex);
+                                     " threw — screen kept, part of it may be stale (failure #" + beat + "): " + ex);
             }
         }
     }
