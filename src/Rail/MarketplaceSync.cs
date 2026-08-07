@@ -68,7 +68,8 @@ namespace Multiplayer.Network.Sync
     /// BLOCK-FIRST, and the money is why: <c>UIModuleTheMarketplace.OnChoiceSelected</c> takes the price out
     /// of the SHARED wallet at :215, two lines BEFORE the funnel that grants the goods (:219) — the same
     /// shape as the repair leak <see cref="ReplenishSync"/> closed today. The wire carries only
-    /// (event id, row index, offer key); the HOST re-derives the price from its own row, asks the GAME'S own
+    /// (event id, offer key — GAP 3 took the row index off); the HOST re-derives the price from its own row,
+    /// asks the GAME'S own
     /// requirement test (<c>GeoEventChoice.PassRequirements</c>, the very predicate the native button uses
     /// to grey itself out at SiteBaseChoicesController:60) and then runs the game's own three lines. ONE op
     /// for every kind of goods — the marketplace sells items, vehicles and researches through one
@@ -81,12 +82,35 @@ namespace Multiplayer.Network.Sync
     /// window, and <c>OpenUiRepaint</c> refuses to Exit+Enter a queued one-shot presentation (it would
     /// replay it) unless the screen declares a <c>UiNativeRepaint.Table</c> entry — which is a line in a file
     /// this track does not own, so the repaint is driven from the applier here instead.
+    ///
+    /// ─── GAP 3 (2026-08-07): THE ROW INDEX WAS THE WIRE IDENTITY, AND A ROW INDEX IS NOT AN IDENTITY ───
+    /// Live report: a client bought a soldier, every other row vanished, the buttons went dead, and only
+    /// re-entering the shop recovered it — and the same offer could be clicked again after the host had
+    /// already sold it. The intent used to carry <c>[eventId][index:i32][offerKey]</c> and the host resolved
+    /// <c>choices[index]</c>, then merely CHECKED the key there. Three ways that is not an address:
+    ///   • <see cref="ApplyOffers"/> DROPS rows it cannot rebuild (a def parity gap, law 10) — its own
+    ///     comment claimed "buying by row index stays correct only because the host re-checks the offer key",
+    ///     which is false: every row after the dropped one is shifted, so the key check does not correct the
+    ///     address, it merely REFUSES a purchase the player legitimately made. Live:
+    ///     <c>buy: row 10 is outside the host's 4-offer shop</c>.
+    ///   • The click's index came from <c>MarketplaceChoices.IndexOf(selectedChoice)</c>, and
+    ///     <see cref="ApplyOffers"/> replaces every element with a freshly generated one. A button that
+    ///     out-lived one push therefore resolved to −1 and the click was DROPPED with a log line and no word
+    ///     to the player — the literal "buttons did nothing".
+    ///   • A refusal was invisible. Every reject took the non-notify overload, so "another peer bought this"
+    ///     — a MOD-PROTOCOL refusal vanilla has no greyed control for — reached the host's console and
+    ///     nobody's screen.
+    /// NOW: the click sends the offer KEY and nothing positional, and the host RESOLVES that key over its own
+    /// live list (<see cref="ResolveOffer"/>). A consumed offer resolves to nothing on every peer the moment
+    /// the host removes it — that is the outcome L166 asserts, in both directions. Still no price on the
+    /// wire (L99 arm d): where a key is ambiguous the host takes its OWN CHEAPEST matching row, so the buyer
+    /// can never be charged more than the row it clicked and the host derives the cost either way.
     /// </summary>
     internal static class MarketplaceSync
     {
         /// <summary>The ONE purchase op — item, vehicle or research, all of them.
-        /// Body: [eventId:string][index:i32][offerKey:string]. No price: the client names WHAT it wants,
-        /// never what it costs.</summary>
+        /// Body: [eventId:string][offerKey:string]. No price: the client names WHAT it wants, never what it
+        /// costs. NO ROW INDEX EITHER, see <see cref="ResolveOffer"/>.</summary>
         internal const byte OpBuy = 1;
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
@@ -149,6 +173,33 @@ namespace Multiplayer.Network.Sync
             if (outcome.GiveResearches.Count > 0) return "R:" + outcome.GiveResearches[0];
             if (outcome.Units.Count > 0) return "U:" + outcome.Units[0]?.Guid;
             return null;
+        }
+
+        /// <summary>THE ADDRESS RESOLVER — a key names a ROW, never a position. Pure and total: no live
+        /// level, no reflection, so RailCheck L166 executes the real thing instead of a copy of it.
+        ///
+        /// The OUTCOME it exists for: a consumed offer resolves to NOTHING. The host removes the row it
+        /// sold, and from that instant no peer — not even the one whose screen still draws it — can address
+        /// it, whatever moved into its old slot. That is the half a row index cannot express: an index
+        /// survives the row it pointed at and silently starts naming its neighbour.
+        ///
+        /// CHEAPEST FIRST when a key is ambiguous. <c>OfferKey</c> is def-level, and the shop is free to roll
+        /// the same <c>ItemDef</c> twice (<c>GeoMarketplace.GenerateRandomChoice</c>:272 only retires an
+        /// option when <c>DisallowDuplicates</c>), so two rows can share a key at different prices. Taking
+        /// the cheapest is deterministic AND it is the arm that keeps the price off the wire (L99 arm d):
+        /// the goods are identical, the host derives the cost from the row it picked, and the buyer can
+        /// never be charged more than the row it actually clicked.</summary>
+        internal static GeoEventChoice ResolveOffer(IList<GeoEventChoice> choices, string key)
+        {
+            if (choices == null || string.IsNullOrEmpty(key)) return null;
+            GeoEventChoice best = null;
+            for (int i = 0; i < choices.Count; i++)
+            {
+                var c = choices[i];
+                if (!string.Equals(OfferKey(c), key, StringComparison.Ordinal)) continue;
+                if (best == null || PriceOf(c) < PriceOf(best)) best = c;
+            }
+            return best;
         }
 
         /// <summary>Key + price → the row, through the game's own generator. Never a hand-built
@@ -223,7 +274,13 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>Push the host's CURRENT offer list to every peer. A full snapshot, so it is idempotent
         /// and a peer that missed one push is corrected by the next. Called on every reroll, after every
-        /// purchase (the row is consumed) and from the reject reconverge.</summary>
+        /// purchase (the row is consumed) and from the reject reconverge.
+        ///
+        /// It also REPAINTS THE HOST'S OWN open shop, because this is the ONE place every host-side change
+        /// to the list funnels through (law 11 / the REACTIVITY mandate: the clients repaint in
+        /// <see cref="ApplyOffers"/>, and this is the same instant on this side). It used to be one
+        /// call bolted onto <see cref="HandleBuy"/>, which left the timed reroll repainting nothing at all
+        /// — a host standing in the shop when it rerolled kept the old goods until it walked out.</summary>
         internal static void HostBroadcastOffers(string why)
         {
             var engine = NetworkEngine.Instance;
@@ -252,6 +309,7 @@ namespace Multiplayer.Network.Sync
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.GeoMarketplaceOffers, SyncKind.StateDelta, inner)));
                 Debug.Log("[MP][market] HOST shipped " + choices.Count + " offer(s) seq=" + seq + " (" + why + ")");
+                RepaintOpenMarketplace();   // the host may be standing in the shop it just changed
             }
             catch (Exception ex)
             {
@@ -312,8 +370,9 @@ namespace Multiplayer.Network.Sync
             if (dropped > 0)
                 Debug.LogError("[MP][market] " + dropped + " of " + rows.Count + " offers could not be rebuilt on " +
                                "this peer — a def the host has and this build does not (mod parity, law 10). The " +
-                               "shop is SHORTER here, and buying by row index stays correct only because the host " +
-                               "re-checks the offer key.");
+                               "shop is SHORTER here; buying the rows that DID rebuild stays correct because the " +
+                               "intent carries the offer KEY and nothing positional (ResolveOffer). It did not " +
+                               "when the wire carried a row index — every row after a dropped one was shifted.");
             market.MarketplaceChoices.Clear();
             market.MarketplaceChoices.AddRange(rebuilt);
             Debug.Log("[MP][market] mirrored " + rebuilt.Count + " offer(s) from the host");
@@ -370,23 +429,24 @@ namespace Multiplayer.Network.Sync
                 if (IntentRail.ShouldRunNative()) return true;
 
                 var geo = GeoLevel();
-                var market = geo?.Marketplace;
                 var module = geo?.View?.GeoscapeModules?.TheMarketplaceModule;
                 var ev = module == null ? null : ModuleGeoEvent?.GetValue(module) as GeoscapeEvent;
-                int index = market?.MarketplaceChoices?.IndexOf(selectedChoice) ?? -1;
+                // The address is read off the CLICKED ROW ITSELF — never off its position in a list the
+                // mirror rebuilds underneath the button. IndexOf used to live here and returned −1 for any
+                // button that out-lived one offer push, which is how a live click became a dead one.
                 string key = OfferKey(selectedChoice);
-                if (index < 0 || string.IsNullOrEmpty(key) || string.IsNullOrEmpty(ev?.EventID))
+                if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(ev?.EventID))
                 {
                     // Never silent, and never a local fallback: a purchase this peer cannot address is a
                     // purchase the host cannot re-derive, and running it here would spend the shared wallet.
                     Debug.LogWarning("[MP][market] client purchase DROPPED — the clicked row is not addressable " +
-                                     "(index=" + index + " key=" + (key ?? "none") + " event=" + (ev?.EventID ?? "none") +
+                                     "(key=" + (key ?? "none") + " event=" + (ev?.EventID ?? "none") +
                                      "); nothing was spent locally either");
                     return false;
                 }
                 string eventId = ev.EventID;
-                IntentRail.Send(SurfaceIds.GeoMarketplaceIntent, OpBuy, "buy #" + index + " " + key,
-                                w => { w.Write(eventId); w.Write(index); w.Write(key); });
+                IntentRail.Send(SurfaceIds.GeoMarketplaceIntent, OpBuy, "buy " + key,
+                                w => { w.Write(eventId); w.Write(key); });
                 return false;
             }
 
@@ -467,29 +527,30 @@ namespace Multiplayer.Network.Sync
         private static void HandleBuy(ulong peer, uint nonce, BinaryReader r)
         {
             string eventId = r.ReadString();
-            int index = r.ReadInt32();
             string key = r.ReadString();
 
             var geo = GeoLevel();
             var market = geo?.Marketplace;
             var choices = market?.MarketplaceChoices;
-            if (geo == null || choices == null) { Reject(peer, "buy: no marketplace on the host"); return; }
-            if (index < 0 || index >= choices.Count)
-            { Reject(peer, "buy: row " + index + " is outside the host's " + choices.Count + "-offer shop"); return; }
+            if (geo == null || choices == null)
+            { Reject(peer, "buy: no marketplace on the host", notify: true); return; }
 
-            var choice = choices[index];
-            // The offer key is what makes a row index safe: a reroll that landed while the click was in
-            // flight moves every row, and buying whatever now sits at that index is the wrong purchase.
-            if (!string.Equals(OfferKey(choice), key, StringComparison.Ordinal))
-            { Reject(peer, "buy: row " + index + " is '" + OfferKey(choice) + "' here, not the '" + key +
-                           "' that was clicked — the shop rerolled under this peer"); return; }
+            // IDENTITY, NOT POSITION. A row the host has already sold resolves to nothing here no matter
+            // what moved into its slot, and a client whose mirrored list is shorter than the host's still
+            // addresses the right row. `notify` because THIS refusal is the mod-protocol one the player has
+            // no other sign of: vanilla greys a control it cannot afford, but it has nothing at all for
+            // "another peer took this while your screen still drew it".
+            var choice = ResolveOffer(choices, key);
+            if (choice == null)
+            { Reject(peer, "the shop no longer offers this — another peer bought it, or the assortment " +
+                           "rerolled (" + key + ")", notify: true); return; }
 
             var faction = geo.PhoenixFaction;
             var site = geo.Map?.ActiveSites?.FirstOrDefault(s => s.Type == GeoSiteType.Marketplace);
             var data = geo.EventSystem?.GetEventByID(eventId, canFail: true)?.GeoscapeEventData;
             if (faction == null || site == null || data == null)
             { Reject(peer, "buy: the host cannot rebuild this shop's context (site=" + (site == null) +
-                           " event '" + eventId + "'=" + (data == null) + ")"); return; }
+                           " event '" + eventId + "'=" + (data == null) + ")", notify: true); return; }
 
             var geoEvent = new GeoscapeEvent(data, new GeoscapeEventContext(site, faction));
             // The GAME'S own eligibility test — the same predicate that greys the native button out
@@ -505,14 +566,20 @@ namespace Multiplayer.Network.Sync
             Debug.Log("[MP][market] HOST bought '" + key + "' for " + PriceOf(choice) + " on behalf of peer=" +
                       peer + " nonce=" + nonce);
             // The wallet and the goods ride the value rail; the consumed ROW does not, so it is pushed here.
+            // HostBroadcastOffers repaints the host's own open shop too — one seam for every list change.
             HostBroadcastOffers("purchase by peer " + peer);
-            RepaintOpenMarketplace();   // the host may be standing in the same shop
         }
 
         /// <summary>A refused purchase changes nothing on the host, so the value rail has nothing to ship —
         /// the faction root carries the wallet the client may have painted as spent, and the family
-        /// reconverge (registered above) re-pushes the offer list the value rail cannot carry.</summary>
-        private static void Reject(ulong peer, string why) =>
-            IntentRail.Reject(SurfaceIds.GeoMarketplaceIntent, peer, why, "F#", "MK");
+        /// reconverge (registered above) re-pushes the offer list the value rail cannot carry.
+        ///
+        /// <paramref name="notify"/> is the difference between a dead button and an answer, and it splits
+        /// exactly where <see cref="IntentRail.Reject(byte,ulong,string,bool,string[])"/> says it should: a
+        /// MOD-PROTOCOL refusal ("another peer took this", "the host has no shop") reaches the screen,
+        /// because vanilla has no greyed control that says it; the AFFORDABILITY refusal does not, because
+        /// <c>PassRequirements</c> is the very predicate that already greys the native button.</summary>
+        private static void Reject(ulong peer, string why, bool notify = false) =>
+            IntentRail.Reject(SurfaceIds.GeoMarketplaceIntent, peer, why, notify, "F#", "MK");
     }
 }

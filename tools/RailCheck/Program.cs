@@ -238,6 +238,9 @@ namespace RailCheck
             laws.AddRange(L163_NotificationWaitsForTheMap.Check());
             laws.AddRange(L164_PostMissionResupplyIsAskedWhenTheStateArrives.Check());
             laws.AddRange(L165_SightingReachesEveryPeer.Check());
+            laws.AddRange(L166_ConsumedOfferIsGoneEverywhere.Check());
+            laws.AddRange(L85_RestartedHostStreamIsApplied.Check());
+            laws.AddRange(L86_AnnouncedBoundaryHoldsItsAnnouncer.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
