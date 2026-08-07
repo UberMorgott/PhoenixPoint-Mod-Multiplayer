@@ -1852,11 +1852,20 @@ namespace Multiplayer.Tactical
         /// joins by overriding the same method.
         ///
         /// A THROW ACCEPTS. This is an extra gate on top of the game's own; it must never become a new way for
-        /// an order to be refused by our own bug.</summary>
+        /// an order to be refused by our own bug. It became exactly that: a free-aim GROUND shoot — grenade,
+        /// launcher, cone weapon, FPS-mode shot — is not drawn from any published list, so holding it to one
+        /// refused every client throw while the client's own arc said it was legal. See
+        /// <see cref="GroundTargetingExemptsTheOrder"/> for the engine's own statement to that effect.</summary>
         internal static bool TargetIsOffered(TacticalAbility ability, TacticalAbilityTarget chosen)
         {
             if (ability == null || chosen == null) return true;
             if (!DeclaresOwnTargets(ability.GetType())) return true;
+            var shoot = ability as ShootAbility;
+            if (GroundTargetingExemptsTheOrder(
+                    shoot != null,
+                    ability.TacticalAbilityDef?.TargetingDataDef?.Origin?.TargetResult ?? TargetResult.None,
+                    shoot?.Weapon?.WeaponDef.DamagePayload.DamageDeliveryType))
+                return true;
             // BOTH questions are properties of the two SETS, so both are asked at this altitude — see
             // ChoiceIsOffered. Asking "is this a choice at all?" inside the loop body (where it used to live,
             // in TargetMatches) means an ability that publishes NOTHING never asks it: the loop body never
@@ -1908,6 +1917,55 @@ namespace Multiplayer.Tactical
             if (!chosenNamesATarget) return true;        // a direction, an inventory item, the actor itself
             if (!abilityPublishedAnyTarget) return true; // no list to be held to
             return matched;
+        }
+
+        /// <summary>DOES THE ABILITY PUBLISH A CHOICE AT ALL, OR IS THE PLAYER AIMING FREELY — pure, so
+        /// RailCheck L169 executes the OUTCOME instead of asserting that a call exists (L132's lesson).
+        ///
+        /// THE ENGINE'S OWN STATEMENT, NOT OURS. <c>UIStateAbilitySelected.EnterState</c>:198-202 calls
+        /// <c>GetTargets()</c> and then THROWS THE RESULT AWAY for exactly this case —
+        /// <c>if (_selectedAbility is ShootAbility ability &amp;&amp; TacticalViewState.IsTargetingGround(ability))
+        /// source = Enumerable.Empty&lt;TacticalAbilityTarget&gt;();</c> — and :468-470 enters the shoot state
+        /// with a NULL valid-shoot list. The player then aims at a raw cursor point
+        /// (<c>UIStateShoot.UpdateGroundTargetState</c>:1180 <c>new TacticalAbilityTarget(vector)</c>), and the
+        /// arc's whole verdict is <c>GetShootTarget(...) != null</c> (:1182), never list membership. Meanwhile
+        /// <c>GetTargets()</c> for that same ability is a grid FLOOR-CAST SWEEP
+        /// (<c>TacticalAbility.GetTargetPositions</c>:605-660): a free cursor point is not drawn from that grid
+        /// and is under no obligation to land within <see cref="TargetMatches"/>'s half-unit tolerance of a
+        /// surviving member. So the enumeration is not the authority here BY THE GAME'S OWN CODE, and our host
+        /// was applying a rule the game does not have — five refused grenades on one soldier in 25 seconds,
+        /// each at a point 0.1-0.3 units from the last, which is a human nudging a free cursor.
+        ///
+        /// THE PREDICATE IS COPIED, NOT INVENTED. <c>TacticalViewState.IsTargetingGround</c>:200-219 is
+        /// <c>protected static</c> and unreachable from here, so its body is reproduced below line for line,
+        /// including the two arms a summary would drop: a weapon whose delivery type is <c>Sphere</c> is ground
+        /// targeting too, and so is a shoot ability with NO weapon at all (the game's <c>?.</c> yields null and
+        /// falls to <c>return true</c>).
+        ///
+        /// NARROWED TO <c>ShootAbility</c>, EXACTLY AS <c>UIStateAbilitySelected</c>:199 NARROWS IT, and that
+        /// is the whole reason the first parameter exists rather than being folded into the caller. The
+        /// <c>TargetResult.Position</c> arm alone is true of <c>ExitVehicleAbility</c> — the ability this gate
+        /// was written for (<see cref="Validate"/>:1731-1736, where the exit tile was effectively
+        /// client-authoritative). Widening the exemption to every position-targeting ability re-opens that
+        /// hole; the law's positive control is that arm.
+        ///
+        /// ponytail: this exempts a whole class of order from OUR gate rather than answering the question the
+        /// game answers. If it ever proves too wide, replace it with the game's own single-point authority run
+        /// on the host — <c>shootAbility.GetShootTarget(chosen, null, ability.OriginTargetData) != null</c>,
+        /// literally the call the client's arc is drawn from (<c>UIStateShoot</c>:1182) — asked once per intent
+        /// instead of once per grid cell. Not done now because it is a live engine call inside the arbiter,
+        /// where the exemption is a decision the harness can run to exhaustion.</summary>
+        internal static bool GroundTargetingExemptsTheOrder(bool isShootAbility, TargetResult originTargetResult,
+                                                           DamageDeliveryType? deliveryType)
+        {
+            if (!isShootAbility) return false;
+            // ── TacticalViewState.IsTargetingGround:204-218, verbatim ──
+            if (originTargetResult == TargetResult.Position || originTargetResult == TargetResult.ActorAndPosition)
+                return true;
+            if (deliveryType.HasValue && deliveryType != DamageDeliveryType.Parabola &&
+                deliveryType != DamageDeliveryType.Cone)
+                return deliveryType == DamageDeliveryType.Sphere;
+            return true;
         }
 
         private static readonly Dictionary<Type, bool> _declaresTargets = new Dictionary<Type, bool>();
