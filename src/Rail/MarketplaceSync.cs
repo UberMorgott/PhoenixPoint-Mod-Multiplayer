@@ -97,12 +97,14 @@ namespace Multiplayer.Network.Sync
     ///     <see cref="ApplyOffers"/> replaces every element with a freshly generated one. A button that
     ///     out-lived one push therefore resolved to −1 and the click was DROPPED with a log line and no word
     ///     to the player — the literal "buttons did nothing".
-    ///   • A refusal was invisible. Every reject took the non-notify overload, so "another peer bought this"
-    ///     — a MOD-PROTOCOL refusal vanilla has no greyed control for — reached the host's console and
-    ///     nobody's screen.
+    ///   • A refusal was invisible: the client's list was never corrected, so a refused click left the same
+    ///     rows on screen and the player had no way to tell a dead button from a slow one. The answer is
+    ///     the PANEL, not a popup — <see cref="Reject"/>'s reconverge re-pushes the host's real list and the
+    ///     clicked row disappears. Losing a race for a shared offer is the ordinary outcome of an optimistic
+    ///     click here, and a modal per ordinary refusal is the error-box storm L123 exists to stop.
     /// NOW: the click sends the offer KEY and nothing positional, and the host RESOLVES that key over its own
     /// live list (<see cref="ResolveOffer"/>). A consumed offer resolves to nothing on every peer the moment
-    /// the host removes it — that is the outcome L166 asserts, in both directions. Still no price on the
+    /// the host removes it — that is the outcome L171 asserts, in both directions. Still no price on the
     /// wire (L99 arm d): where a key is ambiguous the host takes its OWN CHEAPEST matching row, so the buyer
     /// can never be charged more than the row it clicked and the host derives the cost either way.
     /// </summary>
@@ -176,7 +178,7 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>THE ADDRESS RESOLVER — a key names a ROW, never a position. Pure and total: no live
-        /// level, no reflection, so RailCheck L166 executes the real thing instead of a copy of it.
+        /// level, no reflection, so RailCheck L171 executes the real thing instead of a copy of it.
         ///
         /// The OUTCOME it exists for: a consumed offer resolves to NOTHING. The host removes the row it
         /// sold, and from that instant no peer — not even the one whose screen still draws it — can address
@@ -533,24 +535,24 @@ namespace Multiplayer.Network.Sync
             var market = geo?.Marketplace;
             var choices = market?.MarketplaceChoices;
             if (geo == null || choices == null)
-            { Reject(peer, "buy: no marketplace on the host", notify: true); return; }
+            { Reject(peer, "buy: no marketplace on the host"); return; }
 
             // IDENTITY, NOT POSITION. A row the host has already sold resolves to nothing here no matter
             // what moved into its slot, and a client whose mirrored list is shorter than the host's still
-            // addresses the right row. `notify` because THIS refusal is the mod-protocol one the player has
-            // no other sign of: vanilla greys a control it cannot afford, but it has nothing at all for
-            // "another peer took this while your screen still drew it".
+            // addresses the right row. The refusal answers IN THE PANEL, never in a window: Reject's
+            // reconverge re-pushes the host's real list, so the row the player clicked vanishes under the
+            // cursor. Losing a race for a shared offer is ordinary here, and ordinary does not get a modal.
             var choice = ResolveOffer(choices, key);
             if (choice == null)
             { Reject(peer, "the shop no longer offers this — another peer bought it, or the assortment " +
-                           "rerolled (" + key + ")", notify: true); return; }
+                           "rerolled (" + key + ")"); return; }
 
             var faction = geo.PhoenixFaction;
             var site = geo.Map?.ActiveSites?.FirstOrDefault(s => s.Type == GeoSiteType.Marketplace);
             var data = geo.EventSystem?.GetEventByID(eventId, canFail: true)?.GeoscapeEventData;
             if (faction == null || site == null || data == null)
             { Reject(peer, "buy: the host cannot rebuild this shop's context (site=" + (site == null) +
-                           " event '" + eventId + "'=" + (data == null) + ")", notify: true); return; }
+                           " event '" + eventId + "'=" + (data == null) + ")"); return; }
 
             var geoEvent = new GeoscapeEvent(data, new GeoscapeEventContext(site, faction));
             // The GAME'S own eligibility test — the same predicate that greys the native button out
@@ -574,12 +576,16 @@ namespace Multiplayer.Network.Sync
         /// the faction root carries the wallet the client may have painted as spent, and the family
         /// reconverge (registered above) re-pushes the offer list the value rail cannot carry.
         ///
-        /// <paramref name="notify"/> is the difference between a dead button and an answer, and it splits
-        /// exactly where <see cref="IntentRail.Reject(byte,ulong,string,bool,string[])"/> says it should: a
-        /// MOD-PROTOCOL refusal ("another peer took this", "the host has no shop") reaches the screen,
-        /// because vanilla has no greyed control that says it; the AFFORDABILITY refusal does not, because
-        /// <c>PassRequirements</c> is the very predicate that already greys the native button.</summary>
-        private static void Reject(ulong peer, string why, bool notify = false) =>
-            IntentRail.Reject(SurfaceIds.GeoMarketplaceIntent, peer, why, notify, "F#", "MK");
+        /// NEVER <c>notify</c>. A refused purchase must be VISIBLE, and in this panel it already is: the
+        /// reconverge above re-pushes the host's real list, <see cref="ApplyOffers"/> replaces the rows and
+        /// <see cref="RepaintOpenMarketplace"/> redraws them, so the row the player clicked DISAPPEARS under
+        /// the cursor and the shop reconciles to the host's. That is the answer — the panel showing the
+        /// truth — and it is why a modal would be pure noise on top of it. Losing a race for a shared offer
+        /// is the ORDINARY outcome of an optimistic click in a shared shop, not an event: at shop rates a
+        /// prompt per refusal is the error-box storm L123 was written to stop, and it yanks the player out
+        /// of the very menu the reconverge just corrected. The reason still crosses the wire and is still
+        /// logged on both peers (IntentRail's nudge), so nothing is swallowed.</summary>
+        private static void Reject(ulong peer, string why) =>
+            IntentRail.Reject(SurfaceIds.GeoMarketplaceIntent, peer, why, "F#", "MK");
     }
 }

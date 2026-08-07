@@ -263,15 +263,6 @@ namespace RailCheck
                 // computed per refusal (ReferenceEquals(refusal, BusyRefusal)), so every OTHER arm of Validate
                 // — the game's own ability gate, AP, WP, target-not-offered — still crosses quietly.
                 "Multiplayer.Tactical.TacticalCommandSync.HandleActivate",
-                // L166: "another peer already bought this offer", and its two siblings ("the host has no shop",
-                // "the host cannot rebuild this shop's context"). Co-op-invented in the same shape as the entry
-                // above — single player cannot sell a row out from under its own open window, so vanilla has no
-                // greyed control for it and the buyer is left clicking a row that is simply gone (measured:
-                // three intents for one already-sold offer, nonces 143/144/145, every refusal reaching the
-                // host's console and nobody's screen). The AFFORDABILITY refusal in the same handler still
-                // crosses quietly and must: PassRequirements IS the predicate that greys the native button
-                // (SiteBaseChoicesController:60), so a prompt there is this arm's own counter-example.
-                "Multiplayer.Network.Sync.MarketplaceSync.Reject",
             };
             var optIns = mod.GetTypes()
                             .SelectMany(Methods)

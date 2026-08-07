@@ -101,7 +101,7 @@ namespace RailCheck
             var readSingle = typeof(BinaryReader).GetMethod(nameof(BinaryReader.ReadSingle));
             if (CaptureClosure(capture).Any(m => Same(m, writeFloat) || Same(m, writeDouble)))
                 yield return "L99 client-names-a-price: the purchase intent writes a float. The client sends an " +
-                             "ADDRESS (event id + offer key; the row index left the wire with L166) and nothing " +
+                             "ADDRESS (event id + offer key; the row index left the wire with L171) and nothing " +
                              "else — the moment a price rides the wire, the buyer's screen decides what the shop " +
                              "charges. Where a key is ambiguous the host takes its own CHEAPEST matching row " +
                              "(MarketplaceSync.ResolveOffer), which is how the disambiguation stays off the wire";
