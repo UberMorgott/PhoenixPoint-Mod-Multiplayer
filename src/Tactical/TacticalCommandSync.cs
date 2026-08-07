@@ -872,6 +872,24 @@ namespace Multiplayer.Tactical
               "A6: InventoryAbility.Activate:11-15 ends in ToInventoryViewState() — relaying it YANKS every " +
               "other peer's screen into an inventory nobody there opened. Opening the screen is presentation; " +
               "what the session COMMITS rides 0x84 op 5 (TacticalInventorySync)" },
+            { typeof(OpenCrateAbility),
+              "ambient AND uncarriable, and it is the second half that makes it a MUST. AMBIENT: " +
+              "OpenCrateAbility.AbilityAdded:38-42 subscribes TacticalActor.AbilityExecutedEvent and " +
+              "OnActorAbilityExecuted:70-97 raises the ability on EVERY peer whose copy of that soldier just " +
+              "finished an IMoveAbility — which a mirror does, off the move that is already replicated — so the " +
+              "lid opens everywhere with no relay at all. UNCARRIABLE: its parameter is a CrateComponent " +
+              "(OnActorAbilityExecuted:96 Activate(crateComponent)), not a TacticalAbilityTarget, so " +
+              "TacAbilityTargetCodec has nothing to write and the wire said '<no target>' — and OpenCrate:55-63 " +
+              "opens with the HARD cast (CrateComponent)action.Param and dereferences it. Measured 2026-08-06, " +
+              "23:18:19.606: 'MIRROR play Soldier_4 OpenCrate_AbilityDef' → 'Parameter: <>' → " +
+              "NullReferenceException in <OpenCrate>d__10.MoveNext → 'Broken coroutine call chain' → the " +
+              "PlayingAction never completed, so ClearPlayingAction never ran and the actor never left " +
+              "ExecutingAbilities ('holding the settle … 2s/4s/6s/8s', forced at 10s). The HOST takes the same " +
+              "hit replaying a client's intent (23:20:24.464, nonce=113) and the host has NO settle ceiling — " +
+              "ClientTick is a client's. One stuck actor then makes TacticalView." +
+              "IsWaitingForActiveAbilitiesAndMapUpdate:864 true for the whole map, and every " +
+              "TacticalLevelController turn-pump wait (:1245/:1260/:1280/:1296/:1318/:1329) spins on it: that " +
+              "is the enemy turn that never started (L178)" },
         };
 
         /// <summary>

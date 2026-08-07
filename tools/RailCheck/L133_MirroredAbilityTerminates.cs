@@ -35,9 +35,35 @@ namespace RailCheck
     /// only terminal because the applier cancels the action channel, and only defined because it reconciles
     /// the status set.
     ///
+    /// ── (d) THE HOST HAS NO CEILING, AND THAT IS WHY THIS LAW WAS GREEN THROUGH A FROZEN MISSION ──────────
+    ///
+    /// REPAIRED 2026-08-07. On 2026-08-06 an ambush mission froze on the enemy turn — no enemies, nothing
+    /// advanced, Alt+F4 — and the cause was exactly this law's own title: a mirrored ability that never reached
+    /// a terminal state (<c>OpenCrateAbility</c> replayed with the <c>&lt;no target&gt;</c> the codec had for a
+    /// <c>CrateComponent</c> parameter, <c>NullReferenceException … &lt;OpenCrate&gt;d__10.MoveNext</c>,
+    /// <c>Broken coroutine call chain</c>). Arms (a)-(c) were green and CORRECT: on the CLIENT the ceiling
+    /// fired, on schedule, out loud ("the settle for Soldier_4 waited 10s … applied ANYWAY").
+    ///
+    /// The hole is WHOSE ceiling it is. <c>SettleMustBeForced</c> is consulted from <c>ClientTick</c> — arm (c)
+    /// says so itself — and the HOST runs no such tick. But the host replays a CLIENT's intent through the same
+    /// native <c>Activate</c> with the same wire-decoded parameter (<c>HandleActivate</c>, and
+    /// <c>TacticalCommandSync.ReplayOriginPeer</c> exists for exactly that), so it takes the identical throw
+    /// with nothing behind it. One stuck actor then makes
+    /// <c>TacticalView.IsWaitingForActiveAbilitiesAndMapUpdate</c>:864 true for the WHOLE MAP — L145's
+    /// narrowing is confined to the player's own turn on purpose — and every turn-pump wait in
+    /// <c>TacticalLevelController</c> (:1245/:1260/:1280/:1296/:1318/:1329) spins on it forever.
+    ///
+    /// So the host's bound is not a ceiling, it is the DOOR: <see cref="TacticalCommandSync.Validate"/> must
+    /// refuse an intent for an ability that is not a declared rider, before anything native runs. Arm (d) runs
+    /// that refusal and requires the host's own intent handler to be the thing asking. WHICH abilities may not
+    /// ride is L178's question and is deliberately not re-asked here; this arm asserts only that the answer is
+    /// consulted on the one peer that cannot recover from a wrong one.
+    ///
     /// Falsify: make <c>SettleMustBeForced</c> return false while the actor is busy → <c>L133
     /// hold-has-no-ceiling</c>; drop the <c>CancelActions</c> call from <c>ApplySettle</c> → <c>L133
-    /// forced-settle-does-not-end-the-ability</c>.
+    /// forced-settle-does-not-end-the-ability</c>; let <c>Validate</c> accept a non-rider → <c>L133
+    /// host-replays-what-it-cannot-end</c>; stop passing <c>IsRider</c> from <c>HandleActivate</c> →
+    /// <c>L133 host-door-is-decorative</c>.
     /// </summary>
     internal static class L133_MirroredAbilityTerminates
     {
@@ -107,6 +133,30 @@ namespace RailCheck
                 yield return "L133 ceiling-never-consulted: ClientTick no longer asks SettleMustBeForced. The " +
                              "bound is then whatever is inlined at the call site and this law is asserting a " +
                              "decision nothing makes.";
+
+            // ── (d) the HOST's bound is the door, because it has no ceiling ──
+            var handle = cmd.GetMethod("HandleActivate", All);
+            var isRider = cmd.GetMethod("IsRider", All);
+            if (handle == null || isRider == null)
+            {
+                yield return "L133 premise-changed: TacticalCommandSync.{HandleActivate,IsRider} no longer " +
+                             "resolves. The ceiling above is a CLIENT's (ClientTick), so the host's only bound " +
+                             "on an ability that never ends is its refusal to start one — re-read this law " +
+                             "before assuming a stuck host recovers.";
+                yield break;
+            }
+            if (TacticalCommandSync.Validate(true, true, true, true, true, /*abilityIsRider:*/ false, false,
+                                             null, true, 99f, 0f, 99f, 0f) == null)
+                yield return "L133 host-replays-what-it-cannot-end: the host accepts an intent for an ability " +
+                             "that is NOT a declared rider and replays it natively. The host runs no ClientTick, " +
+                             "so if that replay throws mid-coroutine nothing ever forces its settle: the actor " +
+                             "stays in ExecutingAbilities, IsWaitingForActiveAbilitiesAndMapUpdate:864 stays " +
+                             "true for the whole map, and the next non-player turn never starts. That is the " +
+                             "2026-08-06 frozen ambush — the arms above were green throughout it.";
+            if (!Program.Callees(handle, asm).Any(c => c.MetadataToken == isRider.MetadataToken))
+                yield return "L133 host-door-is-decorative: the host's intent handler no longer asks IsRider, so " +
+                             "the refusal proved above is about a decision the live path does not make. The " +
+                             "client's ceiling would still pass every arm while the host sat frozen.";
         }
     }
 }

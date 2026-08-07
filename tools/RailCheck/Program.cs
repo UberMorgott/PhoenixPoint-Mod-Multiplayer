@@ -243,6 +243,8 @@ namespace RailCheck
             laws.AddRange(L170_VehicleSecondarySurvivesTheRepaint.Check());
             laws.AddRange(L172_AScrapCartFitsThePoolItIsTakenFrom.Check());
             laws.AddRange(L168_MoveRangeIsNotSweptOnAnActorAnotherPeerDrives.Check());
+            laws.AddRange(L178_SeamCarriesWhatTheAbilityReads.Check());
+            laws.AddRange(L179_ContainerWindowOpensOnlyForItsOwnPeer.Check());
             laws.AddRange(L85_RestartedHostStreamIsApplied.Check());
             laws.AddRange(L86_AnnouncedBoundaryHoldsItsAnnouncer.Check());
             laws.Sort(StringComparer.Ordinal);
