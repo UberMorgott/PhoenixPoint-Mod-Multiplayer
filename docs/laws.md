@@ -39,7 +39,7 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 - **P10 — PARITY IS BLOCKING.** Mod set, DLC set, per-mod settings, the GAME build and OUR build must match on every peer — the save-graph shape has to. An unresolvable def "cannot happen" → LOUD, never silent.
   - laws: L108 L114
 - **P11 — REPAINT IS THE RAIL'S OTHER HALF.** A mirrored value reaches the screen through the game's OWN read-direction refresh (`UiEventMap`, `UiNativeRepaint`) — never a hand-rolled paint, never a lifecycle transition where the model can express it.
-  - laws: L18 L21 L26 L38 L45 L46 L47 L51 L52 L54 L60 L77 L79 L81 L83 L92 L93 L95 L96 L98 L101 L102 L104 L115 L116 L117 L118 L124 L127 L129 L130 L135 L138 L139 L141 L142 L144 L147 L148 L149 L151
+  - laws: L18 L21 L26 L38 L45 L46 L47 L51 L52 L54 L60 L77 L79 L81 L83 L92 L93 L95 L96 L98 L101 L102 L104 L115 L116 L117 L118 L124 L127 L129 L130 L135 L138 L139 L141 L142 L144 L147 L148 L149 L151 L156
 - **P12 — UNIVERSAL-FIRST.** Unnumbered in `ARCHITECTURE.md`, asserted throughout. ONE generic mechanism per layer; the per-subsystem copy is the "macaroni factory" the mandate forbids. One value rail, one intent engine, one nonce allocator, one dedup, one repaint primitive.
   - laws: L32 L50 L99 L143 L155
 - **P13 — NO QUORUMS, NOBODY KICKED. PROPOSED — not in `ARCHITECTURE.md`.** Developer mandate, stated only in the corpus (quoted by L84, L91): at any moment ANY player must be able to play everything; with 49 of 50 AFK the one active player still plays a whole campaign. Nobody is kicked. A host-side decision about peer P may read P's own intent + shared game state and nothing else. A wait on something that ends BY ITSELF is allowed; a wait on a PERSON is not.
@@ -49,7 +49,7 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 - **P15 — DERIVED, NOT MIRRORED.** Unnumbered in `ARCHITECTURE.md`, asserted in the coverage rules. State a peer can recompute closed-form from already-mirrored inputs is RE-DERIVED locally, never shipped: mirror the ORDER, derive the pose. Inverse holds — what cannot be re-derived (mist) MUST ride.
   - laws: L43 L53 L55 L59 L73 L77 L102 L115 L154
 - **P16 — FRAME BUDGET.** Unnumbered in `ARCHITECTURE.md`, asserted by the sliced walk. No unbudgeted graph walk on either peer; the rail never spends a frame the player is using; urgency never outbids local input. Also may not IDLE — a sim fact waits no longer than it must.
-  - laws: L50 L74 L100 L153 L154
+  - laws: L50 L74 L100 L153 L154 L156
 
 ## Law index
 
@@ -205,17 +205,18 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 | L153 | the host↔client clock phase error has a seam that can read it, and that seam writes nothing | P16 P7 | incident | 2026-08-04 23:22 three-instance session: client-derived aircraft/exploration trail the host, and all three peer logs carry not one `TimeAnchor` line | both |
 | L154 | the departure and exploration-start seams are wired to the urgent flush, and a mid-cycle flush is still served urgently | P16 P15 | incident | 3-instance sessions: geoscape flight and exploration spinner trail the host by a steady ~0.25-0.5 s while gesture-driven windows/orders are instant | both |
 | L155 | each way of joining keeps the transport it names; a pasted code never silently tries Steam | P13 P12 | incident | the owner's report: pressing "copy code" in the lobby and handing that code to the other player still brought the session up over Steam | both |
+| L156 | an in-inventory reorder repaints an ALREADY-OPEN equip screen — order stays rail state, the kind is never declared irrelevant, and the reseed still reaches the widget rebuild | P11 P16 | incident | HANDOFF §5d symptom 1: two peers on the same soldier, one rearranges items inside the inventory, the other "sees NOTHING until he closes and re-opens the screen" | premise-changed |
 
 - inline (private method in `Program.cs`, no file): L1–L25, L27–L76b, L81, L82, L83
-- files (`L<n>_<Name>.cs`): L26, L77, L79, L80, L84, L91–L155
+- files (`L<n>_<Name>.cs`): L26, L77, L79, L80, L84, L91–L156
 
-## Rows vs registrations — why 150 rows and 130 registered laws
+## Rows vs registrations — why 151 rows and 131 registered laws
 
 The two numbers count different things and always will. `tools/law-count.txt` counts REGISTRATIONS
 (one `laws.AddRange(...)` line each); this table counts NUMBERED LAWS. The mapping is many-to-many
 on the inline side. Nothing is missing and no row is invented — verified 2026-08-07.
 
-- **files: 70 rows ↔ 70 registrations, exactly 1:1.** `L26, L77, L79, L80, L84, L91–L155` — one
+- **files: 71 rows ↔ 71 registrations, exactly 1:1.** `L26, L77, L79, L80, L84, L91–L156` — one
   `L<n>_<Name>.cs`, one `AddRange`, one row.
 - **inline: 79 rows ↔ 60 registrations.** 60 inline methods emit 78 distinct ids; the catalogue
   splits one of them in two, giving 79 rows.
@@ -245,8 +246,8 @@ on the inline side. Nothing is missing and no row is invented — verified 2026-
 ## Attention
 
 - rows in table: 150. numbers issued: 155 (L85–L90 never issued; old L26 retired). Registrations: 130 — see "Rows vs registrations".
-- origin: incident 95 | principle 53 | unclear 2 (L18, L78).
-- guard: premise-changed only 43 | POSITIVE CONTROL only 6 | both 9 | neither 92.
+- origin: incident 96 | principle 53 | unclear 2 (L18, L78).
+- guard: premise-changed only 44 | POSITIVE CONTROL only 6 | both 9 | neither 92.
 - guard = POSITIVE CONTROL only: L47 L49 L53 L54 L55 L56 — all inline.
 - guard = both: L77 L81 L84 L91 L92 L136 L153 L154 L155 — only L81 inline.
 - guard = neither (92): L1–L25, L27–L46, L48, L50, L51, L52, L57–L76b, L78, L80, L82, L83, L93, L96, L98, L100, L101, L103–L109, L112, L113, L114, L124, L125, L126.

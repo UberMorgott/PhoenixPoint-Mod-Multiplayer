@@ -34,11 +34,34 @@ namespace Multiplayer.Network.Sync
     /// What the marks were really compensating for was that the equip screens RE-flush content that did not
     /// change (UIStateEditSoldier.cs:459-474, event-driven off _uiRefreshNeeded), most loudly right after a
     /// host echo repaints them, and that a slot move which leaves the LIST order alone is nothing to sync at
-    /// all (GeoItem has no position field; UIInventoryList packs first-fit from list order). One byte compare
-    /// against the character's own canon (<see cref="ChangedBody"/>) covers both, with no state to keep and
-    /// no second phase to miss — while a move that DOES reorder the list still ships, because order is state
-    /// (RailCheck L10). Bonus: every OTHER caller of the funnel (loadout presets, replenish, deployment) is
-    /// captured for free instead of needing its own mark.
+    /// all. One byte compare against the character's own canon (<see cref="ChangedBody"/>) covers both, with
+    /// no state to keep and no second phase to miss — while a move that DOES reorder the list still ships,
+    /// because order is state (RailCheck L10). Bonus: every OTHER caller of the funnel (loadout presets,
+    /// replenish, deployment) is captured for free instead of needing its own mark.
+    ///
+    /// ITEM POSITION IS SETTLED — DO NOT RE-OPEN IT (HANDOFF §5d, closed 2026-08-07 after a full source
+    /// walk; the owner's decision, recorded here because the question keeps coming back).
+    ///   • THERE IS NO COORDINATE. `GeoItem` carries def + count + charges and nothing spatial
+    ///     (GeoItem.cs:12-23), and neither does an `ItemStorage` entry. A CELL IS A LIST INDEX.
+    ///   • THE GRID PACKS FIRST-FIT FROM LIST ORDER. `UIInventoryList.ItemChangedHandler` re-inserts with
+    ///     `Insert(Math.Min(Slots.IndexOf(slot), Count), item)` (:855-859) — a drag into empty space right
+    ///     of the last item CLAMPS BACK to the end, so it changes no order, produces no delta, and the
+    ///     MOVER HIMSELF loses the hole the moment he re-opens the screen. Nothing to replicate exists.
+    ///     Do not add a position field and do not ship cell hints: there is no such state to mirror, and
+    ///     v1 "keeping" a cell was v1 re-showing the mover his own un-reconciled widgets.
+    ///   • ORDER ALREADY REPLICATES, END TO END, VERIFIED LINK BY LINK: a permutation is byte-unequal to
+    ///     the canon (<see cref="EncodeBody"/> writes guids in list order → L19 `order-blind`); the host
+    ///     rebuilds each list in WIRE order (<see cref="HandleIntent"/> :641-685); `_inventoryItems` rides
+    ///     as an ORDERED EntityList (docs/rail-baseline.txt, asserted by L156); the receiving applier
+    ///     reorders the LIVE instances (GenericApplier.cs:794-798) and its unchanged-check is byte-wise
+    ///     (:1375). So a rearrangement that permutes the list DOES reach every peer.
+    ///   • THE REACTIVITY HALF IS THE ONE THAT WAS NEVER ASSERTED, and is now: the delta arrives as kind
+    ///     GeoCharacter → `UiEventMap.Fire` → `OpenUiRepaint.MarkDirty` → `UiNativeRepaint.Table`'s
+    ///     UIStateEditSoldier entry → `ReseedEquipScreen` → `UIStateEditSoldier.DisplaySoldier`:582 hands
+    ///     `character.InventoryItems` to `UIModuleSoldierEquip.UpdateData`, which `Deinit()`+`Init()`s the
+    ///     list (:632-633) so the slots re-pack from the NEW order. RailCheck L156 holds every seam of that
+    ///     chain — including the standing temptation to silence the equip screen's repaint by adding
+    ///     GeoCharacter to `UiNativeRepaint.IgnoredKinds` to buy back its 4-5 fps.
     ///
     /// HOST: dedup (IntentRail, own 0xB3 surface — split off 0xAE 2026-07-26, the surface byte IS the
     /// family) → resolve the character by the rail's stable key (IdentityResolver "U#&lt;charId&gt;") →
