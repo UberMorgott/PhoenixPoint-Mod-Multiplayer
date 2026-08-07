@@ -23,7 +23,19 @@ namespace Multiplayer
     {
         /// <summary>Drops a ping marker at the cursor for every peer — an object under the cursor is
         /// pinged as an object (the marker follows it), empty ground as a point. Never moves anyone's
-        /// camera and never changes anyone's selection. <c>KeyCode.None</c> disables the feature.</summary>
-        public KeyCode PingMarkerKey = KeyCode.V;
+        /// camera and never changes anyone's selection. <c>KeyCode.None</c> disables the feature.
+        ///
+        /// DEFAULT H, AND IT IS VERIFIED FREE, not guessed (2026-08-07). The game's bindings live in the
+        /// <c>PhoenixInput</c> <see cref="Base.Input.InputMapDef"/> — an asset, not code, which is why no
+        /// grep of the decompile answers this. Read out of
+        /// <c>PhoenixPointWin64_Data/sharedassets0.assets</c> (the <c>Defs/Input/*Controls</c>
+        /// <c>InputSetDef</c>s sit beside it), every single-character <c>InputKey.Name</c> in that map is:
+        ///   a c d e f g i m n q r s t w x y z  and digits 1-7, 9.
+        /// So the free letters are b h j k l o p u. On top of that TFTV injects its own actions into the
+        /// SAME def: "v" -> DisplayPerceptionCircles (`refs/TFTV-src/TFTV/TFTVDefsInjectedOnlyOnce.cs:759`)
+        /// and digits 1-9 -> SelectAircraft1..9 (:735), which is why V — the obvious co-op ping key — is
+        /// NOT the default. H is free in both, is free in tactical/geoscape/deployment alike (the ban is
+        /// per key, not per set), and reads as "here".</summary>
+        public KeyCode PingMarkerKey = KeyCode.H;
     }
 }
