@@ -420,6 +420,19 @@ namespace RailCheck
             sb.Append("  INVISIBLE here; this harness asserts only the static belt (L11: a LocalizedTextBind may ride ONLY as\n");
             sb.Append("  a leaf VALUE — never Descend/EntityList, which would write into the instance the def graph shares;\n");
             sb.Append("  ItemDef.GetDisplayName returns def state by ref. L35 keeps the leaf codec itself non-vacuous).\n");
+
+            // The twin PAIRING — which recorded DTO the client applies onto which live type — is
+            // ARCHITECTURE.md's "DTO twin resolution", i.e. a promise; a repointed twin means the rail
+            // mirrors a different entity's state. Its per-field resolution COUNTS are coverage and stay in
+            // the baseline: over six revisions of docs/rail-baseline.txt the pair SET never moved (9
+            // throughout) while resolved/gaps went 64/51 → 66/49 → 78/37 → 80/35. Both files therefore
+            // mention the pairs, ON PURPOSE and in different forms — the baseline heads each block with
+            // "live <= dto resolved=N/M" because the field rows below it need a header, and that count is
+            // exactly what a repoint could hide behind. Here the names ride ALONE. Sorted rather than left
+            // in closure order so a reshuffle of the type sweep cannot fake a promise change.
+            sb.Append("twin pairs (GetBridged, names only — counts live in the baseline):\n");
+            foreach (var line in TwinPairNames.Distinct(StringComparer.Ordinal).OrderBy(s => s, StringComparer.Ordinal))
+                sb.Append(line + "\n");
             return sb.ToString();
         }
 
@@ -682,6 +695,7 @@ namespace RailCheck
             // touched set). Published here so L38 asks the same question this section answers instead of
             // re-deriving the walk and drifting from it.
             int twinRes = 0, twinGap = 0, twinDispatch = 0;
+            // SEED pairs only — the loop below appends more as its dispatch rows discover them.
             var twinPairs = new List<(Type live, Type dto)>();
             foreach (var t in types)
                 if (RailType.Get(t)?.FieldByName("SerializationData") != null && RailMeta.FindBridge(t) != null)
@@ -694,6 +708,7 @@ namespace RailCheck
                 if (!twinSeen.Add(live.FullName + "|" + dto.FullName)) continue;
                 var bt = RailType.GetBridged(live, dto);
                 if (bt == null) continue;
+                TwinPairNames.Add("  " + live.FullName + "  <=  " + dto.FullName);
                 sb.Append(live.FullName + "  <=  " + dto.Name + "  resolved=" + bt.CoveredCount + "/" + bt.Fields.Count + "\n");
                 foreach (var f in bt.Fields)
                 {
@@ -1884,6 +1899,13 @@ namespace RailCheck
 
         /// <summary>See the twin-tables section of <see cref="Snapshot"/>, which fills this.</summary>
         private static readonly HashSet<Type> BridgedApplyTargets = new HashSet<Type>();
+
+        /// <summary>The twin PAIRS the snapshot walk actually emitted a table for, recorded as it goes so
+        /// the contract can publish them without re-deriving anything. Re-deriving is not an option: the set
+        /// is discovered TRANSITIVELY — a nested-component dispatch row appends the next pair mid-loop — so
+        /// a second seed-only derivation saw 3 of the 9 and would have frozen a promise that was mostly
+        /// missing. Filled by Snapshot, read by Contract, which Main calls in that order.</summary>
+        private static readonly List<string> TwinPairNames = new List<string>();
 
         private const BindingFlags AllMembers = BindingFlags.Public | BindingFlags.NonPublic |
                                                 BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly;
@@ -9524,7 +9546,7 @@ namespace RailCheck
                                  "on a client reads as a periodic hitch the host never has";
 
             // ── arm B: both drivers actually consult the budget.
-            if (!ReadsField(runSlice, slice))
+            if (!ConsultsBudget(runSlice, slice))
                 yield return "L74 slice-unbudgeted: DiffEngine.RunSlice does not read SliceBudgetMs — the host walk " +
                              "runs a cycle to completion inside one frame and slicing is decoration";
             if (!ReadsField(crcTick, slice))
@@ -9536,7 +9558,7 @@ namespace RailCheck
             // decoration: written as "IF it reads the urgent budget THEN it must ask", the arm passes
             // VACUOUSLY the moment someone deletes the urgency branch — and arm D would keep passing too,
             // since it only compares the two field VALUES. So demand the read outright.
-            if (!ReadsField(runSlice, urgent))
+            if (!ConsultsBudget(runSlice, urgent))
                 yield return "L74 urgency-absent: DiffEngine.RunSlice does not read UrgentSliceBudgetMs — a cycle a " +
                              "GESTURE asked for finishes no sooner than an idle one, so an inventory/equip change is " +
                              "back to waiting out the whole 625-root walk at the floor budget (~¼-⅓ s to the peers)";
@@ -10082,6 +10104,20 @@ namespace RailCheck
         /// <summary>True when the method's IL actually READS the given static field. This is why
         /// <c>DiffEngine.SliceBudgetMs</c> is a static readonly field and not a const: a const is inlined as
         /// a literal, so "does this loop consult a budget?" would be unanswerable from IL.</summary>
+        /// <summary>"Does this driver consult the per-frame budget" — asked of the PAIR, because e072bd0
+        /// lifted the ternary out of RunSlice into the pure DiffEngine.SliceBudget so L154 could execute it
+        /// case by case. A bare ldsfld test then reported a rail bug (L50 budget-bypassed, L74
+        /// slice-unbudgeted/urgency-absent) that was only a refactor. Still non-vacuous in both directions:
+        /// collapse SliceBudget to one field and the OTHER field stops being reachable, inline it back into
+        /// RunSlice and the direct read answers.</summary>
+        private static bool ConsultsBudget(MethodBase m, FieldInfo budget)
+        {
+            if (ReadsField(m, budget)) return true;
+            var hop = typeof(DiffEngine).GetMethod("SliceBudget", AllMembers);
+            return hop != null && ReadsField(hop, budget) &&
+                   CalleeSequence(m).Any(c => c.MetadataToken == hop.MetadataToken && c.Module == hop.Module);
+        }
+
         internal static bool ReadsField(MethodBase m, FieldInfo target)
         {
             if (m == null || target == null) return false;
@@ -10218,7 +10254,7 @@ namespace RailCheck
                              "per-frame budget, i.e. a whole-graph walk inside one frame";
 
             // Arm C — the surviving loop genuinely consults the budget.
-            if (!ReadsField(runSlice, budget))
+            if (!ConsultsBudget(runSlice, budget))
                 yield return "L50 budget-bypassed: DiffEngine.RunSlice does not read SliceBudgetMs — the slice loop " +
                              "no longer stops on the per-frame budget, so a cycle runs to completion in one frame " +
                              "and slicing is decoration";

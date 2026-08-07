@@ -165,17 +165,20 @@ namespace RailCheck
         /// real method with fabricated inputs — no game, no session, no walk.</summary>
         private static IEnumerable<string> PositiveControl(MethodInfo sliceBudget)
         {
-            double urgent, urgentDragging, ordinary;
+            double urgent = 0, urgentDragging = 0, ordinary = 0;
+            string failed = null;   // C# forbids yield inside catch, so the message crosses the block as a local
             try
             {
                 urgent         = (double)sliceBudget.Invoke(null, new object[] { true, false });
                 urgentDragging = (double)sliceBudget.Invoke(null, new object[] { true, true });
                 ordinary       = (double)sliceBudget.Invoke(null, new object[] { false, false });
             }
-            catch (Exception e)
+            catch (Exception e) { failed = (e.InnerException ?? e).Message; }
+
+            if (failed != null)
             {
                 yield return "L154 premise-changed: DiffEngine.SliceBudget could not be executed (" +
-                             (e.InnerException ?? e).Message + "), so arm (d) — the only executed evidence " +
+                             failed + "), so arm (d) — the only executed evidence " +
                              "this law has — asserts nothing.";
                 yield break;
             }

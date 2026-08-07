@@ -5,6 +5,8 @@ using System.Net;
 using System.Reflection;
 using Multiplayer.Transport;
 using Multiplayer.Util;
+// System.Net carries its own TransportType; this law only ever means the rail's one.
+using TransportType = Multiplayer.Transport.TransportType;
 
 namespace RailCheck
 {

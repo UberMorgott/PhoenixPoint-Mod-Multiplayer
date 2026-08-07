@@ -152,7 +152,8 @@ namespace RailCheck
         /// no session, no clock.</summary>
         private static IEnumerable<string> PositiveControl(MethodInfo phaseLine)
         {
-            string flat1, flat6, scaled, paused;
+            string flat1 = null, flat6 = null, scaled = null, paused = null;
+            string failed = null;   // C# forbids yield inside catch, so the message crosses the block as a local
             try
             {
                 // Shape (a): a CONSTANT 0.45 s REAL offset, seen at speed 1 and at speed 6. In game seconds
@@ -166,10 +167,12 @@ namespace RailCheck
                 // A paused clock has no rate to divide by.
                 paused = (string)phaseLine.Invoke(null, new object[] { 1000.0, 1000.000, 0.0, 5.0, 5.0 });
             }
-            catch (Exception e)
+            catch (Exception e) { failed = (e.InnerException ?? e).Message; }
+
+            if (failed != null)
             {
                 yield return "L153 premise-changed: ClockPhaseDiag.PhaseLine could not be executed (" +
-                             (e.InnerException ?? e).Message + "), so arm (e) — the only executed evidence " +
+                             failed + "), so arm (e) — the only executed evidence " +
                              "this law has — asserts nothing.";
                 yield break;
             }
