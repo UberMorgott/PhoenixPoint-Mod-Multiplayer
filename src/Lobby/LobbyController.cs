@@ -1,7 +1,5 @@
-﻿using Multiplayer.Network.MessageLayer;
-using Multiplayer.Network.Parity;
-
-using Multiplayer.Network.MessageLayer;   // PeerListEntry — the roster row AllLivePeersReady folds over
+﻿using Multiplayer.Network.MessageLayer;   // PeerListEntry — the roster row AllLivePeersReady folds over
+using Multiplayer.Network.Parity;         // ParityComparer.ReadyAllowed — the second exclusion
 
 namespace Multiplayer.Network
 {
