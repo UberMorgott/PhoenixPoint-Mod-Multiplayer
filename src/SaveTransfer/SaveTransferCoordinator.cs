@@ -307,7 +307,8 @@ namespace Multiplayer.Network
         /// pending bootstrap here — and not adding a second gate for it — keeps ONE predicate behind all
         /// three loading-screen take-down paths.
         /// </summary>
-        public bool CurtainHoldArmed => SaveTransferMath.CurtainHoldArmed(_begun, _newCampaign.Armed);
+        public bool CurtainHoldArmed =>
+            SaveTransferMath.CurtainHoldArmed(_begun, _newCampaign.Armed, _loadBoundaryAnnounced);
 
         /// <summary>True once the deferred reveal (native LiftCurtain + overlay hide) has run; used by
         /// CurtainShowPatch.Prefix so a later Loaded→Playing after RevealAll is NOT suppressed.</summary>
@@ -576,6 +577,10 @@ namespace Multiplayer.Network
             var blob = result.Value;
             if (blob == null || blob.Length == 0)
             {
+                // The boundary was ANNOUNCED before this coroutine started (lobby PLAY press / new-campaign
+                // arm), so every peer — this host included, since CurtainHoldArmed reads the announcement —
+                // is already behind a curtain waiting for bytes that will never exist. Take it back down.
+                BroadcastLoadBoundaryAbort("the save produced no bytes");
                 Debug.LogError("[Multiplayer] Save serialization produced no bytes; aborting transfer.");
                 yield break;
             }
@@ -1195,6 +1200,13 @@ namespace Multiplayer.Network
                 Debug.Log("[Multiplayer] New-campaign bootstrap concluded: transfer launched.");
                 return;
             }
+            // THE ARM CURTAINED EVERY PEER; A FAILURE MUST TAKE THAT CURTAIN BACK DOWN. Only the BACK
+            // button used to abort the announced boundary, so a bootstrap that died anywhere else left
+            // every client on a loading screen for a campaign nobody was creating any more, told about it
+            // in one chat line they could not see behind that screen — an unbounded wait with no reason
+            // named where the waiting happens. It also clears _loadBoundaryAnnounced, which the host's own
+            // CurtainHoldArmed now reads: without this the host would strand itself the same way.
+            BroadcastLoadBoundaryAbort("new-campaign bootstrap failed");
             Debug.LogError("[Multiplayer] New-campaign co-op bootstrap FAILED: " + failure +
                            " — no transfer was launched. Host continues solo (curtain gate: " +
                            Multiplayer.Harmony.CurtainTakedownGate.State() + "); clients told over system chat.");

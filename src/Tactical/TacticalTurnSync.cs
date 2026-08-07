@@ -282,6 +282,18 @@ namespace Multiplayer.Tactical
                 {
                     uint seq = r.ReadUInt32();
                     byte op = r.ReadByte();
+                    // A NEW BATTLE'S STREAM STARTS AT 1 AGAIN, and this surface is the one that gets a
+                    // message AFTER the receiver has already reset (HostBroadcastLeave exists to reach a
+                    // peer that has not left yet), so the old cursor can outlive the reset that dropped
+                    // it. SurfaceSeq.IsStreamRestart is what lets that stream back in; say so, because a
+                    // 0x80 message dropped here is a peer stranded in a battle nobody can end for it.
+                    uint cursor = Seq.LastApplied(SurfaceIds.TacTurn);
+                    if (SurfaceSeq.IsStreamRestart(seq, cursor))
+                        Debug.LogWarning("[Multiplayer][tac] host turn stream RESTARTED at seq=1 while this " +
+                                         "peer's cursor was " + cursor + " — a trailing message of the previous " +
+                                         "battle re-armed it after the teardown reset. Rewinding and applying; " +
+                                         "without this every turn edge, mission end and leave of THIS battle is " +
+                                         "dropped in silence.");
                     if (!Seq.ShouldApply(SurfaceIds.TacTurn, seq)) return true; // stale re-delivery (law 7)
                     if (op == OpTurn) ApplyTurn(r.ReadString(), r.ReadInt32());
                     else if (op == OpEnd) ApplyEnd((TacFactionState)r.ReadByte());

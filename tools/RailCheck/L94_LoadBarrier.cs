@@ -527,10 +527,29 @@ namespace RailCheck
                              "even though the session has begun and nobody has been revealed. The host's " +
                              "screen comes down between its own launch and the collective reveal";
 
-            // The ONE release is still the collective one.
+            // THE ROW THIS ARM WAS BLIND TO, AND IT IS THE ONE THE RUNTIME ACTUALLY TAKES. The arm above
+            // passes sessionStarted:TRUE at the conclude edge because the doc said the windows "abut by
+            // construction: LaunchTransfer returns only after Begin() has set the session started". They do
+            // not: LaunchTransfer's last statements are timing.Start(HostSerializeAndSendCrt) + return true,
+            // and Begin() is several yields further on — past ReadSavegameBinary, SendBlob and the host's
+            // own PrepareEntryFromBlobCrt. So the real row at ConcludeNewCampaignBootstrap on a lobby first
+            // start is (started:FALSE, pending:FALSE), and this law stayed green through the whole
+            // "the host loads twice on a new game" report by never evaluating it. The announcement is what
+            // closes it: BroadcastLoadBoundaryBegin has already told every peer to curtain and is cleared
+            // only by the shared reveal or an explicit abort.
+            if (!HeldWith(sessionStarted: false, latch: latch, announced: true))
+                yield return "L94 handover-gap-unannounced: at the REAL conclude edge — transfer launched " +
+                             "but Begin() still several yields away, so the session has NOT begun and the " +
+                             "bootstrap latch is already spent — the gate does not hold, even though " +
+                             "BroadcastLoadBoundaryBegin has every other peer behind a curtain. That is one " +
+                             "boundary showing two loading screens on the host with a live, interactive, " +
+                             "un-transferred geoscape flashing between them";
+
+            // The ONE release is still the collective one. Announced is FALSE here because the reveal is
+            // exactly what clears it (PerformDeferredLift), so a held announcement can never outlive it.
             if (SaveTransferMath.HoldCurtain(
                     engineActive: true,
-                    sessionStarted: SaveTransferMath.CurtainHoldArmed(true, latch.Armed),
+                    sessionStarted: SaveTransferMath.CurtainHoldArmed(true, latch.Armed, false),
                     revealed: true))
                 yield return "L94 hold-survives-reveal: the widened arm outlives the synchronized reveal, so " +
                              "the release that frees everyone frees nobody — a barrier turned into the hang " +
@@ -573,10 +592,10 @@ namespace RailCheck
 
         // The gate's live decision, expressed exactly as CurtainTakedownGate.Hold expresses it: a live
         // engine, the WIDE arm, and no reveal yet.
-        private static bool HeldWith(bool sessionStarted, NewCampaignBootstrap latch) =>
+        private static bool HeldWith(bool sessionStarted, NewCampaignBootstrap latch, bool announced = false) =>
             SaveTransferMath.HoldCurtain(
                 engineActive: true,
-                sessionStarted: SaveTransferMath.CurtainHoldArmed(sessionStarted, latch.Armed),
+                sessionStarted: SaveTransferMath.CurtainHoldArmed(sessionStarted, latch.Armed, announced),
                 revealed: false);
 
         /// <summary>

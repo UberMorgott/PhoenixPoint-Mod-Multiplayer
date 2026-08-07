@@ -59,18 +59,35 @@ namespace Multiplayer.Network
         /// two clients still sat in the lobby without a byte of the save. That is the desync the barrier
         /// exists to prevent, arriving through the ARM instead of through the release.
         ///
-        /// So the arm starts at the ARMED BOOTSTRAP, not at BEGIN. The two windows abut with no gap by
-        /// construction: <c>LaunchTransfer</c> returns only after <c>Begin()</c> has set the session
-        /// started, and only then does <c>ConcludeNewCampaignBootstrap</c> drop the pending flag.
+        /// So the arm starts at the ARMED BOOTSTRAP, not at BEGIN. The two windows were said to "abut with
+        /// no gap by construction: <c>LaunchTransfer</c> returns only after <c>Begin()</c> has set the
+        /// session started". THAT PREMISE IS FALSE, and it is the 2026-08-07 "the host loads twice on a new
+        /// game" report. <c>LaunchTransfer</c>'s last two lines are <c>timing.Start(HostSerializeAndSendCrt)</c>
+        /// and <c>return true</c>: it STARTS the coroutine and returns on the same frame, while
+        /// <c>Begin()</c> is several yields away — behind <c>ReadSavegameBinary</c>, <c>SendBlob</c> and the
+        /// host's own <c>PrepareEntryFromBlobCrt</c>, i.e. behind a whole level load.
+        /// <c>ConcludeNewCampaignBootstrap</c> runs the instant <c>LaunchTransfer</c> returns, so for that
+        /// entire window BOTH inputs are false: the freshly created geoscape is revealed and interactive,
+        /// and then the blob re-entry drops a SECOND loading screen on top of it. One boundary, two
+        /// loading screens with a live world flashing between them.
+        ///
+        /// THE THIRD INPUT IS THE ANNOUNCEMENT ITSELF, which is the honest expression of the rule and not a
+        /// patch for one seam: <c>_loadBoundaryAnnounced</c> is set by <c>BroadcastLoadBoundaryBegin</c> —
+        /// the packet that tells every OTHER peer to curtain — and cleared by <c>PerformDeferredLift</c>
+        /// (the shared reveal) or <c>BroadcastLoadBoundaryAbort</c>. So the host holds its own screen for
+        /// exactly as long as the screen it imposed on everyone else, at EVERY announced boundary, and the
+        /// gap cannot reopen at the lobby PLAY press either.
         ///
         /// THE BOUND IS THE OUTCOME, NOT A CLOCK (L94 e2 unchanged). This adds no deadline to anybody's
         /// wait: the pending flag is cleared by <c>NewCampaignBootstrap.Conclude</c>, which is reached on
-        /// the launch AND on every failure path AND on the latch's own liveness watchdog. A bootstrap that
-        /// dies therefore RELEASES the host's screen — loudly, on the same call that logs the ERROR and
-        /// tells the clients — instead of stranding it.
+        /// the launch AND on every failure path AND on the latch's own liveness watchdog — and every one of
+        /// those failure paths now also ABORTS the announced boundary, which is what clears the third input
+        /// and un-curtains the clients with it. A bootstrap that dies therefore RELEASES every peer's
+        /// screen — loudly, on the same call that logs the ERROR — instead of stranding them.
         /// </summary>
-        public static bool CurtainHoldArmed(bool sessionStarted, bool newCampaignPending)
-            => sessionStarted || newCampaignPending;
+        public static bool CurtainHoldArmed(bool sessionStarted, bool newCampaignPending,
+                                            bool loadBoundaryAnnounced)
+            => sessionStarted || newCampaignPending || loadBoundaryAnnounced;
 
         /// <summary>
         /// BEGIN'S SINGLE-FIRE GUARD — true means "do NOT broadcast SessionBegin". A BARRIER THAT WAS
