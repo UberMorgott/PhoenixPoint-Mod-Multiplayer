@@ -294,7 +294,19 @@ namespace Multiplayer.Tactical
                                          "battle re-armed it after the teardown reset. Rewinding and applying; " +
                                          "without this every turn edge, mission end and leave of THIS battle is " +
                                          "dropped in silence.");
-                    if (!Seq.ShouldApply(SurfaceIds.TacTurn, seq)) return true; // stale re-delivery (law 7)
+                    if (!Seq.ShouldApply(SurfaceIds.TacTurn, seq))
+                    {
+                        // AND A REFUSAL IS NEVER SILENT ON THIS SURFACE. The restart rule above covers the
+                        // cause we found; this covers the CLASS. 0x80 carries a handful of messages per
+                        // battle — turn edges, the mission end, the leave — so logging every refusal costs
+                        // nothing, and the alternative is what happened on 2026-08-07: a whole battle in
+                        // which not one of them applied, with nothing in any log to say so.
+                        Debug.LogWarning("[Multiplayer][tac] host turn/end/leave message seq=" + seq + " op=" + op +
+                                         " REFUSED as stale (cursor " + cursor + "). If this repeats for a whole " +
+                                         "battle this peer will never be told the mission ended or that the host " +
+                                         "left, and the host will wait on a reveal barrier it can never open.");
+                        return true; // stale re-delivery (law 7)
+                    }
                     if (op == OpTurn) ApplyTurn(r.ReadString(), r.ReadInt32());
                     else if (op == OpEnd) ApplyEnd((TacFactionState)r.ReadByte());
                     else if (op == OpLeave) ApplyLeave();
