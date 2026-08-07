@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using Base;
 using Base.Core;
+using Base.Eventus;
+using Base.UI.MessageBox.PromptControllers;
 using Base.Utils;
 using Multiplayer.Network;
 using Multiplayer.Network.MessageLayer;
@@ -49,7 +52,8 @@ namespace Multiplayer.UI
     /// game's OWN 5 s expiry timer — no timer of ours. Tactical: the <c>LocatedBeaconPrefab</c> shaft
     /// (<c>TacticalView.cs:83</c>) the game already raises over a heard-but-unseen actor, i.e. the native
     /// "something is HERE" idiom, instantiated exactly as <c>TacticalActorViewBase.RefreshLocatedBeacon</c>
-    /// :439-449 does it.
+    /// :439-449 does it. AND A NATIVE SOUND — a silent marker is easy to miss, so every shown ping also
+    /// plays the game's own modal-appears cue through the game's own audio path; see <see cref="Cue"/>.
     ///
     /// THE OFF-SCREEN ARROW IS OURS, and the recon's <c>UIObjectTracker.KeepOnScreen</c> route is NOT
     /// usable: <c>UIObjectTrackersController.LateUpdate</c>'s <c>shouldUpdateTracker</c>
@@ -294,7 +298,41 @@ namespace Multiplayer.UI
         {
             p.Until = Time.unscaledTime + LifetimeSeconds;
             _live.Add(p);
+            Cue();
         }
+
+        // ─── the audible half ────────────────────────────────────────────────
+
+        /// <summary>
+        /// THE NATIVE CUE. A marker that only appears is easy to miss on a busy map, so every ping that is
+        /// actually SHOWN also sounds — and because <see cref="Track"/> is the one funnel all four shapes
+        /// (geo point, geo object, tac point, tac object) go through, the cue lands exactly when a marker
+        /// does: on every peer that received the packet, on the sender too (it calls <see cref="Show"/>
+        /// locally, PingMarkers.cs:129), and never on a ping that resolved to nothing.
+        ///
+        /// THE SOUND IS THE GAME'S OWN "A WINDOW JUST APPEARED" EVENT, borrowed rather than authored:
+        /// <c>MessageBoxPromptController.WindowShowEvent</c>, the UIEventDef the game plays through this
+        /// exact call when a modal opens (<c>MessageBoxPromptController.cs:38,69</c> — the line below is
+        /// that line). It is the native attention cue for "look at this", it ships no asset of ours, and
+        /// going through <c>EventusManager</c> → <c>AudioManager.PlayEvent</c> (AudioManager.cs:130-148)
+        /// is what makes it respect the player's own volume: those sliders are Wwise RTPCs the mixer
+        /// applies globally (AudioManager.cs:186-190), so a sound that skipped this path would skip them.
+        ///
+        /// The def is a SCENE object, not a static, so it is looked up rather than assumed and re-looked-up
+        /// whenever the cached controller dies with its scene. A ping is a handful per minute, so the scan
+        /// costs nothing worth caching harder.
+        /// ponytail: if a player ever wants it off, the game's UI volume slider already turns it off.
+        /// </summary>
+        private static void Cue()
+        {
+            if (_prompt == null)
+                _prompt = Resources.FindObjectsOfTypeAll<MessageBoxPromptController>()
+                                   .FirstOrDefault(c => c != null && c.WindowShowEvent != null);
+            if (_prompt == null) return;
+            GameUtl.GameComponent<EventusManager>()?.PlayEventDirect(_prompt.WindowShowEvent, _prompt.gameObject);
+        }
+
+        private static MessageBoxPromptController _prompt;
 
         private void Expire()
         {
