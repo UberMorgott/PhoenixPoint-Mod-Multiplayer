@@ -1,0 +1,31 @@
+#!/bin/sh
+# Enable once per clone:  git config core.hooksPath .githooks
+set -e
+root=$(git rev-parse --show-toplevel)
+
+pwsh -NoProfile -File "$root/tools/law-integrity.ps1" || exit 1
+
+# RailCheck needs the real game assemblies. Probe list mirrors Program.cs:39-47.
+managed=""
+for p in \
+    "$PhoenixPointDir" \
+    "/c/Program Files (x86)/Steam/steamapps/common/Phoenix Point" \
+    "/c/Steam/steamapps/common/Phoenix Point" \
+    "/d/Steam/steamapps/common/Phoenix Point" \
+    "/e/Steam/steamapps/common/Phoenix Point" \
+    "/c/Program Files (x86)/Epic Games/PhoenixPoint" ; do
+    [ -n "$p" ] && [ -d "$p/PhoenixPointWin64_Data/Managed" ] && { managed="$p"; break; }
+done
+
+if [ -z "$managed" ]; then
+    echo ""
+    echo "########################################################################"
+    echo "##  RAILCHECK SKIPPED - no Phoenix Point install; laws NOT verified   ##"
+    echo "##  on this machine. Set PhoenixPointDir and re-run to verify.        ##"
+    echo "########################################################################"
+    echo ""
+    exit 0
+fi
+
+echo "RailCheck: using $managed"
+dotnet run -c Debug --project "$root/tools/RailCheck" || exit 1

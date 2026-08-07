@@ -100,6 +100,19 @@ cd tools/RailCheck
 dotnet run -c Debug
 ```
 
+It diffs against two committed files; `dotnet run -c Debug -- --update` rewrites both.
+
+- `docs/rail-baseline.txt` — volatile: coverage table, husk lists, twin tables, known violations. Diff = expected growth, review and commit it.
+- `docs/rail-contract.txt` — frozen: roots in walk order, codec mode, def-ownership caveat. Diff = `RAILCHECK RED (contract drift)`, an architectural promise changed.
+
+That harness needs the game. The source-level check does not — it runs anywhere, including CI:
+
+```powershell
+pwsh -File tools/law-integrity.ps1
+```
+
+To run both on every commit, once per clone: `git config core.hooksPath .githooks`. The hook blocks on `law-integrity.ps1`, then runs RailCheck if a Phoenix Point install is resolvable and says loudly when it is not.
+
 ## Reporting a bug
 
 [Open an issue](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/issues/new/choose). The form asks for three things only: where it happened, what happened, and how to reproduce it. Everything else is optional, but a log and a save turn a guess into a fix.
@@ -108,7 +121,7 @@ The mod writes its own log to `%USERPROFILE%\AppData\LocalLow\Snapshot Games Inc
 
 ## Architecture
 
-The technical deep dive lives in [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`docs/rail-baseline.txt`](docs/rail-baseline.txt).
+The technical deep dive lives in [`ARCHITECTURE.md`](ARCHITECTURE.md), [`docs/rail-contract.txt`](docs/rail-contract.txt) and [`docs/rail-baseline.txt`](docs/rail-baseline.txt).
 
 ## License
 

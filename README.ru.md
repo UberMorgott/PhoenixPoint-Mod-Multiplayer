@@ -100,6 +100,11 @@ cd tools/RailCheck
 dotnet run -c Debug
 ```
 
+Сверяется с двумя закоммиченными файлами; `dotnet run -c Debug -- --update` переписывает оба.
+
+- `docs/rail-baseline.txt` — изменчивый: таблица покрытия, списки husk, twin-таблицы, известные нарушения. Дифф = ожидаемый рост, отревьюить и закоммитить.
+- `docs/rail-contract.txt` — замороженный: корни в порядке обхода, режим кодека, оговорка про владение дефами. Дифф = `RAILCHECK RED (contract drift)`, сменилось архитектурное обещание.
+
 ## Как сообщить о баге
 
 [Создайте issue](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/issues/new/choose). Форма спрашивает всего три вещи: где случилось, что случилось и как повторить. Остальное необязательно, но лог и сейв превращают догадку в исправление.
@@ -108,7 +113,7 @@ dotnet run -c Debug
 
 ## Архитектура
 
-Технические подробности: [`ARCHITECTURE.md`](ARCHITECTURE.md) и [`docs/rail-baseline.txt`](docs/rail-baseline.txt).
+Технические подробности: [`ARCHITECTURE.md`](ARCHITECTURE.md), [`docs/rail-contract.txt`](docs/rail-contract.txt) и [`docs/rail-baseline.txt`](docs/rail-baseline.txt).
 
 ## Лицензия
 

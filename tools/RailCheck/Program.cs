@@ -236,31 +236,54 @@ namespace RailCheck
 
             foreach (var v in laws) Console.Error.WriteLine("LAW VIOLATION  " + v);
 
-            var baseline = Path.Combine(RepoRoot(), "docs", "rail-baseline.txt");
-            if (args.Contains("--update"))
-            {
-                File.WriteAllText(baseline, snapshot);
-                Console.WriteLine("baseline updated: " + baseline + " (REVIEW the diff before committing)");
-                return 0;
-            }
-            if (!File.Exists(baseline))
-            {
-                Console.Error.WriteLine("NO BASELINE at " + baseline + " — run with --update once, then review+commit it.");
-                return 1;
-            }
-
-            var have = File.ReadAllText(baseline).Replace("\r\n", "\n");
-            if (have != snapshot)
-            {
-                Console.Error.WriteLine("RAILCHECK RED — coverage drift vs docs/rail-baseline.txt:");
-                foreach (var d in Diff(have, snapshot).Take(80)) Console.Error.WriteLine(d);
-                Console.Error.WriteLine("Intended? Re-run with --update and commit the baseline WITH the change.");
-                return 1;
-            }
+            // TWO committed artifacts, two review expectations. The baseline keeps its name (and so its
+            // history) on the churny half; the contract carries the architectural promise, and its drift is
+            // shouted in different words on purpose — a reordered walk must not read like coverage growth.
+            // Both gates run even when the first is red: one run should tell the whole truth.
+            var docs = Path.Combine(RepoRoot(), "docs");
+            var update = args.Contains("--update");
+            int red = Gate(Path.Combine(docs, "rail-contract.txt"), Contract(polymorphicCodec), update,
+                           "RAILCHECK RED (contract drift — architectural promise changed) vs docs/rail-contract.txt:",
+                           "This is NOT routine coverage growth: the walk order, the root set, the codec mode or the " +
+                           "def-ownership caveat moved. Justify it in review, THEN re-run with --update and commit " +
+                           "docs/rail-contract.txt with the change.");
+            red |= Gate(Path.Combine(docs, "rail-baseline.txt"), snapshot, update,
+                        "RAILCHECK RED — coverage drift vs docs/rail-baseline.txt:",
+                        "Intended? Re-run with --update and commit the baseline WITH the change.");
+            if (update || red != 0) return red;
             Console.WriteLine("RAILCHECK GREEN — types=" + types.Count +
                               " polymorphic-codec=" + (polymorphicCodec ? "yes" : "no") +
                               " known-violations=" + laws.Count + " (baselined, see docs/rail-baseline.txt)");
             return 0;
+        }
+
+        /// <summary>Write-or-compare ONE committed artifact. Parameterised rather than duplicated per file so
+        /// the two gates cannot drift apart in the details that matter (the \r\n normalisation, the 80-line
+        /// diff cap); only the WORDING differs, which is the whole point of splitting them. Returns 1 for
+        /// red — missing or drifted — and 0 otherwise, so the caller can run both before it gives up.</summary>
+        private static int Gate(string path, string text, bool update, string red, string howToFix)
+        {
+            if (update)
+            {
+                File.WriteAllText(path, text);
+                Console.WriteLine("updated: " + path + " (REVIEW the diff before committing)");
+                return 0;
+            }
+            if (!File.Exists(path))
+            {
+                // Names the file AND the command: this one is reachable on a fresh clone, where the reader
+                // has no idea the file is generated rather than missing from the commit.
+                Console.Error.WriteLine("MISSING " + path + " — it is GENERATED, not hand-written. Run " +
+                                        "`cd tools/RailCheck && dotnet run -c Debug -- --update` once (needs the game " +
+                                        "install), then review+commit it.");
+                return 1;
+            }
+            var have = File.ReadAllText(path).Replace("\r\n", "\n");
+            if (have == text) return 0;
+            Console.Error.WriteLine(red);
+            foreach (var d in Diff(have, text).Take(80)) Console.Error.WriteLine(d);
+            Console.Error.WriteLine(howToFix);
+            return 1;
         }
 
         // ─── The type closure the rail can reach ────────────────────────────
@@ -366,13 +389,18 @@ namespace RailCheck
             c == FieldClass.LeafDict || c == FieldClass.GeoItemDict || c == FieldClass.LeafList ||
             c == FieldClass.EntityList || c == FieldClass.EntityCollection;
 
-        // ─── Snapshot (the reviewable artifact) ─────────────────────────────
+        // ─── Contract (the frozen artifact) ─────────────────────────────────
+        // Split out of the snapshot deliberately. What the walk ENTERS through and in what ORDER, and what
+        // the codec is allowed to do, is an architectural promise: it must almost never move, and when it
+        // does, that is the single most dangerous kind of change this harness can see. Left in the same
+        // file as the coverage table it read as four lines of noise inside forty lines of harmless growth
+        // — which is exactly how a reordered walk gets --update'd through review.
 
-        private static string Snapshot(List<Type> types, bool polymorphicCodec, List<string> laws)
+        private static string Contract(bool polymorphicCodec)
         {
-            var ser = RailMeta.SerializerOverride;
             var sb = new StringBuilder();
-            sb.Append("RAIL BASELINE — generated by tools/RailCheck (no timestamp: this file is diffed, not dated)\n");
+            sb.Append("RAIL CONTRACT — generated by tools/RailCheck (no timestamp: this file is diffed, not dated); " +
+                      "frozen half — ANY diff changes an architectural promise and needs a deliberate justification\n");
             // Read off IdentityResolver.RootKinds in table ORDER, not re-typed here: the hand-written copy
             // this replaces had already gone stale (it never mentioned the "GL" root that landed in 30b6155),
             // which is the same drift the RootKinds table itself exists to prevent. Mod-state roots are
@@ -389,6 +417,17 @@ namespace RailCheck
             sb.Append("  INVISIBLE here; this harness asserts only the static belt (L11: a LocalizedTextBind may ride ONLY as\n");
             sb.Append("  a leaf VALUE — never Descend/EntityList, which would write into the instance the def graph shares;\n");
             sb.Append("  ItemDef.GetDisplayName returns def state by ref. L35 keeps the leaf codec itself non-vacuous).\n");
+            return sb.ToString();
+        }
+
+        // ─── Snapshot (the reviewable artifact) ─────────────────────────────
+
+        private static string Snapshot(List<Type> types, bool polymorphicCodec, List<string> laws)
+        {
+            var ser = RailMeta.SerializerOverride;
+            var sb = new StringBuilder();
+            sb.Append("RAIL BASELINE — generated by tools/RailCheck (no timestamp: this file is diffed, not dated); " +
+                      "the VOLATILE half — coverage grows with every game system, the frozen half lives in docs/rail-contract.txt\n");
             sb.Append("types: " + types.Count + "\n\n");
 
             int cov = 0, exc = 0, geoItemDicts = 0;

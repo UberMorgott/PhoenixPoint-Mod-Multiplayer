@@ -1,0 +1,28 @@
+# CLAUDE.md
+
+## Verify
+- `deploy.ps1` — builds `Multiplayer.dll` into `Mods/Multiplayer`; needs a Phoenix Point install.
+- `dotnet run -c Debug --project tools/RailCheck` — law harness; needs a Phoenix Point install (reflects over real game assemblies).
+- `pwsh -File tools/law-integrity.ps1` — source-level only, runs anywhere; also `.github/workflows/laws.yml`.
+- Never claim verified without pasting one of those actually run — "looks right" is not verification.
+- `git config core.hooksPath .githooks` — wires both into pre-commit; one-time, per clone.
+
+## Laws
+- Two classes, both registered by one `laws.AddRange(...)` in `tools/RailCheck/Program.cs`: file-backed `L<n>_<Name>.cs` and inline private methods (`RoundTrip`, `CrcBackstopLaw`, `RootOwnershipLaw`, ...).
+- `tools/law-count.txt` holds `files=` and `inline=`; bump the right one — the failure message names which class shrank.
+- New file-backed law needs all three: the `L<n>_<Name>.cs` file, `laws.AddRange(L<n>...Check(...))`, `files=` bumped, plus a `premise-changed` or `POSITIVE CONTROL` guard.
+- New inline law needs the method plus `laws.AddRange(<Method>(...))` and `inline=` bumped. Prefer a new `L<n>_<Name>.cs` file — inline laws carry no vacuity check.
+- Guard is mandatory on file-backed laws — an unguarded law passes while checking nothing once its subject stops resolving.
+- `tools/vacuity-exempt.txt` = ratchet of pre-existing unguarded laws. Never add; only remove, after adding a guard.
+- Deleting either class: lower the matching number in `tools/law-count.txt` + explain why in the commit body — each law encodes a real past bug.
+- `L<n>` = RailCheck laws only. `ARCHITECTURE.md` principles are being renamed `P<n>` — never conflate.
+- `L<n>` numbering is sparse: L78, L85-L90 are unused; L104 exists as a file but emits no `"L104 ..."` string.
+
+## Load-bearing
+- `IdentityResolver.RootKinds` (`src/Rail/IdentityResolver.cs:241`) order: first arrival wins the visited set, `"GL"` stays last — enforced by L28. Do not reorder.
+- `docs/rail-baseline.txt` — reviewed snapshot; read the diff, never blind-run `--update` to clear a failure.
+
+## Commits
+- Conventional Commits, lowercase, imperative, subsystem scope: `fix(tactical):`, `fix(personnel):`, `docs(changelog):`, `chore(release):`.
+- Subject states the behaviour change, not the files — e.g. `fix(tactical): release the local UI a mirrored order takes over`.
+- `git log --format='%s' -20` before writing; match it exactly.

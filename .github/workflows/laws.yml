@@ -1,0 +1,15 @@
+name: laws
+
+# Source-level only. This workflow deliberately does NOT build the mod or run tools/RailCheck:
+# both need Phoenix Point's proprietary game assemblies (Assembly-CSharp.dll &co), which cannot be
+# redistributed and so are unavailable in CI. RailCheck runs on a developer machine (see .githooks/pre-commit).
+on: [push, pull_request]
+
+jobs:
+  law-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: law integrity
+        shell: pwsh
+        run: ./tools/law-integrity.ps1
