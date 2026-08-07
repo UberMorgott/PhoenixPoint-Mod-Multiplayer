@@ -675,8 +675,31 @@ namespace Multiplayer.Transport
             return 0;
         }
 
+        // A datagram bigger than the path MTU is not an error here — the IP layer fragments it and it
+        // usually arrives — but on this transport it is a silent single point of failure: there is no
+        // sequencing, ACK or retransmit (Send just writes twice), so losing ONE fragment loses the whole
+        // message with nothing logged. That is how the 2026-08-07 ZeroTier join died: the JOIN reached
+        // the host, the host's ConnectionAccepted (which carries the whole parity manifest — every
+        // enabled mod's settings as key=value, kilobytes with TFTV installed) went back as one oversized
+        // datagram, and the client sat on "Connecting to host…" forever. Loopback never fragments, so
+        // this was invisible until the first real path. Warn ONCE with the actual size, so the next
+        // report carries the number instead of an estimate.
+        // ponytail: a warning, not a fix — the fix is JoinPlan preferring Direct TCP, which has no
+        // datagram limit at all. Chunking this transport would mean building the ACK/retransmit layer
+        // it deliberately does not have.
+        private const int SafeDatagramBytes = 1400;   // conservative: 1500 Ethernet minus VPN encapsulation
+        private bool _oversizeWarned;
+
         private void SendRaw(IPEndPoint target, byte[] data)
         {
+            if (data.Length > SafeDatagramBytes && !_oversizeWarned)
+            {
+                _oversizeWarned = true;
+                UnityEngine.Debug.LogWarning($"[Multiplayer] StunTransport: sending a {data.Length}-byte datagram, " +
+                                             $"over the {SafeDatagramBytes}-byte fragmentation-free bound. This " +
+                                             $"transport has no retransmit, so one lost IP fragment loses the whole " +
+                                             $"message silently. Prefer Direct TCP to a reachable host.");
+            }
             try { _udp.Send(data, data.Length, target); } catch { }
         }
     }
