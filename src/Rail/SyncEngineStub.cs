@@ -50,6 +50,10 @@ namespace Multiplayer.Network.Sync
             // No intents, no surface: mist coverage is pure host→client mod-state riding the value rail
             // as root "M#mist" — same symmetric registration on both peers as "M#cart" (law L59).
             MistSync.Register();
+            // Same shape, third mod root: the deployment countdown ("M#deploy") is host→all state on the
+            // value rail. Its CANCEL is not a surface of its own either — it is op 2 on 0xB8, registered
+            // with the launch op above (the geoscape band 0xA0-0xBF has no free id left).
+            DeployCountdown.Register();
             // Geoscape rail surfaces ride the one inbound hook (each returns false for foreign ids):
             // the 0xAD manufacture order channel, the intent engine, and the generic value rail
             // (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the host-side intent dedup.
@@ -123,6 +127,10 @@ namespace Multiplayer.Network.Sync
             }
             ManufactureSync.HostTick(_engine);
             MistSync.Tick(_engine); // host: recompute the "M#mist" payload; client: hand it to the native loader
+            // host-only inside: one decrement per real second of the deployment countdown, and the launch it
+            // releases. Driven HERE and not from any screen, so it completes whether or not a single peer is
+            // looking at it — the "waits on no human" half of the no-quorum mandate (P13).
+            DeployCountdown.HostTick(_engine);
             t = RailCost.Charge("mist", t);
             DiffEngine.HostTick(_engine);
             t = RailCost.Charge("walk", t);
@@ -211,6 +219,7 @@ namespace Multiplayer.Network.Sync
             ManufactureSync.ResetForReloadBoundary();
             EquipSync.ResetForReloadBoundary();
             TimeSync.ResetForReloadBoundary();
+            DeployCountdown.ResetForReloadBoundary(); // same mod-root contract, same reason as the line below
             MistSync.ResetForReloadBoundary(); // BEFORE DiffEngine: the mod root must be empty when the
                                                // post-reload baseline snapshot is taken (see its remark)
             DiffEngine.ResetForReloadBoundary();

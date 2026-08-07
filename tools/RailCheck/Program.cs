@@ -245,6 +245,9 @@ namespace RailCheck
             laws.AddRange(L168_MoveRangeIsNotSweptOnAnActorAnotherPeerDrives.Check());
             laws.AddRange(L178_SeamCarriesWhatTheAbilityReads.Check());
             laws.AddRange(L179_ContainerWindowOpensOnlyForItsOwnPeer.Check());
+            laws.AddRange(L175_HeldSquadScreenIsStillTheOneHeadedFor.Check());
+            laws.AddRange(L176_AQueuedWindowIsStillAnswerable.Check());
+            laws.AddRange(L177_TheDropCountsDownAloneAndOneVetoStopsIt.Check());
             laws.AddRange(L85_RestartedHostStreamIsApplied.Check());
             laws.AddRange(L86_AnnouncedBoundaryHoldsItsAnnouncer.Check());
             laws.Sort(StringComparer.Ordinal);

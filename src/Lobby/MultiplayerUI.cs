@@ -33,6 +33,7 @@ namespace Multiplayer.UI
 
         // ─── Co-op player panel (name | ping | status), both scenes ─────────
         private PlayerPanel _playerPanel;
+        private CountdownPanel _countdownPanel;
 
         // ─── Lobby panel (built once the menu Canvas is captured) ───────────
         private LobbyPanel _lobby;
@@ -98,6 +99,11 @@ namespace Multiplayer.UI
             // button, geoscape → the right edge). Built hidden; Update drives it.
             _playerPanel = gameObject.AddComponent<PlayerPanel>();
             _playerPanel.Attach(EnsureBarCanvas());
+
+            // Same canvas, same reason: the deployment countdown must draw over WHATEVER is on screen —
+            // geoscape, research tree, deployment roster — without a view-state transition of any kind.
+            _countdownPanel = gameObject.AddComponent<CountdownPanel>();
+            _countdownPanel.Attach(EnsureBarCanvas());
 
             // Panels are built lazily in OnMenuReady (they need the native menu Canvas).
             _lobby = new LobbyPanel(this);
@@ -1567,6 +1573,9 @@ namespace Multiplayer.UI
             // hides itself outside a started session and catches everything), so calling it here is safe
             // in every scene including the main menu.
             _playerPanel?.Sync();
+            // Same seam, same argument: an ARMING countdown must reach an already-open screen within one
+            // frame of the rail batch that carried it, and a cancel must take it away the same way.
+            _countdownPanel?.Sync();
         }
 
         // ═══════════════════════════════════════════════════════════════════

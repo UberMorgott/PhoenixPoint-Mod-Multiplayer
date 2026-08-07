@@ -53,10 +53,20 @@ namespace Multiplayer.Network.Sync
     {
         internal const byte OpLaunch = 1;  // [siteRef][n:u16][charRef × n]
 
+        /// <summary>The countdown veto (<see cref="DeployCountdown"/>), on the surface the Deploy press
+        /// itself crosses on and in the same direction. EMPTY BODY on purpose: the wire carries WHO by
+        /// carrying nothing — a veto names no state, so there is nothing for the host to re-resolve and
+        /// nothing a stale mirror could get wrong.</summary>
+        internal const byte OpCancelLaunch = 2;  // (no body)
+
         internal static void RegisterIntents()
         {
             IntentRail.Register(SurfaceIds.GeoMissionIntent, "mission",
-                new Dictionary<byte, IntentRail.OpHandler> { [OpLaunch] = HandleLaunch });
+                new Dictionary<byte, IntentRail.OpHandler>
+                {
+                    [OpLaunch] = HandleLaunch,
+                    [OpCancelLaunch] = DeployCountdown.HandleCancel,
+                });
         }
 
         private static GeoLevelController GeoLevel()
@@ -126,6 +136,11 @@ namespace Multiplayer.Network.Sync
 
         private static bool CaptureLaunch(GeoMission mission, GeoSquad squad)
         {
+            // THE FIVE-SECOND DROP, asked FIRST because it is the only gate that can refuse the HOST's own
+            // launch. On a client it answers "run native" and the block-first capture below is unchanged;
+            // on the host it holds the launch, arms the shared countdown, and re-issues this same call when
+            // the count reaches zero. Not a quorum: nobody has to act for it to complete (DeployCountdown).
+            if (!DeployCountdown.Gate(mission, squad)) return false;
             if (IntentRail.ShouldRunNative()) return true;
             string siteRef = null;
             try

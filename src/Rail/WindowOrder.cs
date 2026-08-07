@@ -74,7 +74,11 @@ namespace Multiplayer.Network.Sync
         /// is paid by the user on every window; smaller stops covering one tick of jitter.</summary>
         internal const float SettleSeconds = 0.15f;
 
-        private static readonly FieldInfo RequestsField =
+        /// <summary>ONE bind of the pending list, shared with <c>WindowQueueSync.AnswerQueued</c> — a second
+        /// <c>AccessTools.Field</c> for the same private list is a second thing to drift when the game
+        /// renames it, and the two consumers are two halves of the same rule (this one HOLDS a window in
+        /// that list, the other has to be able to ANSWER one that is sitting in it).</summary>
+        internal static readonly FieldInfo RequestsField =
             AccessTools.Field(typeof(GeoscapeViewSwitchQuery), "_viewStateSwitchRequests"); // GeoscapeViewSwitchQuery.cs:15
         private static readonly FieldInfo CurrentField =
             AccessTools.Field(typeof(GeoscapeViewSwitchQuery), "_currentStateSwitchRequest"); // :17
@@ -135,13 +139,40 @@ namespace Multiplayer.Network.Sync
 
         // ─── THE OPEN-SCREEN HOLD: a notification waits for the map, it does not take the screen ───
 
-        /// <summary>Priority at or above which a queued request is a TRANSITION, not a notification, and is
-        /// never held: the squad screen (<c>int.MaxValue</c>, L144), the mission-outcome modal
-        /// (<c>int.MaxValue</c>), a cutscene (100, <c>ToCutsceneState</c>) and the game-over state. Below it
-        /// sits the review family this hold is for — the event windows (0 / 10 / 15,
-        /// <c>GeoscapeView.OnGeoscapeEventRaised</c>:2044-2059) and the resupply screen
-        /// (<see cref="ReplenishSync.ReplenishRank"/> 20). The game's own knob, so this adds no second axis.</summary>
+        /// <summary>Priority at or above which a queued request is a TRANSITION, not a notification: the
+        /// mission-outcome modal (<c>int.MaxValue</c>), a cutscene (100, <c>ToCutsceneState</c>), the
+        /// game-over state — and the squad screen (<c>int.MaxValue</c>, <c>ToDeploymentState</c>:596), which
+        /// is the ONE exception carved out below. Under it sits the review family this hold was written for —
+        /// the event windows (0 / 10 / 15, <c>GeoscapeView.OnGeoscapeEventRaised</c>:2044-2059) and the
+        /// resupply screen (<see cref="ReplenishSync.ReplenishRank"/> 20). The game's own knob, so this adds
+        /// no second axis.</summary>
         internal const int TransitionPriority = 100;
+
+        /// <summary>THE DEPLOYMENT WINDOW IS IN THE HISTORY LIKE EVERY OTHER WINDOW (owner's ruling,
+        /// 2026-08-07). <c>GeoscapeView.ToDeploymentState</c>:596 queues <c>UIStateRosterDeployment</c> at
+        /// <c>int.MaxValue</c>, so the priority band alone exempted it from the hold and ANOTHER PEER'S
+        /// press of "start mission" pulled this peer out of the research screen he was working in and
+        /// dropped him on the squad screen. Priority is the game's answer to "which of two queued windows
+        /// goes first"; it was never an answer to "may this window take a screen the player opened", and
+        /// <see cref="HoldsForOpenScreen"/> reading it for both is what made the yank legal.
+        ///
+        /// DECLARED BY STATE NAME AND ONLY FOR THIS ONE STATE, because the other three transitions must
+        /// still never be held: a cutscene and the game-over state are the game ENDING a thing rather than
+        /// offering one, and the mission-outcome modal follows a battle, i.e. arrives on a peer whose view
+        /// state is <c>UIStateInitial</c> — a MAP state — where the hold does not engage at all.
+        ///
+        /// TFTV-SAFE WITHOUT NAMING TFTV, the same argument <c>MissionSync.AlreadyHeadedForDeployment</c>
+        /// already rests on: TFTV adds no view state of its own here, it decorates <c>UIStateRosterDeployment</c>.
+        ///
+        /// IT COSTS THIS PEER NOTHING HE DOES NOT ALREADY LOSE. Holding the squad screen does not hold the
+        /// BATTLE: whoever presses Deploy launches for everyone through the host's own save transfer, which
+        /// curtains every peer regardless of what its window queue holds. So a peer who never leaves his
+        /// screen is carried into the battle exactly as before — he simply is not yanked onto a screen he
+        /// did not ask for in order to get there.</summary>
+        private static readonly HashSet<string> HeldTransitionStates = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "UIStateRosterDeployment",   // the pre-mission squad/deployment screen (ToDeploymentState:596)
+        };
 
         /// <summary>THE GEOSCAPE MAP: the only view states in which the player is "on the geoscape". Everything
         /// else under <c>PhoenixPoint.Geoscape.View.ViewStates</c> is either a screen the player OPENED
@@ -175,13 +206,31 @@ namespace Multiplayer.Network.Sync
         /// state and the request's own priority: no peer, no roster, no message, no membership. It is
         /// released by the local player's own next navigation, which is the same click they were going to
         /// make anyway, and it is invisible to every other peer's queue.
-        /// ponytail: a peer who walks away inside the research screen keeps their OWN notifications queued
-        /// (and, on a host, keeps their own <c>_currentStateSwitchRequest</c> null, so a 0xB9 advance has
-        /// nothing to answer). That is the same standing exposure an AFK peer already has with a window open,
-        /// and the 0xB9 advance cannot help in either case. Give the hold a ceiling only if a live session
-        /// shows an idle peer in a menu actually costing another peer something.</summary>
-        internal static bool HoldsForOpenScreen(int priority, Type currentViewState) =>
-            priority < TransitionPriority &&
+        /// WHAT THIS CLASS SAID ABOUT THE 0xB9 ADVANCE WAS WRONG, AND IT COST A WINDOW. The paragraph that
+        /// stood here ruled "a peer who walks away inside the research screen keeps their own
+        /// <c>_currentStateSwitchRequest</c> null, so a 0xB9 advance has nothing to answer" an acceptable
+        /// standing exposure. It is not the same as an AFK peer: the held window is one the HOST RAISED to
+        /// every peer, so another peer's answer really does name it, and refusing that answer left the
+        /// mission-brief modal unanswered on the host FOREVER — no <c>ModalResultCallback</c>, no
+        /// <c>LaunchMission</c>, no deployment screen at all (the 2026-08-07 ambush report). The advance now
+        /// reaches a QUEUED window as well as the current one (<c>WindowQueueSync.AnswerQueued</c>), which is
+        /// what makes holding this family safe rather than merely quiet.
+        /// ponytail: a peer who walks away still keeps his OWN queue held, which is the point of the feature.
+        /// Give the hold a ceiling only if a live session shows an idle peer in a menu costing another peer
+        /// something the advance cannot already deliver.</summary>
+        /// <summary>PURE, and RailCheck L175 executes it over a REAL <c>GeoscapeViewStateSwitchRequest</c>.
+        /// The reason this one-line wrapper exists rather than the extraction sitting inline in
+        /// <see cref="ReadyToDequeue"/>: the whole defect was that the drain gate asked the hold about the
+        /// PRIORITY and not about the WINDOW, and a law can only execute that if the extraction — request →
+        /// (priority, state type) — is on the pure side of the seam. Inline, it is only assertable by IL,
+        /// and IL cannot tell "reads the head's type" from "reads the head's type for the log line".</summary>
+        internal static bool HoldsHead(GeoscapeViewStateSwitchRequest head, Type currentViewState) =>
+            head != null &&
+            HoldsForOpenScreen(head.Priority, head.State == null ? null : head.State.GetType(), currentViewState);
+
+        internal static bool HoldsForOpenScreen(int priority, Type queuedState, Type currentViewState) =>
+            (priority < TransitionPriority ||
+             (queuedState != null && HeldTransitionStates.Contains(queuedState.Name))) &&
             currentViewState != null &&
             !MapStates.Contains(currentViewState.Name);
 
@@ -243,13 +292,14 @@ namespace Multiplayer.Network.Sync
                 // THE OPEN-SCREEN HOLD (see HoldsForOpenScreen). Asked of the head, because the head is what
                 // the game is about to push; a transition further down the queue is not in front of anybody.
                 var current = GeoLevel()?.View?.CurrentViewState;
-                if (HoldsForOpenScreen(pending[0].Priority, current == null ? null : current.GetType()))
+                var head = pending[0].State;
+                if (HoldsHead(pending[0], current == null ? null : current.GetType()))
                 {
-                    if (_heldOnScreen.Add(current.GetType().Name))
-                        Debug.Log("[MP][windows] queue HELD while " + current.GetType().Name + " is open — a " +
-                                  "notification is reviewed on the geoscape, not on top of a screen the player " +
-                                  "opened. It drains as soon as this peer is back on the map (logged once per " +
-                                  "screen).");
+                    if (_heldOnScreen.Add(current.GetType().Name + "/" + (head == null ? "?" : head.GetType().Name)))
+                        Debug.Log("[MP][windows] queue HELD while " + current.GetType().Name + " is open — " +
+                                  (head == null ? "a window" : head.GetType().Name) + " is reviewed on the " +
+                                  "geoscape, not on top of a screen the player opened. It drains as soon as " +
+                                  "this peer is back on the map (logged once per screen/window pair).");
                     return false;
                 }
 

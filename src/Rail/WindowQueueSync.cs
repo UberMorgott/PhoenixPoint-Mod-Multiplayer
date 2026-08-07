@@ -190,6 +190,31 @@ namespace Multiplayer.Network.Sync
             return null;
         }
 
+        /// <summary>PURE (RailCheck L176). May the host answer a window that is still IN THE QUEUE rather
+        /// than on screen? The current-window gate above cannot: <see cref="ValidateIdentity"/> is asked of
+        /// <c>_currentStateSwitchRequest</c>, and a window that was never ENTERED is not it.
+        ///
+        /// WHY THAT STOPPED BEING AN EDGE CASE. <c>19af84c</c> gave this repo <c>WindowOrder
+        /// .HoldsForOpenScreen</c>, which deliberately keeps a raised window in <c>_viewStateSwitchRequests</c>
+        /// while the local player is inside a screen he opened. On a HOST inside the research tree that makes
+        /// "queued, not current" the NORMAL state of every mirrored window — and the 2026-08-07 report is the
+        /// consequence: a client answered the ambush brief, the host's own copy sat held, nothing advanced it,
+        /// so <c>UIStateGeoModal.FinishDialog</c> → <c>ModalResultCallback</c>:799 → <c>LaunchMission</c>:1043
+        /// never ran there and the host never got a deployment screen AT ALL. The hole predates the hold (a
+        /// host with two windows queued always had one that was not current); the hold made it the rule.
+        ///
+        /// THE ANSWER IS NOT <c>FinishDialog</c>. That method's first act is <c>Context.View
+        /// .FinishQueriedState()</c> → <c>FinishCurrentStateSwitch</c>:116, which nulls the current slot and
+        /// runs <c>_statesStack.SwitchToPreviousState()</c> — on a state that was never PUSHED, so it would
+        /// pop the research screen the player is actually looking at. A queued window is answered by taking it
+        /// OUT of the list and invoking the host's own <c>_dialogHandler</c>, and by nothing else.</summary>
+        internal static bool MayAnswerQueued(string haveCurrentIdentity, string queuedIdentity, string wantIdentity)
+            => !string.IsNullOrEmpty(wantIdentity) &&
+               string.IsNullOrEmpty(ValidateIdentity(queuedIdentity, wantIdentity)) &&
+               // The current window always wins: if it is the one being named, FinishDialog is the right
+               // funnel and this arm must not race it with a half-answer that skips FinishQueriedState.
+               !string.Equals(haveCurrentIdentity, wantIdentity, StringComparison.Ordinal);
+
         /// <summary><see cref="ValidateIdentity"/> plus the one question only a MODAL answer raises. Split so
         /// the deploy op can ask the identity half without inventing a <c>ModalResult</c> it does not have.</summary>
         internal static string Validate(string haveIdentity, string wantIdentity, byte result)
@@ -224,6 +249,7 @@ namespace Multiplayer.Network.Sync
             string haveIdentity = IdentityOf(modal);
 
             string why = Validate(haveIdentity, wantIdentity, result);
+            if (why != null && AnswerQueued(query, haveIdentity, wantIdentity, result, senderPeerId, nonce)) return;
             if (why != null)
             {
                 // LOGGED, never rejected — see the class doc. A reject's forced re-emit exists to pull back a
@@ -240,6 +266,65 @@ namespace Multiplayer.Network.Sync
             modal.FinishDialog((ModalResult)result);
             Debug.Log("[MP][windows] HOST advanced '" + haveIdentity + "' with " + (ModalResult)result +
                       " for peer=" + senderPeerId + " nonce=" + nonce);
+        }
+
+        /// <summary>The host's own <c>DialogCallback</c>, reached through <c>UIStateGeoModal</c>'s own field
+        /// rather than through <c>FinishDialog</c> — see <see cref="MayAnswerQueued"/> for why that method
+        /// cannot be used on a window the state stack never pushed.</summary>
+        private static readonly FieldInfo DialogHandlerField =
+            AccessTools.Field(typeof(UIStateGeoModal), "_dialogHandler");   // UIStateGeoModal.cs:42
+
+        /// <summary>
+        /// THE HELD WINDOW'S ANSWER. Returns true when this intent was consumed here, so the caller's
+        /// "did NOT apply" line stays for the cases that really did not.
+        ///
+        /// Three things happen, in this order and no other: the request is REMOVED from the game's own
+        /// pending list (an answered window must not be served to this peer later — it would offer a
+        /// decision that has already been taken for everyone), the handler reference is cleared exactly as
+        /// <c>FinishDialog</c>:83-85 clears it, and only then is the host's OWN callback invoked over the
+        /// host's OWN <c>modalData</c>. Clearing before invoking is deliberate: the callback runs
+        /// <c>LaunchMission</c>, which queues a NEW request into the very list being edited.
+        ///
+        /// It touches NOTHING that is on screen. No <c>FinishQueriedState</c>, no
+        /// <c>SwitchToPreviousState</c>, no <c>_currentStateSwitchRequest</c> write — the peer keeps the
+        /// screen he is in, and whatever the callback queues lands in the queue behind
+        /// <c>WindowOrder.HoldsForOpenScreen</c> like every other window. That is the whole point: the
+        /// deployment screen ARRIVES, in the history, instead of never arriving at all.
+        /// </summary>
+        private static bool AnswerQueued(GeoscapeViewSwitchQuery query, string haveIdentity, string wantIdentity,
+                                         byte result, ulong senderPeerId, uint nonce)
+        {
+            if (result > (byte)ModalResult.Close) return false;      // Validate's other half, unchanged
+            if (query == null || WindowOrder.RequestsField == null || DialogHandlerField == null) return false;
+            if (!(WindowOrder.RequestsField.GetValue(query) is IList<GeoscapeViewStateSwitchRequest> pending))
+                return false;
+
+            for (int i = 0; i < pending.Count; i++)
+            {
+                var modal = pending[i].State as UIStateGeoModal;
+                if (modal == null) continue;
+                if (!MayAnswerQueued(haveIdentity, IdentityOf(modal), wantIdentity)) continue;
+
+                pending.RemoveAt(i);
+                var cb = DialogHandlerField.GetValue(modal) as DialogCallback;
+                DialogHandlerField.SetValue(modal, null);
+                Debug.Log("[MP][windows] HOST advanced QUEUED '" + wantIdentity + "' with " + (ModalResult)result +
+                          " for peer=" + senderPeerId + " nonce=" + nonce + " — this peer is inside a screen of " +
+                          "its own, so the window it was raised was still in _viewStateSwitchRequests and never " +
+                          "became _currentStateSwitchRequest. Its own DialogCallback runs here; nothing on " +
+                          "screen is popped" + (cb == null ? " (no callback: a mirrored copy carries none)" : ""));
+                try { cb?.Invoke((ModalResult)result); }
+                catch (Exception ex)
+                {
+                    // NEVER silent, and never fatal to the intent pump: the window is already out of the
+                    // queue, so a throw here loses the CONSEQUENCE of the answer, not the answer.
+                    Debug.LogError("[MP][windows] the host's own callback for '" + wantIdentity + "' threw — " +
+                                   "the window is answered and gone, but whatever it was going to do (a mission " +
+                                   "brief's LaunchMission, a reward's Apply) did NOT happen: " + ex);
+                }
+                return true;
+            }
+            return false;
         }
 
         /// <summary>The asset-deployment answer. Same identity gate as <see cref="HandleAdvance"/>, then the
