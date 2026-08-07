@@ -19,7 +19,13 @@ namespace Multiplayer
         // before OnModEnabled / after OnModDisabled — callers null-check.
         public static ModLogger Log => Instance?.Logger;
 
+        /// <summary>The in-game mod settings (see <see cref="MultiplayerConfig"/>). The game builds it and
+        /// assigns it before <see cref="OnModEnabled"/> (<c>ModEntry.cs:264</c>); null only if the type
+        /// ever fails to instantiate, so callers null-check.</summary>
+        public new MultiplayerConfig Config => base.Config as MultiplayerConfig;
+
         private MultiplayerUI _ui;
+        private PingMarkers _pings;
 
         /// <summary>Patch classes that did NOT bind this run, "&lt;class&gt;: &lt;reason&gt;". Empty is the
         /// only good answer — anything in here is a feature silently missing from the running game.</summary>
@@ -51,6 +57,11 @@ namespace Multiplayer
 
             _ui = ModGO.AddComponent<MultiplayerUI>();
             Logger.LogInfo("[Multiplayer] UI initialized");
+
+            // Ping markers: its own pump (polls the hotkey, expires markers, draws the off-screen arrow)
+            // and the arrival seam NetworkEngine relays into. Presentation only — see PingMarkers.
+            _pings = ModGO.AddComponent<PingMarkers>();
+            NetworkEngine.PingMarkerShow = PingMarkers.Show;
 
             // Parity auto-apply: wire the teardown restore hook (delegate field — NetworkEngine must not
             // reference ParityConfigSync's game types directly, same JIT-safety rule as SteamLobbyCleanup).
@@ -98,6 +109,13 @@ namespace Multiplayer
             {
                 Object.Destroy(_ui);
                 _ui = null;
+            }
+
+            NetworkEngine.PingMarkerShow = null;
+            if (_pings != null)
+            {
+                Object.Destroy(_pings);
+                _pings = null;
             }
 
             Instance = null;

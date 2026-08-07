@@ -84,6 +84,16 @@ namespace Multiplayer.Network.MessageLayer
         // Chat
         ChatMessage = 0x50,
 
+        // Presentation (no rail, no surface id, no exactly-once guarantee — a lost one is not a problem).
+        PingMarker = 0x51,      // any direction: "look here" marker, geoscape or tactical. Client→host→all,
+                                // the ChatMessage fan-out shape. TOP-LEVEL on purpose: it never enters
+                                // SurfaceRouter, so it needs no surface id — which matters because the
+                                // geoscape band 0xA0-0xBF is full of tombstones and law L62 hard-requires
+                                // the name prefix to match the band. Payload: [scene:u8][kind:u8] then
+                                // either an entity ref / actor key (object ping) or 3 floats (point ping).
+                                // See src/Lobby/PingMarkers.cs. Laws L158 (presentation alters nothing),
+                                // L160 (moves no camera, enters no state, changes no selection).
+
         // Transport-specific (STUN hole punch, etc.)
         TransportInternal = 0xF0
 

@@ -21,8 +21,9 @@ namespace RailCheck
     ///
     /// THE SEAM SET is the one <c>docs/laws.md:263</c> names — <see cref="UiEventMap"/>,
     /// <see cref="UiNativeRepaint"/>, <see cref="OpenUiRepaint"/>, <c>ResearchSync.PresentFromMirror</c> —
-    /// plus <see cref="PingTable"/>, added at birth (2026-08-07) rather than retrofitted, because the RTT
-    /// reading is P4c by construction and arrives with no law of its own.
+    /// plus <see cref="PingTable"/> and <see cref="PingMarkers"/>, both added at birth (2026-08-07) rather
+    /// than retrofitted, because an RTT reading and a "look here" glyph are P4c by construction and each
+    /// arrived with no law of its own.
     ///
     /// THE ARMS:
     ///   (a) <c>seam-blocks</c> — no member of the set is a Harmony PREFIX that can suppress the native
@@ -75,10 +76,16 @@ namespace RailCheck
             // renders a latency reading, so it is where arm (d)'s containment would leak first if the panel
             // ever grew a decision — and it renders two advisory per-peer flags besides, which makes arms
             // (a)/(b) worth having over it for the same reason they are worth having over UiEventMap.
+            // PingMarkers joined the set with the ping-marker feature (2026-08-07), also at birth. A ping
+            // is presentation by construction — a "look here" glyph that expires by itself, carried by its
+            // own top-level packet and touching no rail — so arms (a)/(b) are exactly the two promises
+            // that would be worth breaking first: a marker seam that grew a suppressing prefix, or one
+            // that started writing the model it draws. What no seam-set arm can say about it (it moves no
+            // camera, enters no view state, changes no selection) is law L160.
             var seam = new[]
             {
                 typeof(UiEventMap), typeof(UiNativeRepaint), typeof(OpenUiRepaint),
-                typeof(ResearchSync), typeof(PingTable), typeof(PlayerPanel),
+                typeof(ResearchSync), typeof(PingTable), typeof(PlayerPanel), typeof(PingMarkers),
             };
             var railRoots = new[]
             {
@@ -94,13 +101,18 @@ namespace RailCheck
                 // Update loop with no frame of ours between it and native code. Without its catch a panel
                 // that threw would take the session down over a status column.
                 typeof(PlayerPanel).GetMethod("Sync", AllMembers),
+                // PingMarkers.Show is entered from NetworkEngine.RouteMessage, i.e. from inside the packet
+                // drain that runs inside the game's own Update. It instantiates prefabs and resolves rail
+                // identities against a live level; without its catch, one malformed or late-arriving ping
+                // unwinds into native code and takes the session down over a decoration.
+                typeof(PingMarkers).GetMethod("Show", AllMembers),
             };
             var dispatcher = typeof(UiNativeRepaint).GetMethod("TryRepaint", AllMembers);
 
             if (srtt == null || dispatcher == null || containment.Any(m => m == null) || seam.Any(t => t == null))
             {
                 yield return "L158 premise-changed: PingTable._srtt / UiEventMap.Fire / OpenUiRepaint.Repaint / " +
-                             "PlayerPanel.Sync / " +
+                             "PlayerPanel.Sync / PingMarkers.Show / " +
                              "ResearchSync.PresentFromMirror / UiNativeRepaint.TryRepaint did not all resolve. " +
                              "The seam set or the latency reading has moved, and every arm below is asserting " +
                              "about a shape the repo no longer has.";

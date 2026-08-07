@@ -232,6 +232,7 @@ namespace RailCheck
             laws.AddRange(L157_MirroredInventoryBatchMarksTheOpenScreen.Check());
             laws.AddRange(L158_PresentationSeamAltersNothing.Check());
             laws.AddRange(L159_PlayerPanelReportsOnly.Check());
+            laws.AddRange(L160_PingMovesNoCameraOrSelection.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

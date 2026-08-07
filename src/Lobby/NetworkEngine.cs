@@ -130,6 +130,12 @@ namespace Multiplayer.Network
             catch (Exception e) { Debug.LogError("[Multiplayer] parity config restore failed: " + e.Message); }
         }
 
+        /// <summary>Draws an arriving ping marker (<c>PingMarkers.Show</c>). Same delegate-field pattern and
+        /// same reason as <see cref="ParityConfigRestore"/> — the drawing names GeoscapeView/TacticalView,
+        /// which must not appear in this file's JIT closure. Null in unit tests: a ping is then routed and
+        /// dropped, which is exactly what a presentation packet is allowed to do.</summary>
+        public static Action<byte[]> PingMarkerShow;
+
         // ─── Events ───────────────────────────────────────────────────────
 
         public event Action OnHostStarted;
@@ -668,6 +674,15 @@ namespace Multiplayer.Network
 
                 case PacketType.ChatMessage:
                     Session.HandleChat(msg);
+                    break;
+
+                // Presentation only — relayed and shown, never recorded. The host is the only peer with a
+                // link to everyone, so it re-fans the marker to the others (the ChatMessage shape) before
+                // showing its own. PingMarkerShow is a delegate for the same JIT-safety reason as
+                // ParityConfigRestore below: NetworkEngine must not name the game types the marker draws.
+                case PacketType.PingMarker:
+                    if (IsHost) BroadcastExcept(msg.SenderSteamId, msg);
+                    PingMarkerShow?.Invoke(msg.Payload);
                     break;
 
                 case PacketType.SetSave:
