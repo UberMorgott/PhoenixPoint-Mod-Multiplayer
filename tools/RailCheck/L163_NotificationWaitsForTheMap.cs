@@ -43,6 +43,10 @@ namespace RailCheck
     ///       modal) and <c>TransitionPriority</c> itself (a cutscene) DRAIN even on a screen. A transition
     ///       is not a notification, and holding one would break L144 while every arm of L144 stayed green:
     ///       L144 asks whether the squad screen is SERVABLE, not whether this peer's own drain let it out.
+    ///   (e) <c>deployment-yanks</c> — the CARVE-OUT (owner's ruling 2026-08-07): the squad screen is held
+    ///       on a screen despite its <c>int.MaxValue</c>, and is NOT held on the map. Arms (a)-(c) all pass
+    ///       an ordinary window, so every one of them stays green if the carve-out is dropped — this is the
+    ///       only arm that fails when another peer's mission launch starts yanking again.
     ///   (d) <c>review-family-misranked</c> — <c>ReplenishSync.ReplenishRank</c> is strictly below
     ///       <c>TransitionPriority</c>, so the resupply screen is in the family this law holds. If a later
     ///       re-rank pushed it over the line, arm (a) would keep passing for the event family while the one
@@ -54,6 +58,7 @@ namespace RailCheck
     ///   • return <c>false</c> unconditionally (i.e. delete the hold) → <c>screen-interrupted</c>
     ///   • add <c>UIStateResearch</c> to <c>MapStates</c> → <c>screen-interrupted</c>
     ///   • raise <c>ReplenishSync.ReplenishRank</c> to 100 → <c>review-family-misranked</c>
+    ///   • empty <c>HeldTransitionStates</c>, or make it match every state → <c>deployment-yanks</c>
     /// </summary>
     internal static class L163_NotificationWaitsForTheMap
     {
@@ -69,10 +74,11 @@ namespace RailCheck
         {
             var predicate = typeof(WindowOrder).GetMethod("HoldsForOpenScreen", AllMembers);
             var mapStates = typeof(WindowOrder).GetField("MapStates", AllMembers);
-            if (predicate == null || mapStates == null)
+            var heldTransitions = typeof(WindowOrder).GetField("HeldTransitionStates", AllMembers);
+            if (predicate == null || mapStates == null || heldTransitions == null)
             {
-                yield return "L163 premise-changed: WindowOrder.HoldsForOpenScreen / WindowOrder.MapStates did " +
-                             "not resolve. The open-screen hold has been renamed or removed, so every arm below " +
+                yield return "L163 premise-changed: WindowOrder.HoldsForOpenScreen / WindowOrder.MapStates / " +
+                             "WindowOrder.HeldTransitionStates did not resolve. The open-screen hold has been renamed or removed, so every arm below " +
                              "would pass vacuously — and the failure it defends against is the silent kind: the " +
                              "queue simply goes back to draining onto whatever screen the player has open, with " +
                              "no log line anywhere saying so.";
@@ -89,11 +95,14 @@ namespace RailCheck
             };
             var map = new[] { typeof(UIStateNothingSelected), typeof(UIStateVehicleSelected),
                               typeof(UIStateInitial), typeof(UIStateLoading) };
+            // An ORDINARY queued window — not one the deployment carve-out names — so arms (a)-(c) keep
+            // testing the PRIORITY rule and cannot pass on the carve-out by accident.
+            var ordinary = typeof(UIStateGeoscapeEvent);
 
             // ── (a) the review family is HELD on a screen ───────────────────────────────────────────
             foreach (var screen in screens)
                 foreach (var priority in ReviewPriorities)
-                    if (!Hold(predicate, priority, screen))
+                    if (!Hold(predicate, priority, ordinary, screen))
                         yield return "L163 screen-interrupted: a queued window at priority " + priority +
                                      " drains while " + screen.Name + " is the current view state. That is the " +
                                      "reported defect verbatim — the player is thrown out of a screen they " +
@@ -104,7 +113,7 @@ namespace RailCheck
             // ── (b) NON-VACUITY: the same family DRAINS on the map, and with no screen at all ────────
             foreach (var mapState in map)
                 foreach (var priority in ReviewPriorities)
-                    if (Hold(predicate, priority, mapState))
+                    if (Hold(predicate, priority, ordinary, mapState))
                         yield return "L163 map-held: a queued window at priority " + priority + " is held while " +
                                      mapState.Name + " is current — i.e. on the geoscape itself, which is the " +
                                      "one place the design says a notification IS reviewed. A predicate that " +
@@ -112,21 +121,45 @@ namespace RailCheck
                                      "session; " + mapState.Name + " is also where the queue would have to " +
                                      "release, so nothing would ever release it.";
 
-            if (Hold(predicate, 0, null))
+            if (Hold(predicate, 0, ordinary, null))
                 yield return "L163 map-held: the head is held while there is NO current view state at all. " +
                              "There is no screen to protect and nothing to return to, so a hold there is a " +
                              "queue that never drains — the failure mode this law's own fix must not become.";
 
             // ── (c) a TRANSITION is not a notification ───────────────────────────────────────────────
             foreach (var screen in screens)
-                foreach (var priority in new[] { WindowOrder.TransitionPriority, int.MaxValue })
-                    if (Hold(predicate, priority, screen))
-                        yield return "L163 transition-held: priority " + priority + " is held while " +
-                                     screen.Name + " is open. That band is not the review family — it is the " +
-                                     "squad screen (int.MaxValue, L144), the mission-outcome modal " +
-                                     "(int.MaxValue) and the cutscene (100). Holding a mission launch behind a " +
-                                     "player who happens to be in the base layout is a peer waiting on another " +
-                                     "peer's navigation, which is the one thing this hold must never become.";
+                foreach (var t in new[] { (WindowOrder.TransitionPriority, (Type)typeof(UIStateGeoCutscene)),
+                                          (int.MaxValue, typeof(UIStateGeoModal)) })
+                    if (Hold(predicate, t.Item1, t.Item2, screen))
+                        yield return "L163 transition-held: " + t.Item2.Name + " at priority " + t.Item1 +
+                                     " is held while " + screen.Name + " is open. These are the transitions the " +
+                                     "carve-out does NOT name — a cutscene and the mission-outcome modal are the " +
+                                     "game ENDING something rather than offering it, and neither may wait on a " +
+                                     "player's navigation. Only UIStateRosterDeployment is held up here, and arm " +
+                                     "(e) is what says so.";
+
+            // ── (e) THE CARVE-OUT: the squad screen is held too, and only it ────────────────────────
+            // Owner's ruling 2026-08-07 — another peer's "start mission" pulled this peer off the research
+            // screen, because ToDeploymentState:596 queues UIStateRosterDeployment at int.MaxValue and the
+            // priority band alone exempted it. Asserted here rather than left to the predicate's own doc:
+            // arms (a)-(c) all pass an ORDINARY window, so every one of them stays green if the carve-out
+            // is dropped, and the yank comes straight back on the one window the owner named.
+            foreach (var screen in screens)
+                if (!Hold(predicate, int.MaxValue, typeof(UIStateRosterDeployment), screen))
+                    yield return "L163 deployment-yanks: UIStateRosterDeployment drains while " + screen.Name +
+                                 " is open. Priority answers \"which queued window goes first\", never \"may " +
+                                 "this window take a screen the player opened\" — and reading it for both is " +
+                                 "exactly what let another peer's mission launch throw this peer out of the " +
+                                 "screen he was working in. Holding it costs him nothing: the battle is " +
+                                 "launched through the host's save transfer, which curtains every peer whatever " +
+                                 "its queue holds.";
+            foreach (var mapState in map)
+                if (Hold(predicate, int.MaxValue, typeof(UIStateRosterDeployment), mapState))
+                    yield return "L163 deployment-yanks: UIStateRosterDeployment is held while " +
+                                 mapState.Name + " is current — on the map, where the player has no screen to " +
+                                 "protect and the squad screen is exactly what he is waiting for. The carve-out " +
+                                 "must widen WHICH windows the hold covers, never WHERE it engages (L144: the " +
+                                 "squad screen still has to be reachable).";
 
             // ── (d) the resupply screen is in the family this law holds ─────────────────────────────
             // Read as METADATA, not as the compile-time literals: two consts compared in source fold to a
@@ -147,7 +180,9 @@ namespace RailCheck
             return f == null ? int.MinValue : Convert.ToInt32(f.GetRawConstantValue());
         }
 
-        private static bool Hold(MethodInfo predicate, int priority, Type state) =>
-            (bool)predicate.Invoke(null, new object[] { priority, state });
+        /// <summary><paramref name="queued"/> is the window being offered, <paramref name="state"/> the
+        /// screen the player is on — the predicate reads BOTH since the deployment carve-out went in.</summary>
+        private static bool Hold(MethodInfo predicate, int priority, Type queued, Type state) =>
+            (bool)predicate.Invoke(null, new object[] { priority, queued, state });
     }
 }
