@@ -2333,6 +2333,40 @@ namespace Multiplayer.Tactical
         internal static bool LocalUiStillHoldsAfterMirror(bool viewHeldThisActor, bool releaseReached) =>
             viewHeldThisActor && !releaseReached;
 
+        /// <summary>MAY THE MOVE-RANGE SWEEP RUN RIGHT NOW — pure, so RailCheck L173 executes the outcome.
+        ///
+        /// <see cref="ReleaseLocalUiHolding"/> above is a ONE-SHOT: it fires at the instant a mirrored order
+        /// arrives, and only if <c>view.SelectedActor</c> happens to be that actor at that instant. A player
+        /// who RE-SELECTS the busy soldier a second later walks straight back into
+        /// <c>UIStateCharacterSelected</c> and nothing releases him again — which is why the owner's log holds
+        /// 470 of the engine's own <c>GetTargetsData() shouldn't be called while … is executing abilities</c>
+        /// over four and a half minutes on two host-owned actors, not one per order. This is the STANDING half:
+        /// it holds for as long as the other peer's order runs, however many times the player re-selects.
+        ///
+        /// WHY THE POLL AND NOT THE SELECTION. Taking the player's selection away every time he clicks a busy
+        /// teammate is hostile and it fights the state stack from inside a transition; withholding the SWEEP
+        /// costs him only the move overlay for that soldier — which is the honest signal, since
+        /// <see cref="TacticalActorDrive.RefuseLocalCommand"/> is going to refuse the move anyway (L146). It
+        /// also fixes every OTHER caller of <c>GetTargetsData</c> at the same seam rather than this one UI
+        /// state, and the one place all of them route through is the engine's own error line.
+        ///
+        /// THE HARM IS NOT THE LOG LINE. <c>MoveAbility.GetTargetsData</c>:170-173 logs and then carries ON
+        /// with no early return, into <c>GetTargetsDataInRange</c>:207-236 → <c>MoveAbilityTargets.CacheTargets</c>
+        /// :17-28, which <c>Clear()</c>s and <c>Calculate()</c>s a path request WHILE the actor's navigation is
+        /// live AND assigns the STATIC <c>NavigationSettings.Defaults</c> singleton
+        /// (<c>TacticalPathRequest</c>:34-38; <c>NavigationSettings</c>:46 declares it <c>static readonly</c>),
+        /// turning <c>PathRequestPostProcess</c> off for everybody — read at <c>TacticalPathRequest</c>:64,
+        /// where it clears <c>PointInfos</c> and returns. That is the mirrored soldier who covered 0.14 of 1.41
+        /// units in 403 frames and had to be force-settled.
+        ///
+        /// <paramref name="engineSaysItIsExecuting"/> IS THE ENGINE'S OWN QUESTION, asked with the engine's own
+        /// two exceptions (<c>PanicAbility</c>, <c>AIEvaluationAbility</c>) so this withholds exactly the calls
+        /// the engine itself declares invalid and not one more. The third axis is what makes it OURS rather
+        /// than a behaviour change: this peer's own order, or a solo game, keeps the sweep verbatim.</summary>
+        internal static bool MovePollMustBeWithheld(bool inSharedBattle, bool engineSaysItIsExecuting,
+                                                    bool drivenByAnotherPeer) =>
+            inSharedBattle && engineSaysItIsExecuting && drivenByAnotherPeer;
+
         internal static void ReleaseLocalUiHolding(TacticalActorBase actor, string why)
         {
             if (actor == null) return;
@@ -3226,5 +3260,57 @@ namespace Multiplayer.Tactical
         }
 
         private static IEnumerator<NextUpdate> NoWait() { yield break; }
+    }
+
+    /// <summary>THE STANDING HALF of the local-UI release (<see cref="TacticalCommandSync.MovePollMustBeWithheld"/>
+    /// carries the reasoning). ONE seam for every caller, sited on the engine's own error line rather than on
+    /// the <c>UIStateCharacterSelected.ValidMoves</c>:153-160 that happened to be the reported one — the game
+    /// already answers <c>null</c> there whenever the move ability is not enabled, so an empty sweep is a value
+    /// its callers were always written to receive.</summary>
+    [HarmonyPatch(typeof(MoveAbility), nameof(MoveAbility.GetTargetsData))]
+    internal static class MoveRangeIsNotSweptWhileAnotherPeerDrivesTheActor
+    {
+        private static readonly MoveAbilityTargetData[] Nothing = new MoveAbilityTargetData[0];
+
+        // ONE LINE PER EPISODE, not per frame: the withholding lasts as long as the other peer's order and the
+        // poll is once a frame, so an undeduplicated record would bury the log it is meant to explain. Removed
+        // on the first sweep that runs again, which is the order ending — so a second order logs a second line.
+        private static readonly HashSet<TacticalActorBase> _withheld = new HashSet<TacticalActorBase>();
+
+        private static bool Prefix(MoveAbility __instance, ref IEnumerable<MoveAbilityTargetData> __result)
+        {
+            TacticalActor actor;
+            try { actor = __instance == null ? null : __instance.TacticalActor; }
+            catch { return true; }   // a presentation gate alters NOTHING when it cannot answer (P4c)
+            if (actor == null) return true;
+            // The engine's OWN condition, with the engine's OWN two exceptions (GetTargetsData:165-172).
+            var ignored = new TacticalAbility[]
+            {
+                actor.GetAbility<PanicAbility>(),
+                actor.GetAbility<AIEvaluationAbility>()
+            };
+            var engine = NetworkEngine.Instance;
+            if (!TacticalCommandSync.MovePollMustBeWithheld(engine != null && engine.IsActiveSession,
+                                                            actor.HasExecutingAbility(ignored),
+                                                            TacticalActorDrive.DrivenByAnotherPeer(actor)))
+            {
+                _withheld.Remove(actor);
+                return true;
+            }
+            if (_withheld.Add(actor))
+                Debug.Log("[Multiplayer][tac] move-range sweep WITHHELD for " + SafeName(actor) +
+                          " while another peer's order drives him — the game's own GetTargetsData says it " +
+                          "must not run now (it invalidates the situation cache and turns the static " +
+                          "NavigationSettings.PathRequestPostProcess off mid-navigation), and it says so " +
+                          "without stopping. His move overlay is blank until that order ends; every other " +
+                          "soldier is unaffected and nothing else about this peer's screen changes.");
+            __result = Nothing;
+            return false;
+        }
+
+        private static string SafeName(TacticalActorBase actor)
+        {
+            try { return actor.name; } catch { return "<an actor>"; }
+        }
     }
 }
