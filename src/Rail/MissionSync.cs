@@ -377,6 +377,34 @@ namespace Multiplayer.Network.Sync
         private static readonly MethodInfo FinishEncounterMethod =
             AccessTools.Method(typeof(UIModuleSiteEncounters), "FinishEncounter");
 
+        /// <summary>PURE (RailCheck L191). WHY there is no squad screen to open — and it is a different
+        /// answer on the two roles, which is what this guard got wrong.
+        ///
+        /// MEASURED, host log 2026-08-07, ONE clock: 23:10:12.981 `HOST answered 'PROG_NJ0_MISS' … peer=1`,
+        /// 23:10:13.052 `structural create 'S#104…ActiveMission' sent`, 23:10:26.624 `structural DESTROY
+        /// 'S#104…ActiveMission' sent`, 23:10:30.105 the host's own stale picker `REPLAYED`, and 23:10:31.254
+        /// the host telling ITSELF "the host's mission has not arrived on this peer yet … reach it from the
+        /// aircraft's Launch button once it lands". It had arrived — the host MINTED it 17 s earlier — and it
+        /// was gone 4.6 s before the click. Nothing would ever land.
+        ///
+        /// THE HOST CANNOT BE WAITING FOR STATE IT AUTHORS. On this peer <c>ActiveMission == null</c> has
+        /// exactly one meaning — the mission is GONE (launched by whoever won the race, cancelled, or
+        /// expired) — and returning without a screen is then CORRECT, not a race to wait out. Only on a
+        /// CLIENT is "not arrived yet" a possible reading, because only there is the mission somebody else's
+        /// structural create. The guard's behaviour is unchanged; what changes is that it stops sending the
+        /// next reader (and the owner) hunting an arrival race that cannot exist on the peer that printed it.
+        /// It is the same mistake as making the host discard restored windows only it holds — one peer, one
+        /// role, and the answer follows from which one it is.</summary>
+        internal static string NoDeploymentReason(bool isHost, bool missionMissing) =>
+            isHost
+                ? "this peer AUTHORS the mission, so it cannot be waiting for it to arrive: " +
+                  (missionMissing ? "the site has no ActiveMission" : "the mission is not runnable") +
+                  " means it is GONE — already launched, cancelled or expired — and there is nothing left to " +
+                  "open. This is the correct outcome, not a race."
+                : "the host's mission has not arrived on this peer yet (ActiveMission " +
+                  (missionMissing ? "missing" : "not runnable") + "); reach it from the aircraft's Launch " +
+                  "button once it lands";
+
         private static void Postfix(UIModuleSiteEncounters __instance)
         {
             var engine = NetworkEngine.Instance;
@@ -399,13 +427,10 @@ namespace Multiplayer.Network.Sync
                 var mission = site?.ActiveMission;
                 if (mission == null || !mission.IsRunnable)
                 {
-                    // Never silent: the choice DID start a mission, so a missing one means the structural
-                    // create has not landed yet and this peer is about to sit on a geoscape with no screen.
+                    // Never silent, and never role-blind — see NoDeploymentReason.
                     Debug.LogWarning("[MP][mission] deployment for '" + ev.EventID + "' at " +
-                                     (IdentityResolver.RootRef(site) ?? "S#?") + " NOT opened — the host's mission " +
-                                     "has not arrived on this peer yet (ActiveMission " +
-                                     (mission == null ? "missing" : "not runnable") + "); reach it from the " +
-                                     "aircraft's Launch button once it lands");
+                                     (IdentityResolver.RootRef(site) ?? "S#?") + " NOT opened — " +
+                                     NoDeploymentReason(engine.IsHost, mission == null));
                     return;
                 }
 

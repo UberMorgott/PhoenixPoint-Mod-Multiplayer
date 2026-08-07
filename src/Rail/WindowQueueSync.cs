@@ -596,7 +596,7 @@ namespace Multiplayer.Network.Sync
                                   "UIStateInitial after this restore, not carried through it.");
                         continue;
                     }
-                    if (!foreign || !KindIsMirrored(context)) continue;
+                    if (!DropsRestoredWindow(foreign, KindIsMirrored(context))) continue;
                     data.RemoveAt(i);
                     notMine++;
                 }
@@ -616,8 +616,36 @@ namespace Multiplayer.Network.Sync
             Debug.Log("[MP][windows] window-queue restore: " + seen + " entries in the save, " + data.Count +
                       " kept — " + deadSubject + " dropped (subject already resolved), " + notMine +
                       " dropped (Mirrored kind, produced by another peer" +
-                      (foreign ? "" : "; not applicable — this peer authored this save") + ").");
+                      (foreign ? "" : "; not applicable — this peer authored this save") + ")." +
+                      (notMine > 0
+                          ? " Those " + notMine + " are NOT lost: this peer receives the same windows as its " +
+                            "own live raises (0xB6/0xB7/0xBA) and re-carries its unanswered ones through " +
+                            "EventPopup.RequeueUnanswered, which is why the two peers' KEPT COUNTS legitimately " +
+                            "differ — the host holds one copy, this peer holds the other."
+                          : ""));
         }
+
+        /// <summary>PURE (RailCheck L191). Does this restored entry go?
+        ///
+        /// THE COUNTS ARE MEANT TO DIFFER, and a session was spent reading that as a divergence. MEASURED,
+        /// 2026-08-07, one boundary, one save: the host restored `3 entries … 3 kept` (host multiplayer.log
+        /// :1382) and the client `3 entries … 0 kept — 3 dropped` (client :367). Both ended with THREE
+        /// windows. The host raised <c>IntroBetterGeo_0/1/2</c> itself at 23:09:06.43 and the autosave 11 s
+        /// later carried them, so the restored copy is its ONLY one; the client had already received all
+        /// three as 0xB6 raises at 23:09:13.96, HELD them (no geoscape yet) and replayed them at
+        /// 23:09:28.6-29.1 — so for it the restored copy is a SECOND one, and keeping it is the duplicate
+        /// <c>0616e26</c> measured as six teardowns against three raises.
+        ///
+        /// SO NEITHER PEER IS WRONG, AND "MAKE THEM AGREE" IS THE REGRESSION. Making the host drop too loses
+        /// windows only it holds — the same mistake as telling the host to wait for state it authored
+        /// (<see cref="MissionSync.NoDeploymentReason"/>). Making the client keep them brings the duplicate
+        /// straight back. The invariant is ONE LIVE COPY PER PEER, never equal restore counts, and the two
+        /// halves that deliver it are asserted by L135 (this filter and
+        /// <c>ReplenishSync.CarryUnreadWindowsPatch</c> read the SAME producer signal, and the deferral
+        /// re-carry is reached). Extracted as a pure function so L191 can execute the role split itself: the
+        /// call site read the two conditions inline, so deleting the producer test while keeping the call for
+        /// the log line would have left L135 green.</summary>
+        internal static bool DropsRestoredWindow(bool foreign, bool kindIsMirrored) => foreign && kindIsMirrored;
 
         /// <summary>
         /// IS THE GEOSCAPE BEING RESTORED SOMEBODY ELSE'S? A restored window is only ever a SECOND copy when
