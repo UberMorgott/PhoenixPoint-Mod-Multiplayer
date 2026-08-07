@@ -249,10 +249,19 @@ namespace RailCheck
             laws.AddRange(L176_AQueuedWindowIsStillAnswerable.Check());
             laws.AddRange(L177_TheDropCountsDownAloneAndOneVetoStopsIt.Check());
             laws.AddRange(L173_GateEvidenceNamesEveryInput.Check());
+            laws.AddRange(L174_OneBoundaryOneLoadForTheHostToo.Check());
             laws.AddRange(L180_AnUnjoinedRowIsNeverHeldAndNeverWaitsForever.Check());
             laws.AddRange(L181_TheLobbyGateCountsOnlyPeersAHumanCouldReady.Check());
+            laws.AddRange(L182_ShownMeansSwitchedOn.Check());
             laws.AddRange(L183_ARepaintObservesTheBatchThatCausedIt.Check());
             laws.AddRange(L184_ARequestThatIsDroppedSaysSo.Check());
+            laws.AddRange(L185_CorpseManifestIsAnsweredByItemNotByOrder.Check());
+            laws.AddRange(L186_WeaponSelectionRidesTheSettle.Check());
+            laws.AddRange(L187_AStaleScreenNeverUndoesAnAppliedIntent.Check());
+            laws.AddRange(L188_APermanentExclusionIsNotAOneOffWarning.Check());
+            laws.AddRange(L189_AOneShotPushAPeerCannotTakeIsHeld.Check());
+            laws.AddRange(L191_NoPeerWaitsForStateItAuthored.Check());
+            laws.AddRange(L190_ClockJerkIsVisible.Check());
             laws.AddRange(L85_RestartedHostStreamIsApplied.Check());
             laws.AddRange(L86_AnnouncedBoundaryHoldsItsAnnouncer.Check());
             laws.Sort(StringComparer.Ordinal);
@@ -9013,6 +9022,36 @@ namespace RailCheck
                              "(TacLevelSavegame:49), and using the same one is what makes the index symmetric on " +
                              "both peers";
 
+            // ─── THE IDENTITY IS NEVER A RANDOM ONE (2026-08-07: 13 collisions in one map) ───
+            // SceneObjectIdsComponent.MergeWith:29-34 mints SceneObjectId.CreateNew() — a FRESH RANDOM id —
+            // for every combined id that collides in the component it merges into, and map generation merges
+            // one registry per parcel (MapPlot:230-243). A random id is different on every peer, so a guid
+            // that collided is not an identity: the host's damage to those objects lands on the wrong wall or
+            // on none. The index must therefore DROP a colliding guid rather than let one win, and there must
+            // be a second address both peers DERIVE. That address is executed here, not assumed.
+            {
+                var merge = HarmonyLib.AccessTools.Method(
+                    typeof(Base.Levels.SceneObjectIds.SceneObjectIdsComponent), "MergeWith");
+                if (merge == null)
+                    yield return "L69 merge-premise-gone: SceneObjectIdsComponent.MergeWith no longer exists, so " +
+                                 "the reason a baked GuidInScene can differ between two peers is unverified — and " +
+                                 "it is the only reason this arc carries a second address at all";
+                else if (!Reaches(merge, "SceneObjectId", "CreateNew"))
+                    yield return "L69 merge-premise-stale: SceneObjectIdsComponent.MergeWith no longer mints a fresh " +
+                                 "random id on a collision. If that is genuinely gone, GuidInScene is peer-stable " +
+                                 "everywhere and the position fallback below is sprawl — check before keeping it";
+                var posTag = ModMethod(dest, "PosTag");
+                if (posTag == null)
+                    yield return "L69 destructible-second-address-gone: TacticalDestruction.PosTag no longer exists. " +
+                                 "A destructible whose guid collided then has NO address at all, and the host's " +
+                                 "damage to it is dropped on every other peer";
+                if (index != null && (!Reaches(index, "TacticalDestruction", "PosTag") ||
+                                      !Reaches(ModMethod(dest, "ApplyEnvDamage"), "TacticalDestruction", "Resolve")))
+                    yield return "L69 destructible-second-address-unused: the index or the applier no longer uses " +
+                                 "the position address, so a colliding guid is back to being resolved by whichever " +
+                                 "object happened to be walked last — which is a different object on each peer";
+            }
+
             // The identity itself is the game's save key. If either half of that is gone, the key is ours alone.
             var guidProp = typeof(PhoenixPoint.Tactical.Levels.Destruction.DestructableBase)
                 .GetProperty("GuidInScene", AllMembers);
@@ -10105,7 +10144,9 @@ namespace RailCheck
         /// <summary>Every callee a method invokes, IN IL ORDER, with NO assembly filter. <see cref="Callees"/>
         /// keeps to one assembly, which cannot express "our code calls into the game in THIS sequence" — and
         /// sequence is exactly what an ordering law asserts (L52's adopt-baseline-before-rebind arm).</summary>
-        private static List<MethodBase> CalleeSequence(MethodBase m)
+        // internal, not private: L131 asserts an ordering that CROSSES the assembly boundary (our SetTarget
+        // before the game's StatusComponent.ApplyStatus), which Callees' one-assembly filter cannot express.
+        internal static List<MethodBase> CalleeSequence(MethodBase m)
         {
             var seq = new List<MethodBase>();
             byte[] il = null;

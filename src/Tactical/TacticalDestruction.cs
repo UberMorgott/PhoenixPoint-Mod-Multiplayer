@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using Base;
 using HarmonyLib;
@@ -83,14 +84,46 @@ namespace Multiplayer.Tactical
         /// wall that has been reduced to rubble is still the same object with the same guid.</summary>
         private static readonly Dictionary<string, DestructableBase> _byGuid =
             new Dictionary<string, DestructableBase>(StringComparer.Ordinal);
+
+        /// <summary>THE SECOND ADDRESS, and it exists because the first one is not always the SAME on both
+        /// peers. <c>SceneObjectIdsComponent.MergeWith</c>:29-34 mints <c>SceneObjectId.CreateNew()</c> — a
+        /// FRESH RANDOM id — for every combined id that collides in the component it is merging into, and map
+        /// generation merges a registry per parcel (<c>MapPlot</c>:230-243). A random id is different on every
+        /// peer by construction, so a guid that collided is not an identity at all: the 2026-08-07 client log
+        /// counted THIRTEEN of them in one map, and every one of those objects would take the host's damage on
+        /// the wrong wall or on none.
+        ///
+        /// A COLLIDED GUID IS THEREFORE DROPPED, on both peers, and the object is addressed by something both
+        /// peers DERIVE rather than are told: where it stands. The two peers walk the same generated map (that
+        /// is already this arc's premise — the stable walk) and read the same baked transforms, so a rounded
+        /// world position is symmetric for the same reason the walk is, and — unlike an ordinal — it is
+        /// SELF-CHECKING: a peer whose map really did differ simply fails to resolve and says so, instead of
+        /// confidently naming the wrong wall. Rounded to a tenth of a unit because the positions are baked
+        /// rather than simulated; the grid is one unit, so a tenth is three orders of margin.</summary>
+        private static readonly Dictionary<string, DestructableBase> _byPos =
+            new Dictionary<string, DestructableBase>(StringComparer.Ordinal);
         private static bool _indexed;
         private static readonly HashSet<string> _said = new HashSet<string>(StringComparer.Ordinal);
 
         internal static void Reset()
         {
             _byGuid.Clear();
+            _byPos.Clear();
             _indexed = false;
             _said.Clear();
+        }
+
+        /// <summary>Where this object stands, to a tenth of a unit — the peer-independent half of its address.
+        /// Invariant culture, because a comma decimal separator on one peer and a dot on the other would be
+        /// exactly the silent mismatch this replaces.</summary>
+        internal static string PosTag(DestructableBase d)
+        {
+            var t = d == null ? null : d.transform;
+            if (t == null) return null;
+            var p = t.position;
+            return Mathf.Round(p.x * 10f).ToString(CultureInfo.InvariantCulture) + "," +
+                   Mathf.Round(p.y * 10f).ToString(CultureInfo.InvariantCulture) + "," +
+                   Mathf.Round(p.z * 10f).ToString(CultureInfo.InvariantCulture);
         }
 
         private static void SayOnce(string key, string message)
@@ -126,43 +159,71 @@ namespace Multiplayer.Tactical
             var root = map == null ? null : map.NavigableRoot;
             if (root == null) return false;
 
-            int idless = 0, collisions = 0, total = 0;
+            int idless = 0, total = 0, posClash = 0;
+            var byGuid = new Dictionary<string, DestructableBase>(StringComparer.Ordinal);
+            var collided = new HashSet<string>(StringComparer.Ordinal);
             foreach (var d in root.transform.GetComponentsInChildrenStable<DestructableBase>())
             {
                 total++;
+                string pos = PosTag(d);
+                if (pos != null)
+                {
+                    DestructableBase atPos;
+                    if (_byPos.TryGetValue(pos, out atPos) && !ReferenceEquals(atPos, d)) posClash++;
+                    else _byPos[pos] = d;      // first in the stable walk wins, identically on both peers
+                }
                 string guid = GuidOf(d);
                 if (string.IsNullOrEmpty(guid)) { idless++; continue; }
                 DestructableBase other;
-                if (_byGuid.TryGetValue(guid, out other) && !ReferenceEquals(other, d)) collisions++;
-                _byGuid[guid] = d;
+                if (byGuid.TryGetValue(guid, out other) && !ReferenceEquals(other, d)) collided.Add(guid);
+                else byGuid[guid] = d;
             }
+            // A GUID THAT NAMES TWO OBJECTS NAMES NONE, and it is dropped on BOTH peers rather than
+            // last-write-wins: the collision set itself can differ between peers (MergeWith's replacement id is
+            // random), so keeping a colliding guid anywhere means one peer resolves it and the other resolves
+            // it to something else. The position address below still names every one of them.
+            foreach (var g in collided) byGuid.Remove(g);
+            foreach (var kv in byGuid) _byGuid[kv.Key] = kv.Value;
             _indexed = true;
             Debug.Log("[Multiplayer][tac] indexed " + _byGuid.Count + " destructible(s) of " + total +
-                      " under the navigable root, by the same GuidInScene the game's own save uses.");
+                      " under the navigable root by the same GuidInScene the game's own save uses, and " +
+                      _byPos.Count + " by position as the peer-independent fallback.");
             // Both of these are the v1 failure class caught at battle start instead of at the first grenade.
             if (idless > 0)
-                Debug.LogError("[Multiplayer][tac] " + idless + " of " + total + " destructible(s) have NO readable " +
-                               "GuidInScene, so the host cannot name them and they will never break on any other " +
-                               "peer. Their scene holds no SceneObjectIds registry — the shape MapPlot:230-243 " +
-                               "leaves behind when a parcel's registry was merged and destroyed.");
-            if (collisions > 0)
-                Debug.LogError("[Multiplayer][tac] " + collisions + " destructible guid collision(s) — " +
-                               "SceneObjectIdsComponent.MergeWith:24-34 mints a FRESH random guid when a combined " +
-                               "one collides, and a random guid is different on every peer. Damage to those objects " +
-                               "will land on the wrong wall or nowhere at all.");
+                Debug.LogWarning("[Multiplayer][tac] " + idless + " of " + total + " destructible(s) have NO readable " +
+                                 "GuidInScene — their scene holds no SceneObjectIds registry, the shape " +
+                                 "MapPlot:230-243 leaves behind when a parcel's registry was merged and destroyed. " +
+                                 "They are still addressable by position, so this is no longer a lost object.");
+            if (collided.Count > 0)
+                Debug.LogWarning("[Multiplayer][tac] " + collided.Count + " destructible guid collision(s) — " +
+                                 "SceneObjectIdsComponent.MergeWith:29-34 mints a FRESH RANDOM guid when a combined " +
+                                 "one collides, and a random guid is different on every peer. Those guids are DROPPED " +
+                                 "on every peer and those objects are addressed by position instead.");
+            if (posClash > 0)
+                Debug.LogError("[Multiplayer][tac] " + posClash + " destructible(s) stand within a tenth of a unit of " +
+                               "another, so the position address cannot tell them apart. One of each pair is " +
+                               "unreachable by that address; if its guid also collided, the host's damage to it is " +
+                               "dropped on this peer with a line of its own.");
             return true;
         }
 
-        /// <summary>The destructible the host named, or null with a reason. Never a "closest match".</summary>
-        private static DestructableBase Resolve(string guid, out string why)
+        /// <summary>The destructible the host named, or null with a reason. Never a "closest match". The guid
+        /// is tried first — it is the game's own save key and it is unique for all but the merged handful — and
+        /// the position second, which is the address a merged one has left.</summary>
+        private static DestructableBase Resolve(string guid, string posTag, out string why)
         {
             why = null;
-            if (string.IsNullOrEmpty(guid)) { why = "the record carries no guid at all"; return null; }
+            if (string.IsNullOrEmpty(guid) && string.IsNullOrEmpty(posTag))
+            {
+                why = "the record carries neither a guid nor a position";
+                return null;
+            }
             if (!Index()) { why = "this peer has no tactical map to look in"; return null; }
             DestructableBase d;
-            if (_byGuid.TryGetValue(guid, out d) && d != null) return d;
-            why = "no destructible under this peer's navigable root carries GuidInScene '" + guid + "' (the " +
-                  "index holds " + _byGuid.Count + ")";
+            if (!string.IsNullOrEmpty(guid) && _byGuid.TryGetValue(guid, out d) && d != null) return d;
+            if (!string.IsNullOrEmpty(posTag) && _byPos.TryGetValue(posTag, out d) && d != null) return d;
+            why = "no destructible under this peer's navigable root carries GuidInScene '" + guid + "' (the index " +
+                  "holds " + _byGuid.Count + ") and none stands at " + posTag + " (" + _byPos.Count + " positions)";
             return null;
         }
 
@@ -181,13 +242,17 @@ namespace Multiplayer.Tactical
 
             var destructable = receiver.Destructable();
             if (destructable == null) return;
+            Index();                                       // the collided guids must be dropped before one is read
             string guid = GuidOf(destructable);
-            if (string.IsNullOrEmpty(guid))
+            if (!string.IsNullOrEmpty(guid) && !_byGuid.ContainsKey(guid)) guid = "";   // collided: it names nothing
+            string posTag = PosTag(destructable) ?? "";
+            if (guid.Length == 0 && posTag.Length == 0)
             {
                 SayOnce("envkey-" + TacticalActorLifecycle.SafeName(destructable),
                     "[Multiplayer][tac] damage to '" + TacticalActorLifecycle.SafeName(destructable) + "' is NOT " +
-                    "relayed — it has no readable GuidInScene, so no other peer can be told which object broke. " +
-                    "That piece of cover stays solid on every other screen for the rest of the mission.");
+                    "relayed — it has neither a usable GuidInScene nor a position, so no other peer can be told " +
+                    "which object broke. That piece of cover stays solid on every other screen for the rest of " +
+                    "the mission.");
                 return;
             }
             var aim = receiver.GetAimPoint();
@@ -206,6 +271,7 @@ namespace Multiplayer.Tactical
                     w.Write(guid);
                     w.Write(p.x); w.Write(p.y); w.Write(p.z);
                     DamageResultCodec.Write(w, result);
+                    w.Write(posTag);
                 });
         }
 
@@ -220,12 +286,13 @@ namespace Multiplayer.Tactical
             var aim = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
             var notes = new List<string>();
             var result = DamageResultCodec.Read(r, TacticalDamageSync.Tlc(), notes);
+            string posTag = r.ReadString();
 
             string why;
-            var destructable = Resolve(guid, out why);
+            var destructable = Resolve(guid, posTag, out why);
             if (destructable == null)
             {
-                SayOnce("envlost-" + guid,
+                SayOnce("envlost-" + guid + "@" + posTag,
                     "[Multiplayer][tac] the host broke a destructible this peer CANNOT find — " + why + ". That " +
                     "cover stays solid here while it is rubble on the host, so line of fire and pathing now " +
                     "disagree. This is the v1 mission-wide failure (fc661b7) and law L69 exists to make it " +

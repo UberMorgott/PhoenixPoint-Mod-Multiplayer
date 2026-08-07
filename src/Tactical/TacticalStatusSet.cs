@@ -77,20 +77,56 @@ namespace Multiplayer.Tactical
         /// from the same def. NAME, never guid: TFTV mints defs at runtime with <c>Guid.NewGuid()</c> (L130).
         /// A non-def source (an actor, a live equipment instance) is "" on EVERY peer, so it still matches
         /// itself and nothing regresses — it is simply not rebuildable, exactly as before.</summary>
-        internal static string Key(string defName, int refKey, string sourceDefName) =>
-            refKey.ToString(CultureInfo.InvariantCulture) + "@" + (defName ?? "") + "|" + (sourceDefName ?? "");
+        /// AND ITS TARGET, for the same reason and from the same evidence. <c>Status.Target</c> is a base-class
+        /// field the game ALWAYS supplies when it applies a status —
+        /// <c>TacticalActorBase.ApplyDamageInternal</c>:930-934 is the engine's own three-line rebuild recipe
+        /// (<c>Source</c>, then <c>Target</c>, then <c>SetValue</c>, then <c>ApplyStatus</c>) and
+        /// <c>StatusComponent.ApplyStatus</c>:180-184 is the same two assignments — and this rail was writing
+        /// one of the three. A status whose lifecycle READS its target is then not "the same status minus a
+        /// detail": <c>BleedStatus.OnApply</c>:133-135 is
+        /// <c>GetSlot(GetTargetSlotName(Target))</c> -&gt; <c>GetSlotBleedValue(slot)</c>, so a null target is a
+        /// null slot name, a null slot, and an NRE at <c>GetSlotBleedValue</c>'s first dereference. That is the
+        /// 2026-08-07 client log verbatim, five times in eight minutes on <c>Bleed_StatusDef</c>, each one
+        /// leaving the actor's bleed permanently different from the host's — and it is generic, not about
+        /// bleeding: <c>TacStatus.GetTargetSlotsNames</c>:75-79 reads it too.
+        ///
+        /// SHAPED, NOT GUESSED. The game gives a target exactly two nameable shapes: a raw slot-name STRING
+        /// (<c>AddStatusDamageKeywordData</c>:66 for bleed) and an <c>IDamageReceiver</c>
+        /// (<c>ApplyStatusAbility.GetStatusTarget</c>:44-55 hands the item's <c>ParentSlot</c>; anything else
+        /// is <c>data.Target</c>, the receiver). They are NOT interchangeable on arrival —
+        /// <c>GetTargetSlotsNames</c> does <c>Target.ToString()</c>, which on an <c>ItemSlot</c> is a Unity
+        /// object name and not a slot name — so the shape rides with the name: <c>s:</c> = string,
+        /// <c>r:</c> = receiver, rebuilt through law L66c's own round trip
+        /// (<c>TacticalActorKey.ResolveReceiver</c>, i.e. <c>CharacterBodyState.GetSlot</c>). A third shape is
+        /// said out loud rather than shipped as null.
+        ///
+        /// WHAT STILL DOES NOT RIDE, deliberately: a status's own accumulated INTERNALS. <c>BleedStatus</c>
+        /// merges every later application into the first instance (<c>OnApply</c>:146-154 —
+        /// <c>AddBleedDamage</c> + <c>_slotNames.Add</c>), and only the FIRST slot is its <c>Target</c>. A
+        /// bleed rebuilt from this rail therefore re-derives its magnitude from the one limb it names rather
+        /// than the host's running total. That is a bounded number, not a null dereference, and closing it
+        /// needs a per-status value channel this rail has no generic answer for.
+        internal static string Key(string defName, int refKey, string sourceDefName, string target = "") =>
+            refKey.ToString(CultureInfo.InvariantCulture) + "@" + (defName ?? "") + "|" + (sourceDefName ?? "") +
+            "|" + (target ?? "");
 
-        private static bool Split(string key, out string defName, out int refKey, out string sourceDefName)
+        private static bool Split(string key, out string defName, out int refKey, out string sourceDefName,
+                                  out string target)
         {
-            defName = null; refKey = 0; sourceDefName = "";
+            defName = null; refKey = 0; sourceDefName = ""; target = "";
             if (string.IsNullOrEmpty(key)) return false;
             int at = key.IndexOf('@');
             if (at <= 0) return false;
             if (!int.TryParse(key.Substring(0, at), NumberStyles.Integer, CultureInfo.InvariantCulture, out refKey))
                 return false;
             string rest = key.Substring(at + 1);
+            // Parsed from the RIGHT, so a def name that itself contains a bar still reads correctly.
             int bar = rest.LastIndexOf('|');
             if (bar < 0) { defName = rest; return defName.Length != 0; }   // pre-source key, still readable
+            target = rest.Substring(bar + 1);
+            rest = rest.Substring(0, bar);
+            bar = rest.LastIndexOf('|');
+            if (bar < 0) { defName = rest; sourceDefName = target; target = ""; return defName.Length != 0; }
             defName = rest.Substring(0, bar);
             sourceDefName = rest.Substring(bar + 1);
             return defName.Length != 0;
@@ -150,11 +186,12 @@ namespace Multiplayer.Tactical
             if (keys == null) return;
             foreach (var k in keys)
             {
-                string name; int refKey; string source;
-                Split(k, out name, out refKey, out source);
+                string name; int refKey; string source; string target;
+                Split(k, out name, out refKey, out source, out target);
                 w.Write(name ?? "");
                 w.Write(refKey);
                 w.Write(source ?? "");
+                w.Write(target ?? "");
             }
         }
 
@@ -169,7 +206,8 @@ namespace Multiplayer.Tactical
                 string name = r.ReadString();
                 int refKey = r.ReadInt32();
                 string source = r.ReadString();
-                keys.Add(Key(name, refKey, source));
+                string target = r.ReadString();
+                keys.Add(Key(name, refKey, source, target));
             }
             return keys;
         }
@@ -233,8 +271,8 @@ namespace Multiplayer.Tactical
         private static void ApplyOne(TacticalActorBase actor, StatusComponent comp,
                                      TacticalLevelController tlc, string key)
         {
-            string defName; int refKey; string sourceName;
-            if (!Split(key, out defName, out refKey, out sourceName)) return;
+            string defName; int refKey; string sourceName; string targetTag;
+            if (!Split(key, out defName, out refKey, out sourceName, out targetTag)) return;
             try
             {
                 var def = Resolve(defName);
@@ -266,6 +304,11 @@ namespace Multiplayer.Tactical
                                          "(OverwatchStatus.GetWeapon) will throw and leave its visuals behind.");
                     else status.Source = source;
                 }
+                // THE TARGET, BEFORE ApplyStatus AND FOR THE SAME REASON AS THE SOURCE — OnApply runs
+                // synchronously inside it and BleedStatus.OnApply:133-135 dereferences the slot this names on
+                // its very first statement. A target the host had and this peer cannot rebuild is a REFUSAL,
+                // not a null: applying the status anyway is precisely the NRE this line exists to stop.
+                if (!SetTarget(status, actor, targetTag, defName)) return;
                 comp.ApplyStatus(status);
             }
             catch (Exception ex)
@@ -282,7 +325,55 @@ namespace Multiplayer.Tactical
             var def = s == null ? null : s.BaseDef;
             if (def == null || string.IsNullOrEmpty(def.name)) return null;
             var source = s.Source as BaseDef;
-            return Key(def.name, RefKeyOf(s), source == null ? "" : source.name);
+            return Key(def.name, RefKeyOf(s), source == null ? "" : source.name, TargetTag(s));
+        }
+
+        /// <summary>The host's <c>Status.Target</c> as something the other peer can rebuild: its SHAPE and its
+        /// slot name. Both shapes name a slot the same way — a string IS the name
+        /// (<c>AddStatusDamageKeywordData</c>:66) and <c>IDamageReceiver.GetSlotName</c> is law L66c's own
+        /// identity string — so the two peers derive it identically from a def field. Anything else is left
+        /// out LOUDLY rather than shipped as an empty target that would rebuild into the null this whole
+        /// field exists to stop.</summary>
+        private static string TargetTag(Status s)
+        {
+            var t = s == null ? null : s.Target;
+            if (t == null) return "";
+            var text = t as string;
+            if (text != null) return "s:" + text;
+            var receiver = t as IDamageReceiver;
+            if (receiver != null) return "r:" + (receiver.GetSlotName() ?? "");
+            string type = t.GetType().Name;
+            if (_said.Add("target-" + type))
+                Debug.LogWarning("[Multiplayer][tac] a status is targeted at a " + type + ", which is neither a slot " +
+                                 "name nor an IDamageReceiver and so has no shared address. It rides with NO target, " +
+                                 "and any status whose OnApply reads one will behave differently on every other peer.");
+            return "";
+        }
+
+        private static readonly HashSet<string> _said = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>Put the host's target back on a rebuilt status, or refuse the rebuild. The receiver shape
+        /// goes through <c>TacticalActorKey.ResolveReceiver</c> — the SAME round trip the damage rail already
+        /// uses for a body part (law L66c), so "" is the actor itself and anything else must resolve to a real
+        /// slot or it is a named failure, never a fallback to null.</summary>
+        private static bool SetTarget(Status status, TacticalActorBase actor, string tag, string defName)
+        {
+            if (string.IsNullOrEmpty(tag)) return true;
+            string name = tag.Length > 2 ? tag.Substring(2) : "";
+            if (tag[0] == 's') { status.Target = name; return true; }
+            string why;
+            var receiver = TacticalActorKey.ResolveReceiver(actor, name, out why);
+            if (receiver == null)
+            {
+                Debug.LogError("[Multiplayer][tac] the host's status '" + defName + "' on " +
+                               TacticalActorLifecycle.SafeName(actor) + " is targeted at body part '" + name +
+                               "' and " + why + " — it is NOT applied here, because a status rebuilt without the " +
+                               "target its own OnApply dereferences throws instead of applying. That actor's state " +
+                               "stays different on this peer.");
+                return false;
+            }
+            status.Target = receiver;
+            return true;
         }
 
         private static int RefKeyOf(Status s)

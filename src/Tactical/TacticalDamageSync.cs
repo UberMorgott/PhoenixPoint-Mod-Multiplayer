@@ -985,16 +985,23 @@ namespace Multiplayer.Tactical
     {
         private static bool Prefix(DieAbility __instance, TacticalItem item, ref bool __result)
         {
-            if (LootMirror.TryConsume(TacticalActorKey.Of(__instance == null ? null : __instance.TacticalActorBase),
-                                      item, out __result)) return false;
+            int actorKey = TacticalActorKey.Of(__instance == null ? null : __instance.TacticalActorBase);
+            if (LootMirror.TryConsume(actorKey, item, out __result)) return false;
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;   // solo or host: roll natively
             __result = false;
+            // THE ITEM AND THE ACTOR ARE NAMED, and that is not decoration. This peer keeping an item is the
+            // FIRST half of a divergence whose second half is TacticalInventorySync reporting an item def this
+            // peer holds and the host does not, minutes later — and until this line printed the def guid the
+            // two could not be joined from a log at all.
+            var def = item == null ? null : item.TacticalItemDef;
             TacticalDamageSync.SayOnce("loot-roll",
-                "[Multiplayer][tac] a corpse's contents arrived with no host manifest — this client keeps every " +
-                "droppable item instead of drawing from SharedData.Random (the same stream the spawn tables " +
-                "use). The manifest rides with the killing hit; a death that reached here by any other route " +
-                "has none.");
+                "[Multiplayer][tac] a corpse's contents arrived with no host manifest — actor key " + actorKey +
+                ", item def '" + (def == null ? "<none>" : def.name + "' guid '" + def.Guid) + "'. This client keeps " +
+                "every droppable item instead of drawing from SharedData.Random (the same stream the spawn " +
+                "tables use), so this corpse holds more than the host's does and the extra will surface later as " +
+                "an inventory the host cannot match. The manifest rides with the killing hit, the death op and " +
+                "the resnapshot; reaching here means it rode none of them.");
             return false;
         }
     }

@@ -1119,6 +1119,24 @@ namespace Multiplayer.Tactical
             /// the host's closer for one actor, and the turn-edge sweep re-asserts it for every keyed live
             /// actor.</summary>
             public List<string> Traits;
+
+            /// <summary>The host's SELECTED EQUIPMENT for that actor, as an item def guid ("" = the host has
+            /// nothing selected, which <c>RagdollDieAbility</c>:162 makes a real value). Null = the host had no
+            /// equipment component to read, so there is nothing to reconcile.
+            ///
+            /// The same argument as <see cref="Statuses"/> and <see cref="Traits"/>, for the field that was
+            /// losable in BOTH directions across a mission boundary. The selection rode as an EVENT only
+            /// (<c>OpSelectEquipment</c>), and an event is exactly what a peer that is not ready yet drops:
+            /// the 2026-08-07 logs show the host relaying five per-actor switches while the client had no
+            /// tactical map at all to resolve a key against, and BOTH peers refusing to relay their own —
+            /// <c>Soldier_6/7/8</c> on the host at 23:14:02, <c>Rancid/Cinder/Kain</c> on the client at
+            /// 23:14:23 — because <c>EquipmentComponent</c>:56 raises the enter-play selection before this
+            /// peer has built its battle key map. Nothing retried, so a lost switch was permanent, and the
+            /// relay's own message correctly predicted the <c>EquipmentNotSelected</c> refusals that follow.
+            /// Riding the settle makes it re-asserted routinely instead: the turn-edge sweep covers every keyed
+            /// live actor, so the host's answer lands on every peer at the next turn edge at the latest,
+            /// whichever direction the event was lost in.</summary>
+            public string Selected;
         }
 
         /// <summary>HOST: which peer's order started the ability an actor is currently executing — 0 = the
@@ -1399,10 +1417,14 @@ namespace Multiplayer.Tactical
             if (key == 0)
             {
                 if (_saidKeyless.Add("sel:" + SafeActorName(actor)))
-                    Debug.LogError("[Multiplayer][tac] a weapon switch on " + SafeActorName(actor) + " cannot be " +
-                                   "relayed — that actor has no shared key. Every other peer keeps showing the " +
-                                   "weapon it was already holding, and the host will refuse any ability whose " +
-                                   "source is the new one (EquipmentNotSelected).");
+                    Debug.LogWarning("[Multiplayer][tac] a weapon switch on " + SafeActorName(actor) + " cannot be " +
+                                     "relayed — that actor has no shared key yet. This is the mission-entry window: " +
+                                     "EquipmentComponent:56 raises the enter-play selection before this peer has " +
+                                     "built its battle key map, so it is a DERIVED selection rather than a click. " +
+                                     "The host's own answer for this actor now rides every settle, so the peers " +
+                                     "converge at the next one and no ability is left refused for " +
+                                     "EquipmentNotSelected. A CLICK lost here would still be lost — if this line " +
+                                     "appears mid-battle rather than at entry, that is what happened.");
                 return;
             }
             string guid = equipment == null || equipment.ItemDef == null ? "" : equipment.ItemDef.Guid;
@@ -1464,14 +1486,42 @@ namespace Multiplayer.Tactical
                       actor.name + " -> " + EqName(eq) + " nonce=" + nonce);
         }
 
+        /// <summary>Make this actor hold what the host's is holding. Silent when they already agree — the
+        /// settle sweeps every keyed live actor at every turn edge, so the overwhelmingly common case is "no
+        /// change" and it must not narrate. A difference IS reported, because it is a switch that was lost on
+        /// the wire and the repair is the only evidence that it happened. Runs inside the caller's
+        /// <c>SyncApplyScope</c>, so <see cref="OnEquipmentSelected"/> stands down and nothing echoes back.</summary>
+        private static void ReconcileSelection(TacticalActor actor, string guid)
+        {
+            if (guid == null) return;                       // the host had no equipment component to read
+            EquipmentComponent comp; Equipment eq; string why;
+            if (!ResolveEquipment(actor, guid, out comp, out eq, out why))
+            {
+                if (_saidKeyless.Add("resel:" + SafeActorName(actor) + ":" + guid))
+                    Debug.LogError("[Multiplayer][tac] the host's settle says " + SafeActorName(actor) + " is holding " +
+                                   "an item this peer cannot resolve — " + why + ". That soldier keeps the weapon " +
+                                   "this screen shows, and any ability sourced from the host's one is refused here.");
+                return;
+            }
+            if (ReferenceEquals(comp.SelectedEquipment, eq)) return;   // already agreed: the ordinary case
+            string had = EqName(comp.SelectedEquipment);
+            comp.SetSelectedEquipment(eq);
+            TacticalUiRepaint.MarkDirty();
+            Debug.LogWarning("[Multiplayer][tac] weapon selection RECONCILED at the host's settle — " + actor.name +
+                             " was holding " + had + " and the host has " + EqName(eq) + ". A switch was lost on the " +
+                             "wire in one direction or the other (both peers drop one at mission entry, before the " +
+                             "battle key map exists), and this settle is what repairs it.");
+        }
+
         private static void ApplySelectEquipment(int key, string guid)
         {
             string why;
             var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
             if (actor == null)
             {
-                Debug.LogError("[Multiplayer][tac] the host's weapon switch for actor " + key + " cannot be " +
-                               "applied here — " + why + ". That soldier keeps the weapon this screen shows.");
+                Debug.LogWarning("[Multiplayer][tac] the host's weapon switch for actor " + key + " cannot be " +
+                                 "applied here — " + why + ". That soldier keeps the weapon this screen shows until " +
+                                 "the host's next settle for it, which carries the selection and repairs this.");
                 return;
             }
             EquipmentComponent comp; Equipment eq;
@@ -1587,10 +1637,15 @@ namespace Multiplayer.Tactical
             float wp = stats.WillPoints;
             var statuses = TacticalStatusSet.Collect(tacActor);
             var traits = tacActor.AbilityTraits;   // Send runs writeBody synchronously; no copy needed
+            var equips = tacActor.Equipments;
+            bool hasEquip = equips != null;
+            var selected = hasEquip ? equips.SelectedEquipment : null;
+            string selGuid = selected == null || selected.ItemDef == null ? "" : selected.ItemDef.Guid;
             Send(OpSettle, "settle " + tacActor.name + " @ " + Fmt(pos) + " ap=" + ap.ToString("0.##") +
                  " wp=" + wp.ToString("0.##") + (forced ? " FORCED" : ""), 0,
                  w => { w.Write(key); w.Write(pos.x); w.Write(pos.y); w.Write(pos.z); w.Write(ap); w.Write(wp);
-                        w.Write(forced); TacticalStatusSet.Write(w, statuses); WriteTraits(w, traits); });
+                        w.Write(forced); TacticalStatusSet.Write(w, statuses); WriteTraits(w, traits);
+                        w.Write(hasEquip); if (hasEquip) w.Write(selGuid); });
         }
 
         /// <summary>A5 adds the HAS-TARGET flag, and it is not thrift: the codec writes mask 0 for a null
@@ -2202,7 +2257,8 @@ namespace Multiplayer.Tactical
                     else if (op == OpSettle) QueueSettle(r.ReadInt32(),
                                                         new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
                                                         r.ReadSingle(), r.ReadSingle(), r.ReadBoolean(),
-                                                        TacticalStatusSet.Read(r), ReadTraits(r));
+                                                        TacticalStatusSet.Read(r), ReadTraits(r),
+                                                        r.ReadBoolean() ? r.ReadString() : null);
                     else if (op == OpSelectEquipment) ApplySelectEquipment(r.ReadInt32(), r.ReadString());
                     else
                     {
@@ -2624,10 +2680,10 @@ namespace Multiplayer.Tactical
         }
 
         private static void QueueSettle(int key, Vector3 pos, float ap, float wp, bool forced,
-                                        List<string> statuses, List<string> traits)
+                                        List<string> statuses, List<string> traits, string selected)
         {
             _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced,
-                                                Statuses = statuses, Traits = traits,
+                                                Statuses = statuses, Traits = traits, Selected = selected,
                                                 Epoch = TacticalDamageSync.StatEpoch };
         }
 
@@ -2803,6 +2859,10 @@ namespace Multiplayer.Tactical
                 // there was no host run to copy in the first place. Either way "this soldier has ended his
                 // turn" was decided locally and permanently. The host's list is the answer.
                 ApplyTraits(actor, s.Traits);
+                // AND THE WEAPON IN HIS HANDS, by the same argument again. It rode only as an event, and an
+                // event that arrives before this peer has a map — or is raised before this peer has a key for
+                // the actor — is simply gone, in whichever direction it was travelling. Here it is re-asserted.
+                ReconcileSelection(actor, s.Selected);
                 RefreshVisionTowards(actor);
             }
             Debug.Log("[Multiplayer][tac] CLIENT settled " + actor.name + " @ " + Fmt(s.Pos) +

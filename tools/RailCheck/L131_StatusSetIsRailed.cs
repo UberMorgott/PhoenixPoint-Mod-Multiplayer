@@ -39,16 +39,20 @@ namespace RailCheck
                                          BindingFlags.Instance | BindingFlags.Static;
 
         // Keys as the rail mints them:
-        // "<actorKeyTheStatusNames>@<statusDefName>|<sourceDefName>" — the source joined the identity with
-        // L147 (a status rebuilt without the def it was applied FROM throws in its own OnApply/OnUnapply).
-        // Overwatch below is the case that drove it: two overwatch statuses from different weapons are NOT
-        // interchangeable, and the plan must not treat them as such.
-        private const string Mounted = "-7@MountedStatus_StatusDef|";
-        private const string MountedElsewhere = "-9@MountedStatus_StatusDef|";
-        private const string Panic = "0@Panic_StatusDef|";
-        private const string Buff = "0@Rage_StatusDef|";
-        private const string Overwatch = "0@Overwatch_StatusDef|PDW_WeaponDef";
-        private const string OverwatchOtherWeapon = "0@Overwatch_StatusDef|AssaultRifle_WeaponDef";
+        // "<actorKeyTheStatusNames>@<statusDefName>|<sourceDefName>|<targetTag>" — the source joined the
+        // identity with L147 (a status rebuilt without the def it was applied FROM throws in its own
+        // OnApply/OnUnapply). Overwatch below is the case that drove it: two overwatch statuses from different
+        // weapons are NOT interchangeable, and the plan must not treat them as such. The TARGET joined it for
+        // the same reason and from the same failure mode one step earlier: BleedStatus.OnApply:133-135
+        // dereferences the slot its target names before anything else it does.
+        private const string Mounted = "-7@MountedStatus_StatusDef||";
+        private const string MountedElsewhere = "-9@MountedStatus_StatusDef||";
+        private const string Panic = "0@Panic_StatusDef||";
+        private const string Buff = "0@Rage_StatusDef||";
+        private const string Overwatch = "0@Overwatch_StatusDef|PDW_WeaponDef|";
+        private const string OverwatchOtherWeapon = "0@Overwatch_StatusDef|AssaultRifle_WeaponDef|";
+        private const string BleedTorso = "0@Bleed_StatusDef||s:Torso";
+        private const string BleedArm = "0@Bleed_StatusDef||s:LeftArm";
 
         internal static IEnumerable<string> Check()
         {
@@ -97,9 +101,48 @@ namespace RailCheck
                                  "vehicle, animation and all, several times a turn.";
             }
 
+            // ── (a2) THE TARGET IS PART OF THE IDENTITY, AND IT IS REBUILT ───
+            // A status the game applies is given THREE things (TacticalActorBase.ApplyDamageInternal:930-934
+            // and StatusComponent.ApplyStatus:180-184): its source, its target, and its value. This rail wrote
+            // the source and left Target null, and a status whose own OnApply dereferences it then throws
+            // instead of applying — BleedStatus.OnApply:133-135 is
+            // GetSlot(GetTargetSlotName(Target)) -> GetSlotBleedValue(slot), so a null target is a null slot
+            // and an NRE at that method's first instruction. Five of them in one battle on 2026-08-07, each
+            // caught, logged and tolerated, each leaving that actor's bleed permanently different here.
+            if (string.Equals(TacticalStatusSet.Key("Bleed_StatusDef", 0, "", "s:Torso"),
+                              TacticalStatusSet.Key("Bleed_StatusDef", 0, "", "s:LeftArm"),
+                              StringComparison.Ordinal))
+                yield return "L131 target-is-not-part-of-the-identity: two statuses aimed at DIFFERENT body parts " +
+                             "mint the same key, so the plan calls them interchangeable and a peer bleeding from " +
+                             "the wrong limb is never corrected.";
+            foreach (var v in Converges("bleeding from the wrong limb",
+                                        new[] { BleedArm }, new[] { BleedTorso })) yield return v;
+            {
+                // …and the rebuild must actually WRITE it, before the apply that reads it. Both halves matter:
+                // setting Target after ApplyStatus is setting it after OnApply has already thrown.
+                var applyOne = set.GetMethod("ApplyOne", All);
+                var setTarget = set.GetMethod("SetTarget", All);
+                if (applyOne == null || setTarget == null)
+                    yield return "L131 target-rebuild-gone: TacticalStatusSet.{ApplyOne,SetTarget} no longer " +
+                                 "resolves, so nothing puts the host's target back on a rebuilt status.";
+                else
+                {
+                    // CalleeSequence, not Callees: this ordering crosses the assembly boundary — our SetTarget
+                    // must come before the GAME's StatusComponent.ApplyStatus.
+                    var seq = Program.CalleeSequence(applyOne);
+                    int iTarget = seq.FindIndex(c => c.Name == "SetTarget");
+                    int iApply = seq.FindIndex(c => c.Name == "ApplyStatus");
+                    if (iTarget < 0 || iApply < 0 || iTarget > iApply)
+                        yield return "L131 target-set-too-late: the rebuilt status is targeted at " + iTarget +
+                                     " and applied at " + iApply + ". StatusComponent.ApplyStatus runs OnApply " +
+                                     "SYNCHRONOUSLY and OnApply is the first thing that reads the target, so a " +
+                                     "target written afterwards is written to a status that already threw.";
+                }
+            }
+
             // ── (b) the codec: what the host wrote is what the peer reads ────
             {
-                var sent = new List<string> { Mounted, Panic, Buff, Overwatch };
+                var sent = new List<string> { Mounted, Panic, Buff, Overwatch, BleedTorso };
                 List<string> got = null;
                 string threw = null;
                 try

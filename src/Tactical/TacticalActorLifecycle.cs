@@ -463,19 +463,29 @@ namespace Multiplayer.Tactical
     /// game's own later call gets the memo instead of a second draw. Every other peer NEVER draws: it answers
     /// from the host's declared list.
     ///
-    /// THE ADDRESS. Items carry no shared identity, so an entry is (def guid, decision) in the host's
-    /// <c>GetDroppableItems</c> order and the mirror consumes them in ITS order — which is the same order,
-    /// because it is the same method over the same inventory. The def guid is not decoration: it is the
-    /// CHECKSUM. <c>DropItems</c>:139-185 legitimately asks about a SUBSET of that list (it skips body parts
-    /// in the mount branch, and asks about nothing at all when the def destroys everything), so the mirror's
-    /// question sequence is a SUBSEQUENCE of the host's answers and the queue is scanned forward to the
-    /// matching guid. Falling off the end is a loud "keep it", never a silent one.
+    /// THE ADDRESS IS THE ITEM'S DEF, AND ONLY THE ITEM'S DEF — never its position in the list. That was the
+    /// 2026-08-07 divergence, and both peers' logs name it exactly. The host pre-rolls at
+    /// <c>TacticalActorBase.Die</c> and answered [clip, clip, rifle]; the client's own
+    /// <c>DieAbility.DropItems</c> asked [rifle, clip, clip]. The manifest used to be a QUEUE scanned FORWARD
+    /// to the matching guid, so reaching the rifle DISCARDED both clip answers, the queue emptied, and the two
+    /// clips the host had destroyed (rolls 43 % and 40 % against a 75 % destroy chance, host Player.log frame
+    /// 47909) were KEPT here — which is the extra item the inventory rail reported twelve minutes later.
+    /// The order was never guaranteed: <c>GetDroppableItems</c>:202-224 is inventory-then-addons over
+    /// <c>GetComponentsInChildren</c> plus a <c>Distinct()</c>, and the host reads it a moment EARLIER in the
+    /// death than the mirror does, with the equipped weapon moving between the two enumerations in between.
+    ///
+    /// SO IT IS A MULTISET KEYED BY DEF GUID: each def holds the host's answers for as many items of that def
+    /// as the host rolled, consumed one per question in whatever order the questions arrive. That keeps every
+    /// property the queue had — <c>DropItems</c>:139-185 legitimately asks about a SUBSET (it skips body parts
+    /// in the mount branch, and asks about nothing at all when the def destroys everything), and an unasked
+    /// answer simply goes unused instead of eating the next one — and drops the one it did not have. Running
+    /// out for a def the host DID name is a loud "keep it", never a silent one.
     /// </summary>
     internal static class LootMirror
     {
         private static readonly Dictionary<TacticalItem, bool> _hostRolls = new Dictionary<TacticalItem, bool>();
-        private static readonly Dictionary<int, Queue<KeyValuePair<string, bool>>> _declared =
-            new Dictionary<int, Queue<KeyValuePair<string, bool>>>();
+        private static readonly Dictionary<int, Dictionary<string, Queue<bool>>> _declared =
+            new Dictionary<int, Dictionary<string, Queue<bool>>>();
         private static MethodInfo _droppable;
         private static MethodInfo _shouldDestroy;
 
@@ -534,7 +544,14 @@ namespace Multiplayer.Tactical
         internal static void Declare(int actorKey, List<KeyValuePair<string, bool>> loot)
         {
             if (loot == null || loot.Count == 0) { _declared.Remove(actorKey); return; }
-            _declared[actorKey] = new Queue<KeyValuePair<string, bool>>(loot);
+            var byDef = new Dictionary<string, Queue<bool>>(StringComparer.Ordinal);
+            foreach (var kv in loot)
+            {
+                Queue<bool> q;
+                if (!byDef.TryGetValue(kv.Key ?? "", out q)) byDef[kv.Key ?? ""] = q = new Queue<bool>();
+                q.Enqueue(kv.Value);
+            }
+            _declared[actorKey] = byDef;
         }
 
         /// <summary>The one answer <c>ShouldDestroyItem</c> gets from us — memoized host roll, or the host's
@@ -547,23 +564,25 @@ namespace Multiplayer.Tactical
             return TryDeclared(actorKey, def == null ? "" : def.Guid, out value);
         }
 
-        /// <summary>The PURE half — no game types, no statics beyond the manifest itself — so the subsequence
-        /// rule is testable headless (RailCheck L67d). <c>DropItems</c>:139-185 legitimately asks about a
-        /// SUBSET of the pre-rolled list (body parts are skipped in the mount branch), so the mirror's question
-        /// sequence is a subsequence of the host's answers and the queue is scanned FORWARD to the matching
-        /// def. Running out is "keep it", said out loud — never a silent keep and never a local draw.</summary>
+        /// <summary>The PURE half — no game types, no statics beyond the manifest itself — so the rule is
+        /// testable headless (RailCheck L67d, L185). An answer is found by the item's DEF, never by its
+        /// position among the questions: the two peers enumerate the same droppable set at slightly different
+        /// moments of the same death and do NOT enumerate it in the same order, so a positional read discards
+        /// the answers it passes over. Running out for a def the host DID name is "keep it", said out loud —
+        /// never a silent keep and never a local draw.</summary>
         internal static bool TryDeclared(int actorKey, string itemGuid, out bool value)
         {
             value = false;
-            Queue<KeyValuePair<string, bool>> queue;
-            if (actorKey == 0 || !_declared.TryGetValue(actorKey, out queue)) return false;
-            while (queue.Count > 0)
+            Dictionary<string, Queue<bool>> byDef;
+            if (actorKey == 0 || !_declared.TryGetValue(actorKey, out byDef)) return false;
+            Queue<bool> q;
+            if (byDef.TryGetValue(itemGuid ?? "", out q) && q.Count > 0)
             {
-                var entry = queue.Dequeue();
-                if (queue.Count == 0) _declared.Remove(actorKey);
-                if (entry.Key == (itemGuid ?? "")) { value = entry.Value; return true; }
+                value = q.Dequeue();
+                if (q.Count == 0) byDef.Remove(itemGuid ?? "");
+                if (byDef.Count == 0) _declared.Remove(actorKey);
+                return true;
             }
-            _declared.Remove(actorKey);
             Debug.LogError("[Multiplayer][tac] the host's corpse manifest for actor " + actorKey + " has no answer " +
                            "left for item def '" + itemGuid + "' — this peer KEEPS it rather than guessing, so this " +
                            "corpse holds more than the host's does.");

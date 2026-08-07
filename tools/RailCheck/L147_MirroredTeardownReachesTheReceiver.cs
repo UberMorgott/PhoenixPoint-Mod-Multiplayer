@@ -72,14 +72,16 @@ namespace RailCheck
 
         // The overwatch pair the report is about, as the rail mints it, plus the same status from a different
         // weapon: with the source out of the identity these two are INDISTINGUISHABLE, which is the bug.
-        private const string OwPdw = "0@Overwatch_StatusDef|PDW_WeaponDef";
-        private const string OwRifle = "0@Overwatch_StatusDef|AssaultRifle_WeaponDef";
+        // "<refKey>@<defName>|<sourceDefName>|<targetTag>" — the trailing field is the status's own Target,
+        // which joined the identity after Bleed_StatusDef NRE'd five times rebuilt without one.
+        private const string OwPdw = "0@Overwatch_StatusDef|PDW_WeaponDef|";
+        private const string OwRifle = "0@Overwatch_StatusDef|AssaultRifle_WeaponDef|";
 
         internal static IEnumerable<string> Check()
         {
             var set = typeof(TacticalStatusSet);
             var key = set.GetMethod("Key", All, null,
-                                    new[] { typeof(string), typeof(int), typeof(string) }, null);
+                                    new[] { typeof(string), typeof(int), typeof(string), typeof(string) }, null);
             var keyOf = set.GetMethod("KeyOf", All);
             var applyOne = set.GetMethod("ApplyOne", All);
             var settleGate = set.Assembly.GetType("Multiplayer.Tactical.StatusChangeSettlesTheActor");
@@ -116,7 +118,7 @@ namespace RailCheck
 
             // ── (b) THE CODEC CARRIES IT ──────────────────────────────────────
             {
-                var sent = new List<string> { OwPdw, "0@Panic_StatusDef|" };
+                var sent = new List<string> { OwPdw, "0@Panic_StatusDef||" };
                 List<string> got = null;
                 string threw = null;
                 try
