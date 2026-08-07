@@ -106,6 +106,14 @@ namespace Multiplayer.Tactical
                                 w => w.Write((byte)(want ? 1 : 0)));
             }
             TacticalReadyButton.Repaint(); // this peer's own green flips NOW; the tally follows from the host
+            // THE PRESS LEAVES A MARK. The button was dead for a whole build and no log could tell "nobody
+            // clicked" from "the click reached nothing" — this line is the difference, and it is the only
+            // evidence that the hit surface is live short of asking a player to describe a colour.
+            // The peer's OWN flag only: L119 keeps the tally counters out of every method but the four that
+            // draw or write them, because a method that has the count in hand is one `if` from a quorum.
+            Debug.Log("[Multiplayer][tac] ready button pressed — this peer is now " +
+                      (LocalReady ? "READY" : "not ready") +
+                      ". Advisory only: nothing waits on this.");
         }
 
         // ─── HOST ──────────────────────────────────────────────────────────
@@ -465,6 +473,7 @@ namespace Multiplayer.Tactical
         private static void BuildGreenOverlay(GameObject go)
         {
             var overlay = new GameObject("MP_ReadyGreen", typeof(Image));
+            overlay.layer = go.layer;   // see TrimRaycast: a UI object built at runtime starts on layer 0
             var rt = overlay.GetComponent<RectTransform>();
             rt.SetParent(go.transform, false);
             rt.anchorMin = Vector2.zero;
@@ -546,6 +555,20 @@ namespace Multiplayer.Tactical
             }
 
             var hit = new GameObject("MP_ReadyHit", typeof(Image));
+            // A UI OBJECT BUILT AT RUNTIME STARTS ON LAYER 0, AND AN UNDRAWN GRAPHIC IS NOT HIT-TESTABLE.
+            // `Object.Instantiate` carried the clone's layer over from the prefab (UI, 5); `new GameObject`
+            // does not — it starts on Default (0), which the HUD camera does not render. Unity's own runtime
+            // UI factory takes exactly this line for exactly this reason (DefaultControls.CreateUIObject:
+            // `go.layer = parent.layer`). The consequence is not merely cosmetic: a graphic the canvas never
+            // batched keeps `CanvasRenderer.absoluteDepth == -1`, and GraphicRaycaster's first test is
+            // `if (graphic.depth == -1 || !graphic.raycastTarget || graphic.canvasRenderer.cull) continue;`
+            // — "-1 means it hasn't been processed by the canvas, which means it isn't actually drawn"
+            // (uGUI 2019.4, GraphicRaycaster.Raycast). So the face answered no raycast at all: no
+            // PointerEnter (hence no hover frame — PhoenixGeneralButton.cs:214-227 drives the highlight off
+            // OnPointerEnter, not off a colour tint) and no PointerClick (hence no `Button.onClick`). The
+            // button was not "unwired", it was UNREACHABLE, which is why both symptoms arrived together and
+            // on every peer. The settled-layout diagnostic below now prints layer+depth so a repeat says so.
+            hit.layer = btn.gameObject.layer;
             var rt = hit.GetComponent<RectTransform>();
             rt.SetParent(btn.transform, false);
             rt.anchorMin = Vector2.zero;
@@ -801,10 +824,20 @@ namespace Multiplayer.Tactical
                     : "inside its HUD container";
             }
 
-            int live = 0;
+            // LAYER AND DEPTH, NOT JUST THE COUNT. A surface can be raycastTarget=true and still be hit by
+            // NOTHING: GraphicRaycaster skips any graphic the canvas never drew (depth == -1), and a UI
+            // object built at runtime lands on layer 0 where the HUD camera does not draw it. Reporting the
+            // count alone is what let a completely dead button log a clean line (see TrimRaycast).
+            int live = 0, undrawn = 0;
             var names = new List<string>();
             foreach (var g in GetComponentsInChildren<Graphic>(true))
-                if (g != null && g.raycastTarget) { live++; if (names.Count < 8) names.Add(g.gameObject.name); }
+            {
+                if (g == null || !g.raycastTarget) continue;
+                live++;
+                if (g.depth == -1) undrawn++;
+                if (names.Count < 8)
+                    names.Add(g.gameObject.name + "(layer=" + g.gameObject.layer + " depth=" + g.depth + ")");
+            }
 
             Debug.Log("[Multiplayer][tac] ready button footprint: world x=[" + myLeft + ".." + myRight +
                       "] y=[" + myBottom + ".." + myTop + "] vs HUD container " + hud + " -> " + verdict +
@@ -812,6 +845,13 @@ namespace Multiplayer.Tactical
                       "] (trim: " + TacticalReadyButton._raycastReport + "). Anything above 1 here is a " +
                       "surface that can answer EventSystem.IsPointerOverGameObject() and silently eat a map " +
                       "click — that is what IsCursorOverGUI() gates the tactical confirm on.");
+            if (undrawn > 0)
+                Debug.LogError("[Multiplayer][tac] ready button is NOT HIT-TESTABLE: " + undrawn + " of its " +
+                               live + " raycast surface(s) report depth=-1, which is uGUI's own marker for " +
+                               "\"the canvas never drew this\" — GraphicRaycaster skips exactly those, so the " +
+                               "button takes neither hover nor click even though every wire on it is correct. " +
+                               "The usual cause is a layer the HUD camera does not render (a runtime-built UI " +
+                               "object starts on layer 0); compare the layer= values above against the clone's.");
         }
 
         /// <summary>
