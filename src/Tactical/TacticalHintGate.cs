@@ -112,12 +112,23 @@ namespace Multiplayer.Tactical
     /// reason this surface is bidirectional rather than the usual intent/outcome pair — there is nothing to
     /// validate and nothing to arbitrate, a hint spends nothing and orders nothing.
     ///
-    /// ONE CHOKE POINT FOR BOTH DEDUPES: <see cref="ShouldSend"/>. It is true exactly once per hint name
-    /// per battle, so (a) a peer that already showed the hint locally drops the mirrored copy, and (b) the
-    /// host's relay cannot echo back to the sender, because the sender marked the name when it sent. There
-    /// is no second flag anywhere and no per-call-site guard. The game's own <c>IsHintRegistered</c>:152
-    /// (which consults both <c>_hintsPendingDisplay</c> and <c>_shownHints</c>) is a second, independent
-    /// net underneath it — a mirrored hint a peer already dismissed re-registers as a no-op.
+    /// ONE CHOKE POINT, AND IT GUARDS THE DISPLAY ONLY: <see cref="ShouldSend"/>. It is true exactly once
+    /// per hint name per battle, so a peer that already showed the hint locally drops the mirrored copy.
+    /// The game's own <c>IsHintRegistered</c>:152 (which consults both <c>_hintsPendingDisplay</c> and
+    /// <c>_shownHints</c>) is a second, independent net underneath it.
+    ///
+    /// THE RELAY IS NOT BEHIND THAT CHOKE, AND PUTTING IT THERE WAS THE BUG (2026-08-06 session, fixed
+    /// here). The host runs the real sim, so it is normally the FIRST peer to sight a boss and the first to
+    /// mark the name; a client that sighted it independently then handed the host a 0x8A that the choke
+    /// swallowed, and the third peer — who had seen nothing — never got a copy at all. The host now relays
+    /// UNCONDITIONALLY and the echo cannot come back, for a structural reason rather than a flag: the only
+    /// thing that SENDS is <see cref="Capture"/>, which is itself gated by the choke, and a client never
+    /// re-sends what it receives.
+    ///
+    /// AND A CLAIM THAT COULD NOT BE HONOURED IS GIVEN BACK (<see cref="Forget"/>). Taking the name off the
+    /// wire and then failing to show it — no live manager yet, or the TFTV def not rebuilt on this peer —
+    /// used to silence that peer's OWN later sighting of the same boss for the rest of the battle, with the
+    /// panel simply absent and one warning line to explain it.
     ///
     /// NOTHING HERE BLOCKS ANY PEER. This registers a hint and returns; the panel is popped by that peer's
     /// own per-frame pump (<c>UIStateCharacterSelected.UpdateState</c>:1105 and its four siblings), and the
@@ -146,6 +157,17 @@ namespace Multiplayer.Tactical
         {
             if (string.IsNullOrEmpty(hintName)) return false;
             lock (Known) return Known.Add(hintName);
+        }
+
+        /// <summary>GIVE THE NAME BACK when this peer took it off the wire and then could NOT show it — no
+        /// live tactical hint manager yet, or no def by that name here (see <see cref="Show"/>). Without
+        /// this, a claim is permanent: the one silent line in the whole seam, because the peer that dropped
+        /// the panel also silences its OWN later sighting of the same boss, forever, for this battle. Also
+        /// PURE, so RailCheck L162 drives the claim/release pair directly.</summary>
+        internal static void Forget(string hintName)
+        {
+            if (string.IsNullOrEmpty(hintName)) return;
+            lock (Known) Known.Remove(hintName);
         }
 
         // ─── capture: the ONE trigger funnel, on every peer alike (law 4c, presentation seam) ───
@@ -233,14 +255,23 @@ namespace Multiplayer.Tactical
                 using (var r = new BinaryReader(ms, Encoding.UTF8))
                     name = r.ReadString();
 
-                // THE choke: already known here means this peer has shown it or sent it, and the relay it
-                // would otherwise start is the echo loop.
+                // THE RELAY IS UNCONDITIONAL, AND IT COMES FIRST. It used to sit behind the display choke,
+                // which made the host's own eyes silence the third peer: the host sights the boss first
+                // (it runs the real sim), marks the name, and a client's 0x8A for that same hint was then
+                // dropped at the choke and NEVER fanned out — so in a 3-peer session the panel reached
+                // whoever the host had already reached and nobody else. Relaying a known name cannot echo:
+                // the ONLY sender is Capture, which is itself gated by the choke, and a client never
+                // re-sends what it receives. The host must also relay even when its own tactical manager is
+                // momentarily unreachable, which is the second reason this is above the choke and not below.
+                if (engine.IsHost) engine.BroadcastToAll(Envelope(name));
+
+                // THE DISPLAY CHOKE, and only the display: already known here means this peer has shown it
+                // or triggered it locally.
                 if (!ShouldSend(name)) return true;
 
-                // The sender cannot address its fellow clients — only the host can, and it must do so even
-                // if its own tactical manager is momentarily unreachable.
-                if (engine.IsHost) engine.BroadcastToAll(Envelope(name));
-                Show(name);
+                // A claim this peer cannot honour is GIVEN BACK — otherwise the drop is permanent and
+                // silences this peer's own later sighting too (see Forget).
+                if (!Show(name)) Forget(name);
             }
             catch (Exception ex) { Debug.LogError("[MP][hint] inbound FAILED: " + ex); }
             return true;
@@ -248,17 +279,22 @@ namespace Multiplayer.Tactical
 
         /// <summary>The game's OWN by-name path (<c>TacContextHelpManager.CmdShowHint</c>:385-398): find the
         /// def in the live hint DBs, register it, load its assets. Nothing is displayed from here — the
-        /// per-frame pump does that on its own idle frame, which is why no peer is ever gated on a click.</summary>
-        private static void Show(string name)
+        /// per-frame pump does that on its own idle frame, which is why no peer is ever gated on a click.
+        ///
+        /// RETURNS FALSE when the hint did NOT reach this peer's queue, which is the caller's signal to give
+        /// the name back (<see cref="Forget"/>): a peer still loading its battle, or one whose TFTV def has
+        /// not been rebuilt yet, must not be silenced for the rest of the mission by a delivery it could not
+        /// use. TRUE also covers "already queued or already dismissed here" — that IS shown.</summary>
+        private static bool Show(string name)
         {
             var level = GameUtl.CurrentLevel();
             var mgr = level == null ? null : level.GetComponent<TacContextHelpManager>();
             if (mgr == null)
             {
                 Debug.LogWarning("[MP][hint] '" + name + "' DROPPED — this peer has no live tactical hint " +
-                                 "manager (not in a battle yet, or already tearing down); hints are not " +
-                                 "replayed after the fact.");
-                return;
+                                 "manager (not in a battle yet, or already tearing down); the name is released " +
+                                 "so a later sighting on this peer can still raise it.");
+                return false;
             }
             // isMandatory follows the DB the def lives in, exactly as EventTypeTriggered:59-60 assigns it:
             // AlwaysDisplayedHintsDb is the "show even with hints switched off" set, and that is where TFTV
@@ -270,17 +306,19 @@ namespace Multiplayer.Tactical
             {
                 Debug.LogWarning("[MP][hint] '" + name + "' SKIPPED on this peer — no hint def by that name in " +
                                  "either live hint DB. Hints minted by host-only turn-0 code (TFTV's per-mission " +
-                                 "gang/Revenant/Ancient defs) do not exist where the battle is a loaded save.");
-                return;
+                                 "gang/Revenant/Ancient defs) do not exist where the battle is a loaded save; " +
+                                 "the name is released so a later delivery, after the def is rebuilt, still lands.");
+                return false;
             }
             if (!mgr.RegisterContextHelpHint(def, mandatory, null))
             {
                 Debug.Log("[MP][hint] '" + name + "' already queued or already dismissed here — not shown twice");
-                return;
+                return true;
             }
             if (LoadAssets != null) LoadAssets.Invoke(mgr, new object[] { def });
             Debug.Log("[MP][hint] '" + name + "' queued on this peer from another peer's sighting — the native " +
                       "per-frame pump pops it on this peer's own idle frame, blocking nobody");
+            return true;
         }
 
         private static ContextHelpHintDef Find(ContextHelpHintDbDef db, string name)

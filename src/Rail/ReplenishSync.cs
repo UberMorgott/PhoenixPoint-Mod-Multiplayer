@@ -169,6 +169,134 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        // ─── S4: the resupply GATE is asked again once the returning peer's own state has ARRIVED ───
+
+        /// <summary>Frames left in the post-arrival re-ask window, 0 = disarmed. See
+        /// <see cref="ArmArrivalRecheckPatch"/>.</summary>
+        private static int _recheckFrames;
+
+        /// <summary>THE CEILING, named. ~10 s at 60 fps — two orders of magnitude over the measured gap (the
+        /// 2026-08-06 session's post-mission value-rail batch landed 2 frames / 445 ms after
+        /// <c>UIStateInitial.EnterState</c>) and still short enough that the screen can never appear
+        /// long after the player has moved on. Monotone: it only counts down, from one arming, so this can
+        /// never become an unbounded wait and it never reads another peer.</summary>
+        private const int RecheckFrames = 600;
+
+        /// <summary>Session/level teardown — a live count-down must not survive into the next geoscape.</summary>
+        internal static void Reset() { _recheckFrames = 0; }
+
+        /// <summary>
+        /// THE RESUPPLY SCREEN WAS RESTORED IN 76980f2 AND STILL DID NOT APPEAR, and this is the half that
+        /// commit asserted rather than proved. Its gate is the game's own
+        /// <c>UIStateInitial.EnterState</c>:125 — <c>ViewerFaction is GeoPhoenixFaction &amp;&amp;
+        /// GetMissingItems().Any()</c> — and its verdict there was: "gated on this peer's own
+        /// GetMissingItems() over its own aircraft and its own storage, all mirrored, so nothing about it
+        /// needs the wire". MIRRORED, YES. ARRIVED, NO.
+        ///
+        /// MEASURED (2026-08-06 client log, mission return at 21:22:38). A client's post-battle geoscape is
+        /// rebuilt from the HOST'S MID-TACTICAL save, so at <c>EnterState</c> every returning soldier still
+        /// carries the FULL pre-battle loadout: nothing is missing, nothing is un-full, nothing is damaged,
+        /// <c>GetMissingItems()</c> is empty and <c>QueueReplenishState</c>:127 is never called. The writes
+        /// that make it non-empty are the host's own <c>PostMissionReplenish</c> / <c>SetItems</c>, and they
+        /// arrive on the ordinary 0xAC value rail TWO FRAMES LATER (frame 52446 enters the state; the
+        /// post-mission batch applies at 52448). The whole session contains not one
+        /// <c>Queuerd state switch … UIStateReplenish</c> line while the SAME branch's custom-mission arm
+        /// fired normally — so the branch ran and only this one gate was false.
+        ///
+        /// THE FIX IS TO ASK THE GAME'S OWN QUESTION AGAIN, not to mirror an answer: arm on arrival, then
+        /// re-ask <c>GetMissingItems()</c> each frame until it says yes, and hand the job back to the game's
+        /// own <c>QueueReplenishState</c>. Nothing new decides what "missing" means, no wire byte is added,
+        /// and the rank/order arm above still places it. HOST DOES NOTHING: its own gate was already true at
+        /// <c>EnterState</c>, because its own <c>Complete</c> ran before it.
+        /// </summary>
+        [HarmonyPatch(typeof(UIStateInitial), "EnterState")]
+        internal static class ArmArrivalRecheckPatch
+        {
+            private static readonly System.Reflection.FieldInfo ParamsField =
+                AccessTools.Field(typeof(UIStateInitial), "_params");                 // UIStateInitial.cs:29
+
+            private static void Postfix(UIStateInitial __instance)
+            {
+                try
+                {
+                    var engine = NetworkEngine.Instance;
+                    if (engine == null || !engine.IsActiveSession || engine.IsHost) return;
+                    if (ParamsField == null)
+                    {
+                        Debug.LogError("[MP][replenish] UIStateInitial._params did not resolve — this peer " +
+                                       "cannot tell a post-mission arrival from any other, so the resupply " +
+                                       "screen is left to the one gate that already misses it.");
+                        return;
+                    }
+                    // THE GAME'S OWN TEST, verbatim (UIStateInitial.cs:102) — the branch whose last statement
+                    // is QueueReplenishState. No second opinion about when a mission is over.
+                    var prms = ParamsField.GetValue(__instance) as UIStateInitial.Params;
+                    var mission = prms == null ? null : prms.LastMission;
+                    if (mission == null) return;
+                    if (!mission.IsCompleted &&
+                        mission.GetMissionOutcomeState() == PhoenixPoint.Tactical.Levels.TacFactionState.Playing)
+                        return;
+
+                    var view = GeoLevel()?.View;
+                    if (view == null) return;
+                    // Already queued by the native gate = the state DID arrive in time; re-asking would
+                    // double the screen.
+                    if (SwitchQueryOf(view)?.TryGetStateSwitchRequestForState<UIStateReplenish>(out _) == true)
+                        return;
+
+                    _recheckFrames = RecheckFrames;
+                    Debug.Log("[MP][replenish] post-mission arrival: the resupply gate said \"nothing missing\" " +
+                              "while this peer's returning squad is still the host's pre-battle save — re-asking " +
+                              "the game's own GetMissingItems() for the next " + RecheckFrames + " frames.");
+                }
+                catch (Exception ex)
+                { Debug.LogError("[MP][replenish] arming the post-mission resupply re-ask failed: " + ex); }
+            }
+        }
+
+        private static readonly System.Reflection.FieldInfo SwitchQueryField =
+            AccessTools.Field(typeof(GeoscapeView), "_viewSwichQuery");                // GeoscapeView.cs:138 (game typo)
+
+        private static GeoscapeViewSwitchQuery SwitchQueryOf(GeoscapeView view) =>
+            view == null || SwitchQueryField == null
+                ? null
+                : SwitchQueryField.GetValue(view) as GeoscapeViewSwitchQuery;
+
+        /// <summary>Driven from <c>SyncEngine.Tick</c>, next to <c>EventPopup.DrainHeldRaises</c> — the other
+        /// seam that exists because a client's arrival and its state do not land on the same frame. Disarmed
+        /// the moment it queues, and by the ceiling either way.</summary>
+        internal static void ClientArrivalTick(NetworkEngine engine)
+        {
+            if (_recheckFrames <= 0) return;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) { _recheckFrames = 0; return; }
+            try
+            {
+                bool lastFrame = --_recheckFrames <= 0;
+                var geo = GeoLevel();
+                var view = geo?.View;
+                if (view == null) return;
+                if (!(geo.ViewerFaction is GeoPhoenixFaction phoenix)) { _recheckFrames = 0; return; }
+                if (!phoenix.GetMissingItems().Any())
+                {
+                    if (lastFrame)
+                        Debug.Log("[MP][replenish] post-mission re-ask expired with nothing missing — this " +
+                                  "squad really did come back whole, so there is no resupply screen to show.");
+                    return;
+                }
+                _recheckFrames = 0;
+                view.QueueReplenishState();   // the game's own raiser, at the game's own priority + our rank
+                Debug.Log("[MP][replenish] the host's post-mission writes have landed and the squad IS short — " +
+                          "queued the game's own UIStateReplenish, which UIStateInitial:127 could not because " +
+                          "this peer's geoscape was still the pre-battle save when it asked.");
+            }
+            catch (Exception ex)
+            {
+                _recheckFrames = 0;
+                Debug.LogError("[MP][replenish] post-mission re-ask failed — this peer gets no resupply " +
+                               "screen for this mission: " + ex);
+            }
+        }
+
         // ─── S2 capture: repair (block-first, law 3) ───
 
         /// <summary>THE seam for repair. <c>GeoCharacter.RepairItem(GeoItem, bool)</c>:1387 is the sole

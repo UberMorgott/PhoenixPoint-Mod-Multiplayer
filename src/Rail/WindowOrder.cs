@@ -93,6 +93,15 @@ namespace Multiplayer.Network.Sync
 
         private static bool _bindLogged;
 
+        /// <summary>Log-once-per-screen for the hold below — a queue that is deliberately not draining must
+        /// still say so, but once, not every frame the player spends in the research tree.</summary>
+        private static readonly HashSet<string> _heldOnScreen = new HashSet<string>(StringComparer.Ordinal);
+
+        private static PhoenixPoint.Geoscape.Levels.GeoLevelController GeoLevel() =>
+            Base.Core.GameUtl.CurrentLevel() == null
+                ? null
+                : Base.Core.GameUtl.CurrentLevel().GetComponent<PhoenixPoint.Geoscape.Levels.GeoLevelController>();
+
         /// <summary>Called from the ONE queue entry point, on the request the game is actually about to
         /// insert (after any rank rebuild — a rebuilt request is a different instance, and stamping the one
         /// that never reaches the list would key nothing). Never throws into game code.</summary>
@@ -123,6 +132,58 @@ namespace Multiplayer.Network.Sync
         /// <paramref name="now"/> and bounded by a constant: once true it cannot become false again, which
         /// is the whole "this cannot become an unbounded wait" argument in one line.</summary>
         internal static bool SettleExpired(float queuedAt, float now) => now - queuedAt >= SettleSeconds;
+
+        // ─── THE OPEN-SCREEN HOLD: a notification waits for the map, it does not take the screen ───
+
+        /// <summary>Priority at or above which a queued request is a TRANSITION, not a notification, and is
+        /// never held: the squad screen (<c>int.MaxValue</c>, L144), the mission-outcome modal
+        /// (<c>int.MaxValue</c>), a cutscene (100, <c>ToCutsceneState</c>) and the game-over state. Below it
+        /// sits the review family this hold is for — the event windows (0 / 10 / 15,
+        /// <c>GeoscapeView.OnGeoscapeEventRaised</c>:2044-2059) and the resupply screen
+        /// (<see cref="ReplenishSync.ReplenishRank"/> 20). The game's own knob, so this adds no second axis.</summary>
+        internal const int TransitionPriority = 100;
+
+        /// <summary>THE GEOSCAPE MAP: the only view states in which the player is "on the geoscape". Everything
+        /// else under <c>PhoenixPoint.Geoscape.View.ViewStates</c> is either a screen the player OPENED
+        /// (research, manufacturing, base layout, roster, diplomacy, interception, the log, the options) or a
+        /// window the queue itself put up — and a window that is up is already covered one step earlier, by
+        /// the game's own <c>_currentStateSwitchRequest != null</c> early-out.
+        ///
+        /// DECLARED AS THE MAP AND NOT AS THE SCREENS, so an unknown state HOLDS rather than interrupts:
+        /// holding is recoverable by the player's next click, interrupting is not recoverable at all.</summary>
+        private static readonly HashSet<string> MapStates = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "UIStateNothingSelected",   // the map with nothing selected — owns the time-control module (:99)
+            "UIStateVehicleSelected",   // the map with an aircraft selected — likewise (:168)
+            "UIStateInitial",           // transient: switches to one of the two above in its own EnterState
+            "UIStateLoading",           // no player and no screen to protect
+        };
+
+        /// <summary>PURE, and RailCheck L161 executes it. TRUE = keep this request in the queue this frame.
+        ///
+        /// WHY THE HOLD EXISTS AT ALL, and why it is a co-op-only rule. In vanilla every full-screen section
+        /// STOPS THE CLOCK on entry — <c>UIModuleGeoSectionBar</c>:119/:135/:148/:160,
+        /// <c>UIStateResearch</c>:22, <c>UIStateManufacturing</c>:51, <c>UIStateDiplomacy</c>:27,
+        /// <c>UIStatePhoenixBaseLayout</c>:43, <c>UIStateGeoscapeLog</c>:18 — so a solo player's sim raises
+        /// nothing while they read and there is never anything to push on top of them. Co-op deleted that
+        /// guarantee ON PURPOSE (2026-08-04 pause rework, <see cref="PauseHold"/>): resume is unconditional
+        /// from any peer, so somebody else's play button restarts this peer's sim while they are inside a
+        /// screen, and <c>ProcessQueriedStateSwitch</c>:71 then pushes every event that fires on top of it.
+        /// The clock used to hold the queue; nothing replaced it. This does — LOCALLY.
+        ///
+        /// IT WAITS ON NO HUMAN BUT THE ONE HOLDING IT. The predicate reads this peer's own current view
+        /// state and the request's own priority: no peer, no roster, no message, no membership. It is
+        /// released by the local player's own next navigation, which is the same click they were going to
+        /// make anyway, and it is invisible to every other peer's queue.
+        /// ponytail: a peer who walks away inside the research screen keeps their OWN notifications queued
+        /// (and, on a host, keeps their own <c>_currentStateSwitchRequest</c> null, so a 0xB9 advance has
+        /// nothing to answer). That is the same standing exposure an AFK peer already has with a window open,
+        /// and the 0xB9 advance cannot help in either case. Give the hold a ceiling only if a live session
+        /// shows an idle peer in a menu actually costing another peer something.</summary>
+        internal static bool HoldsForOpenScreen(int priority, Type currentViewState) =>
+            priority < TransitionPriority &&
+            currentViewState != null &&
+            !MapStates.Contains(currentViewState.Name);
 
         /// <summary>Re-sort <paramref name="pending"/> in place by <see cref="Compare"/>, STABLY (the
         /// original index is the final tie-break, so equal keys keep the game's insert order). Returns true
@@ -178,6 +239,19 @@ namespace Multiplayer.Network.Sync
                 if (CurrentField.GetValue(query) != null) return true;   // a switch is in flight; native early-returns
                 if (!(RequestsField.GetValue(query) is IList<GeoscapeViewStateSwitchRequest> pending) ||
                     pending.Count == 0) return true;
+
+                // THE OPEN-SCREEN HOLD (see HoldsForOpenScreen). Asked of the head, because the head is what
+                // the game is about to push; a transition further down the queue is not in front of anybody.
+                var current = GeoLevel()?.View?.CurrentViewState;
+                if (HoldsForOpenScreen(pending[0].Priority, current == null ? null : current.GetType()))
+                {
+                    if (_heldOnScreen.Add(current.GetType().Name))
+                        Debug.Log("[MP][windows] queue HELD while " + current.GetType().Name + " is open — a " +
+                                  "notification is reviewed on the geoscape, not on top of a screen the player " +
+                                  "opened. It drains as soon as this peer is back on the map (logged once per " +
+                                  "screen).");
+                    return false;
+                }
 
                 // BOUNDED LOCAL SETTLE, measured from when WE queued the head. A later arrival never
                 // extends it — the head's queue time is fixed — so the hold is one SettleSeconds, once.

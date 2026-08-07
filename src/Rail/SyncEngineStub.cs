@@ -158,6 +158,10 @@ namespace Multiplayer.Network.Sync
             // in (still in tactical, mid-load). Not a pump over the mirrored records — the 1 Hz record scan
             // deleted 2026-07-30 is not coming back; this drains only raises 0xB6 actually DELIVERED here.
             EventPopup.DrainHeldRaises(_engine);
+            // client-only inside, and the same shape of problem one screen over: the post-mission resupply
+            // gate is asked at UIStateInitial.EnterState, a frame or two before the host's own post-mission
+            // writes land on 0xAC. Re-asks the GAME'S own GetMissingItems() over a bounded window.
+            ReplenishSync.ClientArrivalTick(_engine);
             GenericApplier.ClientCrcTick(_engine); // client-only inside: law-7 drift backstop, one root per second
             // (it charges itself per ROOT — the name in the log says which root cost the frame)
             // (No event pump: an event WINDOW is a live host→client 0xB6 raise, not a derivation over the
@@ -188,6 +192,7 @@ namespace Multiplayer.Network.Sync
             CutsceneMirror.Reset();  // 0xBA cutscene raise seq stream, same teardown-only contract
             MarketplaceSync.Reset();  // 0xBF offer-list seq stream, same teardown-only contract
             MissionOutcomeMirror.Reset();  // 0xBB reward raise seq stream + any un-consumed stash
+            ReplenishSync.Reset();  // the post-mission re-ask count-down must not survive into the next session
             Multiplayer.Tactical.TacticalTurnSync.Reset();  // 0x80 seq + the client's turn cursor / mission-over flag
             Multiplayer.Tactical.TacticalCommandSync.Reset();  // 0x82 seq + pending settles + the per-battle "not covered" notices
             Multiplayer.Tactical.TacticalDamageSync.Reset();   // 0x84 seq + gap cursor + the mirror-apply scope depth
