@@ -121,6 +121,7 @@ namespace Multiplayer.Network.Sync
         private static readonly List<string> _forcePrefixes = new List<string>(); // scoped forced re-emit, see ForceReemit
         private static float _nextTickAt;
         private static bool _cycleUrgent;   // a FlushNow is outstanding — see RunSlice / UrgentSliceBudgetMs
+        private static bool _urgentPending; // that flush landed MID-cycle — see FlushNow / RunSlice
         private static float _cycleStartedAt;
 
         /// <summary>WALL seconds the last completed cycle took, BeginCycle → DiffAndEmit. Not a perf
@@ -615,7 +616,42 @@ namespace Multiplayer.Network.Sync
         /// No guards needed: <see cref="HostTick"/> still returns on non-host / no session / no geoscape,
         /// so this can be called from any seam that knows the host just changed something the client
         /// must not wait for.</summary>
-        public static void FlushNow() { _nextTickAt = 0f; _cycleUrgent = true; }
+        public static void FlushNow()
+        {
+            _nextTickAt = 0f;
+            // THE ONE-SHOT GESTURE'S MISSING HALF (geoscape flight/exploration lateness, 3-instance session
+            // 2026-08-04 23:22). A flush that lands MID-cycle cannot be served by that cycle if the walk has
+            // already passed the root that changed — BeginCycle snapshots the root list and _cycleNext only
+            // ever moves forward, so a departure written at root #400 of 625 while the cursor sits at #500 is
+            // simply not in this batch. It ships from the NEXT cycle, which starts on the very next frame
+            // (_nextTickAt is 0 and nothing rewrites it until BeginCycle) — but that next cycle used to walk
+            // at the ORDINARY SliceBudgetMs, because RunSlice clears _cycleUrgent at completion and the
+            // one-shot gesture has no second flush left to re-arm it. ~625 roots at 3 ms/frame is the ~0.25 s
+            // the user measures, and it is measured on exactly the gestures that fire ONCE: an aircraft
+            // departing, an exploration starting. The gesture the 141 ms figure came from does not show it —
+            // an equip drag re-enters ShouldRunNative 6-7 frames in a row (EquipSync's own repeat-guard note),
+            // so one of those flushes always lands inside the serving cycle and keeps it urgent.
+            // Carry the urgency across the boundary instead of re-arming it per seam: the flag says "a change
+            // is outstanding", and it stays true until a cycle that STARTED after the change has shipped.
+            //
+            // FACTION TRAFFIC, and why this hand-off does NOT widen it. Every faction's aircraft departs
+            // through the same GeoVehicle.StartTravel funnel the player's does, so on the host EVERY
+            // departure on the planet already arms this — VehicleSync.CaptureTravel:200 reaches
+            // IntentRail.ShouldRunNative, whose first line is FlushOnHostGesture, BEFORE any owner test.
+            // A continuous stream of departures therefore already pins _cycleUrgent true in the cycles it
+            // lands in (the assignment below is unconditional and RunSlice re-reads it every frame), i.e.
+            // ~8 ms/frame instead of ~3 is a cost the rail carries TODAY, not one this line introduces.
+            // What _urgentPending adds is bounded and one-sided: at most ONE extra cycle of urgency past
+            // the LAST flush (~100 ms), which is precisely the one-shot case the steady stream does not
+            // cover. It cannot compound — RunSlice clears it as it hands it over.
+            // ponytail: no rate limiter, because the ceiling is FlushOnHostGesture's and predates this fix;
+            // bounding it belongs there, once, for every family, not here for one. The shape to reuse when
+            // in-game frame times say so is FullResendCooldownSec's — a window plus a pending flag, never a
+            // DROP: coalesce the urgency into at most one urgent walk per window and the frame cost is
+            // capped while a sim start still beats the poll by the window instead of by a full cycle.
+            if (_cycleRoots != null) _urgentPending = true;
+            _cycleUrgent = true;
+        }
 
         /// <summary>N3 third arm — HOST-LOCAL gestures. The law-4a capture seams fire on the host too
         /// (they conclude "run native"); this is their one-line exit into the same change-driven flush
@@ -769,6 +805,18 @@ namespace Multiplayer.Network.Sync
             _cycleStartedAt = Time.realtimeSinceStartup;
         }
 
+        /// <summary>THE PER-FRAME BUDGET DECISION, kept pure so RailCheck L154 can execute it case by case
+        /// (the same shape <see cref="BaselineIsHonest"/> and <c>GenericApplier.ShouldBeExploring</c> use).
+        /// The two inputs are the whole rule and neither is negotiable: a cycle a GESTURE asked for may spend
+        /// the larger budget because its delta is what the other peers are waiting on, and it may NOT while
+        /// the local user has uncommitted input in flight — the low floor was bought for exactly that drag,
+        /// and raising it there would cost frame time during the interaction it protects. Extracted rather
+        /// than left inline because the gap between the two numbers IS the fix for the one-shot geoscape
+        /// gestures (see <see cref="FlushNow"/>): an inline ternary that quietly collapsed to one budget
+        /// would leave every other arm of that fix green.</summary>
+        internal static double SliceBudget(bool urgent, bool localInputInFlight)
+            => urgent && !localInputInFlight ? UrgentSliceBudgetMs : SliceBudgetMs;
+
         /// <summary>One frame's worth of walk: whole roots until the ~<see cref="SliceBudgetMs"/> budget
         /// is spent (always ≥1 root, so a cycle terminates even if a single root overruns the budget).
         /// Fields read on different frames landing in one batch = ACCEPTED tearing (ARCHITECTURE.md) —
@@ -778,12 +826,8 @@ namespace Multiplayer.Network.Sync
         /// existing getter-throw → Incident path in VisitEntity.</summary>
         private static void RunSlice(NetworkEngine engine)
         {
-            // The urgency gate (the upgrade path FlushNow reserved). An urgent cycle is one a GESTURE asked
-            // for, and a gesture's delta is what the other peers are waiting on — so it may spend the larger
-            // budget. It may NOT while the local user has uncommitted input in flight: the low floor exists
-            // for exactly that drag, and raising it there would cost frame time during the interaction it
-            // was bought to protect. Asked of input state, not of screens (OpenUiRepaint.LocalInputInFlight).
-            double budget = _cycleUrgent && !OpenUiRepaint.LocalInputInFlight() ? UrgentSliceBudgetMs : SliceBudgetMs;
+            // The urgency gate (the upgrade path FlushNow reserved), asked of INPUT state and not of screens.
+            double budget = SliceBudget(_cycleUrgent, OpenUiRepaint.LocalInputInFlight());
             var sw = Stopwatch.StartNew();
             while (_cycleNext < _cycleRoots.Count)
             {
@@ -798,7 +842,11 @@ namespace Multiplayer.Network.Sync
             if (_cycleNext < _cycleRoots.Count) return;
             int roots = _cycleRoots.Count;
             _cycleRoots = null;
-            _cycleUrgent = false; // this cycle carried whatever the flush asked for
+            // This cycle carried whatever the flush asked for — UNLESS the flush arrived after it began, in
+            // which case the change may have been behind the cursor and the next cycle is the one that ships
+            // it. See FlushNow: that hand-off is the whole fix for the one-shot geoscape gestures.
+            _cycleUrgent = _urgentPending;
+            _urgentPending = false;
             LastCycleSeconds = Time.realtimeSinceStartup - _cycleStartedAt;
             DiffAndEmit(engine, (long)Math.Round(_cycleWalkMs), _maxSliceMs, _cycleFrames, roots);
         }

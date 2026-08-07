@@ -47,9 +47,9 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 - **P14 — DRIFT IS THE GATE, AND A LAW ASSERTS AN OUTCOME.** `docs/rail-baseline.txt` + `docs/rail-contract.txt` = committed snapshots; ANY drift is harness-RED, so a field moving Excluded↔covered is a reviewable diff, never a side effect. A law asserts the executed OUTCOME, not the presence of a call, and carries its own non-vacuity.
   - laws: L6 L9 L22 L23 L33 L48 L49 L72 L103 L125
 - **P15 — DERIVED, NOT MIRRORED.** Unnumbered in `ARCHITECTURE.md`, asserted in the coverage rules. State a peer can recompute closed-form from already-mirrored inputs is RE-DERIVED locally, never shipped: mirror the ORDER, derive the pose. Inverse holds — what cannot be re-derived (mist) MUST ride.
-  - laws: L43 L53 L55 L59 L73 L77 L102 L115
+  - laws: L43 L53 L55 L59 L73 L77 L102 L115 L154
 - **P16 — FRAME BUDGET.** Unnumbered in `ARCHITECTURE.md`, asserted by the sliced walk. No unbudgeted graph walk on either peer; the rail never spends a frame the player is using; urgency never outbids local input. Also may not IDLE — a sim fact waits no longer than it must.
-  - laws: L50 L74 L100 L153
+  - laws: L50 L74 L100 L153 L154
 
 ## Law index
 
@@ -203,9 +203,10 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 | L151 | a peer waiting on another peer's load sees that load advance | P11 P13 | incident | 2026-08-06: first `RosterProgress SEND []` 14.2 s after the boundary, and empty | premise-changed |
 | L152 | a chat line delivered to a peer appears exactly once | P7 | incident | 2026-08-06: "instead of one message he received TWO … it happened only ONCE" | premise-changed |
 | L153 | the host↔client clock phase error has a seam that can read it, and that seam writes nothing | P16 P7 | incident | 2026-08-04 23:22 three-instance session: client-derived aircraft/exploration trail the host, and all three peer logs carry not one `TimeAnchor` line | both |
+| L154 | the departure and exploration-start seams are wired to the urgent flush, and a mid-cycle flush is still served urgently | P16 P15 | incident | 3-instance sessions: geoscape flight and exploration spinner trail the host by a steady ~0.25-0.5 s while gesture-driven windows/orders are instant | both |
 
 - inline (private method in `Program.cs`, no file): L1–L25, L27–L76b, L81, L82, L83
-- files (`L<n>_<Name>.cs`): L26, L77, L79, L80, L84, L91–L153
+- files (`L<n>_<Name>.cs`): L26, L77, L79, L80, L84, L91–L154
 
 ## Unassigned / retired numbers
 
