@@ -66,8 +66,16 @@ namespace RailCheck
     ///   • count a PAUSED or parity-blocked row in <c>LobbyController.AllLivePeersReady</c> →
     ///     <c>lobby-counts-a-dead-peer</c>; make that fold return true for everything →
     ///     <c>POSITIVE CONTROL</c>
+    ///
+    /// ARM (c) WAS GREEN THROUGH A REAL BREAKAGE and has been REPAIRED rather than supplemented
+    /// (2026-08-07). Its rows were built with no <c>PlayerGuid</c> — which is exactly what a roster row
+    /// carries BEFORE its JOIN arrives — so the arm proved the fold's behaviour only for a shape no live
+    /// peer has, and it read green while a never-joined phantom held a host's lobby shut. The rows now
+    /// carry identities. The claim that a row with no identity is not a live peer is L181's, and the
+    /// claim that such a row never gets a held seat in the first place is L180's.
     ///   • restore the client counts to <c>SaveTransferMath.BarrierReleased</c> → <c>loaded-quorum-back</c>
-    ///   • swap <c>PausePeer</c> back to <c>RemoveClient</c> in the disconnect funnel → <c>drop-removes-the-peer</c>
+    ///   • swap <c>NotePeerLoss</c> back to <c>RemoveClient</c> in the disconnect funnel, or stop
+    ///     <c>NotePeerLoss</c> pausing → <c>drop-removes-the-peer</c>
     /// </summary>
     internal static class L84_NoPeerRemoval
     {
@@ -161,6 +169,13 @@ namespace RailCheck
                 yield return "L84 premise-changed: LobbyController.AllLivePeersReady is gone — this law can no " +
                              "longer prove the lobby gate skips the peers no human can ready for";
 
+            // FIXTURES REPAIRED 2026-08-07 (L180/L181 incident). Every row here used to be built with no
+            // PlayerGuid, i.e. Guid.Empty — the value a roster row carries BEFORE its JOIN arrives. So
+            // this arm and its positive control were exercising the fold with rows that no live peer ever
+            // looks like, and both read green straight through a real phantom sitting in a real lobby.
+            // The live rows now carry an identity, which is what makes the arm mean what it says.
+            var joined = Guid.NewGuid();
+
             var lobby = new LobbyController();
             lobby.BeginHost();
 
@@ -169,9 +184,9 @@ namespace RailCheck
                 allLivePeersReady: LobbyController.AllLivePeersReady(new[]
                 {
                     new PeerListEntry { IsHost = true },
-                    new PeerListEntry { Ready = true },
-                    new PeerListEntry { Ready = false, Paused = true },
-                    new PeerListEntry { Ready = false, ParityDiffs = "mod X missing" },
+                    new PeerListEntry { Ready = true,  PlayerGuid = joined },
+                    new PeerListEntry { Ready = false, Paused = true, PlayerGuid = Guid.NewGuid() },
+                    new PeerListEntry { Ready = false, ParityDiffs = "mod X missing", PlayerGuid = Guid.NewGuid() },
                 }));
             if (!lobby.CanStart)
                 yield return "L84 lobby-counts-a-dead-peer: a roster whose only un-ready rows are a PAUSED peer " +
@@ -185,7 +200,7 @@ namespace RailCheck
             if (LobbyController.AllLivePeersReady(new[]
                 {
                     new PeerListEntry { IsHost = true },
-                    new PeerListEntry { Ready = false },
+                    new PeerListEntry { Ready = false, PlayerGuid = joined },
                 }))
                 yield return "L84 POSITIVE CONTROL: AllLivePeersReady answers TRUE for a LIVE, un-paused, " +
                              "parity-clean peer that has not readied. The fold has stopped discriminating, so " +
@@ -211,14 +226,28 @@ namespace RailCheck
             }
 
             // ─── (e) AN INVOLUNTARY LOSS PAUSES THE PEER, IT DOES NOT REMOVE IT ───
+            // ARM FOLLOWED ONTO ITS NEW SHAPE 2026-08-07 (L180), NOT WEAKENED. The transport-disconnect
+            // funnel now reaches PausePeer through SessionManager.NotePeerLoss, which classifies the loss
+            // before anything is held: a row whose JOIN never arrived has no seat to hold (no identity,
+            // name, slot or permissions) and is removed there instead. That decision could not live in
+            // PausePeer, because PausePeer announces and L120 arm (f) forbids the notice path freeing a
+            // seat. So the claim is unchanged — an involuntary loss PAUSES a peer that joined — and this
+            // arm now pins the extra hop rather than being satisfied by any path that reaches PausePeer.
             var funnel = typeof(NetworkEngine).GetMethod("OnPeerDisconnected", All);
+            var classify = typeof(SessionManager).GetMethod("NotePeerLoss", All);
             var pause = typeof(SessionManager).GetMethod("PausePeer", All);
-            if (funnel == null || pause == null)
-                yield return "L84 premise-changed: NetworkEngine.OnPeerDisconnected / SessionManager.PausePeer no " +
-                             "longer both exist. That funnel is where a dead socket, a stalled write and a failed " +
-                             "send channel all arrive, and pausing THERE is what covers all three at once";
-            else if (!CallsMethod(funnel, pause))
-                yield return "L84 drop-removes-the-peer: the transport-disconnect funnel does not call PausePeer. " +
+            if (funnel == null || classify == null || pause == null)
+                yield return "L84 premise-changed: NetworkEngine.OnPeerDisconnected / SessionManager.NotePeerLoss " +
+                             "/ SessionManager.PausePeer no longer all exist. That funnel is where a dead socket, " +
+                             "a stalled write and a failed send channel all arrive, and pausing THERE is what " +
+                             "covers all three at once";
+            else if (!CallsMethod(classify, pause))
+                yield return "L84 drop-removes-the-peer: SessionManager.NotePeerLoss no longer pauses anybody, so " +
+                             "the classifier every involuntary loss now routes through has stopped holding the " +
+                             "seat it exists to hold. The unjoined-row removal beside it (L180) is the ONE " +
+                             "exception this arm allows, and only because such a row has no seat in the first place";
+            else if (!CallsMethod(funnel, classify))
+                yield return "L84 drop-removes-the-peer: the transport-disconnect funnel does not call NotePeerLoss. " +
                              "None of the things that reach it means the player left — they mean the network did " +
                              "something. Removing the roster row throws away the slot, the permissions and the " +
                              "guid binding, so the peer comes back as a stranger who has to fight its way in";

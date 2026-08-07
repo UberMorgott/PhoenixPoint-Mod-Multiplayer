@@ -590,8 +590,10 @@ namespace Multiplayer.Network.MessageLayer
         public string ParityDiffs { get; set; } = "";
         /// <summary>This peer stopped answering and is being HELD, not removed (SessionManager.PausePeer).
         /// Renders as the grey "dropped out" marker on the player panel. The ONE thing that reads it as a
-        /// fact is <see cref="Multiplayer.Network.LobbyController.AllLivePeersReady"/>, and it reads it to
-        /// EXCLUDE this row — a paused peer still blocks nobody (L84), it just stops being waited for.</summary>
+        /// fact is <see cref="Multiplayer.Network.LobbyController.IsLivePeer"/> — the single definition
+        /// BOTH halves of the lobby start gate go through (L181) — and it reads it to EXCLUDE this row:
+        /// a paused peer still blocks nobody (L84), it just stops being waited for and stops standing in
+        /// for a player who is present.</summary>
         public bool Paused { get; set; }
         /// <summary>The tactical "I have finished moving" advisory flag. Same non-decision status as
         /// <see cref="Multiplayer.Network.ClientInfo.TacReady"/> it is copied from — read by the player

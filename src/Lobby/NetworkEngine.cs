@@ -592,18 +592,22 @@ namespace Multiplayer.Network
             // the peer resumes its own seat on reconnect instead of being a stranger who has to fight its
             // way back in. A peer that genuinely LEFT sends ClientLeave, and SessionManager.HandleLeave
             // still removes it there.
-            bool paused = false;
+            // …via SessionManager.NotePeerLoss, which is the funnel that decides whether there is a seat
+            // to hold at all before PausePeer holds it. A row whose JOIN never arrived has none (L180).
+            bool ownedByTheFunnel = false;
             if (IsHost && Session != null && Session.Clients.ContainsKey(peerId))
             {
-                Session.PausePeer(peerId, endpoint == null ? "connection lost" : "connection lost (" + endpoint + ")");
-                paused = true;
+                Session.NotePeerLoss(peerId, endpoint == null ? "connection lost" : "connection lost (" + endpoint + ")");
+                ownedByTheFunnel = true;
             }
             else Session?.RemoveClient(peerId); // client side, or a row already reclaimed — nothing to hold
             OnClientDisconnected?.Invoke(peerId);
-            // Suppress the "— X left —" notice for a PAUSED peer: it did not leave, and PausePeer already
-            // posted the accurate line. HostLeaveHandler still sees the raise (it needs it to detect a host
-            // loss on the CLIENT side, where nothing is ever paused).
-            OnClientDisconnectedNamed?.Invoke(peerId, droppedName, wasKnown && !paused);
+            // Suppress the "— X left —" notice for anything the funnel above handled: a PAUSED peer did not
+            // leave and PausePeer already posted the accurate line, and a row whose JOIN never arrived is
+            // nobody the other players ever saw — announcing "Unknown left" for it would be the placeholder
+            // name reaching four screens as a departure. HostLeaveHandler still sees the raise (it needs it
+            // to detect a host loss on the CLIENT side, where nothing goes through this funnel).
+            OnClientDisconnectedNamed?.Invoke(peerId, droppedName, wasKnown && !ownedByTheFunnel);
 
             // Advertising gate again (see OnPeerConnected). A PAUSED peer still holds its seat, so this
             // deliberately does not free one — it is holding the seat that lets the peer come back.

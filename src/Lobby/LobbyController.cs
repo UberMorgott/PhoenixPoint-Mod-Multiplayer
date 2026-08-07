@@ -41,6 +41,13 @@ namespace Multiplayer.Network
     /// <c>RemoveClient</c>, so a gone peer keeps its roster row forever — is NOT COUNTED. Without that
     /// exclusion this gate is an infinite blocker one floor down: a crashed player would hold the lobby
     /// shut for everyone with nobody able to ready on its behalf. Live peers only, always.
+    ///
+    /// LIVE ALSO MEANS JOINED (2026-08-07 incident, L180/L181). A roster row is minted by the TRANSPORT
+    /// connect, before any JOIN — so a peer whose handshake never completed owns a row with no identity,
+    /// no name and no way to press READY, and it is not <c>Paused</c> while its socket looks alive. That
+    /// row held the host's NEW CAMPAIGN button down naming nobody. <see cref="IsLivePeer"/> is now the ONE
+    /// definition and BOTH halves of the gate read it, so such a row can neither block the start nor
+    /// stand in for the player the host is not supposed to start without.
     /// </summary>
     public class LobbyController
     {
@@ -54,27 +61,67 @@ namespace Multiplayer.Network
         private bool _allLivePeersReady;
 
         /// <summary>
-        /// THE LOBBY READINESS FOLD. Pure and total so RailCheck EXECUTES it rather than describing it
-        /// (L84 arm (c)). Counts the non-host rows that are LIVE and answers whether every one of them
-        /// has readied. An empty live set is vacuously ready; the ">= 1 connected peer" half of the gate
-        /// is what stops a host starting alone, and it is deliberately a different question.
+        /// THE ONE DEFINITION OF A PEER THAT IS ACTUALLY AT THE TABLE, so both halves of the gate ask the
+        /// same question. A row is LIVE iff there is a human behind it right now:
+        ///   • not the host's own row;
+        ///   • not <c>Paused</c> — every involuntary loss funnels there (drops use <c>PausePeer</c>, never
+        ///     <c>RemoveClient</c>), so a gone peer keeps its roster row. Nobody is home;
+        ///   • its JOIN actually arrived — <c>PlayerGuid</c> is the identity the JOIN carries and NOTHING
+        ///     else sets it, so <c>Guid.Empty</c> means the row was minted by the TRANSPORT connect and
+        ///     the handshake never completed (<c>SessionLifecycle.StaleRejoinPeers</c> names the same
+        ///     pre-JOIN row). Such a peer has no name, no slot, no permissions and no way to press READY —
+        ///     the 2026-08-07 phantom, which sat in the host's lobby holding it shut after its owner had
+        ///     quit the game and switched his VPN off.
+        /// </summary>
+        public static bool IsLivePeer(PeerListEntry p) =>
+            p != null && !p.IsHost && !p.Paused && p.PlayerGuid != System.Guid.Empty;
+
+        /// <summary>
+        /// WHY THE READINESS HALF OF THE GATE IS SHUT — "" when it is open, otherwise a reason that NAMES
+        /// the peers it is waiting on. The blocked message used to say only "not every live peer has
+        /// readied", which is unactionable exactly when it matters: the host cannot see which row is
+        /// holding the button down, and a phantom row named nobody at all.
         ///
-        /// A ROW IS SKIPPED WHEN NO HUMAN CAN CLEAR IT BY PRESSING A BUTTON — that is the whole exclusion
-        /// rule, and it is what keeps this gate from becoming the infinite blocker one floor down:
-        ///   • <c>Paused</c> — every involuntary loss funnels here (drops use <c>PausePeer</c>, never
-        ///     <c>RemoveClient</c>, so a gone peer keeps its roster row forever). Nobody is home to ready.
-        ///   • parity-blocked — <c>SessionManager.SetClientReady</c> REFUSES a ready from a peer whose row
-        ///     carries parity diffs, host-authoritatively. Counting it would mean waiting for a vote the
-        ///     host itself will not accept. Parity is already a SOFT gate (such a peer joins and plays;
-        ///     only its READY is locked), so skipping it changes who enters the session not at all.
-        /// A peer that truly left is off the roster and needs no rule.
+        /// A row that is live but PARITY-BLOCKED is not waited on: <c>SessionManager.SetClientReady</c>
+        /// refuses its ready host-authoritatively, so counting it would mean waiting for a vote the host
+        /// itself will not accept. It still counts as being AT the table (parity is a soft gate — such a
+        /// peer joins and plays), so it satisfies the host-is-not-alone half.
+        /// </summary>
+        public static string PeersBlockedBy(System.Collections.Generic.IEnumerable<PeerListEntry> roster)
+        {
+            var waiting = new System.Collections.Generic.List<string>();
+            int live = 0;
+            if (roster != null)
+                foreach (var p in roster)
+                {
+                    if (!IsLivePeer(p)) continue;
+                    live++;
+                    if (!ParityComparer.ReadyAllowed(p.ParityDiffs)) continue;
+                    if (!p.Ready)
+                        waiting.Add(string.IsNullOrEmpty(p.Nickname) ? p.SteamId.ToString() : p.Nickname);
+                }
+            if (live == 0)
+                return "no peer has finished joining — a row that never completed its handshake, or one " +
+                       "that dropped out, is not somebody you can start a co-op session with";
+            if (waiting.Count > 0)
+                return "waiting on " + string.Join(", ", waiting.ToArray());
+            return "";
+        }
+
+        /// <summary>
+        /// THE LOBBY READINESS FOLD. Pure and total so RailCheck EXECUTES it rather than describing it
+        /// (L84 arm (c)). Counts the non-host rows that are LIVE (<see cref="IsLivePeer"/>) and answers
+        /// whether every one of them has readied. An empty live set is vacuously ready HERE; the
+        /// ">= 1 connected peer" half of the gate is what stops a host starting alone, and it now counts
+        /// the same live set (<c>MultiplayerUI.RefreshGateFacts</c>) so a phantom can neither hold the
+        /// gate shut nor pass the host off as not-alone.
         /// </summary>
         public static bool AllLivePeersReady(System.Collections.Generic.IEnumerable<PeerListEntry> roster)
         {
             if (roster == null) return true;
             foreach (var p in roster)
             {
-                if (p == null || p.IsHost || p.Paused) continue;
+                if (!IsLivePeer(p)) continue;
                 if (!ParityComparer.ReadyAllowed(p.ParityDiffs)) continue;
                 if (!p.Ready) return false;
             }

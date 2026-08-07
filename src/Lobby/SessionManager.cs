@@ -99,6 +99,10 @@ namespace Multiplayer.Network
         // — 20 missed probes instead of 4.
         private const int HeartbeatIntervalMs = PingTable.CadenceMs;
         private const int HeartbeatTimeoutMs = 20000;
+        // How long a TRANSPORT-connected peer may hold a roster row without its JOIN arriving. Longer
+        // than the joiner's own stage deadline (MultiplayerUI.JoinStageTimeoutSec = 20 s) so the peer
+        // always gives up first and this never reaps a handshake still in flight. See the reaper.
+        private const int JoinHandshakeTimeoutMs = 30000;
         // The identity-takeover liveness bar (IsPeerLive) used to be written as 2 x the 5 s cadence.
         // Pinned to its ABSOLUTE value when the cadence dropped: that check decides whether a rejoining
         // peer may take over a still-connected peer's guid, and shrinking its window to 2 s because an
@@ -220,7 +224,33 @@ namespace Multiplayer.Network
                 // "you were disconnected". The heartbeat row is kept too, so the resume edge is just the
                 // next heartbeat that arrives (HandleHeartbeat → ResumePeer).
                 foreach (var clientId in toRemove)
-                    PausePeer(clientId, $"no heartbeat for {HeartbeatTimeoutMs / 1000}s");
+                    NotePeerLoss(clientId, $"no heartbeat for {HeartbeatTimeoutMs / 1000}s");
+
+                // THE HANDSHAKE DEADLINE (2026-08-07 incident, L180). Everything above is keyed on
+                // SILENCE, and a half-open joiner is not silent: its packets keep arriving and
+                // RefreshLiveness keeps its heartbeat row fresh, while the one packet that matters — the
+                // JOIN — never comes. On 2026-08-07 the host carried such a row for 31 s and only
+                // Steam's own P2P timeout ended it; over a link that keeps the session nominally alive
+                // nothing would have. Every wait gets a deadline: a row whose JOIN has not arrived within
+                // JoinHandshakeTimeoutMs is dropped, LOUDLY and by name. Deliberately longer than the
+                // joiner's own 20 s stage deadline (MultiplayerUI.JoinStageTimeoutSec), so the peer
+                // always learns first and this never reaps a handshake still in flight; and inside the
+                // load-suspension branch with the rest of the reaper, so a saturated transfer cannot
+                // starve a JOIN into a false drop.
+                var unjoined = new List<ulong>();
+                foreach (var kvp in _clients)
+                    if (SessionLifecycle.UnjoinedRowExpired(kvp.Value.PlayerGuid != Guid.Empty,
+                            kvp.Value.ConnectedAt.Ticks / TimeSpan.TicksPerMillisecond, now,
+                            JoinHandshakeTimeoutMs))
+                        unjoined.Add(kvp.Key);
+                foreach (var clientId in unjoined)
+                {
+                    Debug.LogWarning($"[Multiplayer] Peer {clientId} connected {JoinHandshakeTimeoutMs / 1000}s ago " +
+                                     "and its JOIN never arrived — roster row REMOVED. It reached the transport but " +
+                                     "never presented an identity, so it has no name, slot or permissions, cannot " +
+                                     "ready, and would sit in the lobby holding the start gate down forever.");
+                    RemoveClient(clientId);
+                }
             }
             // F3 (client side): host HEARTBEAT TIMEOUT. A wedged/half-open host socket may never send
             // FIN/RST, so OnPeerDisconnected (trigger b) never fires and the client would be stranded.
@@ -268,6 +298,42 @@ namespace Multiplayer.Network
 
         // ─── Client Management ────────────────────────────────────────────
 
+        /// <summary>
+        /// THE INVOLUNTARY-LOSS FUNNEL, and the one place that decides whether there is a seat to hold.
+        /// Every path that means "the network did something" arrives here — a dead socket, a stalled
+        /// write, N failed sends, heartbeat silence — and every one of them then routes to
+        /// <see cref="PausePeer"/>, which is the N=50 mandate (L84) and is unchanged.
+        ///
+        /// EXCEPT FOR A PEER THAT NEVER SAT DOWN (2026-08-07 incident, L180). The roster row is minted by
+        /// the TRANSPORT connect, before any JOIN, so a peer whose handshake never completed owns a row
+        /// carrying <see cref="Guid.Empty"/>, the placeholder name "Unknown", no slot and no permissions.
+        /// Pausing THAT applies the seat-holding rule to a peer it was never written for: there is nothing
+        /// to preserve, nobody the notice can name, and no return edge — <see cref="ResumePeer"/> needs a
+        /// heartbeat that a peer which never handshaked never sends, and the heartbeat reaper only calls
+        /// back in here, where <see cref="PausePeer"/> returns immediately on an already-paused row. The
+        /// row becomes immortal, which is exactly what happened: the friend's first join half-opened over
+        /// a VPN, Steam timed the P2P session out (`P2PSessionError=4`), the row was PAUSED as
+        /// `Peer 1 (Unknown)`, and it was still in the host's lobby after he had quit the game and turned
+        /// the VPN off — where <c>3161d33</c>'s readiness gate counted it.
+        ///
+        /// THE DECISION LIVES HERE AND NOT IN <see cref="PausePeer"/> because that method announces, and
+        /// an announcer that frees a seat is a kick wearing a label (L120 arm (f) — which caught exactly
+        /// that first draft of this fix). Announcing is not deciding; this is the deciding.
+        /// </summary>
+        public void NotePeerLoss(ulong steamId, string reason)
+        {
+            if (!_clients.TryGetValue(steamId, out var client)) return;
+            if (client.PlayerGuid == Guid.Empty)
+            {
+                Debug.LogWarning($"[Multiplayer] Peer {steamId} dropped BEFORE its JOIN ever arrived ({reason}) — " +
+                                 "roster row REMOVED, not paused: it carries no identity, name, slot or " +
+                                 "permissions, so there is no seat to hold and nobody who could ever ready it.");
+                RemoveClient(steamId);
+                return;
+            }
+            PausePeer(steamId, reason);
+        }
+
         public void AddClient(ulong steamId, string endpoint)
         {
             if (!_clients.ContainsKey(steamId))
@@ -296,6 +362,10 @@ namespace Multiplayer.Network
         ///
         /// <see cref="RemoveClient"/> is now reserved for a peer that LEFT: the ClientLeave packet, or a
         /// stale row being reclaimed by its own returning owner.
+        ///
+        /// WHOSE seat is being held is decided ABOVE this method, in <see cref="NotePeerLoss"/>. This one
+        /// announces and holds and does nothing else — L120 arm (f): announcing is not deciding, and a
+        /// notice path that frees a seat has become a kick wearing a label.
         /// </summary>
         public void PausePeer(ulong steamId, string reason)
         {

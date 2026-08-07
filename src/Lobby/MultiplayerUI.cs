@@ -514,9 +514,13 @@ namespace Multiplayer.UI
 
             // Gate closed at press time. Tell the host exactly what is missing, reading the SAME
             // projected facts (no parallel rule) so the message can never contradict the gate.
+            // NAME THE BLOCKER (L181). "All players must be ready" told the host nothing about WHICH row
+            // was holding the button down — and when the row was a phantom that could never ready, it
+            // named a player who was not there at all.
             string why = !saveChosen ? "Choose a save before starting."
                 : clientCount < 1 ? "Wait for a player to join before starting."
-                : "All players must be ready before starting.";
+                : "All players must be ready before starting — " +
+                  LobbyController.PeersBlockedBy(NetworkEngine.Instance?.Session?.GetLobbyRoster()) + ".";
             var mb = GameUtl.GetMessageBox();
             if (mb != null)
             {
@@ -532,7 +536,12 @@ namespace Multiplayer.UI
         // the LobbyController FSM. This is the ONE place the non-host/all-ready rule is applied (via
         // LobbyController.AllClientsReady) — both the Play-button VISUAL (EvaluateStartGate) and the
         // press-time guard (OnLobbyPlay) call through here, so they can never derive a different gate.
-        //   • clientCount      = connected NON-host peers (host self-entry excluded).
+        //   • clientCount      = LIVE non-host peers (LobbyController.IsLivePeer — host self-entry, a
+        //                        PAUSED row and a row whose JOIN never arrived all excluded). It used to
+        //                        count every non-host row, so a phantom stood in for the player the host
+        //                        is not allowed to start without: the readiness fold skipped that row as
+        //                        not-live and the count accepted it as present, and the two halves of one
+        //                        gate disagreed about who was at the table (2026-08-07, L181).
         //   • saveChosen       = the AUTHORITATIVE broadcast value Session.ChosenSaveName is non-empty
         //                        (single source of truth; see the gate-vs-rail divergence note below).
         //   • allLivePeersReady = every LIVE non-host row has readied (owner ruling 2026-08-07: readiness
@@ -547,7 +556,7 @@ namespace Multiplayer.UI
             clientCount = 0;
             if (roster != null)
                 foreach (var p in roster)
-                    if (!p.IsHost) clientCount++;
+                    if (LobbyController.IsLivePeer(p)) clientCount++;
 
             // SINGLE SOURCE OF TRUTH for "a save is chosen": the AUTHORITATIVE broadcast value
             // (Session.ChosenSaveName, set only by SetChosenSave which also broadcasts SetSave + drives
@@ -706,6 +715,14 @@ namespace Multiplayer.UI
         private void StartJoinAttempt()
         {
             var attempt = _joinPlan[_joinAttemptIndex];
+            // EVERY STAGE LEAVES A LINE (L180). Until this existed the whole join path wrote nothing at
+            // all after "transport initialized": a deadline that fired, a user who pressed CANCEL and an
+            // attempt still hanging produced byte-identical logs — which is why the 2026-08-07 report
+            // could say only "he waited, then it said it could not connect", with 54 s of silence in the
+            // file underneath it.
+            Debug.Log($"[Multiplayer][join] stage {_joinAttemptIndex + 1}/{_joinPlan.Count} " +
+                      $"{attempt.Transport} → {attempt.Address}:{attempt.Port} — connecting " +
+                      $"(deadline {(int)JoinStageTimeoutSec}s for the host's first PEER_LIST).");
             NetworkEngine.Create();
             // Initialize BEFORE subscribing (unchanged from the pre-cascade order): a transport that
             // reports Failed synchronously inside Initialize (e.g. Steam API unavailable) has no UI
@@ -978,8 +995,13 @@ namespace Multiplayer.UI
             // this is the defense-in-depth half, same shape as OnLobbyPlay's).
             if (!EvaluateNewCampaignGate())
             {
-                Debug.LogWarning("[Multiplayer] NEW CAMPAIGN blocked: not every live peer has readied " +
-                                 "(a peer that dropped out is PAUSED and is not counted).");
+                // NAME THE BLOCKER (L181): the old line said only that somebody had not readied, which is
+                // unactionable exactly when it matters — and a row that never finished joining named
+                // nobody at all while holding this button down forever.
+                Debug.LogWarning("[Multiplayer] NEW CAMPAIGN blocked: " +
+                                 LobbyController.PeersBlockedBy(engine.Session?.GetLobbyRoster()) +
+                                 ". (A peer that dropped out is PAUSED, and one whose JOIN never arrived " +
+                                 "is off the roster — neither is counted.)");
                 return;
             }
 
@@ -1250,6 +1272,10 @@ namespace Multiplayer.UI
             // set — only the LAST stage's failure falls through to the user-facing error below.
             if (_joinPlan != null && _joinAttemptIndex + 1 < _joinPlan.Count)
             {
+                Debug.LogWarning($"[Multiplayer][join] stage {_joinAttemptIndex + 1}/{_joinPlan.Count} " +
+                                 $"({_joinPlan[_joinAttemptIndex].Transport}) FAILED after " +
+                                 $"{UnityEngine.Time.realtimeSinceStartup - _joinStageStartedAt:F1}s: {reason} " +
+                                 $"— falling back to {_joinPlan[_joinAttemptIndex + 1].Transport}.");
                 _joinAttemptIndex++;
                 DismissConnectingBox();
                 NetworkEngine.Instance?.Disconnect();
@@ -1257,6 +1283,12 @@ namespace Multiplayer.UI
                 StartJoinAttempt();
                 return;
             }
+            // The LAST stage (or a plan-less failure): this is the one the player is told about, so it is
+            // also the one the log has to carry. Read the stage BEFORE the plan is dropped.
+            Debug.LogError($"[Multiplayer][join] join ABANDONED after " +
+                           $"{(_joinPlan == null ? 0 : _joinPlan.Count)} stage(s), " +
+                           $"{UnityEngine.Time.realtimeSinceStartup - _joinStageStartedAt:F1}s in the last one: " +
+                           $"{reason}");
             _joinPlan = null;
 
             // A client join in flight just failed/timed out. End the connecting state and close the
@@ -1346,6 +1378,10 @@ namespace Multiplayer.UI
         // no error dialog, no lobby. The box already closed itself on the CANCEL press.
         private void CancelClientConnect()
         {
+            // The third outcome of a join, and the one the log could not tell from the other two.
+            Debug.LogWarning($"[Multiplayer][join] CANCELLED by the player after " +
+                             $"{UnityEngine.Time.realtimeSinceStartup - _joinStageStartedAt:F1}s " +
+                             $"(stage {_joinAttemptIndex + 1}) — no failure, no deadline.");
             _clientConnecting = false;
             _joinPlan = null; // abort the whole cascade
             _connectingBox = null;
@@ -1503,6 +1539,9 @@ namespace Multiplayer.UI
                 if (_clientConnecting && !engine.IsHost &&
                     (engine.Session?.GetLobbyRoster()?.Count ?? 0) > 0)
                 {
+                    Debug.Log($"[Multiplayer][join] host ACCEPTED the join after " +
+                              $"{UnityEngine.Time.realtimeSinceStartup - _joinStageStartedAt:F1}s " +
+                              $"(stage {_joinAttemptIndex + 1}) — its first PEER_LIST arrived; opening the lobby.");
                     _clientConnecting = false;
                     _joinPlan = null; // cascade succeeded — drop the plan so a later drop doesn't retry
                     // Fix #4: the host's first PEER_LIST IS the explicit accept, so advance the FSM
@@ -1539,6 +1578,12 @@ namespace Multiplayer.UI
                 else if (_clientConnecting && !engine.IsHost &&
                          UnityEngine.Time.realtimeSinceStartup - _joinStageStartedAt > JoinStageTimeoutSec)
                 {
+                    // Say that the DEADLINE is what ended this, before OnConnectionFailed says what happens
+                    // next. Without this line an expired deadline and a still-hanging attempt read the same.
+                    Debug.LogWarning($"[Multiplayer][join] stage DEADLINE at " +
+                                     $"{UnityEngine.Time.realtimeSinceStartup - _joinStageStartedAt:F1}s — no " +
+                                     "PEER_LIST from the host, i.e. the transport connected but the host never " +
+                                     "accepted the JOIN (it may never have seen one).");
                     OnConnectionFailed($"the host never accepted the join ({(int)JoinStageTimeoutSec}s). " +
                                        "It may be on a different build, or its replies are not reaching you.");
                 }

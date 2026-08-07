@@ -277,6 +277,26 @@ namespace Multiplayer.Network
         {
             return joiningGuid != Guid.Empty && joiningGuid == hostGuid;
         }
+
+        /// <summary>
+        /// THE JOIN HANDSHAKE HAS A DEADLINE (2026-08-07 incident, L180). A host roster row is minted by
+        /// the TRANSPORT connect, before any JOIN — so between the connect and the JOIN there is a row
+        /// with no identity, and until this deadline existed nothing bounded that window. It is not
+        /// covered by the heartbeat reaper, which keys on SILENCE: a half-open joiner keeps sending, and
+        /// <c>RefreshLiveness</c> keeps its heartbeat row fresh off any inbound byte, while the one
+        /// packet that matters never comes. On 2026-08-07 the host carried such a row for 31 s and only
+        /// Steam's own P2P timeout ended it.
+        ///
+        /// True ⇔ the row must be dropped: its handshake never completed AND its connect is at least
+        /// <paramref name="timeoutMs"/> old. A row that DID handshake is never expired here whatever its
+        /// age — that peer owns its seat and only <see cref="SessionManager.PausePeer"/>'s rule applies
+        /// to it (L84). Pure + Unity-free so RailCheck executes it rather than describing it.
+        /// </summary>
+        public static bool UnjoinedRowExpired(bool handshakeComplete, long connectedAtMs, long nowMs,
+                                              long timeoutMs)
+        {
+            return !handshakeComplete && nowMs - connectedAtMs >= timeoutMs;
+        }
     }
 
     /// <summary>
