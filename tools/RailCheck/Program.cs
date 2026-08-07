@@ -251,6 +251,8 @@ namespace RailCheck
             laws.AddRange(L173_GateEvidenceNamesEveryInput.Check());
             laws.AddRange(L180_AnUnjoinedRowIsNeverHeldAndNeverWaitsForever.Check());
             laws.AddRange(L181_TheLobbyGateCountsOnlyPeersAHumanCouldReady.Check());
+            laws.AddRange(L183_ARepaintObservesTheBatchThatCausedIt.Check());
+            laws.AddRange(L184_ARequestThatIsDroppedSaysSo.Check());
             laws.AddRange(L85_RestartedHostStreamIsApplied.Check());
             laws.AddRange(L86_AnnouncedBoundaryHoldsItsAnnouncer.Check());
             laws.Sort(StringComparer.Ordinal);

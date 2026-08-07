@@ -1270,10 +1270,28 @@ namespace Multiplayer.Network.Sync
             return _scratchW;
         }
 
+        /// <summary>WHICH MEMBER THE CODEC IS CURRENTLY ENCODING, for the warnings inside
+        /// <see cref="EncodeLeaf"/> — which takes a declared TYPE and a value and therefore cannot name
+        /// anything by itself. The empty-LocalizationKey warning identified its bind by nothing at all, so
+        /// the blank UI string it predicts was unfindable. Ambient rather than a parameter because
+        /// EncodeLeaf has eleven call sites and recurses on itself; [ThreadStatic] for the same reason the
+        /// scratch writer above is. Read ONLY on a warning path, so it costs one field store per encode.</summary>
+        [ThreadStatic] private static RailField _encoding;
+
+        internal static string EncodingWhere()
+        {
+            var f = _encoding;
+            if (f == null) return "an unnamed member (encoded outside the field walk)";
+            var owner = (f.Fi != null ? f.Fi.DeclaringType : f.Pi?.DeclaringType);
+            return (owner != null ? owner.Name : "?") + "." + f.Name;
+        }
+
         private static void EncodeFieldInto(BinaryWriter w, RailField f, object v)
         {
+            _encoding = f;
             if (f.Class == FieldClass.LeafList) EncodeList(w, f, v);
             else EncodeLeaf(w, f.Class == FieldClass.LeafDict ? f.DictValType : f.ValueType, v);
+            _encoding = null;
         }
 
         public static byte[] EncodeFieldValue(RailField f, object v)
@@ -1366,8 +1384,9 @@ namespace Multiplayer.Network.Sync
                     // makes GeoscapeLogEntry.GenerateMessage throw ArgumentNullException, which its
                     // FormatException-only catch does NOT hold (decompile GeoscapeLogEntry.cs:20-31).
                     if (string.IsNullOrEmpty(key))
-                        WarnOnce("EncodeLeaf: a LocalizedTextBind has no LocalizationKey — it ships as an EMPTY " +
-                                 "bind and the client's text for it will be blank");
+                        WarnOnce("EncodeLeaf: " + EncodingWhere() + " is a LocalizedTextBind with no " +
+                                 "LocalizationKey — it ships as an EMPTY bind and the client's text for it " +
+                                 "will be blank. That member is the one to look at on screen.");
                     w.Write(key ?? "");
                     w.Write(BindNoLocalize(bind));
                     break;
@@ -1606,12 +1625,63 @@ namespace Multiplayer.Network.Sync
         private sealed class CreateInfo { public MethodDelegate Method; public MemberInfo[] Params; }
         private static readonly Dictionary<Type, CreateInfo> _createInfoCache = new Dictionary<Type, CreateInfo>();
         private static readonly Dictionary<Type, bool> _blobContentCache = new Dictionary<Type, bool>();
-        private static readonly HashSet<string> _blobWarned = new HashSet<string>(StringComparer.Ordinal);
+
+        // ─── ONE COUNTED once-logger for the whole rail (client applier + host encoder) ───
+        // Quiet the way it always was — a message prints on its FIRST sighting only — but no longer
+        // uncountable. A HashSet threw the repeat away, so ~20 families all read "1" in a session log and
+        // the real volume of mirror gaps was unknowable by construction. The digest names growth only, so
+        // a family that fires once still costs exactly one line for the whole session.
+        private sealed class Tally { public int Count; public int Reported; }
+        private static readonly Dictionary<string, Tally> _tally = new Dictionary<string, Tally>(StringComparer.Ordinal);
+        private static double _nextDigestAt;
+        private const double DigestIntervalSec = 30.0;
+        // A BCL clock, not UnityEngine.Time: this codec is executed in-process by RailCheck (L11's
+        // TextBindCodecLaw round-trips a keyless bind straight through EncodeLeaf), and every Time member
+        // is an ECall that throws SecurityException outside the player. A digest interval needs no Unity
+        // semantics whatever.
+        private static readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
+
+        /// <summary>True = first sighting, the caller prints it. Later sightings are counted.</summary>
+        internal static bool CountMiss(string line)
+        {
+            bool first;
+            if (_tally.TryGetValue(line, out var t)) { t.Count++; first = false; }
+            else if (_tally.Count >= 500) return false;   // the same cap the HashSet had
+            else { _tally[line] = new Tally { Count = 1, Reported = 1 }; first = true; }
+            double now = _clock.Elapsed.TotalSeconds;
+            if (_nextDigestAt <= 0.0) _nextDigestAt = now + DigestIntervalSec;
+            else if (now >= _nextDigestAt) { _nextDigestAt = now + DigestIntervalSec; FlushMissDigest("30s"); }
+            return first;
+        }
+
+        /// <summary>The aggregate the once-logger owes: every family that REPEATED since the last digest,
+        /// with its running total. Self-pumped off <see cref="CountMiss"/> so it works identically on the
+        /// host (encode side) and the client (apply side) with nothing to wire, and flushed explicitly at a
+        /// reload boundary so the tail is never lost.</summary>
+        internal static void FlushMissDigest(string why)
+        {
+            System.Text.StringBuilder sb = null;
+            int families = 0, repeats = 0;
+            foreach (var kv in _tally)
+            {
+                var t = kv.Value;
+                if (t.Count == t.Reported) continue;
+                families++; repeats += t.Count - t.Reported;
+                (sb ?? (sb = new System.Text.StringBuilder())).Append("\n  ×").Append(t.Count).Append(" total (+")
+                  .Append(t.Count - t.Reported).Append(" since last digest) ").Append(kv.Key);
+                t.Reported = t.Count;
+            }
+            if (sb == null) return;
+            Debug.LogWarning("[Multiplayer][rail] mirror-gap digest (" + why + "): " + families +
+                             " family(ies) repeated, " + repeats + " suppressed line(s):" + sb);
+        }
+
+        internal static void ResetMissTally() { _tally.Clear(); _nextDigestAt = 0.0; }
 
         private static void WarnOnce(string msg)
         {
-            if (_blobWarned.Count < 200 && _blobWarned.Add(msg))
-                Debug.LogWarning("[Multiplayer][rail] " + msg);
+            var line = "[Multiplayer][rail] " + msg;
+            if (CountMiss(line)) Debug.LogWarning(line);
         }
 
         /// <summary>Custom-create contract of a type per the game's serializer, or null when it has none.

@@ -36,9 +36,18 @@ namespace Multiplayer.Network.Sync
         private static readonly Dictionary<byte, RailType> _kinds = new Dictionary<byte, RailType>();
         private static readonly HashSet<byte> _brokenKinds = new HashSet<byte>();
         private static Dictionary<string, object> _pathCache = new Dictionary<string, object>(StringComparer.Ordinal);
-        private static readonly HashSet<string> _loggedMisses = new HashSet<string>(StringComparer.Ordinal);
         private static uint _lastSeq;
-        private static float _nextResyncReqAt;
+        // A FULL resend and a SCOPED backfill are not interchangeable, so they never share a window
+        // (see RequestResync). The scoped window is PER ROOT: two different roots losing their
+        // ref-lists in the same second are two different losses.
+        private static float _nextFullResyncAt;
+        private static readonly Dictionary<string, float> _nextScopedAt = new Dictionary<string, float>(StringComparer.Ordinal);
+        /// <summary>Scoped requests this peer has sent and not yet seen an answer to (root → deadline).
+        /// Without it "the resend never came" and "it came and was applied silently" produce the same
+        /// log — four requests in the 2026-08-07 session had ZERO acknowledgement of either kind.</summary>
+        private static readonly Dictionary<string, float> _pendingScoped = new Dictionary<string, float>(StringComparer.Ordinal);
+        internal const float ResyncThrottleSec = 5f;
+        private const float ScopedAnswerDeadlineSec = 10f;
         private const float CrcInterval = 1f; // one root subtree per second (see ClientCrcTick)
         private static float _crcNextAt;
         private static int _crcRoot;          // rotation cursor over IdentityResolver.Roots
@@ -55,7 +64,17 @@ namespace Multiplayer.Network.Sync
         public static void ResetForReloadBoundary()
         {
             _pathCache = new Dictionary<string, object>(StringComparer.Ordinal);
-            _loggedMisses.Clear();
+            // Flush BEFORE clearing: a boundary is the one moment the whole session's mirror-gap volume
+            // is knowable, and the counts are what a once-per-message logger throws away (13 "dto-twin
+            // gap" families all reported "1" in the 2026-08-07 log).
+            RailMeta.FlushMissDigest("reload boundary");
+            RailMeta.ResetMissTally();
+            _lastSitePaint.Clear();
+            _nextScopedAt.Clear();
+            // The transferred save replaced the state a pending answer belonged to — it can never be
+            // answered now, and reporting it unanswered later would name a root that no longer means
+            // what it meant when the request went out.
+            _pendingScoped.Clear();
             _fragBuf.Clear(); _fragGot.Clear(); // the transferred save replaced the state these halves belonged to
             // (No EventPopup reset here anymore: event windows are live 0xB6 raises, so there is no
             // record-derived latch to re-seed. Its raise-seq stream is a host monotonic counter and MUST
@@ -93,10 +112,30 @@ namespace Multiplayer.Network.Sync
                         // re-emit that already exists rather than with the whole graph. Only a request
                         // that knows no scope falls back to the full resend — which is itself globally
                         // coalesced host-side (DiffEngine.FullResendCooldownSec).
+                        // ANSWERED, OUT LOUD. The requesting peer cannot tell a resend that never came
+                        // from one that arrived and applied silently, and neither could the host log:
+                        // four scoped requests in the 2026-08-07 session produced no host line at all,
+                        // so the RCA had to guess from DiffEngine tick shapes.
                         string root = ReadResyncRoot(payload);
-                        if (!string.IsNullOrEmpty(root)) DiffEngine.ForceReemit(root);
-                        else DiffEngine.RequestFullResend();
+                        if (!string.IsNullOrEmpty(root))
+                        {
+                            Debug.Log("[Multiplayer][rail] resync request from peer " + senderPeerId +
+                                      " — answering with a SCOPED re-emit of root '" + root + "'");
+                            DiffEngine.ForceReemit(root);
+                        }
+                        else
+                        {
+                            Debug.Log("[Multiplayer][rail] resync request from peer " + senderPeerId +
+                                      " — answering with a FULL resend (the request named no scope)");
+                            DiffEngine.RequestFullResend();
+                        }
                     }
+                    else
+                        LogMissOnce("resync request from peer " + senderPeerId + " REFUSED — " +
+                                    (engine == null || !engine.IsHost
+                                        ? "this peer is not the host"
+                                        : "that sender is not on the roster") +
+                                    ". Its mirror stays as it is and it will ask again.");
                     return true;
                 }
                 if (payload[0] == DiffEngine.MsgCrcReport)
@@ -721,8 +760,12 @@ namespace Multiplayer.Network.Sync
             }
             if (Unchanged(entity, field, subKey, value))
             {
-                // TEMP diag (reassign retest): a TacUnits delta that arrived but matched local bytes.
-                if (field.Name == "TacUnits") Debug.Log("[MP][diag] TacUnits APPLY-SKIP (unchanged) " + path);
+                // Investigation diag (reassign retest), behind the ONE switch: a TacUnits delta that
+                // arrived but matched local bytes. Ungated it emitted 431 lines in a release build, 424
+                // of them inside ONE second of the first campaign load — MpDiag.On FIRST so the path
+                // concatenation is not built either.
+                if (MpDiag.On && field.Name == "TacUnits")
+                    Debug.Log("[MP][diag] TacUnits APPLY-SKIP (unchanged) " + path);
                 return; // no-op entry: not applied, not touched, no repaint
             }
 
@@ -740,10 +783,9 @@ namespace Multiplayer.Network.Sync
                         // FactionRef twin: the wire carries the faction's DEF; the live member holds the
                         // GeoFaction. Unknown def → keep the live value (same L-C shape as Unresolved).
                         if (field.FactionRef && v != null && (v = RailMeta.FactionByDef(geo, v)) == null) return;
-                        // TEMP diag (power retest 2026-07-29): the host→client direction of the facility
-                        // power leaf has never been observed live. One line at the write, at delta rate
-                        // for this ONE field (Unchanged already filtered no-ops above).
-                        if (field.Name == "_isPowered")
+                        // Investigation diag (power retest 2026-07-29), behind the ONE switch: the
+                        // host→client direction of the facility power leaf has never been observed live.
+                        if (MpDiag.On && field.Name == "_isPowered")
                             Debug.Log("[MP][diag] facility power APPLY " + path + "." + field.Name + " " +
                                       (field.CanRead ? field.GetValue(entity) : null) + "→" + v);
                         field.SetValue(entity, v);
@@ -771,8 +813,8 @@ namespace Multiplayer.Network.Sync
                     case FieldClass.LeafList:
                     {
                         var items = RailMeta.DecodeFieldValue(value, field, geo, out var isNull) as List<object>;
-                        // TEMP diag (reassign retest): every TacUnits list apply. Pull after the retest.
-                        if (field.Name == "TacUnits")
+                        // Investigation diag (reassign retest), behind the ONE switch: every TacUnits list apply.
+                        if (MpDiag.On && field.Name == "TacUnits")
                         {
                             var ids = new StringBuilder();
                             if (items != null) foreach (var u in items) ids.Append(IdentityResolver.RootRef(u) ?? "?").Append(' ');
@@ -847,6 +889,7 @@ namespace Multiplayer.Network.Sync
                 }
                 touched.Add(entity);
                 MarkOrderChange(geo, path, entity, field.Name);
+                if (_pendingScoped.Count > 0) NoteScopedAnswer(path);
             }
             catch (Exception ex)
             {
@@ -936,14 +979,43 @@ namespace Multiplayer.Network.Sync
         /// NAVIGATION re-seed next door must stay named).</summary>
         internal static bool IdentityWriteConsequence(object entity) => entity is CharacterIdentity;
 
+        /// <summary>The ROOT segment of a path when that root names a SITE and the write landed DEEPER than
+        /// the site itself, else null. Pure (no resolver, no level) so RailCheck L183 can execute it case by
+        /// case, and cheap: a path whose first two chars are not "S#" costs two comparisons and no resolve.
+        ///
+        /// WHY IT EXISTS. A descend create ships the mission's TYPE and nothing else — every one of its own
+        /// members rides a LATER packet (<see cref="ApplyDescendCreate"/>). So the repaint the create marks
+        /// necessarily observes a mission with no values in it, and the batch that finally fills those values
+        /// wrote a <c>GeoMission</c>, not a <c>GeoSite</c> — which the type test below dropped on the floor.
+        /// Live proof (2026-08-07): the host answered the S#104 backfill and the client APPLIED it, and the
+        /// client's last word on that site remained the create-time line saying the mission was not there.
+        /// A repaint that cannot observe the batch that landed the state is not a repaint.</summary>
+        internal static string SiteRootKeyOf(string path)
+        {
+            if (string.IsNullOrEmpty(path) || path.Length < 3 || path[0] != 'S' || path[1] != '#') return null;
+            int dot = path.IndexOf('.');
+            return dot <= 0 ? null : path.Substring(0, dot);
+        }
+
         private static void MarkOrderChange(GeoLevelController geo, string path, object entity, string fieldName)
         {
             if (IdentityWriteConsequence(entity)) { MarkTagRefresh(geo, path); return; }
             if (IsOrderLeaf(fieldName) && entity is GeoVehicle v) { _reseed.Add(v); return; }
-            if (!(entity is GeoSite s)) return;
-            SiteWriteConsequences(fieldName, out var repaintMarker, out var reseedParked);
-            if (repaintMarker) _siteRepaint.Add(s);
-            if (reseedParked) MarkSiteAuthority(s);
+            if (entity is GeoSite s)
+            {
+                SiteWriteConsequences(fieldName, out var repaintMarker, out var reseedParked);
+                if (repaintMarker) _siteRepaint.Add(s);
+                if (reseedParked) MarkSiteAuthority(s);
+                return;
+            }
+            // DEPTH IS NOT A GATE, for the same reason the field NAME is not one (see
+            // SiteWriteConsequences): the marker repaint costs one bool on a MonoBehaviour, and the state
+            // it reads (ActiveMission and everything hanging off it) lands on entities that are not the
+            // site. The re-seed stays behind the site's own authoritative leaf — that one is a derivation
+            // and must not re-decide off a descendant's clock.
+            var rootKey = SiteRootKeyOf(path);
+            if (rootKey != null && IdentityResolver.Resolve(geo, rootKey, _pathCache) is GeoSite owner)
+                _siteRepaint.Add(owner);
         }
 
         /// <summary>
@@ -977,6 +1049,24 @@ namespace Multiplayer.Network.Sync
         }
 
         private static readonly HashSet<GeoSite> _siteRepaint = new HashSet<GeoSite>();
+
+        /// <summary>The last <c>[MP][site] repaint</c> text printed per site — see the print itself.</summary>
+        private static readonly Dictionary<GeoSite, string> _lastSitePaint = new Dictionary<GeoSite, string>();
+
+        /// <summary>HOW A SITE'S MISSION READS IN THE REPAINT LINE, kept pure so RailCheck L183 can execute it
+        /// case by case. THREE outcomes, never two: the old line was
+        /// <c>s.ActiveMission?.MissionDef?.name ?? "none"</c>, so a site that HAS a mission whose def has not
+        /// landed yet printed the same word as a site with no mission at all. That collapse is what made
+        /// five identical "activeMission=none" lines read as "the client never got that mission" when the
+        /// client had in fact created it, registered it natively and applied the host's answer to its own
+        /// backfill request. A diagnostic that cannot tell absent from unfinished manufactures its own
+        /// root cause.</summary>
+        internal static string MissionLabel(bool hasMission, string typeName, string defName)
+        {
+            if (!hasMission) return "none";
+            if (!string.IsNullOrEmpty(defName)) return defName;
+            return (typeName ?? "GeoMission") + "(def has not landed yet)";
+        }
 
         /// <summary>The characters whose tag cache this batch invalidated. The identity is a DESCEND child,
         /// so the applied entity is the <c>CharacterIdentity</c> itself and carries no back-reference to its
@@ -1035,8 +1125,17 @@ namespace Multiplayer.Network.Sync
                 // peer's site now IS, at the instant a rail write changed it. The site-marker RCA had to be
                 // reconstructed from the host's log alone because this moment was never named on the client —
                 // and a site that never prints one of these after a mission return never received the delta.
-                Debug.Log("[MP][site] repaint " + (IdentityResolver.RootRef(s) ?? "S#?") + " state=" + s.State +
-                          " activeMission=" + (s.ActiveMission?.MissionDef?.name ?? "none"));
+                // Deduped on the RENDERED text, not throttled: a line repeats only when the site actually
+                // reads differently, so the volume the descendant marking above adds is zero when nothing
+                // visible changed, and every change still gets its line.
+                var m = s.ActiveMission;
+                var line = "[MP][site] repaint " + (IdentityResolver.RootRef(s) ?? "S#?") + " state=" + s.State +
+                           " activeMission=" + MissionLabel(m != null, m?.GetType().Name, m?.MissionDef?.name);
+                if (!_lastSitePaint.TryGetValue(s, out var prev) || !string.Equals(prev, line, StringComparison.Ordinal))
+                {
+                    _lastSitePaint[s] = line;
+                    Debug.Log(line);
+                }
             }
             _siteRepaint.Clear();
         }
@@ -1433,10 +1532,51 @@ namespace Multiplayer.Network.Sync
             return true;
         }
 
+        /// <summary>First sighting of a message prints; every later one is COUNTED and reported by
+        /// <see cref="RailMeta.FlushMissDigest"/>. The old version kept a bare HashSet, so all thirteen
+        /// "dto-twin gap" families, both "no native wiring" lines and every "entity not found" reported
+        /// exactly 1 for a whole session however often they really fired — the quietness was fine, the
+        /// unknowability was not.</summary>
         private static void LogMissOnce(string msg)
         {
-            if (_loggedMisses.Count < 500 && _loggedMisses.Add(msg))
-                Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + msg);
+            var line = "[Multiplayer][rail] GenericApplier: " + msg;
+            if (RailMeta.CountMiss(line)) Debug.LogWarning(line);
+        }
+
+        /// <summary>An applied entry under a root this peer asked to have re-sent IS the acknowledgement —
+        /// there is no other one on the wire, and the host's answer is an ordinary delta by design
+        /// (DiffEngine.ForceReemit). Whole-segment prefix match, the same rule the host's scope uses, so
+        /// "S#29" never claims "S#293"'s answer.</summary>
+        private static void NoteScopedAnswer(string path)
+        {
+            string hit = null;
+            foreach (var k in _pendingScoped.Keys)
+                if (path.Length >= k.Length && string.CompareOrdinal(path, 0, k, 0, k.Length) == 0 &&
+                    (path.Length == k.Length || path[k.Length] == '.'))
+                { hit = k; break; }
+            if (hit == null) return;
+            _pendingScoped.Remove(hit);
+            Debug.Log("[Multiplayer][rail] GenericApplier: scoped resend of root '" + hit +
+                      "' ANSWERED — first entry applied at " + path);
+        }
+
+        /// <summary>The other half: a request nobody answered must say so, or "the resend never came" and
+        /// "it came and applied silently" stay indistinguishable — which is exactly what four unacknowledged
+        /// backfill requests looked like in the 2026-08-07 session.</summary>
+        private static void ExpireScopedRequests()
+        {
+            float now = Time.realtimeSinceStartup;
+            List<string> dead = null;
+            foreach (var kv in _pendingScoped)
+                if (now >= kv.Value) (dead ?? (dead = new List<string>())).Add(kv.Key);
+            if (dead == null) return;
+            foreach (var k in dead)
+            {
+                _pendingScoped.Remove(k);
+                Debug.LogWarning("[Multiplayer][rail] GenericApplier: scoped resend of root '" + k +
+                                 "' went UNANSWERED for " + ScopedAnswerDeadlineSec + "s — not one entry " +
+                                 "under it applied. This peer's mirror of that root stays as it was.");
+            }
         }
 
         /// <summary>Law-7 drift backstop, client half — the ONE thing in the rail that ever compares host and
@@ -1462,6 +1602,9 @@ namespace Multiplayer.Network.Sync
         public static void ClientCrcTick(NetworkEngine engine)
         {
             if (engine == null || engine.IsHost || !engine.IsActiveSession) return;
+            // BEFORE the CRC's own interval gate: an unanswered request must be reported on its OWN
+            // deadline, not on whenever the roster-scaled backstop next happens to come round.
+            if (_pendingScoped.Count > 0) ExpireScopedRequests();
             if (Time.realtimeSinceStartup < _crcNextAt) return;
             // ROSTER-SCALED interval (N=50 mandate). Every client reports on its own clock and the HOST pays
             // one subtree walk per report, so a fixed 1 s interval makes the host's backstop cost grow
@@ -1511,18 +1654,53 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex) { Debug.LogError("[Multiplayer][rail] CRC report for '" + key + "' failed: " + ex.Message); }
         }
 
-        /// <summary>ONE throttled gate onto the law-7 resync path, whatever noticed the divergence (seq gap,
-        /// unknown kind def, torn batch). The throttle is global on purpose: a systematic miss hits every
-        /// entry of every packet, and one full resend answers all of them.</summary>
+        /// <summary>MAY THIS REQUEST GO OUT, kept pure so RailCheck L184 can execute it case by case.
+        ///
+        /// A FULL RESEND AND A SCOPED BACKFILL ARE NOT INTERCHANGEABLE, so they do not share a window. The
+        /// full one stays globally coalesced for the reason its old comment gave and that reason still
+        /// holds — a systematic miss hits every entry of every packet and one full resend answers all of
+        /// them (39 unknown-kindId warnings, one resend, converged in 1.3 s: correct). But the SAME window
+        /// also swallowed the scoped <c>structural create backfill</c> requests, and the warning line sat
+        /// INSIDE the throttle, so a swallowed scoped request printed NOTHING AT ALL. A backfill is about
+        /// one root's ref-lists; a full resend that went out five seconds ago for an unrelated reason does
+        /// not answer it, and nothing would ever have said so.
+        ///
+        /// The scoped window is PER ROOT for the same reason: two roots losing their ref-lists in the same
+        /// second are two losses, and the second one is not noise.</summary>
+        internal static bool ResyncAllowed(bool scoped, float now, float nextFullAt, float nextScopedAt)
+            => scoped ? now >= nextScopedAt : now >= nextFullAt;
+
+        /// <summary>ONE gate onto the law-7 resync path, whatever noticed the divergence (seq gap, unknown
+        /// kind def, torn batch). Throttled per <see cref="ResyncAllowed"/> — and a request the throttle
+        /// eats leaves a COUNTED line, never silence.</summary>
         /// <param name="rootKey">The one root this client knows it lost, when it knows one — the host then
         /// answers with a SCOPED re-emit instead of the whole covered graph (see HandleInbound). Null = no
         /// scope known (a seq gap or a torn batch can have touched anything).</param>
         private static void RequestResync(NetworkEngine engine, string reason, string rootKey = null)
         {
-            if (engine == null || Time.realtimeSinceStartup < _nextResyncReqAt) return;
-            _nextResyncReqAt = Time.realtimeSinceStartup + 5f;
+            if (engine == null) return;
+            float now = Time.realtimeSinceStartup;
+            bool scoped = !string.IsNullOrEmpty(rootKey);
+            float nextScoped = scoped && _nextScopedAt.TryGetValue(rootKey, out var at) ? at : 0f;
+            if (!ResyncAllowed(scoped, now, _nextFullResyncAt, nextScoped))
+            {
+                // The REASON is deliberately not in this text: it varies per entry (38 distinct
+                // "unknown kindId N" strings in one burst) and would defeat the counted once-logger it
+                // rides on. The digest reports the volume; the first line already named the family.
+                LogMissOnce(scoped
+                    ? "scoped resend of root '" + rootKey + "' THROTTLED — a request for that root went out " +
+                      "less than " + ResyncThrottleSec + "s ago and has not been answered yet"
+                    : "full resend THROTTLED — one is already in flight (" + ResyncThrottleSec + "s window)");
+                return;
+            }
+            if (scoped)
+            {
+                _nextScopedAt[rootKey] = now + ResyncThrottleSec;
+                _pendingScoped[rootKey] = now + ScopedAnswerDeadlineSec;
+            }
+            else _nextFullResyncAt = now + ResyncThrottleSec;
             Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + reason + " — requesting resend" +
-                             (string.IsNullOrEmpty(rootKey) ? " (full)" : " of root '" + rootKey + "'"));
+                             (scoped ? " of root '" + rootKey + "'" : " (full)"));
             try
             {
                 byte[] body;
