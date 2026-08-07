@@ -41,11 +41,13 @@ namespace RailCheck
     /// is the defect the event path already carries a <c>MarkDirty</c> for. Arm (d) is the echo guard: the
     /// reconcile runs inside the apply scope, so it cannot re-enter the relay and bounce back at the host.
     ///
-    /// Falsify: drop the selection from <c>HostSettle</c>'s writer → <c>L186 settle-carries-no-selection</c>;
-    /// drop the <c>ReconcileSelection</c> call from <c>ApplySettle</c> →
-    /// <c>L186 settle-applies-no-selection</c>; drop the <c>MarkDirty</c> from <c>ReconcileSelection</c> →
+    /// FALSIFIED, each against a freshly built assembly (the mod rebuilt before every harness run, so no
+    /// verdict came off a stale <c>Multiplayer.dll</c>): stop <c>HostSettle</c> reading the selection →
+    /// <c>L186 settle-carries-no-selection</c>; drop the <c>MarkDirty</c> from <c>ReconcileSelection</c> →
     /// <c>L186 repaired-weapon-is-invisible</c>; move <c>ReconcileSelection</c> above the
-    /// <c>SyncApplyScope.Enter</c> in <c>ApplySettle</c> → <c>L186 reconcile-echoes</c>.
+    /// <c>SyncApplyScope.Enter</c> in <c>ApplySettle</c> → <c>L186 reconcile-echoes (scope@1, reconcile@0)</c>.
+    /// Also falsifiable: drop the <c>ReconcileSelection</c> call from <c>ApplySettle</c> →
+    /// <c>L186 settle-applies-no-selection</c>.
     /// </summary>
     internal static class L186_WeaponSelectionRidesTheSettle
     {

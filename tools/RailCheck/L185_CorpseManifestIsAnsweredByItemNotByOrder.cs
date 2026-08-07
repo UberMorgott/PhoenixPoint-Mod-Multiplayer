@@ -39,10 +39,19 @@ namespace RailCheck
     /// gets are the ones the host declared, for every asking order, which is the only thing that makes the two
     /// corpses hold the same items. It does not assert that any method is called.
     ///
-    /// Falsify: restore the forward-scanning queue in <c>LootMirror.TryDeclared</c> (dequeue until the guid
-    /// matches) → <c>L185 answers-are-positional</c> AND <c>L185 an-unasked-answer-eats-the-next-one</c>;
-    /// make the unmatched case return a value instead of false → <c>L185 unnamed-item-is-guessed-at</c>;
-    /// stop consuming → <c>L185 one-corpse-answers-for-the-next</c>.
+    /// FALSIFIED, against a freshly built assembly (restoring `0ecff8f`'s <c>LootMirror</c> verbatim — the
+    /// forward-scanning queue — and rebuilding the mod before the harness ran):
+    ///   <c>L185 answers-are-positional (the order the client actually asked in)</c>,
+    ///   <c>L185 answers-are-positional (interleaved)</c>,
+    ///   <c>L185 one-unknown-item-voids-the-corpse</c>.
+    /// And note WHICH case stays green under the queue, because it is the whole reason the bug survived:
+    /// <c>(the host's own order)</c> passes, and so does arm (b)'s single skipped entry — a forward scan
+    /// handles a SUBSET fine. That is exactly what <c>L67 loot-manifest-positional</c> asserted and why it was
+    /// green through this. The discriminating input is not a skip, it is a REORDER, and only arm (a) supplies
+    /// one. Arm (b) is kept as a floor, not as this law's falsifier.
+    /// Other arms: make the unmatched case return a value instead of false →
+    /// <c>L185 unnamed-item-is-guessed-at</c>; stop consuming →
+    /// <c>L185 one-corpse-answers-for-the-next</c>.
     /// </summary>
     internal static class L185_CorpseManifestIsAnsweredByItemNotByOrder
     {
