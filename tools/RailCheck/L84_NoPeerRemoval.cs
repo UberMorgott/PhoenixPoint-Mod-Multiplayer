@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
 using Multiplayer.Transport;
 
 namespace RailCheck
@@ -36,10 +37,18 @@ namespace RailCheck
     ///     now ONE rule — <c>SessionManager.PausePeer</c> — and a peer keeps its row, slot, permissions and
     ///     guid binding while it is away.
     ///
-    /// WHAT "NOBODY WAITS" MEANS, SCOPED (developer ruling, 2026-08-05). The forbidden wait is an ADMISSION
-    /// quorum: a gate that reads what OTHER peers have done before letting play begin — the ready vote and the
-    /// LOADED count, both of which held a whole lobby hostage to one AFK or slow player, and both of which arms
-    /// (c) and (d) keep dead. A LEVEL TRANSITION is explicitly NOT that wait: "if it's loading from geoscape
+    /// WHAT "NOBODY WAITS" MEANS, SCOPED AGAIN (owner ruling, 2026-08-07 — supersedes the 2026-08-05 line
+    /// below for the LOBBY only). The mandate governs progress AFTER the game has been entered: once play is
+    /// running, nothing may gate one peer on another peer ACTING. It does NOT reach the lobby, where no play
+    /// exists to be blocked — so the host MAY hold the start until every live peer has readied, and the greyed
+    /// PLAY / NEW CAMPAIGN button is wanted behaviour rather than a violation. That reverses <c>afc111a</c>
+    /// deliberately and on the record. Arm (c) is retargeted accordingly; its replacement is the guard that
+    /// makes the lobby gate safe (LIVE peers only), which is the same concern as the rest of this law.
+    ///
+    /// The 2026-08-05 ruling, unchanged for everything else: the forbidden wait is an ADMISSION
+    /// quorum: a gate that reads what OTHER peers have done before letting play begin — the
+    /// LOADED count, which held a whole lobby hostage to one slow download, and which arm
+    /// (d) keeps dead. A LEVEL TRANSITION is explicitly NOT that wait: "if it's loading from geoscape
     /// into tactical, or from tactical back, then without options EVERYONE must load, in order to start" —
     /// otherwise the first peer in plays a world the others have not reached (law L94's report). That barrier is
     /// legitimate because it can never strand anybody: it releases as soon as every LIVE peer is in, gives up on
@@ -54,7 +63,9 @@ namespace RailCheck
     /// Falsify (each verified to go RED, then restored):
     ///   • add <c>Transport.DisconnectPeer(id)</c> anywhere outside HandleLeave → <c>kick-outside-a-leave</c>
     ///   • put <c>DropPeer</c> back in the send-queue overflow branch → <c>backpressure-removes-the-peer</c>
-    ///   • restore the ready fact to <c>LobbyController.UpdateLobby/CanStart</c> → <c>ready-quorum-back</c>
+    ///   • count a PAUSED or parity-blocked row in <c>LobbyController.AllLivePeersReady</c> →
+    ///     <c>lobby-counts-a-dead-peer</c>; make that fold return true for everything →
+    ///     <c>POSITIVE CONTROL</c>
     ///   • restore the client counts to <c>SaveTransferMath.BarrierReleased</c> → <c>loaded-quorum-back</c>
     ///   • swap <c>PausePeer</c> back to <c>RemoveClient</c> in the disconnect funnel → <c>drop-removes-the-peer</c>
     /// </summary>
@@ -129,25 +140,56 @@ namespace RailCheck
                              "Discard the OLDEST queued frames instead: stale is what the rail is built to " +
                              "survive (idempotent Apply, seq'd delivery, resync on gap)";
 
-            // ─── (c) NO READY QUORUM — EXECUTED against the real gate ───
-            var update = typeof(LobbyController).GetMethod("UpdateLobby", All);
-            if (update == null)
-                yield return "L84 premise-changed: LobbyController.UpdateLobby is gone — this law can no longer " +
-                             "prove the start gate takes no ready vote";
-            else if (update.GetParameters().Any(p => p.ParameterType == typeof(bool) &&
-                                                     p.Name.IndexOf("ready", StringComparison.OrdinalIgnoreCase) >= 0))
-                yield return "L84 ready-quorum-back: LobbyController.UpdateLobby takes a ready fact again. " +
-                             "Whatever it is called, a start gate that reads whether OTHER peers are ready is a " +
-                             "quorum, and a quorum is a hostage: one player who is AFK, on a slow machine or " +
-                             "parity-blocked holds fifty shut. The host starts on its OWN readiness";
+            // ─── (c) A LOBBY GATE COUNTS ONLY LIVE PEERS — EXECUTED against the real fold ───
+            //
+            // SUBJECT NARROWED, STRENGTH UNCHANGED (owner ruling 2026-08-07). This arm used to assert
+            // that the LOBBY start gate reads nobody's ready flag, which reversed into this repo as
+            // afc111a. The mandate is now scoped: it governs progress AFTER the game has been entered.
+            // Before the game starts there is no play to block, so the host may wait for the table to sit
+            // down, and the greyed PLAY / NEW CAMPAIGN button is wanted behaviour. Everything the mandate
+            // ever said about IN-GAME progress is untouched — arms (a), (b), (d) and (e) are byte for
+            // byte what they were, L91/L145/L151 still forbid gating one peer on another peer ACTING, and
+            // the load barrier still waits on a LOAD that ends by itself and never on a person.
+            //
+            // WHAT REPLACES IT IS THE GUARD THAT MAKES THE LOBBY GATE SAFE, and it is this law's business
+            // for exactly the reason the rest of it is: a peer that is gone must cost nobody the session.
+            // Drops PausePeer rather than RemoveClient (arm (e)), so a dead peer keeps its roster row
+            // forever — count that row and the lobby hangs for everyone with no human able to clear it.
+            // Same for a parity-blocked peer, whose ready the host itself refuses (SetClientReady).
+            var fold = typeof(LobbyController).GetMethod("AllLivePeersReady", All);
+            if (fold == null)
+                yield return "L84 premise-changed: LobbyController.AllLivePeersReady is gone — this law can no " +
+                             "longer prove the lobby gate skips the peers no human can ready for";
 
             var lobby = new LobbyController();
             lobby.BeginHost();
-            lobby.UpdateLobby(connectedClientCount: 49, saveChosen: true);
+
+            // A dead peer must not hold the lobby: paused + not ready, and the gate still opens.
+            lobby.UpdateLobby(connectedClientCount: 49, saveChosen: true,
+                allLivePeersReady: LobbyController.AllLivePeersReady(new[]
+                {
+                    new PeerListEntry { IsHost = true },
+                    new PeerListEntry { Ready = true },
+                    new PeerListEntry { Ready = false, Paused = true },
+                    new PeerListEntry { Ready = false, ParityDiffs = "mod X missing" },
+                }));
             if (!lobby.CanStart)
-                yield return "L84 ready-quorum-back: with 49 peers connected and a save chosen — and NOT ONE of " +
-                             "them having readied — CanStart is false. Something still makes the host's start " +
-                             "depend on what the other 49 did, which is the join wall this law exists to keep shut";
+                yield return "L84 lobby-counts-a-dead-peer: a roster whose only un-ready rows are a PAUSED peer " +
+                             "and a parity-blocked one still closes the start gate. Neither can ever be cleared " +
+                             "by a human pressing a button — the paused peer's machine is gone, and the host " +
+                             "itself refuses the parity-blocked peer's ready — so the lobby is shut forever and " +
+                             "the readiness gate has become the infinite blocker it was allowed on condition of " +
+                             "never being. Count LIVE peers only";
+
+            // POSITIVE CONTROL: the fold must still be able to say no, or the arm above proves nothing.
+            if (LobbyController.AllLivePeersReady(new[]
+                {
+                    new PeerListEntry { IsHost = true },
+                    new PeerListEntry { Ready = false },
+                }))
+                yield return "L84 POSITIVE CONTROL: AllLivePeersReady answers TRUE for a LIVE, un-paused, " +
+                             "parity-clean peer that has not readied. The fold has stopped discriminating, so " +
+                             "the arm above passes for a gate that reads nothing at all";
 
             // ─── (d) NO LOADED QUORUM — EXECUTED against the real predicate ───
             var released = typeof(SaveTransferMath).GetMethod("BarrierReleased", All);

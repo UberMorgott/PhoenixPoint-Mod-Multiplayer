@@ -1,4 +1,9 @@
-﻿namespace Multiplayer.Network
+﻿using Multiplayer.Network.MessageLayer;
+using Multiplayer.Network.Parity;
+
+using Multiplayer.Network.MessageLayer;   // PeerListEntry — the roster row AllLivePeersReady folds over
+
+namespace Multiplayer.Network
 {
     /// <summary>
     /// The co-op lobby lifecycle states. <c>Starting</c> / <c>InGame</c> internals are out of axis
@@ -25,12 +30,19 @@
     /// unlocked, with at least one connected client, and a save chosen. Host-alone can never start.
     /// On <see cref="CommitStart"/> the lobby LOCKS so a late join can never reopen the gate mid-start.
     ///
-    /// NO READY QUORUM (N=50 mandate, 2026-08-05). The gate used to also require EVERY connected
-    /// non-host peer to be ready, which is a quorum: one peer that is slow, AFK, parity-blocked or
-    /// simply not looking at its screen held fifty players shut, and the bigger the roster the more
-    /// certain that is. The host now starts on its OWN readiness and every other peer converges through
-    /// the per-peer on-demand join path. Ready survives as what it always really was — a signal to the
-    /// host that a player is at the keyboard — and is still rendered per row; it just no longer votes.
+    /// READINESS LIVES IN THE LOBBY, AND ONLY IN THE LOBBY (owner ruling, 2026-08-07). This REVERSES
+    /// <c>afc111a</c> (2026-08-05), which removed exactly this gate under "start on the host's own
+    /// readiness, never on a peer quorum". The no-quorum postulate is now scoped: it governs progress
+    /// AFTER the game has been entered — once play is running, nothing may gate one peer on another peer
+    /// ACTING (L91, L145, L151, and the load barrier's own rule that it waits on a LOAD, never a person).
+    /// Before the game starts there is no play to block, so the host may wait for the table to sit down.
+    /// The in-game half of the mandate is untouched and undiminished.
+    ///
+    /// THE ONE THING THAT MAKES IT SAFE is <see cref="AllLivePeersReady"/>: a peer that is PAUSED — the
+    /// single state every involuntary loss funnels into, because drops use <c>PausePeer</c> and never
+    /// <c>RemoveClient</c>, so a gone peer keeps its roster row forever — is NOT COUNTED. Without that
+    /// exclusion this gate is an infinite blocker one floor down: a crashed player would hold the lobby
+    /// shut for everyone with nobody able to ready on its behalf. Live peers only, always.
     /// </summary>
     public class LobbyController
     {
@@ -41,17 +53,49 @@
 
         private int _connectedClientCount;
         private bool _saveChosen;
+        private bool _allLivePeersReady;
 
         /// <summary>
-        /// The start gate. True only when the lobby is in HostLobby, unlocked, and
-        /// connectedClientCount &gt;= 1 &amp;&amp; saveChosen. Deliberately NOT a function of anyone's
-        /// ready flag — see the class summary.
+        /// THE LOBBY READINESS FOLD. Pure and total so RailCheck EXECUTES it rather than describing it
+        /// (L84 arm (c)). Counts the non-host rows that are LIVE and answers whether every one of them
+        /// has readied. An empty live set is vacuously ready; the ">= 1 connected peer" half of the gate
+        /// is what stops a host starting alone, and it is deliberately a different question.
+        ///
+        /// A ROW IS SKIPPED WHEN NO HUMAN CAN CLEAR IT BY PRESSING A BUTTON — that is the whole exclusion
+        /// rule, and it is what keeps this gate from becoming the infinite blocker one floor down:
+        ///   • <c>Paused</c> — every involuntary loss funnels here (drops use <c>PausePeer</c>, never
+        ///     <c>RemoveClient</c>, so a gone peer keeps its roster row forever). Nobody is home to ready.
+        ///   • parity-blocked — <c>SessionManager.SetClientReady</c> REFUSES a ready from a peer whose row
+        ///     carries parity diffs, host-authoritatively. Counting it would mean waiting for a vote the
+        ///     host itself will not accept. Parity is already a SOFT gate (such a peer joins and plays;
+        ///     only its READY is locked), so skipping it changes who enters the session not at all.
+        /// A peer that truly left is off the roster and needs no rule.
         /// </summary>
-        public bool CanStart =>
+        public static bool AllLivePeersReady(System.Collections.Generic.IEnumerable<PeerListEntry> roster)
+        {
+            if (roster == null) return true;
+            foreach (var p in roster)
+            {
+                if (p == null || p.IsHost || p.Paused) continue;
+                if (!ParityComparer.ReadyAllowed(p.ParityDiffs)) continue;
+                if (!p.Ready) return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// The readiness half of the gate, on its own because the NEW CAMPAIGN button needs it WITHOUT
+        /// the chosen-save half (a fresh campaign picks no save). Same lobby state, same lock, same
+        /// host-is-not-alone rule.
+        /// </summary>
+        public bool PeersReady =>
             State == LobbyState.HostLobby
             && !IsLocked
             && _connectedClientCount >= 1
-            && _saveChosen;
+            && _allLivePeersReady;
+
+        /// <summary>The start gate: <see cref="PeersReady"/> plus a chosen save.</summary>
+        public bool CanStart => PeersReady && _saveChosen;
 
         /// <summary>Idle → HostLobby. Returns false (no-op) if not currently Idle.</summary>
         public bool BeginHost()
@@ -81,11 +125,12 @@
         /// Push the latest lobby facts. Ignored once locked (post-start) so a mid-start race can
         /// never reopen the gate.
         /// </summary>
-        public void UpdateLobby(int connectedClientCount, bool saveChosen)
+        public void UpdateLobby(int connectedClientCount, bool saveChosen, bool allLivePeersReady)
         {
             if (IsLocked) return;
             _connectedClientCount = connectedClientCount;
             _saveChosen = saveChosen;
+            _allLivePeersReady = allLivePeersReady;
         }
 
         /// <summary>
@@ -117,8 +162,9 @@
 
         /// <summary>
         /// The host swapped the chosen save: clients readied for a specific session, so their Ready
-        /// must be cleared. Returns true so the caller can drive the actual roster reset. It no longer
-        /// closes <see cref="CanStart"/> — ready is not part of the gate (see the class summary).
+        /// must be cleared. Returns true so the caller can drive the actual roster reset. Clearing them
+        /// DOES close <see cref="CanStart"/> again now that readiness is part of the lobby gate — which is
+        /// the point: a peer readied for the save the host just swapped away has not agreed to this one.
         /// </summary>
         public bool SaveChangedShouldResetReady() => !IsLocked;
 
@@ -129,6 +175,7 @@
             IsLocked = false;
             _connectedClientCount = 0;
             _saveChosen = false;
+            _allLivePeersReady = false;
         }
 
     }

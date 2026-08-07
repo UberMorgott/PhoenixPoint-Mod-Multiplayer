@@ -60,6 +60,12 @@ namespace Multiplayer.UI
         private object _readyButtonCtrl;
         private System.Reflection.MethodInfo _readyButtonSetInteractable;
         private int _readyInteractableCache = -1;
+        // Same three, for NEW CAMPAIGN — it greys on the lobby readiness gate exactly as PLAY does
+        // (owner ruling 2026-08-07). It reads PeersReady rather than CanStart because a fresh campaign
+        // picks no save, so the chosen-save half of the start gate must not apply to it.
+        private object _newCampaignCtrl;
+        private System.Reflection.MethodInfo _newCampaignSetInteractable;
+        private int _newCampaignInteractableCache = -1;
         // True while the LOCAL player's own roster row carries parity diffs → READY locked.
         private bool _parityLocked;
 
@@ -401,6 +407,23 @@ namespace Multiplayer.UI
                     Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
                     () => _owner.OnLobbyNewCampaign());
                 LE(_newCampaignBtn.gameObject).preferredHeight = RailButtonSize.y;
+            }
+
+            // Same one-time controller resolution the PLAY button does, for the same reason: a cloned
+            // native button repaints its greyed visual only through SetInteractable, never off
+            // Button.interactable alone.
+            if (_newCampaignBtn != null)
+            {
+                var ncPgb = HarmonyLib.AccessTools.TypeByName(
+                    "PhoenixPoint.Common.View.ViewControllers.PhoenixGeneralButton");
+                if (ncPgb != null)
+                {
+                    _newCampaignCtrl = _newCampaignBtn.GetComponentInParent(ncPgb)
+                        ?? _newCampaignBtn.GetComponentInChildren(ncPgb);
+                    if (_newCampaignCtrl != null)
+                        _newCampaignSetInteractable =
+                            HarmonyLib.AccessTools.Method(ncPgb, "SetInteractable", new[] { typeof(bool) });
+                }
             }
 
             // ── SECTION "JOIN" (always): join someone else's game ───────────────
@@ -1146,6 +1169,28 @@ namespace Multiplayer.UI
                     _playActiveCache = activeNow;
                     _playInteractableCache = interactableNow;
                     RefreshPlayButtonVisual(playable);
+                }
+            }
+
+            // NEW CAMPAIGN: greys on the SAME lobby readiness gate, minus the chosen-save half (a fresh
+            // campaign picks no save). Same press-time projection the button's handler re-checks, so the
+            // visual and the press can never disagree.
+            if (_newCampaignBtn != null)
+            {
+                var ncReady = engine.IsHost && (MultiplayerUI.Instance?.EvaluateNewCampaignGate() ?? false);
+                _newCampaignBtn.interactable = ncReady;
+                var ncNow = ncReady ? 1 : 0;
+                if (ncNow != _newCampaignInteractableCache)
+                {
+                    _newCampaignInteractableCache = ncNow;
+                    if (_newCampaignSetInteractable != null && _newCampaignCtrl != null)
+                    {
+                        try { _newCampaignSetInteractable.Invoke(_newCampaignCtrl, new object[] { ncReady }); }
+                        catch (System.Exception e)
+                        {
+                            UnityEngine.Debug.LogError("[Multiplayer] New-campaign button repaint failed: " + e.Message);
+                        }
+                    }
                 }
             }
         }

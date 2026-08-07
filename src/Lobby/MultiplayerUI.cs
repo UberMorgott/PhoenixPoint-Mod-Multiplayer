@@ -529,8 +529,9 @@ namespace Multiplayer.UI
         //   • clientCount      = connected NON-host peers (host self-entry excluded).
         //   • saveChosen       = the AUTHORITATIVE broadcast value Session.ChosenSaveName is non-empty
         //                        (single source of truth; see the gate-vs-rail divergence note below).
-        // Ready flags are NOT projected any more: the start gate carries no ready quorum (N=50 mandate —
-        // see LobbyController's class summary). They are still rendered per row by the lobby panel.
+        //   • allLivePeersReady = every LIVE non-host row has readied (owner ruling 2026-08-07: readiness
+        //                        is a LOBBY gate; see LobbyController's class summary for the scope and
+        //                        for why a PAUSED peer is excluded rather than counted-and-unready).
         // UpdateLobby ignores updates while the FSM is locked, so this is safe to call every frame.
         private void RefreshGateFacts(out int clientCount, out bool saveChosen)
         {
@@ -550,7 +551,8 @@ namespace Multiplayer.UI
             // broadcast value makes them converge: PLAY can never arm unless a save was really broadcast.
             saveChosen = !string.IsNullOrEmpty(engine?.Session?.ChosenSaveName);
 
-            _lobbyController.UpdateLobby(clientCount, saveChosen);
+            _lobbyController.UpdateLobby(clientCount, saveChosen,
+                                         LobbyController.AllLivePeersReady(roster));
         }
 
         // Refresh the FSM from the live roster, then return the FULL start gate (clients>=1 && all
@@ -561,6 +563,15 @@ namespace Multiplayer.UI
         {
             RefreshGateFacts(out _, out _);
             return _lobbyController.CanStart;
+        }
+
+        // Same projection for NEW CAMPAIGN, which needs the readiness half WITHOUT the chosen-save half
+        // (a fresh campaign picks no save). Both the button visual and OnLobbyNewCampaign's press-time
+        // guard read THIS, so they cannot drift into two rules the way Bug B did.
+        public bool EvaluateNewCampaignGate()
+        {
+            RefreshGateFacts(out _, out _);
+            return _lobbyController.PeersReady;
         }
 
         // ─── Smart-Join (footer Join…) ─────────────────────────────────────
@@ -954,6 +965,15 @@ namespace Multiplayer.UI
                     coord.SessionStarted, coord.TransferActive))
             {
                 Debug.LogWarning("[Multiplayer] New-campaign bootstrap unavailable (session started or transfer in flight).");
+                return;
+            }
+
+            // The lobby readiness gate, re-checked at the press (the button is already greyed on it —
+            // this is the defense-in-depth half, same shape as OnLobbyPlay's).
+            if (!EvaluateNewCampaignGate())
+            {
+                Debug.LogWarning("[Multiplayer] NEW CAMPAIGN blocked: not every live peer has readied " +
+                                 "(a peer that dropped out is PAUSED and is not counted).");
                 return;
             }
 
