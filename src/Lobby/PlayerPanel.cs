@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using Multiplayer.Network;
 using Multiplayer.Network.MessageLayer;
-using Multiplayer.Network.Sync;
 using Multiplayer.Tactical;
 using UnityEngine;
 using UnityEngine.UI;
@@ -19,19 +18,30 @@ namespace Multiplayer.UI
     /// grey "dropped" marker in particular is a REPORT, never an input — no start, launch, barrier or
     /// turn predicate may read this file, and none does (the NO-QUORUM mandate, laws L84/L91/L119).
     ///
-    /// WHERE IT LIVES. One panel object on the mod's own persistent overlay canvas
-    /// (<c>MultiplayerUI.EnsureBarCanvas</c>), for BOTH scenes, positioned per frame:
-    ///   • TACTICAL — pinned under the co-op ready button (<see cref="TacticalReadyButton.Rect"/>), which
-    ///     is itself pinned under the native End Turn button. Cross-canvas by screen point rather than by
-    ///     re-parenting, which is what keeps it out of the End Turn row's layout group: a panel that hung
-    ///     BELOW the ready clone as its SIBLING would be measured by that clone's own
-    ///     <c>TacticalReadyRowFollower.ExtraClearance</c> sweep of "the lowest thing any sibling draws",
-    ///     pushing the ready button down, pushing the panel down after it, forever.
-    ///   • GEOSCAPE — the right edge, vertically centred. There is no readiness on the geoscape, so the
-    ///     status column there reads connection only (connected / dropped), exactly as specified.
-    /// Tactical VISIBILITY is inherited the same way the ready button inherits it — the panel is shown
-    /// only while that clone is <c>activeInHierarchy</c>, so whatever hides the End Turn module (enemy
-    /// turn, cinematic, tutorial lockout) hides this too, with no rule of ours in the middle.
+    /// WHERE IT LIVES. TACTICAL ONLY, one panel object on the mod's own persistent overlay canvas
+    /// (<c>MultiplayerUI.EnsureBarCanvas</c>), positioned per frame under the co-op ready button
+    /// (<see cref="TacticalReadyButton.Rect"/>), which is itself pinned under the native End Turn button.
+    /// Cross-canvas by screen point rather than by re-parenting, which is what keeps it out of the End
+    /// Turn row's layout group: a panel that hung BELOW the ready clone as its SIBLING would be measured
+    /// by that clone's own <c>TacticalReadyRowFollower.ExtraClearance</c> sweep of "the lowest thing any
+    /// sibling draws", pushing the ready button down, pushing the panel down after it, forever.
+    ///
+    /// IT IS RIGHT-ALIGNED AND CLAMPED, and both halves are the same bug. The End Turn row lives at the
+    /// bottom RIGHT of the HUD; hanging the panel off the anchor's bottom-LEFT corner with a left pivot
+    /// made it grow RIGHTWARDS from there, straight off the edge of the screen with half of it invisible.
+    /// It now hangs off the bottom-RIGHT corner with a (1,1) pivot so it grows INWARDS, and
+    /// <see cref="ClampOnScreen"/> then holds the whole rect inside the canvas on both axes — the anchor
+    /// is a native widget whose position moves with resolution, aspect and every UI-scale setting, so
+    /// "lands on screen" is not a property that arithmetic against one screen can have on its own.
+    ///
+    /// THERE IS NO GEOSCAPE PANEL. It was removed on the owner's report (2026-08-07): at geoscape sizes
+    /// the plate is big enough to cover the interface it reports over, and its status column there had
+    /// nothing to say the lobby roster does not — there is no readiness on the geoscape. Tactical is
+    /// where the three columns are load-bearing, so tactical is the only place it draws.
+    ///
+    /// VISIBILITY is inherited the same way the ready button inherits it — the panel is shown only while
+    /// that clone is <c>activeInHierarchy</c>, so whatever hides the End Turn module (enemy turn,
+    /// cinematic, tutorial lockout) hides this too, with no rule of ours in the middle.
     ///
     /// IT CANNOT EAT A CLICK. Every Graphic it builds has <c>raycastTarget = false</c>, including the ping
     /// meter, and the hover that reveals the millisecond number is a rect/mouse-position test rather than
@@ -72,19 +82,30 @@ namespace Multiplayer.UI
         private const int BarCount = 4;
 
         // ─── Geometry (all theme-scaled; UiScale is the one knob) ──────────
-        private static int Pad => LobbyTheme.ScaledPadding / 2;
-        private static int RowH => LobbyTheme.ScaledRowHeight;
-        private static int NameW => LobbyTheme.ScaledRosterNameWidth;
+        // OVERHANG SIZING, not lobby sizing. The lobby's Scaled* row metrics are built for a full-screen
+        // page; over a live battle map the same numbers are a plate that covers the HUD it reports over
+        // (the owner's report, 2026-08-07). So the bases below are the panel's own — roughly half the
+        // lobby's — and they still go through LobbyTheme.Scale, so UiScale remains the one knob.
+        private static int Pad => LobbyTheme.Scale(6);
+        private static int RowH => LobbyTheme.Scale(24);
+        private static int NameW => LobbyTheme.Scale(80);
         /// <summary>Wide enough for the four bars AND for the "123 ms" the hover swaps in over them — the
         /// number replaces the meter in the same cell, so there is no floating tooltip to place, clip or
         /// keep on screen.</summary>
-        private static int PingW => LobbyTheme.Scale(60);
-        private static int StatusW => LobbyTheme.ScaledIconButtonSize;
+        private static int PingW => LobbyTheme.Scale(44);
+        private static int StatusW => LobbyTheme.Scale(18);
         private static int PanelW => Pad * 2 + NameW + Pad + PingW + Pad + StatusW;
+        private static int NameFont => LobbyTheme.Scale(13);
+        private static int NumberFont => LobbyTheme.Scale(11);
 
-        /// <summary>Gap between the panel's top edge and the ready button's bottom edge, and the geoscape
-        /// margin from the screen edge. One value, themed.</summary>
-        private static int Margin => LobbyTheme.ScaledPadding;
+        /// <summary>Gap between the panel's top edge and the ready button's bottom edge, and the margin
+        /// <see cref="ClampOnScreen"/> keeps from every screen edge. One value, themed.</summary>
+        private static int Margin => Pad;
+
+        /// <summary>SEE-THROUGH ON PURPOSE. The panel deliberately overhangs the tactical HUD, so an
+        /// opaque plate hides the interface rather than reporting over it. Theme colours, panel alpha.</summary>
+        private const float FillAlpha = 0.45f;
+        private const float BorderAlpha = 0.35f;
 
         private sealed class Row
         {
@@ -116,7 +137,8 @@ namespace Multiplayer.UI
             var img = _root.AddComponent<Image>();
             img.raycastTarget = false;
             var outline = _root.AddComponent<Outline>();
-            LobbyTheme.ApplyPanelSkin(img, outline, LobbyTheme.PanelFill, LobbyTheme.PanelBorder);
+            LobbyTheme.ApplyPanelSkin(img, outline, Fade(LobbyTheme.PanelFill, FillAlpha),
+                                                   Fade(LobbyTheme.PanelBorder, BorderAlpha));
 
             _root.SetActive(false);
         }
@@ -152,10 +174,11 @@ namespace Multiplayer.UI
             // The tactical anchor is Unity-null between battles; ReferenceEquals is deliberately NOT used
             // here, because the question really is "is this object still alive", not "do we hold a handle".
             var anchor = TacticalReadyButton.Rect;
-            bool tactical = anchor != null && anchor.gameObject.activeInHierarchy;
-            bool show = session != null && engine.IsActiveSession &&
-                        engine.SaveTransfer?.SessionStarted == true &&
-                        (tactical || GeoRuntime.Instance.IsGeoscapeActive);
+            // TACTICAL ONLY. No anchor, no panel — there is no geoscape placement to fall back to any
+            // more, and the absence IS the feature (see the class comment).
+            bool show = anchor != null && anchor.gameObject.activeInHierarchy &&
+                        session != null && engine.IsActiveSession &&
+                        engine.SaveTransfer?.SessionStarted == true;
 
             if (!show)
             {
@@ -166,7 +189,7 @@ namespace Multiplayer.UI
 
             var roster = session.GetLobbyRoster();
             EnsureRows(roster.Count);
-            Place(tactical ? anchor : null, roster.Count);
+            Place(anchor, roster.Count);
 
             var mouse = (Vector2)Input.mousePosition;
             for (int i = 0; i < _rows.Count; i++)
@@ -175,13 +198,13 @@ namespace Multiplayer.UI
                 bool used = i < roster.Count;
                 if (row.Go.activeSelf != used) row.Go.SetActive(used);
                 if (!used) continue;
-                Paint(row, roster[i], session, engine, tactical, mouse);
+                Paint(row, roster[i], session, engine, mouse);
             }
         }
 
         /// <summary>Name, meter, glyph. The one method that turns a roster row into pixels.</summary>
         private void Paint(Row row, PeerListEntry entry, SessionManager session, NetworkEngine engine,
-                           bool tactical, Vector2 mouse)
+                           Vector2 mouse)
         {
             row.Name.text = string.IsNullOrEmpty(entry.Nickname) ? "Player" : entry.Nickname;
             row.Name.color = entry.Paused ? LobbyTheme.MutedText : LobbyTheme.BodyText;
@@ -210,15 +233,14 @@ namespace Multiplayer.UI
             row.Number.text = ms < 0 ? "—" : ms + " ms";
 
             // STATUS. Grey always wins: a peer that has gone silent is not "not ready", it is not here, and
-            // showing its last-known readiness would be the one lie this column must not tell. In tactical
-            // the glyph is the advisory ready flag; on the geoscape there is no readiness to report, so a
-            // present peer is simply present.
+            // showing its last-known readiness would be the one lie this column must not tell. Otherwise
+            // the glyph is the advisory ready flag.
             if (entry.Paused)
             {
                 row.Status.text = "✗";
                 row.Status.color = LobbyTheme.MutedText;
             }
-            else if (!tactical || entry.TacReady)
+            else if (entry.TacReady)
             {
                 row.Status.text = "✓";
                 row.Status.color = LobbyTheme.ReadyText;
@@ -230,49 +252,64 @@ namespace Multiplayer.UI
             }
         }
 
-        private static Color Dim(Color c) => new Color(c.r, c.g, c.b, 0.25f);
+        private static Color Fade(Color c, float a) => new Color(c.r, c.g, c.b, a);
+        private static Color Dim(Color c) => Fade(c, 0.25f);
 
         // ─── Placement ──────────────────────────────────────────────────────
 
         /// <summary>
-        /// Pin the panel under <paramref name="anchor"/> (tactical) or to the right screen edge (geoscape).
+        /// Pin the panel under <paramref name="anchor"/>, right-aligned with it and clamped on screen.
         ///
-        /// The tactical case crosses canvases — ours is a ScreenSpaceOverlay of the mod's own, the ready
-        /// button lives on the game's HUD canvas — so it goes world → SCREEN → our canvas' local space.
-        /// The screen point is the one currency both canvases are guaranteed to agree on whatever render
-        /// mode, camera or scale the HUD is using; converting rect-to-rect directly would silently be wrong
-        /// the moment the HUD canvas is not an overlay.
+        /// It crosses canvases — ours is a ScreenSpaceOverlay of the mod's own, the ready button lives on
+        /// the game's HUD canvas — so it goes world → SCREEN → our canvas' local space. The screen point
+        /// is the one currency both canvases are guaranteed to agree on whatever render mode, camera or
+        /// scale the HUD is using; converting rect-to-rect directly would silently be wrong the moment the
+        /// HUD canvas is not an overlay.
         /// </summary>
         private void Place(RectTransform anchor, int rowCount)
         {
-            _rootRect.sizeDelta = new Vector2(PanelW, Pad * 2 + RowH * Mathf.Max(rowCount, 1));
-
-            if (anchor == null)
-            {
-                // Geoscape: right edge, vertically centred — the one large stretch of the geoscape frame
-                // that carries no native HUD. ponytail: if it ever collides with a mod's own panel, this
-                // anchor pair is the whole fix.
-                _rootRect.anchorMin = _rootRect.anchorMax = _rootRect.pivot = new Vector2(1f, 0.5f);
-                _rootRect.anchoredPosition = new Vector2(-Margin, 0f);
-                return;
-            }
+            var size = new Vector2(PanelW, Pad * 2 + RowH * Mathf.Max(rowCount, 1));
+            _rootRect.sizeDelta = size;
 
             anchor.GetWorldCorners(_corners);
             var srcCanvas = anchor.GetComponentInParent<Canvas>();
             var cam = srcCanvas == null || srcCanvas.renderMode == RenderMode.ScreenSpaceOverlay
                 ? null
                 : srcCanvas.worldCamera;
-            // Corners are BL, TL, TR, BR — the bottom-left one is where a panel that hangs under the
-            // button, left-aligned with it, puts its own top-left corner.
-            var screen = RectTransformUtility.WorldToScreenPoint(cam, _corners[0]);
+            // Corners are BL, TL, TR, BR — the bottom-RIGHT one, because the End Turn row it hangs off
+            // sits at the right of the HUD and a panel wider than the button must therefore grow LEFT.
+            // Taking BL here (and pivoting left) is what pushed it off the edge of the screen.
+            var screen = RectTransformUtility.WorldToScreenPoint(cam, _corners[3]);
 
             Vector2 local;
             if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(_canvasRect, screen, null, out local))
                 return;   // degenerate canvas — keep the last good position rather than fling the panel
 
             _rootRect.anchorMin = _rootRect.anchorMax = new Vector2(0.5f, 0.5f);
-            _rootRect.pivot = new Vector2(0f, 1f);
-            _rootRect.anchoredPosition = local - new Vector2(0f, Margin);
+            _rootRect.pivot = new Vector2(1f, 1f);
+            _rootRect.anchoredPosition = ClampOnScreen(local - new Vector2(0f, Margin), size);
+        }
+
+        /// <summary>
+        /// The whole rect, inside the canvas, at any resolution and any UI scale.
+        ///
+        /// <paramref name="topRight"/> is an anchoredPosition for anchors (0.5,0.5) and pivot (1,1), i.e.
+        /// literally the panel's TOP-RIGHT corner measured from the canvas centre — so the four edges are
+        /// four subtractions and the clamp is one line per axis. The canvas' own <c>rect</c> is the bound
+        /// rather than <c>Screen.width/height</c>: our canvas is a ScaleWithScreenSize one, so its rect is
+        /// already denominated in the same scaled units this position is, and reading raw pixels here
+        /// would be wrong by exactly the scale factor on every screen that is not 1920×1080.
+        ///
+        /// The <c>Mathf.Min</c> is the degenerate case — a panel taller or wider than the canvas has no
+        /// position that satisfies both edges, and pinning it to the top-right one is the useful answer.
+        /// </summary>
+        private Vector2 ClampOnScreen(Vector2 topRight, Vector2 size)
+        {
+            var half = _canvasRect.rect.size * 0.5f;
+            float maxX = half.x - Margin, minX = -half.x + Margin + size.x;
+            float maxY = half.y - Margin, minY = -half.y + Margin + size.y;
+            return new Vector2(Mathf.Clamp(topRight.x, Mathf.Min(minX, maxX), maxX),
+                               Mathf.Clamp(topRight.y, Mathf.Min(minY, maxY), maxY));
         }
 
         private readonly Vector3[] _corners = new Vector3[4];
@@ -305,7 +342,7 @@ namespace Multiplayer.UI
             rt.sizeDelta = new Vector2(PanelW - Pad * 2, RowH);
 
             var name = UiToolkit.CreateText(go, "Name", Vector2.zero, new Vector2(NameW, RowH), "",
-                LobbyTheme.ScaledRowFontSize, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
+                NameFont, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
 
             // The meter cell. Also the hover rect — RectangleContainsScreenPoint is tested against it, so
             // the hover needs no EventSystem handler and the cell needs no raycastTarget.
@@ -319,9 +356,9 @@ namespace Multiplayer.UI
             // Four stacked bars — the one thing here that is DRAWN rather than reused, because the game
             // ships no discrete signal-strength widget (its only bar is the continuous loading bar
             // NativeWidgetFactory clones, which reads as progress, not as strength). Four flat Images.
-            int barW = Mathf.Max(2, LobbyTheme.Scale(5));
-            int gap = Mathf.Max(1, LobbyTheme.Scale(2));
-            int full = Mathf.Max(4, LobbyTheme.Scale(18));
+            int barW = Mathf.Max(2, LobbyTheme.Scale(3));
+            int gap = Mathf.Max(1, LobbyTheme.Scale(1));
+            int full = Mathf.Max(4, LobbyTheme.Scale(12));
             var bars = new Image[BarCount];
             for (int b = 0; b < BarCount; b++)
             {
@@ -336,11 +373,11 @@ namespace Multiplayer.UI
             }
 
             var number = UiToolkit.CreateText(cellGo, "Number", Vector2.zero, new Vector2(PingW, RowH), "",
-                LobbyTheme.ScaledSubFontSize, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
+                NumberFont, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
             number.color = LobbyTheme.SubText;
 
             var status = UiToolkit.CreateText(go, "Status", new Vector2(NameW + Pad + PingW + Pad, 0f),
-                new Vector2(StatusW, RowH), "", LobbyTheme.ScaledRowFontSize, TextAnchor.MiddleCenter,
+                new Vector2(StatusW, RowH), "", NameFont, TextAnchor.MiddleCenter,
                 new Vector2(0f, 0.5f));
 
             name.raycastTarget = false;
