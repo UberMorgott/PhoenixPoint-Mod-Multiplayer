@@ -548,7 +548,11 @@ namespace Multiplayer.Network
         // Shared launch tail for both the lobby start and the mid-session load: warn on the best-effort
         // Stun path, resolve game + timing, then kick the serialize+send+barrier coroutine. Callers own
         // the guard (lobby ready-gate vs in-game guard); this is guard-free.
-        private bool LaunchTransfer(SavegameMetaData chosen)
+        /// <param name="hostHoldsThisWorld">THE ONE FLAG THAT REMOVES THE HOST'S SECOND LOAD, and the whole
+        /// revert: pass <c>false</c> here (its default, and what both save-loading callers pass) and the host
+        /// re-enters from the blob exactly as it always did. Only the new-campaign bootstrap passes true,
+        /// because only there is the blob an autosave OF THE WORLD THE HOST IS STANDING IN.</param>
+        private bool LaunchTransfer(SavegameMetaData chosen, bool hostHoldsThisWorld = false)
         {
             Debug.Log($"[Multiplayer] LaunchTransfer: transport={_engine.Transport?.TransportType} save={chosen?.Name}");
 
@@ -572,13 +576,14 @@ namespace Multiplayer.Network
             if (timing == null) return false;
 
             _transferId = Guid.NewGuid();
-            timing.Start(HostSerializeAndSendCrt(game, chosen));
+            timing.Start(HostSerializeAndSendCrt(game, chosen, hostHoldsThisWorld));
             return true;
         }
 
 
         // Coroutine: read the save to bytes, then chunk+send, then prepare host entry + open barrier.
-        private IEnumerator<NextUpdate> HostSerializeAndSendCrt(PhoenixGame game, SavegameMetaData metaData)
+        private IEnumerator<NextUpdate> HostSerializeAndSendCrt(PhoenixGame game, SavegameMetaData metaData,
+                                                               bool hostHoldsThisWorld = false)
         {
             var result = new ByRef<byte[]>();
             yield return Timing.Current.Call(game.SaveManager.Serializer.ReadSavegameBinary(metaData, result));
@@ -599,13 +604,58 @@ namespace Multiplayer.Network
 
             SendBlob(blob, ext);
 
-            // Host prepares its own entry from the SAME bytes (in memory), then waits at the barrier.
-            yield return Timing.Current.Call(PrepareEntryFromBlobCrt(game, blob, ext));
+            if (hostHoldsThisWorld)
+            {
+                // ONE BOUNDARY, ONE LOAD PER PEER — the host does not re-enter a world it IS (law L174).
+                // This is the SAME refusal HostBeginTacticalEntryTransfer makes (:708 "the host does NOT
+                // re-enter from the blob (it is already in this live tactical level)"), adopted on the one
+                // geoscape boundary that has the same property: the new-campaign bootstrap's blob is an
+                // AUTOSAVE OF THE HOST'S OWN LIVE CAMPAIGN, taken seconds earlier by
+                // NewCampaignAutosaveAndTransferCrt. Re-entering re-deserialized the world the host had just
+                // built, which is the "creating a new game makes the HOST load twice" report: measured
+                // 2026-08-07 on the host log — geoscape playable 23:09:04.174, then BEGIN 23:09:07.437 and a
+                // second Playing at 23:09:16.631, 9.2 s of loading for bytes the host already was. 17bf9fe
+                // removed the interactive geoscape that used to FLASH between the two; it could not remove
+                // the second load, because the second load is not a bug in the curtain.
+                //
+                // WHAT PAYS FOR THE SAME-BYTES INVARIANT NOW. Every other peer still builds from the blob, so
+                // only the host keeps a graph it minted rather than deserialized. That is exactly what the
+                // rail's law-7 drift backstop already polices, and it needed no new mechanism: every client
+                // CRCs one geoscape root per second with the host's own canonical walk
+                // (GenericApplier.ClientCrcTick → DiffEngine.RootCrc) and the host compares against its live
+                // graph in DiffEngine.HandleCrcReport — "the ONE thing in the rail that ever compares host and
+                // client state". A keying or structural disagreement between the world the host created and
+                // the world the clients loaded therefore surfaces within a sweep as
+                // "CRC backstop: root '<key>' DIVERGED on peer <id>" and force-re-emits, instead of becoming
+                // a mystery three sessions later.
+                _engine.Sync?.ResetForReloadBoundary(); // the ONE side effect of PrepareEntryFromBlobCrt the
+                                                       // host still owes: its geoscape WAS replaced at this
+                                                       // boundary — by the native creation, not by a re-entry
+                                                       // — so the in-flight state pointing at the old one goes
+                                                       // now. Idempotent by its own contract.
+                _begun = true;      // never left the level ⇒ Begin()'s EnterLevel() self-guards to a no-op,
+                                    // while the barrier flag still vetoes BeginSuppressed so SessionBegin —
+                                    // which is what releases the CLIENTS into their load — still broadcasts.
+                OpenBarrier();      // clears _loadCompleteSent/_reachedPlaying/_tracker/_slotProgress, so
+                                    // everything below must come after it.
+                _hostLoaded = true;
+                // No Loaded→Playing edge is coming for this peer, so OnReachedPlaying will never fire and
+                // AllDone could never hold. Report in explicitly — the same pair the tac-entry tail uses
+                // (:786/:791) for the same reason — and publish the terminal row so clients render the host
+                // bar complete instead of stuck at 0%.
+                SendLoadComplete();
+                _slotProgress[_engine.Session.LocalSlotIndex] = (1, 100);
+            }
+            else
+            {
+                // Host prepares its own entry from the SAME bytes (in memory), then waits at the barrier.
+                yield return Timing.Current.Call(PrepareEntryFromBlobCrt(game, blob, ext));
 
-            OpenBarrier();
-            // Host counts as loaded immediately — under the dedicated sentinel flag, NOT an id key in
-            // _loadedPeers, so it can never collide with a peerId-0 client ack on DirectIP (fix #2).
-            _hostLoaded = true;
+                OpenBarrier();
+                // Host counts as loaded immediately — under the dedicated sentinel flag, NOT an id key in
+                // _loadedPeers, so it can never collide with a peerId-0 client ack on DirectIP (fix #2).
+                _hostLoaded = true;
+            }
             TryReleaseBarrier();
         }
 
@@ -1267,7 +1317,10 @@ namespace Multiplayer.Network
                     _begun = false;
                     _loadCompleteSent = false;
                     _revealAllSent = false;
-                    if (!LaunchTransfer(meta))
+                    // hostHoldsThisWorld: THIS is the boundary where the blob is an autosave of the world the
+                    // host is standing in (taken by the CallSafe above, seconds ago) — so the host must not
+                    // load it back. Law L174; flip this one argument to false to restore the re-entry.
+                    if (!LaunchTransfer(meta, hostHoldsThisWorld: true))
                     {
                         _begun = wasBegun;
                         _loadCompleteSent = wasLoadComplete;

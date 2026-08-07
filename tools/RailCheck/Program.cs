@@ -263,6 +263,7 @@ namespace RailCheck
             Add(laws, () => L187_AStaleScreenNeverUndoesAnAppliedIntent.Check());
             Add(laws, () => L188_APermanentExclusionIsNotAOneOffWarning.Check());
             Add(laws, () => L189_AOneShotPushAPeerCannotTakeIsHeld.Check());
+            Add(laws, () => L192_ADefWearingAnInterfaceStillRidesAsALeaf.Check());
             Add(laws, () => L191_NoPeerWaitsForStateItAuthored.Check());
             Add(laws, () => L190_ClockJerkIsVisible.Check());
             Add(laws, () => L85_RestartedHostStreamIsApplied.Check());
