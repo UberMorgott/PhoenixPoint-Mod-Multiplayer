@@ -227,6 +227,7 @@ namespace RailCheck
             laws.AddRange(L150_NoConcurrentSpendGoesNegative.Check());
             laws.AddRange(L153_ClockPhaseIsMeasurable.Check());
             laws.AddRange(L154_OneShotGestureKeepsItsUrgency.Check());
+            laws.AddRange(L155_EachEntryPointKeepsItsTransport.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

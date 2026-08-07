@@ -41,9 +41,9 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 - **P11 — REPAINT IS THE RAIL'S OTHER HALF.** A mirrored value reaches the screen through the game's OWN read-direction refresh (`UiEventMap`, `UiNativeRepaint`) — never a hand-rolled paint, never a lifecycle transition where the model can express it.
   - laws: L18 L21 L26 L38 L45 L46 L47 L51 L52 L54 L60 L77 L79 L81 L83 L92 L93 L95 L96 L98 L101 L102 L104 L115 L116 L117 L118 L124 L127 L129 L130 L135 L138 L139 L141 L142 L144 L147 L148 L149 L151
 - **P12 — UNIVERSAL-FIRST.** Unnumbered in `ARCHITECTURE.md`, asserted throughout. ONE generic mechanism per layer; the per-subsystem copy is the "macaroni factory" the mandate forbids. One value rail, one intent engine, one nonce allocator, one dedup, one repaint primitive.
-  - laws: L32 L50 L99 L143
+  - laws: L32 L50 L99 L143 L155
 - **P13 — NO QUORUMS, NOBODY KICKED. PROPOSED — not in `ARCHITECTURE.md`.** Developer mandate, stated only in the corpus (quoted by L84, L91): at any moment ANY player must be able to play everything; with 49 of 50 AFK the one active player still plays a whole campaign. Nobody is kicked. A host-side decision about peer P may read P's own intent + shared game state and nothing else. A wait on something that ends BY ITSELF is allowed; a wait on a PERSON is not.
-  - laws: L26 L64 L71 L82 L84 L91 L94 L109 L118 L119 L120 L122 L129 L136 L143 L145 L150 L151
+  - laws: L26 L64 L71 L82 L84 L91 L94 L109 L118 L119 L120 L122 L129 L136 L143 L145 L150 L151 L155
 - **P14 — DRIFT IS THE GATE, AND A LAW ASSERTS AN OUTCOME.** `docs/rail-baseline.txt` + `docs/rail-contract.txt` = committed snapshots; ANY drift is harness-RED, so a field moving Excluded↔covered is a reviewable diff, never a side effect. A law asserts the executed OUTCOME, not the presence of a call, and carries its own non-vacuity.
   - laws: L6 L9 L22 L23 L33 L48 L49 L72 L103 L125
 - **P15 — DERIVED, NOT MIRRORED.** Unnumbered in `ARCHITECTURE.md`, asserted in the coverage rules. State a peer can recompute closed-form from already-mirrored inputs is RE-DERIVED locally, never shipped: mirror the ORDER, derive the pose. Inverse holds — what cannot be re-derived (mist) MUST ride.
@@ -204,9 +204,10 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 | L152 | a chat line delivered to a peer appears exactly once | P7 | incident | 2026-08-06: "instead of one message he received TWO … it happened only ONCE" | premise-changed |
 | L153 | the host↔client clock phase error has a seam that can read it, and that seam writes nothing | P16 P7 | incident | 2026-08-04 23:22 three-instance session: client-derived aircraft/exploration trail the host, and all three peer logs carry not one `TimeAnchor` line | both |
 | L154 | the departure and exploration-start seams are wired to the urgent flush, and a mid-cycle flush is still served urgently | P16 P15 | incident | 3-instance sessions: geoscape flight and exploration spinner trail the host by a steady ~0.25-0.5 s while gesture-driven windows/orders are instant | both |
+| L155 | each way of joining keeps the transport it names; a pasted code never silently tries Steam | P13 P12 | incident | the owner's report: pressing "copy code" in the lobby and handing that code to the other player still brought the session up over Steam | both |
 
 - inline (private method in `Program.cs`, no file): L1–L25, L27–L76b, L81, L82, L83
-- files (`L<n>_<Name>.cs`): L26, L77, L79, L80, L84, L91–L154
+- files (`L<n>_<Name>.cs`): L26, L77, L79, L80, L84, L91–L155
 
 ## Unassigned / retired numbers
 

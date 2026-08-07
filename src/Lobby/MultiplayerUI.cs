@@ -55,8 +55,11 @@ namespace Multiplayer.UI
         private MessageBox _connectingBox;
 
         // ─── Client-join cascade ────────────────────────────────────────────
-        // The ordered transports to try for the current join (JoinPlan.Build): a unified code cascades
-        // Steam → STUN → Direct; a legacy code is a single attempt. _joinAttemptIndex is the stage in
+        // The ordered transports to try for the current join (JoinPlan.Build), pinned by how the join was
+        // started: a unified code from an accepted Steam INVITE cascades Steam → STUN → Direct, the same
+        // code PASTED is STUN → Direct with no Steam leg, and a legacy code is a single attempt of its own
+        // transport. So this is at most a fallback WITHIN one technology, never across them.
+        // _joinAttemptIndex is the stage in
         // flight; on a stage failure OnConnectionFailed advances to the next instead of surfacing the
         // error, so only the LAST stage's failure reaches the user. Cleared on confirm/cancel/final-fail.
         private List<JoinAttempt> _joinPlan;
@@ -88,7 +91,10 @@ namespace Multiplayer.UI
         // silent no-op). Idempotent: SteamInvite.RegisterJoinHandlers self-guards against re-subscribe.
         private void WireSteamInvite()
         {
-            SteamInvite.OnJoinResolved = joinString => OnLobbyJoin(joinString);
+            // JoinOrigin.SteamInvite: this callback is reached ONLY by an accepted Steam invite (overlay,
+            // friends-list "Join Game", rich presence, or the cold-start "+connect_lobby"), so the user
+            // has explicitly chosen Steam and the plan keeps its Steam-first order.
+            SteamInvite.OnJoinResolved = joinString => OnLobbyJoin(joinString, JoinOrigin.SteamInvite);
             SteamInvite.Report = (msg, isError) =>
             {
                 if (!isError) return; // successes already reach Player.log inside SteamInvite
@@ -562,8 +568,14 @@ namespace Multiplayer.UI
             return direct != null && direct.State == ConnectionState.Connected;
         }
 
-        // Native ShowInputPrompt → classify → drop our own host lobby → join as client.
-        public void OnLobbyJoin(string input)
+        // Native ShowInputPrompt → classify → drop our own host lobby → join as client. <paramref
+        // name="origin"/> is HOW the user asked to join, and it is a required parameter rather than a
+        // defaulted one on purpose: it decides which transport a unified code is allowed to use, and a
+        // caller that silently inherited the wrong default would connect over the wrong technology
+        // while looking entirely correct. Both entry points are unambiguous — the Steam invite
+        // subsystem's callback (WireSteamInvite, including the cold start) is JoinOrigin.SteamInvite,
+        // the lobby's paste box is JoinOrigin.PastedCode.
+        public void OnLobbyJoin(string input, JoinOrigin origin)
         {
             var target = SmartJoinParser.Parse(input ?? "");
             if (target.Kind == JoinKind.Invalid)
@@ -616,16 +628,22 @@ namespace Multiplayer.UI
                 _lobbyController.Reset();
                 _lobbyController.BeginJoin();
 
-                // Build the ordered cascade for this target (unified code → Steam/STUN/Direct; legacy
-                // code → single attempt) and start the first stage. Each stage's async connect is
-                // time-bounded; a stage failure advances to the next in OnConnectionFailed.
-                _joinPlan = JoinPlan.Build(target, SteamInvite.IsSteamAlive());
+                // Build the ordered cascade for this target and start the first stage. The plan is pinned
+                // by the ORIGIN: a unified code that arrived through an accepted Steam invite keeps
+                // Steam/STUN/Direct, a PASTED one is STUN/Direct with no Steam leg at all (JoinPlan's
+                // Unified branch states why); a legacy code is a single attempt of its own transport.
+                // Each stage's async connect is time-bounded; a stage failure advances to the next in
+                // OnConnectionFailed.
+                _joinPlan = JoinPlan.Build(target, SteamInvite.IsSteamAlive(), origin);
                 _joinAttemptIndex = 0;
                 if (_joinPlan.Count == 0)
                 {
-                    // Only reachable for a unified code that carried ONLY a Steam id while Steam is off —
-                    // nothing here is connectable without Steam.
-                    OnConnectionFailed("that invite code needs Steam, which isn't running — ask the host for their IP or a code with an endpoint");
+                    // Only reachable for a unified code that carried ONLY a Steam id and no endpoint —
+                    // because Steam is off, or because it was PASTED and pasting is pinned off Steam.
+                    // A host produces such a code when it has neither a UPnP-forwarded nor a STUN-
+                    // discovered endpoint to put in it (see GetOwnUnifiedCode), so the honest advice is
+                    // the same either way: get an address, or take the invite through Steam itself.
+                    OnConnectionFailed("that invite code carries no address — ask the host to invite you through Steam, or to share their IP");
                     return;
                 }
                 // DO NOT open the lobby yet. The connect is async + time-bounded and the host has not
@@ -699,7 +717,7 @@ namespace Multiplayer.UI
                     // whitespace-only OK), and an empty string reaching OnLobbyJoin classifies as
                     // Invalid → error box, never a connect-to-nothing. So empty == cancel/no-op.
                     if (res.DialogResult == MessageBoxResult.OK)
-                        OnLobbyJoin(res.InputTextResult ?? "");
+                        OnLobbyJoin(res.InputTextResult ?? "", JoinOrigin.PastedCode);
                     else
                         _lobby?.Show();
                 }, this);
