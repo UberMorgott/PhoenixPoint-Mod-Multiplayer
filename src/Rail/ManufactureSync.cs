@@ -502,20 +502,35 @@ namespace Multiplayer.Network.Sync
         /// never re-read: natively safe because the screen pauses the game so storage cannot move, but in
         /// co-op stale the instant a remote delta lands — SetupQueue/DoFilter alone rebuild FROM the stale
         /// snapshot, which is why the open scrap screen never changed. Replay the native snapshot block
-        /// against live storage, preserving the user's staged cart (native re-snapshot dumps it — that is
-        /// mid-gesture state, same category as the _filter this screen's Exit+Enter opt-out protects):
-        /// clamp each staged count to what live storage still holds (a remote peer may have scrapped the
-        /// same items; also keeps the host's native ScrapAllItems from dereferencing a vanished def at
-        /// UIModuleManufacturing.cs:858-859), then subtract the cart so staged items don't double-show.</summary>
+        /// against live storage FIRST, then reconcile the cart against the result, preserving the user's
+        /// staged cart (native re-snapshot dumps it — that is mid-gesture state, same category as the
+        /// _filter this screen's Exit+Enter opt-out protects): clamp each staged count to what the rebuilt
+        /// POOL still offers (a remote peer may have scrapped the same items; also keeps the host's native
+        /// ScrapAllItems from dereferencing a vanished def at UIModuleManufacturing.cs:858-859), then
+        /// subtract the cart so staged items don't double-show. Pool, not raw faction storage — see the
+        /// partial-magazine note in the body.</summary>
         private static void ResyncScrapSnapshot(UIModuleManufacturing module)
         {
             var faction = GeoLevel()?.PhoenixFaction;
             if (faction?.ItemStorage == null || faction.AircraftItemStorage == null) return;
 
+            // THE POOL FIRST, and everything below measured against it. The native snapshot block ends with
+            // StripPartialMagsFromScrapStorage (UIModuleManufacturing.cs:1075-1092), which WITHHOLDS one
+            // partial magazine per def — a 5-stack whose last clip is half-empty offers 4. Measuring the
+            // cart against the RAW faction stack instead (what this did until 2026-08-07) stages a
+            // magazine the screen never held, and the subtract at the bottom underflows: the engine says
+            // "Trying to remove 5 items with 36 charges but only 4 items with 32 charges available in
+            // PX_SniperRifle_AmmoClip_ItemDef" (x31 in one client session) and then RemoveItem drops the
+            // whole entry (ItemStorage.cs:87-89) — the item disappears off the scrap screen.
+            var snapshot = ScrapStorageField(module);
+            snapshot.Clear();
+            snapshot.AddItems(faction.ItemStorage);
+            StripPartialMagsMethod?.Invoke(module, null);
+
             var cart = ScrapItemsField(module);
             foreach (var kv in cart.Items.ToList())
             {
-                int live = faction.ItemStorage.Items.TryGetValue(kv.Key, out var gi) ? gi.CommonItemData.Count : 0;
+                int live = snapshot.Items.TryGetValue(kv.Key, out var gi) ? gi.CommonItemData.Count : 0;
                 int extra = kv.Value.CommonItemData.Count - live;
                 // Same GeoItem shape the native cart-return path uses (RemoveFromScrapQueue :846).
                 if (extra > 0) cart.RemoveItem(new GeoItem(kv.Key, extra, kv.Key.ChargesMax));
@@ -531,9 +546,10 @@ namespace Multiplayer.Network.Sync
             // store — foreign peers' queued items materialize, remotely unqueued ones return, and a def
             // absent from the store leaves the cart (the store is the ONLY truth in co-op). Idempotent:
             // equal counts move nothing, so re-applying the same echo is a no-op. Add clones use the
-            // native add shape (charges/ammo/malfunction from the live stack, AddToScrapQueue:1116);
-            // removals use the native return shape (RemoveFromScrapQueue:846). Targets clamp to live
-            // storage; the snapshot rebuild below subtracts the final cart, so the partition stays exact.
+            // native add shape (charges/ammo/malfunction read off the POOL entry, exactly as
+            // AddToScrapQueue:1116 reads them off _scrapStorage); removals use the native return shape
+            // (RemoveFromScrapQueue:846). Targets clamp to the pool; the subtract below takes the final
+            // cart out of it, so the partition stays exact.
             var engine = NetworkEngine.Instance;
             if (engine != null && engine.IsActiveSession)
             {
@@ -549,7 +565,10 @@ namespace Multiplayer.Network.Sync
                 }
                 foreach (var t in targets)
                 {
-                    if (!faction.ItemStorage.Items.TryGetValue(t.Key, out var live)) continue;
+                    // Count AND charges off the POOL, never the raw stack: the pool's entry is full-charged
+                    // exactly because the partial was withheld, so each add moves the cart count by one
+                    // (CommonItemData.AddItem:205-213 merges partial charges instead of counting them).
+                    if (!snapshot.Items.TryGetValue(t.Key, out var live)) continue;
                     int cur = cart.Items.TryGetValue(t.Key, out var cgi) ? cgi.CommonItemData.Count : 0;
                     int want = Math.Min(t.Value, live.CommonItemData.Count);
                     for (int i = cur; i < want; i++)
@@ -579,10 +598,20 @@ namespace Multiplayer.Network.Sync
                 }
             }
 
-            var snapshot = ScrapStorageField(module);
-            snapshot.Clear();
-            snapshot.AddItems(faction.ItemStorage);
-            StripPartialMagsMethod?.Invoke(module, null);
+            // The subtract that partitions pool into "available" and "staged". It is the ONE place a
+            // shortfall shows, and the engine reports it with a bare Debug.LogError naming only a def —
+            // nothing that says a PEER's cart is the thing that overdrew. Say it ourselves, first.
+            foreach (var kv in cart.Items)
+            {
+                var staged = kv.Value.CommonItemData;
+                var have = snapshot.Items.TryGetValue(kv.Key, out var pool) ? pool.CommonItemData : null;
+                if (have != null && have.Count >= staged.Count && have.TotalCharges >= staged.TotalCharges) continue;
+                Debug.LogError("[MP][scrapcart] SHORTFALL " + kv.Key?.name + ": cart holds " + staged.Count +
+                               " item(s)/" + staged.TotalCharges + " charges but the scrap pool offers only " +
+                               (have?.Count ?? 0) + "/" + (have?.TotalCharges ?? 0) +
+                               " — the subtract underflows and the def drops off the screen. Shared store says " +
+                               (Cart.Items.TryGetValue(kv.Key.Guid, out int shared) ? shared : 0) + ".");
+            }
             snapshot.RemoveItems(cart);
             var vehSnapshot = VehicleScrapStorageField(module);
             vehSnapshot.Clear();
@@ -724,7 +753,7 @@ namespace Multiplayer.Network.Sync
                 foreach (var def in cart.Items.Keys.ToList())
                 {
                     faction.ItemStorage.Items.TryGetValue(def, out var live);
-                    int have = live?.CommonItemData?.Count ?? 0;
+                    int have = ScrappableCount(live);   // the pool's ceiling, not the raw stack's
                     int queued = cart.Items[def].CommonItemData.Count;
                     if (queued > have)
                         cart.RemoveItem(new GeoItem(def, queued - have, def.ChargesMax));
@@ -755,6 +784,22 @@ namespace Multiplayer.Network.Sync
             // Ships on the rail: the capture prefix's ShouldRunNative already armed the host-gesture flush.
         }
 
+        /// <summary>How many of a def the SCRAP SCREEN actually offers — the stack MINUS the one partial
+        /// magazine <c>StripPartialMagsFromScrapStorage</c> withholds (UIModuleManufacturing.cs:1075-1092),
+        /// mirroring its predicate exactly. This, not the raw stack, is the ceiling a cart may be staged to:
+        /// the pool is what a staged item is finally subtracted from, so validating against the raw stack
+        /// lets a peer stage a magazine that pool never held and the subtract underflows. A host running the
+        /// screen natively can never overdraw (AddToScrapQueue:1109-1116 moves items OUT of the pool, and
+        /// throws once it is empty) — only the client, whose gesture is validated here instead.</summary>
+        private static int ScrappableCount(GeoItem gi)
+        {
+            var def = gi?.ItemDef;
+            if (def == null) return 0;
+            var cid = gi.CommonItemData;
+            bool withheld = cid.CurrentCharges != def.ChargesMax && !(def.CompatibleAmmunition?.Any() ?? false);
+            return cid.Count - (withheld ? 1 : 0);
+        }
+
         private static int CartLiveCount(string defGuid, bool veh)
         {
             var faction = GeoLevel()?.PhoenixFaction;
@@ -763,7 +808,7 @@ namespace Multiplayer.Network.Sync
             if (veh)
                 return repo.GetDef(defGuid) is GeoVehicleEquipmentDef vd ? faction.AircraftItemStorage.CountItem(vd) : 0;
             return repo.GetDef(defGuid) is ItemDef d && faction.ItemStorage.Items.TryGetValue(d, out var gi)
-                ? gi.CommonItemData.Count : 0;
+                ? ScrappableCount(gi) : 0;
         }
 
         /// <summary>Host: apply a client queue/unqueue gesture to the store. Add validates against live
