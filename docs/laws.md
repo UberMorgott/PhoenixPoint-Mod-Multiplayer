@@ -25,7 +25,7 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 - **P4b — SIM GATING.** Client clock not frozen → host-only sim funnels prefix-skipped on the client (`LevelHourlyUpdateCrt`, `Research.Update`), reschedule preserved.
   - laws: L42 L63
 - **P4c — PRESENTATION SEAMS ALTER NOTHING.** Replay what the model already says. Never block, never write, never throw into game code.
-  - laws: NONE. Not "jointly defended with P11" — P11 laws assert a repaint is REACHED, which a seam that also writes model state passes. Ruled a real coverage hole 2026-08-07; the argument and the three assertable clauses are in Attention.
+  - laws: L158 (written 2026-08-07, the same day the hole was ruled real — see Attention). Not "jointly defended with P11": P11 laws assert a repaint is REACHED, which a seam that also writes model state passes.
 - **P5 — TACTICAL SCOPE IS SHARED AND CONCURRENT.** Six peers command six soldiers at once. First-to-act-wins, no ownership table, no ledger a reload can lose. Which peer plays a mission = tactical scope, not a permission.
   - laws: L27 L44 L45 L47 L65 L68 L75 L76a L78 L80 L97 L99 L104 L111 L123 L130 L132 L139 L140 L141 L144 L145 L146 L149
 - **P6 — DETERMINISM / CANONICALITY.** Sorted roots/children/subkeys, fixed metadata field order, byte-identical deltas on both peers. Serializer blobs licensed ONLY as structural payloads.
@@ -207,17 +207,18 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 | L155 | each way of joining keeps the transport it names; a pasted code never silently tries Steam | P13 P12 | incident | the owner's report: pressing "copy code" in the lobby and handing that code to the other player still brought the session up over Steam | both |
 | L156 | an in-inventory reorder repaints an ALREADY-OPEN equip screen — order stays rail state, the kind is never declared irrelevant, and the reseed still reaches the widget rebuild | P11 P16 | incident | HANDOFF §5d symptom 1: two peers on the same soldier, one rearranges items inside the inventory, the other "sees NOTHING until he closes and re-opens the screen" | premise-changed |
 | L157 | applying a mirrored TACTICAL inventory batch marks the open container screen on both apply paths, and the repaint it asks for never re-commits on the peer that is only watching | P1 P3 | incident | in-mission report: two peers on one soldier (and on the neighbour's panel the trade view shows), a slot↔backpack swap by one leaves the other's open inventory unchanged until it is closed and re-opened | both |
+| L158 | a presentation seam never blocks, writes a `[SerializeMember]` leaf, or throws into game code — and a latency reading reaches the panel and NOTHING else: `PingTable` is unreachable from `DiffEngine` / `GenericApplier` / `SurfaceRouter` / `TimeAnchor`, carries no serialized member, and is no rail root | P4c | principle | P4c was cited by nothing executable (`grep -rn "P4c" tools/RailCheck src` = 0 hits) while HANDOFF §5e loaded it with two new presentation features; the RTT arm pre-empts this repo's dominant failure — a diagnostic number silently becoming replicated state, the shape L153 records as "fixed ten times" while nobody could read it | both |
 
 - inline (private method in `Program.cs`, no file): L1–L25, L27–L76b, L81, L82, L83
-- files (`L<n>_<Name>.cs`): L26, L77, L79, L80, L84, L91–L156
+- files (`L<n>_<Name>.cs`): L26, L77, L79, L80, L84, L91–L158
 
-## Rows vs registrations — why 151 rows and 131 registered laws
+## Rows vs registrations — why 153 rows and 133 registered laws
 
 The two numbers count different things and always will. `tools/law-count.txt` counts REGISTRATIONS
 (one `laws.AddRange(...)` line each); this table counts NUMBERED LAWS. The mapping is many-to-many
 on the inline side. Nothing is missing and no row is invented — verified 2026-08-07.
 
-- **files: 71 rows ↔ 71 registrations, exactly 1:1.** `L26, L77, L79, L80, L84, L91–L156` — one
+- **files: 73 rows ↔ 73 registrations, exactly 1:1.** `L26, L77, L79, L80, L84, L91–L158` — one
   `L<n>_<Name>.cs`, one `AddRange`, one row.
 - **inline: 79 rows ↔ 60 registrations.** 60 inline methods emit 78 distinct ids; the catalogue
   splits one of them in two, giving 79 rows.
@@ -257,11 +258,12 @@ on the inline side. Nothing is missing and no row is invented — verified 2026-
 - laws with neither token AND no differently-named equivalent visible in the header: the early codec block L1–L20.
 - P orphans: none. No law maps to `P?`.
 - P with zero laws: P9 (journal).
-- P with no law scoped to it alone: P4c. **DECIDED 2026-08-07: this is a REAL coverage hole, not a principle that is only jointly checkable.**
+- ~~P with no law scoped to it alone: P4c.~~ **CLOSED 2026-08-07 by `L158_PresentationSeamAltersNothing`** — the three clauses below, over the seam set below, plus a fourth arm containing the new RTT reading (`PingTable`) at birth rather than retrofitting it. Two clauses landed narrower than this entry assumed and the law's header says so: clause (b) can only see DIRECT IL writes, because this seam set drives the native model almost entirely through `MethodInfo.Invoke` / `FieldInfo.SetValue`; clause (c) is asserted at the CONTAINMENT POINTS (`UiEventMap.Fire`, `OpenUiRepaint.Repaint`, `ResearchSync.PresentFromMirror`) plus "no uncontained caller of `UiNativeRepaint.TryRepaint`", because the helpers that actually invoke native code deliberately carry no catch of their own — demanding one per leaf would have been a style rule, not P4c. The original argument, kept because it is what the law is for:
+  - **DECIDED 2026-08-07: this is a REAL coverage hole, not a principle that is only jointly checkable.**
   - The two are opposite directions, not two halves of one test. P11 asserts the repaint HAPPENS (reach); P4c asserts the seam CHANGES NOTHING (harmlessness). Every P11 law in this table is a reach-law, and a presentation seam that reaches the screen AND writes model state passes all forty of them.
   - P4c is cited by NOTHING executable. `grep -rn "P4c" tools/RailCheck src` = zero hits; the only mentions in the repo are `ARCHITECTURE.md:313` and this file. L126 ("a transpiler substitutes a computation, never writes one down") is the nearest shape and it is scoped P6 P3 and covers transpilers only, not the repaint/present seams.
   - All three of P4c's clauses are statically assertable over a named seam set (`UiEventMap` arms, `UiNativeRepaint.Table` entries, `OpenUiRepaint`, `ResearchSync.PresentFromMirror`): (a) no prefix in the set returns false / suppresses native — never BLOCK; (b) no member of the set writes a `[SerializeMember]` leaf — never WRITE; (c) every entry is exception-contained — never THROW into game code. Clause (c) is already an unasserted written promise at `ARCHITECTURE.md:192` ("a registered screen that throws keeps the screen + logs once").
-  - The hole is about to be loaded, which is why it is worth closing now rather than noting again: HANDOFF §5c option (C) moves death presentation onto the mirror's own local playback, and §5e classes both new features (pings, player panel) as presentation. Both are P4c by construction and neither has a law.
+  - The hole is about to be loaded, which is why it is worth closing now rather than noting again: HANDOFF §5c option (C) moves death presentation onto the mirror's own local playback, and §5e classes both new features (pings, player panel) as presentation. Both are P4c by construction and neither has a law. (The ping half arrived the same day and is arm (d) of L158; the panel inherits the seam set when it is written.)
 - P13 is PROPOSED: not in `ARCHITECTURE.md`; stated only inside the corpus as a developer mandate quoted by L84 + L91; 18 laws defend it. Recommend writing it into `ARCHITECTURE.md` as a numbered principle.
 - P12, P14, P15, P16 asserted by `ARCHITECTURE.md` but never numbered there → no source cites them by id today.
 - `law 1` carries ≥3 readings in the corpus: (a) the two primitives Intent+Delta — `src/Rail/IntentRail.cs:11`; (b) join is a save transfer, not a delta — `src/Rail/DiffEngine.cs:33`, `ARCHITECTURE.md` P1 line; (c) never a silent swallow — `src/Rail/RailMeta.cs:1704/:1742`, `src/Rail/GenericApplier.cs:408`, `src/Rail/OpenUiRepaint.cs:331`. P1 states all three; not resolved to one.

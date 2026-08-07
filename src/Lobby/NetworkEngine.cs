@@ -411,10 +411,12 @@ namespace Multiplayer.Network
 
         // ─── Send / Broadcast ────────────────────────────────────────────
 
-        public void SendToClient(ulong clientId, NetworkMessage msg)
+        /// <summary><paramref name="reliable"/>: false only for loss-tolerant traffic that must NOT be
+        /// retransmitted — the heartbeat/RTT probe, where a retransmit would be measured as latency.</summary>
+        public void SendToClient(ulong clientId, NetworkMessage msg, bool reliable = true)
         {
             var data = msg.Serialize();
-            Transport?.Send(clientId, data);
+            Transport?.Send(clientId, data, reliable);
         }
 
         /// <summary>
@@ -429,12 +431,13 @@ namespace Multiplayer.Network
                 OnConnectionFailed?.Invoke(reason);
         }
 
-        public void SendToHost(NetworkMessage msg)
+        /// <summary><paramref name="reliable"/>: see <see cref="SendToClient"/>.</summary>
+        public void SendToHost(NetworkMessage msg, bool reliable = true)
         {
             if (Transport != null && Session.HostPeerId.HasValue)
             {
                 var data = msg.Serialize();
-                Transport.Send(Session.HostPeerId.Value, data);
+                Transport.Send(Session.HostPeerId.Value, data, reliable);
             }
         }
 

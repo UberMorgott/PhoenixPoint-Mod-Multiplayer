@@ -93,8 +93,23 @@ namespace Multiplayer.Network
         public event Action<string, string, bool> OnChatReceived;   // (senderNick, text, isSystem)
         public event Action<string, string> OnChosenSaveChanged;    // (saveName, saveMeta)
 
-        private const int HeartbeatIntervalMs = 5000;
+        // 5000 -> 1000 (2026-08-07): the heartbeat is now also the RTT probe (see PingTable), and a
+        // 5 s cadence smoothed at alpha=1/4 would lag ~20 s behind a peer's real latency. The TIMEOUT
+        // below is deliberately left at 20 s, which makes the reaper strictly MORE tolerant than before
+        // — 20 missed probes instead of 4.
+        private const int HeartbeatIntervalMs = PingTable.CadenceMs;
         private const int HeartbeatTimeoutMs = 20000;
+        // The identity-takeover liveness bar (IsPeerLive) used to be written as 2 x the 5 s cadence.
+        // Pinned to its ABSOLUTE value when the cadence dropped: that check decides whether a rejoining
+        // peer may take over a still-connected peer's guid, and shrinking its window to 2 s because an
+        // unrelated probe got faster would be a security change smuggled in by a constant.
+        private const int PeerLiveWindowMs = 10_000;
+
+        /// <summary>Per-peer smoothed RTT — a LOCAL reading (law L158: it reaches a panel and nothing
+        /// else). Host measures every peer and publishes its table on the heartbeat it already
+        /// broadcasts; a client measures its own link to the host and reads the rest off that table.
+        /// UI: <c>engine.Session.Ping.GetPingMs(entry.SteamId)</c>, -1 = no fresh sample.</summary>
+        public PingTable Ping { get; } = new PingTable();
         // FIX-1 deadline: the transfer/load liveness suspension below is honoured only while the
         // transfer shows PROGRESS (SaveTransferCoordinator.LastProgressMs keeps moving). A silently
         // dead host (STUN, missing Steam fail callback, TCP half-open) leaves the transfer flags
@@ -133,22 +148,26 @@ namespace Multiplayer.Network
         public void Update()
         {
             var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+            Ping.Tick(now);   // discards any probe a main-thread stall crossed — must run before the send
             FlushPeerList(); // one roster per frame, however many things changed in it (see BroadcastPeerList)
 
-            // Periodic heartbeat
+            // Periodic heartbeat — also the RTT probe. Sent UNRELIABLE: a retransmitted probe measures the
+            // retransmit, not the path. Liveness is unharmed (20 s timeout vs a 1 s cadence).
             if (now - _lastHeartbeatSend > HeartbeatIntervalMs)
             {
                 _lastHeartbeatSend = now;
-                var heartbeat = new NetworkMessage(PacketType.Heartbeat,
-                    BitConverter.GetBytes(now));
+                var stamp = Ping.StartProbe(now);
 
                 if (_engine.IsHost)
                 {
-                    _engine.BroadcastToAll(heartbeat);
+                    // The host's probe carries its ping TABLE as well — only the host has a link to every
+                    // peer, so only the host can measure everyone, and this is a broadcast it already sends.
+                    _engine.BroadcastUnreliable(new NetworkMessage(PacketType.Heartbeat, Ping.Encode(stamp, now)));
                 }
                 else if (HostPeerId.HasValue)
                 {
-                    _engine.SendToHost(heartbeat);
+                    _engine.SendToHost(new NetworkMessage(PacketType.Heartbeat, BitConverter.GetBytes(stamp)),
+                                       reliable: false);
                 }
             }
 
@@ -334,6 +353,9 @@ namespace Multiplayer.Network
                 // as the guid release above — every drop path passes through here.
                 if (!string.IsNullOrEmpty(client.PlayerName))
                     _lastKnownNames[steamId] = client.PlayerName;
+                // Latency readings die with the row (same detach chokepoint) — a reconnect measures fresh
+                // rather than inheriting a stale SRTT from the connection that just ended.
+                Ping.Forget(steamId);
             }
             _clients.Remove(steamId);
             _lastHeartbeat.Remove(steamId);
@@ -790,9 +812,23 @@ namespace Multiplayer.Network
         {
             if (!_lastHeartbeat.TryGetValue(peerId, out var last)) return false;
             var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
-            return now - last <= 2 * HeartbeatIntervalMs;
+            return now - last <= PeerLiveWindowMs;
         }
 
+        /// <summary>
+        /// Handles BOTH <see cref="PacketType.Heartbeat"/> and <see cref="PacketType.HeartbeatAck"/> —
+        /// NetworkEngine routes them into the one method (NetworkEngine.cs:649-651).
+        ///
+        /// THE ACK IS ONLY EVER A REPLY TO A PROBE, NEVER TO AN ACK. Both branches below gate their send
+        /// on <c>msg.Type == Heartbeat</c>, so the reply graph is exactly one edge deep: the periodic
+        /// timer in <see cref="Update"/> is the ONLY producer of a Heartbeat, each one draws exactly one
+        /// HeartbeatAck, and a HeartbeatAck draws nothing. Drop either guard and host and client ack each
+        /// other's acks forever — a storm that is invisible until two peers connect.
+        ///
+        /// The ack ECHOES the stamp it received rather than restamping with the responder's clock (what
+        /// this did before 2026-08-07): the initiator subtracts its own stamp from its own clock, so no
+        /// clock synchronisation is involved and the result is a true round trip.
+        /// </summary>
         public void HandleHeartbeat(NetworkMessage msg)
         {
             var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
@@ -806,21 +842,37 @@ namespace Multiplayer.Network
                 if (!_clients.ContainsKey(msg.SenderSteamId)) return;
                 _lastHeartbeat[msg.SenderSteamId] = now;
                 ResumePeer(msg.SenderSteamId); // the resume edge — a paused peer is back (no-op otherwise)
-                // Respond with ack
-                var ack = new NetworkMessage(PacketType.HeartbeatAck,
-                    BitConverter.GetBytes(now));
-                _engine.SendToClient(msg.SenderSteamId, ack);
+
+                if (msg.Type == PacketType.HeartbeatAck)
+                    Ping.Sample(msg.SenderSteamId, BitConverter.ToInt64(PingTable.EchoStamp(msg.Payload), 0), now);
+                else
+                    _engine.SendToClient(msg.SenderSteamId,
+                        new NetworkMessage(PacketType.HeartbeatAck, PingTable.EchoStamp(msg.Payload)),
+                        reliable: false);
             }
             else
             {
                 // Client received a host Heartbeat OR HeartbeatAck — both refresh inbound liveness.
                 if (HostPeerId.HasValue)
                     _lastHeartbeat[HostPeerId.Value] = now;
-                // FIX-2: a HeartbeatAck specifically proves our OUTBOUND channel is alive (the host
-                // received our heartbeat and replied). Track it separately so a half-open send channel
-                // (inbound flowing, outbound dead) is detectable while host packets keep arriving.
+
                 if (msg.Type == PacketType.HeartbeatAck)
+                {
+                    // FIX-2: a HeartbeatAck specifically proves our OUTBOUND channel is alive (the host
+                    // received our heartbeat and replied). Track it separately so a half-open send channel
+                    // (inbound flowing, outbound dead) is detectable while host packets keep arriving.
                     _lastHeartbeatAck = now;
+                    if (HostPeerId.HasValue)
+                        Ping.Sample(HostPeerId.Value, BitConverter.ToInt64(PingTable.EchoStamp(msg.Payload), 0), now);
+                }
+                else
+                {
+                    // Host probe: merge its ping table (that is how a client learns every OTHER peer's
+                    // latency — it has no link to them) and ack so the host can measure US.
+                    var stamp = Ping.Decode(msg.Payload, now);
+                    _engine.SendToHost(new NetworkMessage(PacketType.HeartbeatAck, BitConverter.GetBytes(stamp)),
+                                       reliable: false);
+                }
             }
         }
 
