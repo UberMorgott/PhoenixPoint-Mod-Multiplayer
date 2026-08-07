@@ -1141,20 +1141,34 @@ namespace Multiplayer.Network
             // _peerListDirty), and only ever on a roster CHANGE, so this is not per-packet spam.
             var transport = _engine.Transport;
             var recipients = new List<string>();
-            var unreachable = new List<string>();
+            var unreachable = new List<ulong>();
+            var unreachableNames = new List<string>();
             foreach (var id in _clients.Keys)
             {
                 recipients.Add(id.ToString());
-                if (transport == null || !transport.CanReach(id)) unreachable.Add(id.ToString());
+                if (transport != null && transport.CanReach(id)) continue;
+                unreachable.Add(id);
+                unreachableNames.Add(id.ToString());
             }
             Debug.Log($"[Multiplayer] PEER_LIST fan-out: {roster.Count} row(s) → {recipients.Count} peer(s) " +
                       $"[{string.Join(",", recipients.ToArray())}]");
             if (unreachable.Count > 0)
+            {
                 Debug.LogError($"[Multiplayer] PEER_LIST fan-out MISSES {unreachable.Count} roster peer(s) " +
-                               $"[{string.Join(",", unreachable.ToArray())}] — the " +
+                               $"[{string.Join(",", unreachableNames.ToArray())}] — the " +
                                $"transport will not broadcast to them, so they never get the roster and stay stuck " +
-                               $"on \"Connecting…\" until their heartbeat gives up. Unicast to them still works, " +
-                               $"which is why nothing else looks wrong.");
+                               $"on \"Connecting…\". Routing each into NotePeerLoss now rather than waiting out " +
+                               $"the heartbeat: a row the transport has no session for is not a live peer.");
+                // AND THEN ACT ON IT (L180). This was a self-diagnosing ERROR the host then IGNORED, and it is
+                // the line that named the 2026-08-07 phantom out loud — `MISSES 1 roster peer(s) [1]`, 40 minutes
+                // before anyone read it. CanReach is a membership test (SteamTransport:440 is
+                // `_connectedPeers.Contains`), not a probe, so it is false exactly when the transport holds no
+                // session for that row — never transiently because a packet was late. NotePeerLoss then applies
+                // the rule that already exists: a row that never joined is removed, one that did is PAUSED and
+                // keeps its seat (L84). Collected BEFORE the loop acts, because removing mutates _clients.
+                foreach (var id in unreachable)
+                    NotePeerLoss(id, "the transport has no session to broadcast the roster over");
+            }
         }
 
         // Client receives the authoritative roster; mirror into local _clients map.

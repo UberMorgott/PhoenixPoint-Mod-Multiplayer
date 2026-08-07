@@ -48,6 +48,26 @@ namespace RailCheck
     /// window must outlast the joiner's own, or the host reaps handshakes that are still in flight.
     /// (e) is the vacuity guard: if the pre-JOIN row stops existing this law has no subject.
     ///
+    /// (f) IS THE HOST'S OWN DIAGNOSIS, ACTED ON. The fan-out reachability check printed `PEER_LIST
+    /// fan-out MISSES 1 roster peer(s) [1]` at 23:07:08.557 — the host naming this phantom out loud, in an
+    /// ERROR it then ignored for the rest of the session. Each unreachable row now routes into the same
+    /// classifier. <c>CanReach</c> is a membership test (<c>SteamTransport</c>:440 is
+    /// <c>_connectedPeers.Contains</c>), not a probe, so it is false exactly when the transport holds no
+    /// session for that row.
+    ///
+    /// WHAT THIS LAW DELIBERATELY DOES NOT CLAIM: that the host should CLOSE the stale process-global
+    /// session on those bytes. That was proposed and rejected on the evidence. The wedge it would fix is
+    /// already fixed one branch up — the edge-triggered <c>OnP2PSessionRequest</c> cannot fire twice for
+    /// one SteamId, so 94fb77b's arm registers the peer off its own ConnectionRequest instead, and the
+    /// host log shows that working on the very next attempt (23:07:30.711 "Registering it now"). Closing
+    /// would race the ConnectionRequest riding in behind the stale bytes, which is the hazard
+    /// <c>_deferredCloses</c>' grace window already exists for. And it would have changed nothing on
+    /// 23:06:37: the host RECEIVED that packet, so the inbound path was open — what never arrived was a
+    /// ConnectionRequest, and no local close makes a packet arrive. 94fb77b's minting gate is left to
+    /// 94fb77b; an arm pinning it here was written, found VACUOUS by falsification (ConnectionRequest is
+    /// 0x01, so the `ldc.i4.1` an IL constant scan looks for occurs all over that pump) and deleted rather
+    /// than shipped green. A cheap check that cannot fail is worse than no check.
+    ///
     /// Falsify (each verified to go RED, then restored): drop the <c>Guid.Empty</c> branch from
     /// <c>PausePeer</c> → <c>seat-held-for-a-peer-who-never-sat</c>; delete the reaper sweep →
     /// <c>handshake-has-no-deadline</c>; make <c>UnjoinedRowExpired</c> return true for a handshaked row →
@@ -157,6 +177,22 @@ namespace RailCheck
                              (int)(joinerWindow.Value * 1000f) + " ms stage deadline. The host must be the more " +
                              "patient of the two: a handshake still in flight is then reaped by the one side that " +
                              "cannot tell the joiner why, and the joiner retries into a host that just deleted it.";
+
+            // ─── (f) THE HOST'S OWN DIAGNOSIS IS ACTED ON, NOT JUST PRINTED ───
+            var flush = typeof(SessionManager).GetMethod("FlushPeerList", All);
+            if (flush == null)
+                yield return "L180 premise-changed: SessionManager.FlushPeerList is gone — the fan-out reachability " +
+                             "check went with it, and that check is the host telling itself which roster rows it " +
+                             "cannot even send the roster to.";
+            else if (loss != null && !Program.Callees(flush, mod).Any(c => c.MetadataToken == loss.MetadataToken))
+                yield return "L180 the-miss-is-only-logged: the PEER_LIST fan-out finds roster rows the transport " +
+                             "cannot reach and does not route them into NotePeerLoss. That ERROR line is the host " +
+                             "naming the phantom out loud — `PEER_LIST fan-out MISSES 1 roster peer(s) [1]`, " +
+                             "printed 23:07:08.557 and ignored — while the row it names sat in the lobby for the " +
+                             "rest of the session. A row the transport holds no session for is not a live peer, " +
+                             "and CanReach is a membership test rather than a probe, so nothing about acting on " +
+                             "it is a guess.";
+
         }
 
         private static int? ReadIntConst(System.Type t, string name)

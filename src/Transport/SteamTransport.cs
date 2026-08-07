@@ -543,6 +543,16 @@ namespace Multiplayer.Transport
                     // Never-silent, once per stranger. Two shapes of the same invisible event: on a CLIENT
                     // a sender that is not the dialed host (host-link hijack guard), on a HOST a sender
                     // whose packet is not a JOIN (a previous session's trailing traffic).
+                    //
+                    // AND NOT CLOSING THE SESSION HERE, deliberately (2026-08-07 review). The wedged-session
+                    // problem this line reports is ALREADY solved one branch up: the edge-triggered
+                    // OnP2PSessionRequest never fires again for a process-global session, so the mint arm
+                    // registers the peer off its own ConnectionRequest instead — and the host log shows that
+                    // working on the very next attempt (23:07:30.711 "Registering it now"). Closing the
+                    // session on THESE bytes would race the ConnectionRequest riding in behind them, which is
+                    // the hazard _deferredCloses' grace window exists for. The 23:06:37 join did not fail on a
+                    // stale session: the host received this packet, so the inbound path was open — it never
+                    // received a ConnectionRequest at all, and no local close makes a packet arrive.
                     UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport: packet from {steamId} did not " +
                                                  $"register it as a peer — " +
                                                  (IsHost ? "host, and the packet is not a ConnectionRequest "
@@ -721,7 +731,17 @@ namespace Multiplayer.Transport
             // path loss) must not re-fire OnPeerConnected — on a client that meant a duplicate
             // SetHostPeer + JOIN.
             if (_connectedPeers.Add(remoteSteamId))
+            {
+                // THE SILENT BIRTH OF A ROSTER ROW, said out loud (L180). On the host this raise IS what
+                // mints the identity-less row, and it wrote nothing at all: the 2026-08-07 log jumps from
+                // "invite lobby joinable" straight to a `Peer 1 (Unknown) PAUSED` half a minute later, with
+                // the row's creation nowhere in between. It is also the one line that separates "the joiner
+                // never reached us" from "it reached us and its JOIN did not".
+                UnityEngine.Debug.Log($"[Multiplayer] SteamTransport: P2P session accepted from {remoteSteamId}" +
+                                      (IsHost ? " — roster row minted; its JOIN is what gives it an identity."
+                                              : " — the dialed host's reply leg."));
                 OnPeerConnected?.Invoke(remoteSteamId, $"Steam({remoteSteamId})");
+            }
         }
 
         private struct P2PPacket
