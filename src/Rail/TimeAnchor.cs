@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using Base.Core;
 using PhoenixPoint.Geoscape.Levels;
 using UnityEngine;
@@ -60,9 +61,11 @@ namespace Multiplayer.Network.Sync
         /// value depends on the threshold sitting BELOW the maximum rate a latch can even occur at, and that
         /// is the one thing prose cannot enforce. <see cref="HostDto"/> is asked once per host walk cycle
         /// (IdentityResolver.Roots, snapshotted at DiffEngine.BeginCycle), so the ceiling is
-        /// <c>Window / DiffEngine.TickInterval</c> = 20 per 10 s — which is EXACTLY the threshold this used
-        /// to carry, i.e. the anchor could re-latch every single cycle forever and never trip it. RailCheck
-        /// L73 asserts the inequality mechanically so it cannot drift back.</summary>
+        /// <c>Window / DiffEngine.TickInterval</c> — 20 per 10 s when this comment was written against a
+        /// 0.5 s tick, which is EXACTLY the threshold this used to carry, i.e. the anchor could re-latch
+        /// every single cycle forever and never trip it. e43bee8 took the tick to 0.1 s, so the ceiling is
+        /// now 100 and the margin is wider still. RailCheck L73 asserts the inequality mechanically against
+        /// the LIVE tick so it cannot drift back.</summary>
         internal const float ChurnWindowSeconds = 10f;
         internal const int ChurnThreshold = 4;
 
@@ -117,9 +120,36 @@ namespace Multiplayer.Network.Sync
         /// not a pause/speed change — save-load, time skip, any native re-anchor — and, over long unchanged
         /// stretches, ordinary rate error. This is the calibration knob: the model is a model, and the host's
         /// Timing is the truth. Threshold as in the quarry: 5 s of game time, or one diff tick at the current
-        /// rate when that is larger.</summary>
+        /// rate when that is larger.
+        ///
+        /// A RATE CHANGE IS NOT DRIFT, and the guard below is where that has to be said, because the
+        /// prediction extrapolates the WHOLE interval since the latch at the rate read NOW. On the one cycle
+        /// a pause/resume/speed lands, that rate is one the clock never ran at, so the answer is not merely
+        /// noisy — it is guaranteed over threshold in both directions. Resume after a P-second pause: the
+        /// clock stood still while the prediction ran, error = rate x P against a rate x 0.5 tolerance, i.e.
+        /// true for any pause longer than half a second. Pause: rate reads 0, so the tolerance collapses to
+        /// its 5 GAME-second floor while the error is the whole running stretch since the latch. That floor
+        /// is nothing at geoscape speed: the same host log clocks 8 game-hours between mist hour 254 and 262
+        /// over realtime 411.057-421.059, i.e. ~2880 game-s per real-s, so 5 game seconds is 1.7 ms of wall
+        /// clock. Every rate change therefore answered DRIFT.
+        ///
+        /// Host log 2026-08-07, the only two ERRORs this class produced all session (23:10:09.971 and
+        /// 23:10:50.724, "5 DRIFT re-latches in 10 s"): the second window (realtime 401.5-411.5) contains
+        /// exactly five [MP][pause] transitions — 402.264, 402.740, 408.488, 409.409, 409.817 — a
+        /// vehicle-order storm, and no client logged one clock complaint. Both alarms sit inside the
+        /// session's two densest pause bursts and the other ~15 minutes of geoscape are silent, which is the
+        /// signature of counting gestures, not of a model that disagrees with its clock.
+        ///
+        /// REGRESSION: a4a368a added the driftLatch flag to make exactly this exclusion ("a pause/speed latch
+        /// is a user gesture", <see cref="ChurnCheck"/>) and did not get it, because the flag was computed by
+        /// a predicate that cannot see a rate change. The guard belongs here rather than in the caller so the
+        /// predicate cannot be asked a question it has no basis to answer — RailCheck L190 asserts it.
+        /// The LATCH is untouched: <see cref="HostDto"/>'s own Paused/Scale terms fire it and must, so
+        /// returning false here changes nothing on the wire and only stops the alarm confessing speed
+        /// clicks.</summary>
         private static bool Drifted(Timing t)
         {
+            if (_hostDto.Paused != t.Paused || _hostDto.Scale != t.Scale) return false;
             double rate = t.EffectiveScale; // Paused ? 0 : CumulativeScale — the true d(Now)/d(realtime)
             double predicted = _hostDto.StartTime.TimeSpan.TotalSeconds + rate * (Time.realtimeSinceStartup - _latchedAt);
             return Math.Abs(t.Now.TimeSpan.TotalSeconds - predicted) > Math.Max(5.0, rate * 0.5);
@@ -147,16 +177,25 @@ namespace Multiplayer.Network.Sync
         ///
         /// Only DRIFT latches are counted. A pause/speed latch is a user gesture — five speed clicks in ten
         /// seconds are not churn, and counting them is how a threshold ends up raised above the rate the
-        /// pathological case actually runs at (see <see cref="ChurnThreshold"/>).</summary>
+        /// pathological case actually runs at (see <see cref="ChurnThreshold"/>). <see cref="Drifted"/> owns
+        /// the other half of that exclusion and is the half a4a368a missed.
+        ///
+        /// The window is reported MEASURED, never as <see cref="ChurnWindowSeconds"/>, because this runs only
+        /// ON a latch: a latch-free stretch keeps the window open past its nominal end, so the count can span
+        /// arbitrarily long. The 2026-08-07 host log printed two alarms 40.75 s apart and both claimed
+        /// "in 10 s" — with the constant in the text there was no way to tell 5-in-10-s from 5-in-40-s, which
+        /// is the difference between churn and background.</summary>
         private static void ChurnCheck(bool driftLatch)
         {
             if (driftLatch) _latchesSinceLog++;
             if (Time.realtimeSinceStartup < _nextChurnLogAt) return;
             if (_nextChurnLogAt > 0f && _latchesSinceLog > ChurnThreshold)
                 Debug.LogError("[Multiplayer][rail] TimeAnchor: " + _latchesSinceLog + " DRIFT re-latches in " +
-                               ChurnWindowSeconds + " s (threshold " + ChurnThreshold + ") — the drift prediction " +
-                               "does not match the host clock, so every client's level clock is being jerked to a " +
-                               "fresh anchor on almost every walk cycle");
+                               (Time.realtimeSinceStartup - (_nextChurnLogAt - ChurnWindowSeconds))
+                                   .ToString("F1", CultureInfo.InvariantCulture) +
+                               " s (threshold " + ChurnThreshold + " per " + ChurnWindowSeconds + " s) — the drift " +
+                               "prediction does not match the host clock, so every client's level clock is being " +
+                               "jerked to a fresh anchor on almost every walk cycle");
             _nextChurnLogAt = Time.realtimeSinceStartup + ChurnWindowSeconds;
             _latchesSinceLog = 0;
         }
@@ -240,8 +279,44 @@ namespace Multiplayer.Network.Sync
             // EffectiveScaleChangedEvent/OnPausedEvent (Timing.cs:88-131); _clientDto itself keeps the
             // HOST's Paused/Scale as received on the wire — that retained rate is the prediction
             // EnforceDrift checks the local clock against, and it is deliberately NOT written here.
-            Rebase(geo.Timing, _clientDto.StartTime);
+            //
+            // SAY THE SIZE OF THE JUMP. This is the peer the anchor actually moves, and until now it logged
+            // nothing at all: the 2026-08-07 session has two host-side alarms naming "every client's level
+            // clock is being jerked" and not one TimeAnchor line in the client log to confirm or deny it, so
+            // a player reporting geoscape stutter produced zero evidence on the peer that stuttered.
+            // Unconditional and at Log level on purpose. An apply happens only when the anchor CHANGED
+            // (piecewise-constant, law 6), i.e. at rate transitions — ~5 in the densest 10 s of that session
+            // and none across quiet play, which is nothing next to the rail's own per-cycle tick line. A
+            // severity threshold would need a calibrated "how big is a jerk", and that number is exactly what
+            // no measurement has produced yet (ClockPhaseDiag exists because of it) — inventing one here
+            // would re-hide the quantity behind a guess. Sign: POSITIVE = the clock is pushed FORWARD, i.e.
+            // this peer was behind the host.
+            var t = geo.Timing;
+            double rate = ClientRate(t);
+            double jump = _clientDto.StartTime.TimeSpan.TotalSeconds - t.Now.TimeSpan.TotalSeconds;
+            var inv = CultureInfo.InvariantCulture;
+            Debug.Log("[Multiplayer][rail] TimeAnchor: anchor apply moved this peer's level clock by " +
+                      jump.ToString("F1", inv) + " s of game time (" +
+                      (rate > 0.0 ? (jump / rate).ToString("F3", inv) + " s real" : "paused") +
+                      ", rate=" + rate.ToString("F2", inv) + ", sinceLastApply=" +
+                      ClientAnchorAgeSeconds.ToString("F1", inv) + " s)");
+            Rebase(t, _clientDto.StartTime);
             _appliedAt = Time.realtimeSinceStartup;
+        }
+
+        /// <summary>The client's live <c>d(Now)/d(realtime)</c> under the anchor's RETAINED host rate, shared
+        /// by <see cref="ApplyIfTouched"/>'s jump report and <see cref="EnforceDrift"/>'s prediction so the
+        /// two can never price the same clock differently. The anchor carries only the host's OWN
+        /// Paused/Scale; the parent factor is local clock machinery and is read live (decompile
+        /// Base.Core/Timing.cs:65-75 — Paused is parent-aware :100-109, CumulativeScale =
+        /// ParentCumulativeScale x Scale, no-parent fallback Time.timeScale :184). A bare
+        /// <c>_clientDto.Scale</c> mispriced the derivation — spurious re-asserts, missed drift — whenever
+        /// the parent ran at anything but 1x or was paused.</summary>
+        private static double ClientRate(Timing t)
+        {
+            bool paused = _clientDto.Paused || (t.ParentTime != null && t.ParentTime.Paused);
+            double parentScale = t.ParentTime != null ? t.ParentTime.CumulativeScale : Time.timeScale;
+            return paused ? 0.0 : _clientDto.Scale * parentScale;
         }
 
         /// <summary>Client-side counterpart of <see cref="Drifted"/> — the free-run backstop. The rail
@@ -259,15 +334,8 @@ namespace Multiplayer.Network.Sync
         {
             if (_clientDto == null || _appliedAt <= 0f || geo == null || geo.Timing == null) return;
             var t = geo.Timing;
-            // Same EffectiveScale form as the host derivation (Drifted): Paused ? 0 : Scale × parent
-            // cumulative (decompile Base.Core/Timing.cs:65-75 — Paused is parent-aware :100-109,
-            // CumulativeScale = ParentCumulativeScale × Scale, no-parent fallback Time.timeScale :184).
-            // The anchor carries only the host's OWN Paused/Scale; the parent factor is local clock
-            // machinery, read live — a bare _clientDto.Scale mispriced the derivation (spurious
-            // re-asserts / missed drift) whenever the parent ran ≠1× or was paused.
-            bool paused = _clientDto.Paused || (t.ParentTime != null && t.ParentTime.Paused);
-            double parentScale = t.ParentTime != null ? t.ParentTime.CumulativeScale : Time.timeScale;
-            double rate = paused ? 0.0 : _clientDto.Scale * parentScale;
+            // Same EffectiveScale form as the host derivation (Drifted), via ClientRate — see there.
+            double rate = ClientRate(t);
             double derived = _clientDto.StartTime.TimeSpan.TotalSeconds + rate * (Time.realtimeSinceStartup - _appliedAt);
             if (Math.Abs(t.Now.TimeSpan.TotalSeconds - derived) <= Math.Max(5.0, rate * 0.5)) return;
             Debug.LogWarning("[Multiplayer][rail] TimeAnchor: client clock drifted from anchor derivation (now=" +
