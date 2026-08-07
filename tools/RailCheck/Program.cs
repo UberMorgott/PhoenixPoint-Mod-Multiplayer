@@ -277,6 +277,7 @@ namespace RailCheck
             Add(laws, () => L199_TheCountdownLabelFitsItsPlate.Check());
             Add(laws, () => L210_ClientFreeAimShotActuallyFires.Check());
             Add(laws, () => L220_TheReadyControlIsReachable.Check());
+            Add(laws, () => L230_EveryPeerStartsTheAnimationFromTheHostsRecord.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

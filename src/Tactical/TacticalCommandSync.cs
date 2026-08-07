@@ -1164,7 +1164,7 @@ namespace Multiplayer.Tactical
         /// <summary>How long a held order waits for that soldier to finish the same peer's previous one. A
         /// mirrored cross-map move is a few seconds; past this the ability is not slow, it is stuck — and a
         /// correction that waits forever is a swallowed correction (A7's settle ceiling, same reasoning).</summary>
-        private const float DeferCeilingSeconds = 10f;
+        internal const float DeferCeilingSeconds = 10f;
 
         /// <summary>Log-once sets for the two "A3a knowingly does not cover this" notices. Per BATTLE, so the
         /// next mission reports its own gaps instead of inheriting a silence.</summary>
@@ -1179,6 +1179,20 @@ namespace Multiplayer.Tactical
         {
             return ability != null && _mirrorSkipsCameraWait.Remove(ability);
         }
+
+        /// <summary>CLIENT: actors whose clicked order has been sent and whose animation is waiting for the
+        /// host's echo, with the frames each has waited. The acting peer no longer plays its own click
+        /// (<see cref="PublishClickedOrder"/>), so this is the ONE thing standing between the button press and
+        /// the animation — and the only peer it waits on is the HOST, which answers by itself. No other peer
+        /// is consulted, so an AFK peer cannot lengthen it by a single frame.</summary>
+        private static readonly Dictionary<int, int> _awaitingEcho = new Dictionary<int, int>();
+
+        /// <summary>12 s at 60 fps, deliberately LONGER than the host's own <see cref="DeferCeilingSeconds"/>
+        /// (10 s): a host that is legitimately HOLDING this peer's order behind that same peer's previous one
+        /// gives up first and answers with a reject + forced settle, which clears the wait through
+        /// <see cref="QueueSettle"/>. Only an echo that is never coming at all reaches this ceiling — and it
+        /// is released LOUDLY rather than left to freeze the soldier for the rest of the battle.</summary>
+        internal const int EchoCeilingFrames = 720;
 
         // ~2 s at 60 fps. Not a deadline: a held settle is CORRECT while the actor is still moving, so the
         // hold keeps waiting and only says so periodically — but a hold nobody can see is the bug class.
@@ -1201,6 +1215,7 @@ namespace Multiplayer.Tactical
             _saidUncovered.Clear();
             _mirrorSkipsCameraWait.Clear();   // live ability refs: never let them outlive the battle
             _queuedMirrors.Clear();           // same: a watched record belongs to the battle it queued in
+            _awaitingEcho.Clear();            // same: an echo wait belongs to ONE battle, never the next one
             _relayedAim.Clear();              // L104(j): keys belong to ONE battle
             _saidKeyless.Clear();
             _replayOriginPeer = 0;
@@ -1365,9 +1380,15 @@ namespace Multiplayer.Tactical
                 // its origin (0 = the host), so the ownership the hold in HandleActivate consults is written at
                 // the one point that cannot drift out of step with what is actually executing.
                 _cmdOwner[key] = _replayOriginPeer;
+                // WHO GETS THIS MIRROR is decided by the ONE rule (L230), not by "somebody already played it".
+                // The exclusion exists because a SPECULATIVE acting peer played the order at its own click and
+                // a second copy would play it twice. An order that WAITS for the echo never played it, so
+                // excluding its origin is exactly how that peer would be left standing still forever — the
+                // wait would run to its ceiling on every single shot.
+                ulong exclude = OrderWaitsForTheEcho(true, true, ability is IMoveAbility) ? 0UL : _replayOriginPeer;
                 Send(OpActivate, "mirror " + actor.name + " " + name + " " + Where(target) +
                      (IsAutonomous(target) ? " [" + target.AttackType + "]" : "") + (fumbled ? " FUMBLED" : ""),
-                     _replayOriginPeer, w => { WriteCommand(w, key, guid, target); w.Write(fumbled); });
+                     exclude, w => { WriteCommand(w, key, guid, target); w.Write(fumbled); });
             }
             else
                 IntentRail.Send(SurfaceIds.TacCommandIntent, OpIntentActivate,
@@ -1389,6 +1410,170 @@ namespace Multiplayer.Tactical
                     return "DamageReceiver's owning actor";
             }
             return null;
+        }
+
+        // ─── A9: THE CLICK NO LONGER PLAYS ITSELF ──────────────────────────
+
+        /// <summary>
+        /// A9 — EVERY PEER STARTS THE ANIMATION FROM THE HOST'S RECORD, INCLUDING THE PEER THAT CLICKED.
+        ///
+        /// THE DEFECT, in the owner's words: "I throw a grenade and on one instance it has already exploded
+        /// while on another it is only just leaving the hand". The cause is not the wire, it is that the same
+        /// action had THREE different start times by construction — the acting peer began at its own click
+        /// (A3a's speculative local play), the host began when the intent landed (+½ RTT) and the other peers
+        /// began when the mirror landed (+½ RTT again). Nothing corrected the gap because nothing was wrong:
+        /// each peer was playing the order it had, as soon as it had it.
+        ///
+        /// SO THE SPECULATION IS RETIRED for everything that is not a move. The acting peer publishes the
+        /// order and plays NOTHING; its animation starts from the host's mirror, decoded by
+        /// <see cref="ApplyActivate"/> — the same function, from the same bytes, that every watching peer
+        /// plays from. The cost is deliberate and was accepted: the acting player waits his own ping before
+        /// his soldier moves. The spread across peers goes from [0 … RTT₁+RTT₂] to [½RTT … RTT].
+        ///
+        /// THE HOST IS NOT EXEMPT, and that is the half of the defect that would otherwise survive: a host
+        /// click reaches <c>Activate</c> natively, takes the <see cref="RelayMirror"/> branch and never
+        /// touches <see cref="Validate"/> at all (the asymmetry <see cref="HostGateFilter"/> documents). Here
+        /// the host's own click is SERIALISED TO THE WIRE FORMAT AND FED TO <see cref="HandleActivate"/> with
+        /// peer 0 — the very function that answers a client's order. It is arbitrated by the same
+        /// <see cref="Validate"/>, held by the same <see cref="BusyWithOwnOrder"/> queue, played from the same
+        /// decoded (and therefore equally lossy) target, and mirrored from the same one place. The host still
+        /// cannot receive its own broadcast, so "plays from the record" means it publishes and plays inside one
+        /// synchronous call; there is no earlier moment and no other peer is waited on.
+        ///
+        /// THIS IS NOT A QUORUM. The only peer ever waited on is the HOST, which answers by itself with no
+        /// human action anywhere in the loop; an AFK peer cannot add a frame. And the wait is BOUNDED — see
+        /// <see cref="TickEchoWaits"/>, which drops it out loud rather than freezing a soldier.
+        ///
+        /// GENERIC BY THE GAME'S OWN FUNNEL, NOT BY A LIST OF ABILITIES. The seam is
+        /// <c>TacticalViewState.ActivateAbility</c>:259 — the ONE method every player click passes through,
+        /// with exactly one override in the whole game (<c>UIStateShoot</c>:1385) which calls base. Shoot,
+        /// free-aim (<c>UIStateFreeCam</c>:464), first-person multi-target, overwatch
+        /// (<c>UIStateOverwatchAbilitySelected</c>), grenade/cone/throw and every def-driven ability
+        /// (<c>UIStateAbilitySelected</c>), melee and reload (<c>UIStateCharacterSelected</c>) all route
+        /// there. No <c>is ShootAbility</c>, no per-weapon branch, nothing to grow per alien.
+        ///
+        /// ONE EXCLUSION, BY THE GAME'S OWN MARKER INTERFACE and not by a concrete class: <c>IMoveAbility</c>
+        /// (<c>MoveAbility</c>:20 <c>: TacticalAbility, IMoveAbility, IDelayedCacheAbility</c>), so every
+        /// subclass the game and TFTV mint is covered — the trap a <c>typeof(MoveAbility)</c> test walks into.
+        /// A move is excluded for a reason that is written down elsewhere in this file rather than invented
+        /// here: <c>FollowupAbility</c> and <c>FollowupAbilityTarget</c> are in
+        /// <see cref="TacAbilityTargetCodec.Dropped"/>, so a move that carries a follow-up attack
+        /// (<c>UIStateCharacterSelected.MoveAndActivateAbility</c>:945) loses that attack on the wire —
+        /// deferring the move would therefore delete the acting player's own follow-up shot, not merely delay
+        /// it. Move also has the whole settle/closer architecture built to correct its divergence, and it is
+        /// the one rider whose divergence is already cosmetic and self-correcting.
+        /// </summary>
+        internal static bool OrderWaitsForTheEcho(bool inSharedBattle, bool abilityIsRider, bool abilityIsMove)
+            => inSharedBattle && abilityIsRider && !abilityIsMove;
+
+        /// <summary>The player-click gate. TRUE means the local activation is SUPPRESSED and the order was
+        /// published instead; FALSE means nothing was published and the click plays natively exactly as it
+        /// always has (solo, a declared-local ability, a move, or a payload this peer cannot name).</summary>
+        internal static bool PublishClickedOrder(TacticalAbility ability, TacticalAbilityTarget target)
+        {
+            var engine = LiveEngine();
+            if (engine == null) return false;                 // solo, or connected but not in a co-op game
+            if (SyncApplyScope.Active) return false;          // law 8: a mirror is driving this, not a click
+            var actor = ability == null ? null : ability.TacticalActorBase;
+            if (actor == null) return false;
+            if (!OrderWaitsForTheEcho(true, IsRider(ability), ability is IMoveAbility)) return false;
+
+            int key = TacticalActorKey.Of(actor);
+            string guid = ability.AbilityDef == null ? null : ability.AbilityDef.Guid;
+            string name = ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name;
+            string unkeyable = target == null ? null : FirstUnkeyableTargetField(target);
+            if (key == 0 || string.IsNullOrEmpty(guid) || unkeyable != null)
+            {
+                // UNSHIPPABLE, so it falls back to the pre-A9 behaviour: this peer acts alone rather than
+                // standing still forever waiting for an echo of an order nobody could send. Said out loud —
+                // the same sentence OnAbilityActivated would have printed one layer down.
+                if (_saidKeyless.Add("echo:" + actor.name + "/" + name))
+                    Debug.LogError("[Multiplayer][tac] ECHO bypass for " + actor.name + " / " + name + " — " +
+                                   (key == 0 ? "the commanded actor has no shared key"
+                                    : string.IsNullOrEmpty(guid) ? "the ability def has no guid"
+                                    : "the payload's " + unkeyable + " has no shared key") +
+                                   ". This click is played LOCALLY and no other peer will follow it, so this " +
+                                   "soldier's animation is out of step here by design rather than by accident.");
+                return false;
+            }
+
+            if (engine.IsHost)
+            {
+                // THE HOST ANSWERS ITS OWN ORDER THROUGH THE FUNCTION THAT ANSWERS A PEER'S. Serialised and
+                // re-read on purpose: the host then plays the same lossy target every client plays, so a field
+                // the codec drops cannot make the host's shot differ from everybody else's.
+                byte[] body;
+                using (var ms = new MemoryStream())
+                using (var w = new BinaryWriter(ms, Encoding.UTF8))
+                {
+                    WriteCommand(w, key, guid, target);
+                    body = ms.ToArray();
+                }
+                Debug.Log("[Multiplayer][tac] ECHO host " + actor.name + " " + name + " " + Where(target) +
+                          " — published and played from that record, through the same arbitration a peer's " +
+                          "order takes (no Validate bypass).");
+                using (var ms = new MemoryStream(body))
+                using (var r = new BinaryReader(ms, Encoding.UTF8))
+                    HandleActivate(engine, 0, 0, OpIntentActivate, r);
+                return true;
+            }
+
+            if (_awaitingEcho.ContainsKey(key))
+            {
+                // A SECOND CLICK INSIDE THE PING WINDOW. Dropped rather than sent, because sending it would
+                // put two orders for one soldier on the wire and the host would play both. Loud, throttled by
+                // the actor+ability so a mashed button costs one line.
+                if (_saidUncovered.Add("echo2:" + key + "/" + name))
+                    Debug.LogWarning("[Multiplayer][tac] ECHO busy — " + actor.name + " already has an order " +
+                                     "waiting for the host's mirror, so this " + name + " click was DROPPED " +
+                                     "rather than sent twice. It is bounded: the wait gives up after " +
+                                     (EchoCeilingFrames / 60) + "s and says so.");
+                return true;
+            }
+
+            IntentRail.Send(SurfaceIds.TacCommandIntent, OpIntentActivate,
+                            "command " + actor.name + " " + name + " " + Where(target),
+                            w => WriteCommand(w, key, guid, target));
+            _awaitingEcho[key] = 0;
+            Debug.Log("[Multiplayer][tac] ECHO wait " + actor.name + " " + name + " " + Where(target) +
+                      " — this peer plays NOTHING now; its animation starts when the host's mirror lands, " +
+                      "from the same record every other peer plays from.");
+            return true;
+        }
+
+        /// <summary>The host's answer for this actor arrived (a mirror, or a settle carrying a refusal), so the
+        /// wait is over. Called from BOTH ends on purpose: an order that is refused produces no mirror at all,
+        /// and a wait that only a mirror could clear would sit out its whole ceiling on every refusal.</summary>
+        private static void NoteEchoArrived(int key)
+        {
+            if (key != 0) _awaitingEcho.Remove(key);
+        }
+
+        /// <summary>THE BOUND. A lost or never-sent echo may not leave a soldier frozen for the rest of the
+        /// battle, and it may not fail quietly — those are the two halves of this repo's dominant bug class in
+        /// one place. Pumped from <see cref="ClientTick"/>; the host never waits for anything here.</summary>
+        private static void TickEchoWaits()
+        {
+            if (_awaitingEcho.Count == 0) return;
+            List<int> expired = null;
+            foreach (var kv in new List<KeyValuePair<int, int>>(_awaitingEcho))
+            {
+                if (kv.Value + 1 < EchoCeilingFrames) { _awaitingEcho[kv.Key] = kv.Value + 1; continue; }
+                (expired ?? (expired = new List<int>())).Add(kv.Key);
+            }
+            if (expired == null) return;
+            foreach (var key in expired)
+            {
+                _awaitingEcho.Remove(key);
+                string why;
+                var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
+                Debug.LogError("[Multiplayer][tac] ECHO LOST for " + (actor == null ? "actor " + key : actor.name) +
+                               " — an order was published " + (EchoCeilingFrames / 60) + "s ago and the host " +
+                               "never mirrored it back, so that soldier never played the action every other " +
+                               "peer may already have played. The wait is RELEASED here (the soldier is " +
+                               "clickable again); it is NOT replayed locally, because a locally-replayed order " +
+                               "the host also ran is a second shot from one actor (law L83).");
+            }
         }
 
         // ─── A7: THE OTHER TACTICAL FUNNEL — SELECTING A WEAPON ────────────
@@ -2507,6 +2692,10 @@ namespace Multiplayer.Tactical
         private static void ApplyActivate(int key, string guid, TacticalAbilityTarget target, bool fumbled,
                                           List<string> unresolved)
         {
+            // THE ECHO THIS PEER WAS WAITING FOR (A9). Cleared BEFORE the refusal branch below, not after: a
+            // record that arrives and cannot be played is still an answer, and leaving the wait armed would
+            // freeze that soldier for the full ceiling on top of an already-named failure.
+            NoteEchoArrived(key);
             string why;
             var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
             // ONE VERDICT, TWO SENTENCES. The decision is pure so RailCheck L140 can execute it; the branch
@@ -2721,6 +2910,10 @@ namespace Multiplayer.Tactical
         private static void QueueSettle(int key, Vector3 pos, float ap, float wp, bool forced,
                                         List<string> statuses, List<string> traits, string selected)
         {
+            // A9: a REFUSED order produces no mirror at all — the host answers it with a reject and this
+            // forced settle. That makes a settle the other half of "the host has answered", and without this
+            // line every refusal would leave the clicked soldier frozen for the whole echo ceiling.
+            NoteEchoArrived(key);
             _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced,
                                                 Statuses = statuses, Traits = traits, Selected = selected,
                                                 Epoch = TacticalDamageSync.StatEpoch };
@@ -2737,6 +2930,9 @@ namespace Multiplayer.Tactical
             // and gating the watchdog on _pending would make it run only while a settle happened to be in
             // flight — which is precisely when the bug it watches for does NOT need reporting.
             TickQueuedMirrors();
+            // Same reasoning, same place: an echo wait is independent of both, and it is the one that leaves a
+            // soldier unclickable while it runs (A9).
+            TickEchoWaits();
             if (_pending.Count == 0) return;
             var tlc = Tlc();
             if (tlc == null) { _pending.Clear(); return; }   // left the battle: nothing left to correct
@@ -3076,6 +3272,55 @@ namespace Multiplayer.Tactical
     {
         private static void Prefix(TacticalAbility __instance, object parameter)
             => TacticalCommandSync.OnAbilityActivated(__instance, parameter);
+    }
+
+    /// <summary>
+    /// A9's ONE SEAM (law L230): <c>TacticalViewState.ActivateAbility</c>:259 — the single method every
+    /// PLAYER CLICK passes through, and the only one that can tell a click apart from the engine's own
+    /// activations without enumerating abilities. Blocking here and not at <c>TacticalAbility.Activate</c> is
+    /// forced, not preferred: <c>Activate</c> is VIRTUAL, so a prefix that skips the base body still lets
+    /// <c>ShootAbility.Activate</c>:165-174 run its own <c>PlayAction(Shoot)</c> — the same reason
+    /// <see cref="AutonomousReactionExecuteGate"/> sits on the non-virtual <c>Execute</c> wrappers. This is the
+    /// caller, so returning false suppresses the whole activation.
+    ///
+    /// It covers every clicked action at once because the game funnels them all here: <c>UIStateShoot</c>
+    /// (the one override in the game, and it calls base), <c>UIStateFreeCam</c>:464 free-aim,
+    /// <c>UIStateFirstPersonMultiTargetSelection</c>, <c>UIStateOverwatchAbilitySelected</c>,
+    /// <c>UIStateAbilitySelected</c> (every def-driven ability: grenades, cones, throws, alien specials) and
+    /// <c>UIStateCharacterSelected</c> (melee, reload, move).
+    ///
+    /// SUPPRESSING THE STATE SWITCH TOO IS DELIBERATE. The native body also leaves the targeting state for
+    /// <c>UIStateWaiting</c>; letting the view park for an ability that has not started would show a wait for
+    /// nothing. The release happens on the mirror instead, where it already lives —
+    /// <see cref="TacticalCommandSync.ReleaseLocalUiHolding"/> runs from <c>ApplyActivate</c> BEFORE the
+    /// engine takes the actor, and a second click in the meantime is dropped by the echo gate itself.
+    ///
+    /// <c>Prepare</c> rather than a null <c>TargetMethod</c>: <c>AccessTools.Method</c> does EXACT parameter
+    /// matching, a returned null aborts <c>PatchAll</c> and kills every later patch in the pass (RailCheck
+    /// L23), and a silent skip is this repo's dominant bug class. It says so and stands down.
+    /// </summary>
+    [HarmonyPatch]
+    internal static class ClickedOrderWaitsForTheEcho
+    {
+        internal static readonly MethodBase Seam = AccessTools.Method(
+            typeof(PhoenixPoint.Tactical.View.TacticalViewState), "ActivateAbility",
+            new[] { typeof(TacticalAbility), typeof(TacticalAbilityTarget), typeof(Base.UI.StateStackAction),
+                    typeof(Func<TacticalAbility, bool>) });
+
+        private static bool Prepare()
+        {
+            if (Seam != null) return true;
+            Debug.LogError("[Multiplayer][tac] ECHO SEAM NOT BOUND — TacticalViewState.ActivateAbility" +
+                           "(TacticalAbility, TacticalAbilityTarget, StateStackAction, Func<TacticalAbility,bool>) " +
+                           "did not resolve, so every clicked order will play LOCALLY at the click again and " +
+                           "attack animations will start at a different moment on every peer (law L230).");
+            return false;
+        }
+
+        private static MethodBase TargetMethod() => Seam;
+
+        private static bool Prefix(TacticalAbility ability, TacticalAbilityTarget target)
+            => !TacticalCommandSync.PublishClickedOrder(ability, target);
     }
 
     /// <summary>
