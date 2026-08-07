@@ -132,7 +132,18 @@ namespace RailCheck
                                  "the ABSENCE of a line stop meaning anything.";
 
             // ── (d) our tactical HUD additions present one clickable face ──
-            foreach (var v in RaycastArm()) yield return v;
+            // ARM (d) WITHDRAWN 2026-08-08 — it required every Multiplayer.Tactical method that clones a
+            // native widget to silence a Graphic's raycastTarget AND settle Selectable.targetGraphic. That
+            // requirement produced TacticalReadyButton.TrimRaycast twice, and both times it killed the co-op
+            // ready button outright: the clone is an Instantiate of the native End Turn button, so its own
+            // graphics ARE its clickable face, and sweeping them off leaves a widget nothing can hit. The
+            // last round measured it rather than inferring it — the hand-built replacement face logged
+            // layer=5 depth=258, raycastTarget true, sole surface, and the button still took neither hover
+            // nor click on any peer. The premise underneath was wrong too: a button answering
+            // IsPointerOverGameObject() over its OWN rect is not eating the map, it is being a button, and
+            // the native End Turn button does exactly the same over its own rect. The clone mirrors End
+            // Turn's sizeDelta every frame, so the rect it answers for is the art it draws. The inverse
+            // invariant — do not disarm the clone's native face — is now L220 ready-face-disarmed.
         }
 
         /// <summary>Does this method lead to an ability actually being activated? By NAME on a
@@ -152,75 +163,8 @@ namespace RailCheck
             return false;
         }
 
-        /// <summary>
-        /// ARM (d). A mod method that CLONES a native tactical widget has taken on the whole cloned raycast
-        /// footprint, so it must also hand it back down to one surface, and that surface must not be
-        /// GUESSED. Both halves are required and they mean different things: writing <c>raycastTarget</c>
-        /// without settling which face survives is a blanket sweep that leaves the button unclickable (or
-        /// spares the wrong child), and settling the face without writing <c>raycastTarget</c> silences
-        /// nothing at all.
-        ///
-        /// "NOT GUESSED" HAS TWO HONEST SPELLINGS, and this arm demanded only the first until 2026-08-08.
-        /// Reading <c>Selectable.targetGraphic</c> asks Unity which graphic is the button's clickable face;
-        /// WRITING it declares one the mod built itself. The read alone was written in on the assumption
-        /// that a cloned prefab always names a face — and the live tactical log falsified that assumption
-        /// on the one button this arm exists for: <c>ready button raycast NOT trimmed — its Button names no
-        /// targetGraphic</c>. A law that can only be satisfied by asking a question with no answer stops
-        /// being a guard: the code obeyed it by reading the field, finding null, and silencing NOTHING,
-        /// which left a ~250x40 invisible click-eater over the tactical map. So the write counts too, and
-        /// L182 arm (d) holds <c>TacticalReadyButton.TrimRaycast</c> to the stronger of the two.
-        /// </summary>
-        private static IEnumerable<string> RaycastArm()
-        {
-            var uiAsm = typeof(Graphic).Assembly;
-            var setRaycast = typeof(Graphic).GetProperty("raycastTarget")?.GetSetMethod();
-            var getTarget = typeof(Selectable).GetProperty("targetGraphic")?.GetGetMethod();
-            var setTarget = typeof(Selectable).GetProperty("targetGraphic")?.GetSetMethod();
-            var instantiate = typeof(UnityEngine.Object).Assembly;
-            if (setRaycast == null || getTarget == null || setTarget == null)
-            {
-                yield return "L127 premise-changed: Graphic.raycastTarget or Selectable.targetGraphic no longer " +
-                             "resolves in UnityEngine.UI, so 'one clickable surface' cannot be expressed against " +
-                             "this Unity version and arm (d) is asserting nothing.";
-                yield break;
-            }
-
-            var cloners = typeof(TacticalReadySync).Assembly.GetTypes()
-                .Where(t => t.Namespace == "Multiplayer.Tactical")
-                .SelectMany(t => t.GetMethods(All))
-                .Where(m => Program.Callees(m, instantiate)
-                        .Any(c => c.DeclaringType == typeof(UnityEngine.Object) && c.Name == "Instantiate"))
-                .ToList();
-            if (cloners.Count == 0)
-                yield return "L127 no-tactical-clone: nothing under Multiplayer.Tactical clones a native widget " +
-                             "any more. Either the co-op Ready button is gone (in which case delete this arm) or " +
-                             "it is built some way this arm cannot see — and an arm that sees nothing cannot go " +
-                             "red for the thing it was written for.";
-
-            foreach (var m in cloners)
-            {
-                bool silences = Reaches(m, setRaycast, 4);
-                bool namesTheFace = Reaches(m, getTarget, 4) || Reaches(m, setTarget, 4);
-                if (silences && namesTheFace) continue;
-                yield return "L127 mod-gui-raycast-unsilenced: " + Describe(m) + " clones a native tactical " +
-                             "widget but " +
-                             (!silences && !namesTheFace
-                                 ? "never silences one graphic's raycastTarget"
-                                 : !silences
-                                     ? "settles Selectable.targetGraphic without ever writing raycastTarget"
-                                     : "writes raycastTarget without ever settling Selectable.targetGraphic — " +
-                                       "neither reading which face Unity says is clickable nor writing one it " +
-                                       "built") +
-                             ". Every extra raycast-enabled graphic it carries answers " +
-                             "EventSystem.IsPointerOverGameObject() for the cursor, and TacticalView." +
-                             "IsCursorOverGUI() gates the tactical MAP click on exactly that — so the clone " +
-                             "silently eats the player's confirm and the symptom is 'the UI responds, the map " +
-                             "does not'.";
-            }
-        }
-
         /// <summary>Transitive reachability from mod code to one specific external method, walking only
-        /// through the mod's OWN assembly (the hop that matters here is Build -> TrimRaycast).</summary>
+        /// through the mod's OWN assembly.</summary>
         private static bool Reaches(MethodBase m, MethodBase target, int depth)
         {
             if (depth <= 0 || m == null) return false;

@@ -45,21 +45,24 @@ namespace RailCheck
     ///       reach <see cref="PingMarkers"/>'s tint. Nothing on the wire says who sent a ping, so if
     ///       <c>Update</c> is ever pointed back at <c>Show</c> every ping silently becomes somebody else's
     ///       colour and no other arm notices.
-    ///   (d) <c>ready-button-face-not-built</c> — <c>TacticalReadyButton.TrimRaycast</c> reaches BOTH
-    ///       <c>Graphic.set_raycastTarget</c> and <c>Selectable.set_targetGraphic</c>. The version that
-    ///       shipped the defect reached neither on the path it actually took: it read
-    ///       <c>targetGraphic</c>, found the prefab had named none, logged, and returned with the whole
-    ///       cloned footprint still raycastable over the tactical map — where
-    ///       <c>TacticalView.IsCursorOverGUI()</c> gates the confirm click, so it ate them. Building the
-    ///       face instead of hoping the asset named one is what makes the give-up branch unreachable.
-    ///   (e) POSITIVE CONTROL, EXECUTED — <see cref="FakeSeam"/> below borrows a pooled marker, instantiates
-    ///       without activating, and trims nothing. (a), (b) and (d) must all go red on it, or their green
-    ///       above is a scan that resolved no call edges and would pass forever.
+    ///   (d) WITHDRAWN 2026-08-08 — it was <c>ready-button-face-not-built</c>, requiring
+    ///       <c>TacticalReadyButton.TrimRaycast</c> to silence the clone's graphics and name a face it built.
+    ///       That requirement was WRONG, and it is why the co-op ready button stayed dead for three rounds:
+    ///       the clone is an <c>Instantiate</c> of the native End Turn button and its own graphics ARE its
+    ///       clickable face. Silencing all twelve and substituting one hand-built Image left a widget nothing
+    ///       could hit — measured, not inferred: the built face logged <c>layer=5 depth=258</c>,
+    ///       raycastTarget true, sole surface, and still took neither hover nor click on any peer. This arm
+    ///       and L127's raycast arm were the two laws MANDATING that edit, which is why deleting the trim
+    ///       turned them both red. The correct invariant is its inverse and now lives in L220
+    ///       <c>ready-face-disarmed</c>. A button answering the pointer over its own rect is not a
+    ///       click-eater; it is a button, and End Turn does the same over its own.
+    ///   (e) POSITIVE CONTROL, EXECUTED — <see cref="FakeSeam"/> below borrows a pooled marker and
+    ///       instantiates without activating. (a) and (b) must both go red on it, or their green above is a
+    ///       scan that resolved no call edges and would pass forever.
     ///
     /// Falsify: put <c>markers.AddMarker(...)</c> back into <c>ShowGeo</c> → (a); drop the
     /// <c>go.SetActive(true)</c> after either <c>Instantiate</c> → (b); point <c>Update</c> at <c>Show</c>,
-    /// or stop calling <c>Tint</c> from either shower → (c); restore <c>TrimRaycast</c>'s
-    /// "no targetGraphic, leave it alone" early return → (d); empty <see cref="FakeSeam"/> → (e).
+    /// or stop calling <c>Tint</c> from either shower → (c); empty <see cref="FakeSeam"/> → (e).
     /// </summary>
     internal static class L182_ShownMeansSwitchedOn
     {
@@ -76,7 +79,6 @@ namespace RailCheck
             var showGeo = seam.GetMethod("ShowGeo", AllMembers);
             var showTac = seam.GetMethod("ShowTac", AllMembers);
             var tint = seam.GetMethod("Tint", AllMembers);
-            var trim = typeof(TacticalReadyButton).GetMethod("TrimRaycast", AllMembers);
 
             // The banned/required GAME members must resolve, or the arms below are assertions about a shape
             // this build does not have. AddMarker in particular: arm (a) bans a method by name, and a game
@@ -87,24 +89,20 @@ namespace RailCheck
                 globe.GetMethod("AddMarker", AllMembers, null, new[] { typeof(Vector3), typeof(GlobeMarkerType), typeof(float) }, null),
                 globe.GetMethod("AddMarker", AllMembers, null, new[] { typeof(PhoenixPoint.Geoscape.Entities.GeoActor), typeof(GlobeMarkerType), typeof(float) }, null),
                 globe.GetMethod("GetMarkerPrefab", AllMembers),
-                typeof(Graphic).GetProperty("raycastTarget", AllMembers)?.GetSetMethod(true),
-                typeof(Selectable).GetProperty("targetGraphic", AllMembers)?.GetSetMethod(true),
             };
 
             if (update == null || showLocal == null || show == null || showGeo == null || showTac == null ||
-                tint == null || trim == null || premises.Any(m => m == null))
+                tint == null || premises.Any(m => m == null))
             {
                 yield return "L182 premise-changed: one of PingMarkers.Update/Show/ShowLocal/ShowGeo/ShowTac/" +
-                             "Tint, TacticalReadyButton.TrimRaycast, GeoscapeGlobeMarkers.AddMarker (either " +
-                             "overload) / GetMarkerPrefab, Graphic.set_raycastTarget or " +
-                             "Selectable.set_targetGraphic no longer resolves. The seams this law is written " +
+                             "Tint, GeoscapeGlobeMarkers.AddMarker (either overload) or GetMarkerPrefab no " +
+                             "longer resolves. The seams this law is written " +
                              "over, or the members it names, have moved — every arm below is asserting about " +
                              "a shape the build no longer has.";
                 yield break;
             }
 
             foreach (var v in ScanPing(seam, "PingMarkers")) yield return v;
-            foreach (var v in ScanTrim(trim, "TacticalReadyButton.TrimRaycast")) yield return v;
 
             // ── arm (c): the two doors, and the colour they exist for.
             if (!Reaches(update, null, "ShowLocal") || Reaches(update, null, "Show"))
@@ -123,11 +121,8 @@ namespace RailCheck
                                  "(arm (a)) — losing it here loses the only thing that ownership bought.";
 
             // ── arm (e): the scan must be able to SEE each violation.
-            var control = ScanPing(typeof(FakeSeam), "FakeSeam")
-                .Concat(ScanTrim(typeof(FakeSeam).GetMethod("Trim", AllMembers), "FakeSeam.Trim"))
-                .ToList();
-            foreach (var want in new[] { "ping-borrows-a-pooled-marker", "ping-marker-not-switched-on",
-                                         "ready-button-face-not-built" })
+            var control = ScanPing(typeof(FakeSeam), "FakeSeam").ToList();
+            foreach (var want in new[] { "ping-borrows-a-pooled-marker", "ping-marker-not-switched-on" })
                 if (!control.Any(c => c.Contains(want)))
                     yield return "L182 control-not-red: FakeSeam commits " + want + " and the scan did not flag " +
                                  "it. The arm cannot tell a marker that was switched on from one that was not, " +
@@ -166,34 +161,14 @@ namespace RailCheck
                 }
         }
 
-        /// <summary>Arm (d), over one method.</summary>
-        private static IEnumerable<string> ScanTrim(MethodBase trim, string label)
-        {
-            var callees = CalleesOf(trim).Select(c => c.Name).ToList();
-            if (!callees.Contains("set_raycastTarget") || !callees.Contains("set_targetGraphic"))
-                yield return "L182 ready-button-face-not-built: " + label + " must both silence graphics " +
-                             "(Graphic.set_raycastTarget) and NAME the one it keeps " +
-                             "(Selectable.set_targetGraphic). Reading targetGraphic and giving up when the " +
-                             "prefab named none is the shipped defect: the clone sits a full row BELOW its HUD " +
-                             "container, over the tactical map, and every graphic it carries answers " +
-                             "EventSystem.IsPointerOverGameObject() — which is what TacticalView.IsCursorOverGUI() " +
-                             "gates the confirm click on. The face has to be built, not looked up.";
-        }
-
         /// <summary>ARM (e). Never instantiated, never registered — it exists only to be walked. One
-        /// violation per arm: a pooled marker, an Instantiate with no SetActive, and a trim that trims
-        /// nothing.</summary>
+        /// violation per arm: a pooled marker, and an Instantiate with no SetActive.</summary>
         private sealed class FakeSeam
         {
             internal static void Draw(GeoscapeGlobeMarkers markers, GameObject prefab)
             {
                 markers.AddMarker(Vector3.zero, GlobeMarkerType.SitePointOfInterest, 5f);   // (a)
                 UnityEngine.Object.Instantiate(prefab);                                     // (b): never woken
-            }
-
-            internal static void Trim(Button btn)                                           // (d): trims nothing
-            {
-                if (btn != null) btn.enabled = true;
             }
         }
 

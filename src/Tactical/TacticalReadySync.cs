@@ -9,6 +9,7 @@ using PhoenixPoint.Common.View.ViewControllers;
 using PhoenixPoint.Tactical.Levels;
 using PhoenixPoint.Tactical.View.ViewModules;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
 namespace Multiplayer.Tactical
@@ -326,7 +327,22 @@ namespace Multiplayer.Tactical
                 WireClick(go);
                 CollectLabels(go);      // before the overlay: the overlay's depth is derived from the labels'
                 BuildGreenOverlay(go);
-                TrimRaycast(go);        // last: it must also see the overlay it is trimming around
+                // THE CLICK SURFACE IS THE CLONE'S OWN NATIVE GRAPHICS. DO NOT TRIM THEM (2026-08-08).
+                // Twice now this spot has grown a TrimRaycast that silenced every cloned Graphic and put one
+                // hand-built transparent Image in their place, to stop the clone answering
+                // IsCursorOverGUI() over the map. Both times it killed the button outright, and the second
+                // time it was measured: the live log reports the built face as
+                // `MP_ReadyHit(layer=5 depth=258)` — drawn, batched, raycastTarget=true, the ONLY surface
+                // left — and the button still took neither hover nor click on any peer. The known-good state
+                // is the one this clone ships with: at e9500f8 the trim bailed out ("its Button names no
+                // targetGraphic") and left all twelve native graphics live, and the button worked. 30a64e3
+                // replaced them with the built face and it died; that is the whole before/after.
+                //
+                // Eating a click over its OWN rect is not the bug it was mistaken for — that is what a
+                // button IS, and the native End Turn button does exactly the same over its own rect. The
+                // clone mirrors End Turn's sizeDelta every frame (TacticalReadyRowFollower.Apply), so the
+                // rect it eats is the art it draws, no more. If a click really must survive under this
+                // widget, MOVE the widget; do not disarm its face.
                 Repaint();
                 // The CLONE's subtree, not the template's: the question this answers is "did the frame come
                 // across", and only the clone can answer it.
@@ -473,7 +489,7 @@ namespace Multiplayer.Tactical
         private static void BuildGreenOverlay(GameObject go)
         {
             var overlay = new GameObject("MP_ReadyGreen", typeof(Image));
-            overlay.layer = go.layer;   // see TrimRaycast: a UI object built at runtime starts on layer 0
+            overlay.layer = go.layer;   // a UI object built at runtime starts on layer 0, undrawn (L220)
             var rt = overlay.GetComponent<RectTransform>();
             rt.SetParent(go.transform, false);
             rt.anchorMin = Vector2.zero;
@@ -486,113 +502,6 @@ namespace Multiplayer.Tactical
             _green.raycastTarget = false;
             _green.enabled = false;
         }
-
-        /// <summary>
-        /// ONE CLICKABLE SURFACE, AND IT IS THE BUTTON'S OWN.
-        ///
-        /// A cloned prefab brings its whole raycast footprint with it. Unity decides "is the cursor over the
-        /// GUI" with <c>EventSystem.IsPointerOverGameObject()</c>, which answers YES for ANY
-        /// <c>Graphic</c> with <c>raycastTarget</c> under the pointer — background art, frame, glow, shadow,
-        /// underlight, a transparent inherited overlay, all of it, whether or not it is even visible. The
-        /// engine reads that same flag through <c>TacticalView.IsCursorOverGUI()</c>
-        /// (<c>TacticalView.cs</c>:801-804) and gates the tactical MAP click on it —
-        /// <c>UIStateOverwatchAbilitySelected.OnInputEvent</c>:215 is
-        /// <c>ev.Name == "Select" &amp;&amp; !IsCursorOverGUI()</c>, and
-        /// <c>UIStateAbilitySelected.OnSelect</c> opens with <c>if (CursorOverGui) return;</c>. So a stray
-        /// raycast rect of ours parked over the battlefield does not merely sit there: it silently eats the
-        /// player's confirm click, and the symptom is precisely the one reported — clicks on the UI keep
-        /// working while clicks on the map do nothing.
-        ///
-        /// This is a real risk for THIS clone and not a hypothetical: it is placed a full button-height plus
-        /// the row's spacing plus clearance BELOW the native End Turn button, so unlike every native widget
-        /// it is the one HUD element that can end up outside the panel that hosts it. The measurement that
-        /// says whether it actually does is logged once per battle from the settled layout, in
-        /// <see cref="TacticalReadyRowFollower.Apply"/> — this method makes the footprint one button wide
-        /// either way, so the answer stops mattering.
-        ///
-        /// KEEP EXACTLY ONE, AND BUILD IT RATHER THAN GUESS IT (2026-08-08, law L182). The first version
-        /// kept <c>Selectable.targetGraphic</c> — Unity's own answer to "which graphic is this button's
-        /// clickable face" — and left the clone ALONE when the prefab named none, on the reasoning that
-        /// silencing every graphic leaves a button nothing can click. The live log says the prefab names
-        /// none: <c>ready button raycast NOT trimmed — its Button names no targetGraphic</c>, and one line
-        /// later <c>OVERHANGS its HUD container ... -> that part of the clone is drawn over the tactical
-        /// map</c>. So the cautious branch was not a safety net, it was the defect: the WHOLE cloned
-        /// footprint stayed raycastable over the battlefield and ate map clicks, which is the reported
-        /// symptom exactly.
-        ///
-        /// The way out is not a better guess. A full-rect transparent <c>Image</c> is added to the Button's
-        /// OWN GameObject and made the single click surface — so "the clickable face" is a thing this class
-        /// owns and knows the bounds of, instead of a serialized field an asset may or may not have filled
-        /// in. It is parented to the Button's own object, not to the clone root, because Unity routes a
-        /// click by walking UP from the graphic it hit to the first handler: a hit surface hung off the
-        /// root would miss a Button that sits on a CHILD. Every other graphic on the clone is then silenced
-        /// unconditionally — there is no "leave it alone" branch left to take.
-        ///
-        /// It is also given to <c>Selectable.targetGraphic</c>, which was null: that is the field Unity's
-        /// colour transition drives, so the button had no hover feedback either. The tint overlay is
-        /// deliberately NOT reused for this — <see cref="Repaint"/> toggles its <c>enabled</c>, and a
-        /// disabled <c>Graphic</c> leaves the raycast graph, which would make the button clickable only
-        /// while this peer was already ready.
-        ///
-        /// The width is deliberately NOT narrowed. The clone mirrors the native End Turn button's
-        /// <c>sizeDelta</c> every frame (<see cref="TacticalReadyRowFollower.Apply"/>), so its rect is the
-        /// native button's rect exactly — it is not a frozen prefab size overhanging its own art, and
-        /// shrinking it would only make the clone stop matching the row it belongs to.
-        /// </summary>
-        private static void TrimRaycast(GameObject go)
-        {
-            var pgb = go.GetComponent<PhoenixGeneralButton>();
-            var btn = pgb != null && pgb.BaseButton != null ? pgb.BaseButton : go.GetComponentInChildren<Button>();
-            if (btn == null)
-            {
-                // WireClick has already logged the missing Button as an error. Silence everything anyway:
-                // a clone that cannot be clicked must at least not stop the map being clicked.
-                int muted = 0;
-                foreach (var g in go.GetComponentsInChildren<Graphic>(true))
-                    if (g != null && g.raycastTarget) { g.raycastTarget = false; muted++; }
-                _raycastReport = "no Button — kept 0, silenced " + muted;
-                return;
-            }
-
-            var hit = new GameObject("MP_ReadyHit", typeof(Image));
-            // A UI OBJECT BUILT AT RUNTIME STARTS ON LAYER 0, AND AN UNDRAWN GRAPHIC IS NOT HIT-TESTABLE.
-            // `Object.Instantiate` carried the clone's layer over from the prefab (UI, 5); `new GameObject`
-            // does not — it starts on Default (0), which the HUD camera does not render. Unity's own runtime
-            // UI factory takes exactly this line for exactly this reason (DefaultControls.CreateUIObject:
-            // `go.layer = parent.layer`). The consequence is not merely cosmetic: a graphic the canvas never
-            // batched keeps `CanvasRenderer.absoluteDepth == -1`, and GraphicRaycaster's first test is
-            // `if (graphic.depth == -1 || !graphic.raycastTarget || graphic.canvasRenderer.cull) continue;`
-            // — "-1 means it hasn't been processed by the canvas, which means it isn't actually drawn"
-            // (uGUI 2019.4, GraphicRaycaster.Raycast). So the face answered no raycast at all: no
-            // PointerEnter (hence no hover frame — PhoenixGeneralButton.cs:214-227 drives the highlight off
-            // OnPointerEnter, not off a colour tint) and no PointerClick (hence no `Button.onClick`). The
-            // button was not "unwired", it was UNREACHABLE, which is why both symptoms arrived together and
-            // on every peer. The settled-layout diagnostic below now prints layer+depth so a repeat says so.
-            hit.layer = btn.gameObject.layer;
-            var rt = hit.GetComponent<RectTransform>();
-            rt.SetParent(btn.transform, false);
-            rt.anchorMin = Vector2.zero;
-            rt.anchorMax = Vector2.one;
-            rt.offsetMin = Vector2.zero;
-            rt.offsetMax = Vector2.zero;
-            var face = hit.GetComponent<Image>();
-            face.color = new Color(1f, 1f, 1f, 0f);   // invisible, still raycastable: alpha is not consulted
-            face.raycastTarget = true;                //   unless alphaHitTestMinimumThreshold is raised
-
-            int silenced = 0;
-            foreach (var g in go.GetComponentsInChildren<Graphic>(true))
-            {
-                if (g == null || !g.raycastTarget || ReferenceEquals(g, face)) continue;
-                g.raycastTarget = false;
-                silenced++;
-            }
-            btn.targetGraphic = face;
-            _raycastReport = "kept 1 (MP_ReadyHit, built on " + btn.gameObject.name + "), silenced " + silenced;
-        }
-
-        /// <summary>What <see cref="TrimRaycast"/> did, carried to the settled-layout diagnostic — where the
-        /// clone's real rect is finally knowable and the two facts are worth reading together.</summary>
-        internal static string _raycastReport = "not run";
 
         /// <summary>Every text component on the clone, by SHAPE (a settable public <c>string text</c>), plus
         /// the standing-down of any I2 <c>Localize</c> component — a live localiser would overwrite our label
@@ -800,7 +709,8 @@ namespace Multiplayer.Tactical
         /// bottom sits under the container's, it is drawing over whatever is behind the HUD, which in a
         /// battle is the tactical map. Combined with the raycast count this is the whole question: a rect
         /// over the map with nothing raycastable on it is harmless, and one raycastable graphic there is a
-        /// dead confirm click (<c>TacticalReadyButton.TrimRaycast</c>).
+        /// dead confirm click. The count alone never settled that, so the EventSystem is asked directly at
+        /// the end of this method — see the probe below for why a clean count proves nothing.
         /// </summary>
         private void ReportFootprint(RectTransform me)
         {
@@ -827,7 +737,7 @@ namespace Multiplayer.Tactical
             // LAYER AND DEPTH, NOT JUST THE COUNT. A surface can be raycastTarget=true and still be hit by
             // NOTHING: GraphicRaycaster skips any graphic the canvas never drew (depth == -1), and a UI
             // object built at runtime lands on layer 0 where the HUD camera does not draw it. Reporting the
-            // count alone is what let a completely dead button log a clean line (see TrimRaycast).
+            // count alone is what let a completely dead button log a clean line.
             int live = 0, undrawn = 0;
             var names = new List<string>();
             foreach (var g in GetComponentsInChildren<Graphic>(true))
@@ -841,10 +751,10 @@ namespace Multiplayer.Tactical
 
             Debug.Log("[Multiplayer][tac] ready button footprint: world x=[" + myLeft + ".." + myRight +
                       "] y=[" + myBottom + ".." + myTop + "] vs HUD container " + hud + " -> " + verdict +
-                      " | raycast-enabled graphics remaining: " + live + " [" + string.Join(", ", names.ToArray()) +
-                      "] (trim: " + TacticalReadyButton._raycastReport + "). Anything above 1 here is a " +
-                      "surface that can answer EventSystem.IsPointerOverGameObject() and silently eat a map " +
-                      "click — that is what IsCursorOverGUI() gates the tactical confirm on.");
+                      " | raycast-enabled graphics: " + live + " [" + string.Join(", ", names.ToArray()) +
+                      "]. These are the clone's OWN native graphics and they are meant to be live — they are " +
+                      "the button's face, exactly as the native End Turn button's are. A count of 0 means " +
+                      "something disarmed them and the button is dead.");
             if (undrawn > 0)
                 Debug.LogError("[Multiplayer][tac] ready button is NOT HIT-TESTABLE: " + undrawn + " of its " +
                                live + " raycast surface(s) report depth=-1, which is uGUI's own marker for " +
@@ -852,6 +762,71 @@ namespace Multiplayer.Tactical
                                "button takes neither hover nor click even though every wire on it is correct. " +
                                "The usual cause is a layer the HUD camera does not render (a runtime-built UI " +
                                "object starts on layer 0); compare the layer= values above against the clone's.");
+
+            ProbeReachable(me, live);
+        }
+
+        /// <summary>
+        /// ASK THE EVENTSYSTEM WHAT IS UNDER THIS BUTTON. DO NOT INFER IT FROM OUR OWN FIELDS.
+        ///
+        /// Every number in <see cref="ReportFootprint"/> is a scan of the clone's own children, and that is
+        /// precisely what read CLEAN through a completely dead button: raycastTarget true, layer 5, depth 258,
+        /// exactly one surface — and neither hover nor click on any peer. A scan of what we SET can never
+        /// answer whether anything can HIT it; only the raycaster the game actually uses can, because only it
+        /// applies the parts we do not own — the ancestor <c>ICanvasRaycastFilter</c> chain (a
+        /// <c>CanvasGroup</c> with <c>blocksRaycasts</c> off, a <c>Mask</c>/<c>RectMask2D</c> whose rect this
+        /// deliberately-overhanging widget sits outside of), the canvas a graphic is REGISTERED against, and
+        /// anything drawn over us with a higher sort order.
+        ///
+        /// So this fires one synthetic raycast at the button's own centre and reports what comes back, top
+        /// first. Ours on top = reachable, and any future "the button is dead" is NOT a raycast problem.
+        /// Ours absent or buried = the name of the thing in the way is in the log, which is the one fact four
+        /// rounds of inference never produced.
+        /// </summary>
+        private void ProbeReachable(RectTransform me, int live)
+        {
+            var es = EventSystem.current;
+            if (es == null)
+            {
+                Debug.LogError("[Multiplayer][tac] ready button reachability UNKNOWN: no EventSystem.current, " +
+                               "so nothing in this battle can be clicked and the probe has nothing to ask.");
+                return;
+            }
+
+            var canvas = me.GetComponentInParent<Canvas>();
+            var cam = canvas == null || canvas.renderMode == RenderMode.ScreenSpaceOverlay
+                ? null
+                : canvas.worldCamera;
+            var screen = RectTransformUtility.WorldToScreenPoint(cam, me.TransformPoint(me.rect.center));
+
+            var hits = new List<RaycastResult>();
+            es.RaycastAll(new PointerEventData(es) { position = screen }, hits);
+
+            int mine = -1;
+            var seen = new List<string>();
+            for (int i = 0; i < hits.Count; i++)
+            {
+                var go = hits[i].gameObject;
+                if (mine < 0 && go != null && go.transform.IsChildOf(transform)) mine = i;
+                if (seen.Count < 6) seen.Add((go == null ? "<null>" : go.name) + "@" + hits[i].sortingOrder);
+            }
+
+            string where = "screen=" + screen + " canvas=" + (canvas == null ? "<none>" : canvas.name) +
+                           " hits=" + hits.Count + " [" + string.Join(", ", seen.ToArray()) + "]";
+
+            if (mine == 0)
+                Debug.Log("[Multiplayer][tac] ready button IS REACHABLE: the EventSystem returns it on top at " +
+                          "its own centre, so hover and click are wired to a surface that can be hit. " + where);
+            else if (mine > 0)
+                Debug.LogError("[Multiplayer][tac] ready button is BURIED: the EventSystem finds it at index " +
+                               mine + " at its own centre, under " + hits[0].gameObject.name + " — that object " +
+                               "takes the hover and the click instead. " + where);
+            else
+                Debug.LogError("[Multiplayer][tac] ready button is UNREACHABLE: the EventSystem returns NOTHING " +
+                               "of ours at its own centre, though " + live + " of its graphics are raycast " +
+                               "targets. The graphic is set up and the raycaster still refuses it, so the cause " +
+                               "is OUTSIDE the clone: an ancestor CanvasGroup/Mask/RectMask2D filtering the " +
+                               "point, or a canvas whose raycaster does not serve this graphic. " + where);
         }
 
         /// <summary>

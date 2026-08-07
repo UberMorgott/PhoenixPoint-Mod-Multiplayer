@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using Multiplayer.Tactical;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
 namespace RailCheck
@@ -79,29 +80,34 @@ namespace RailCheck
                 typeof(Graphic).GetProperty("depth", AllMembers)?.GetGetMethod(true),
                 typeof(Debug).GetMethod("Log", BindingFlags.Public | BindingFlags.Static, null,
                                         new[] { typeof(object) }, null),
+                typeof(EventSystem).GetMethod("RaycastAll", AllMembers),
+                typeof(Graphic).GetProperty("raycastTarget", AllMembers)?.GetSetMethod(true),
             };
 
             if (toggle == null || report == null || premises.Any(m => m == null))
             {
                 yield return "L220 premise-changed: one of TacticalReadySync.Toggle, " +
                              "TacticalReadyRowFollower.ReportFootprint, GameObject.set_layer, " +
-                             "Graphic.get_depth or Debug.Log(object) no longer resolves. The seams this law " +
-                             "is written over, or the members it names, have moved — every arm below is " +
-                             "asserting about a shape the build no longer has.";
+                             "Graphic.get_depth, Graphic.set_raycastTarget, EventSystem.RaycastAll or " +
+                             "Debug.Log(object) no longer resolves. The seams this law is written over, or " +
+                             "the members it names, have moved — every arm below is asserting about a shape " +
+                             "the build no longer has.";
                 yield break;
             }
 
             foreach (var v in ScanLayers(typeof(TacticalReadyButton), "TacticalReadyButton")) yield return v;
             foreach (var v in ScanPress(toggle, "TacticalReadySync.Toggle")) yield return v;
-            foreach (var v in ScanReport(report, "TacticalReadyRowFollower.ReportFootprint")) yield return v;
+            foreach (var v in ScanProbe(typeof(TacticalReadyRowFollower), "TacticalReadyRowFollower")) yield return v;
+            foreach (var v in ScanFace(typeof(TacticalReadyButton), "TacticalReadyButton")) yield return v;
 
             // ── arm (d): the scan must be able to SEE each violation.
             var control = ScanLayers(typeof(FakeSeam), "FakeSeam")
                 .Concat(ScanPress(typeof(FakeSeam).GetMethod("Press", AllMembers), "FakeSeam.Press"))
-                .Concat(ScanReport(typeof(FakeSeam).GetMethod("Report", AllMembers), "FakeSeam.Report"))
+                .Concat(ScanProbe(typeof(FakeSeam), "FakeSeam"))
+                .Concat(ScanFace(typeof(FakeSeam), "FakeSeam"))
                 .ToList();
             foreach (var want in new[] { "ready-widget-off-the-drawn-layer", "ready-press-is-silent",
-                                         "ready-reachability-unmeasured" })
+                                         "ready-reachability-unasked", "ready-face-disarmed" })
                 if (!control.Any(c => c.Contains(want)))
                     yield return "L220 control-not-red: FakeSeam commits " + want + " and the scan did not " +
                                  "flag it. The arm cannot tell a reachable control from a dead one, so its " +
@@ -145,21 +151,76 @@ namespace RailCheck
                              "dominant bug class and a press is where it costs the most.";
         }
 
-        /// <summary>Arm (c), over one method.</summary>
-        private static IEnumerable<string> ScanReport(MethodBase report, string label)
+        /// <summary>
+        /// ARM (c). THE OUTCOME IS "SOMETHING CAN HIT IT", AND ONLY THE RAYCASTER CAN SAY SO.
+        ///
+        /// This arm used to require that the diagnostic read <c>Graphic.depth</c>. It did, and it was GREEN
+        /// across a full three-instance test round over a button that took neither hover nor click — the
+        /// fifth assert-the-call law in this repo in one night. Every field it inspected was ours and every
+        /// one read correct (<c>MP_ReadyHit(layer=5 depth=258)</c>, exactly one live surface). Reading back
+        /// what we ourselves set can never establish reachability, because the parts that refuse a raycast
+        /// are the parts we do NOT own: the ancestor ICanvasRaycastFilter chain, the canvas a graphic is
+        /// registered against, and whatever is drawn on top.
+        ///
+        /// So the requirement is now the measurement that can come back NO: the follower must put the
+        /// question to <c>EventSystem.RaycastAll</c>, and the method that asks must be able to reach
+        /// <c>Debug.LogError</c> — a probe whose negative answer is silent restores exactly the condition
+        /// this law exists to end, where a dead control and a working one produce identical logs.
+        /// </summary>
+        private static IEnumerable<string> ScanProbe(Type seam, string label)
         {
-            if (!Reaches(report, "Graphic", "get_depth"))
-                yield return "L220 ready-reachability-unmeasured: " + label + " must read Graphic.depth for " +
-                             "the surfaces it counts. Counting raycastTarget flags answers 'how many surfaces " +
-                             "could eat a map click' and says NOTHING about whether any of them can be hit — " +
-                             "the shipped diagnostic reported a healthy 'raycast-enabled graphics remaining: " +
-                             "1' over a button no pointer could reach. depth == -1 is uGUI's own marker for " +
-                             "'the canvas never drew this', and it is the one fact that separates the two.";
+            MethodBase asker = null;
+            foreach (var t in AllTypes(seam))
+                foreach (var m in AllMethodsOf(t))
+                    if (Reaches(m, "EventSystem", "RaycastAll")) { asker = m; break; }
+
+            if (asker == null)
+                yield return "L220 ready-reachability-unasked: " + label + " never calls " +
+                             "EventSystem.RaycastAll. Nothing in the clone's own fields can answer whether a " +
+                             "pointer can reach this button — raycastTarget, layer and depth all read healthy " +
+                             "on the dead one. The only component that knows is the raycaster the game itself " +
+                             "uses, so it has to be asked at the button's own centre.";
+            else if (!Reaches(asker, "Debug", "LogError"))
+                yield return "L220 ready-reachability-unasked: " + label + "." + asker.Name + " asks " +
+                             "EventSystem.RaycastAll and cannot reach Debug.LogError, so a NO comes back " +
+                             "silent. A probe that only speaks when the answer is good is the same green-over-" +
+                             "dead shape this arm replaced.";
+        }
+
+        /// <summary>
+        /// ARM (e). THE BUTTON'S FACE IS THE CLONE'S OWN NATIVE GRAPHICS.
+        ///
+        /// The regression this law was written after is `30a64e3`: a TrimRaycast that swept the clone with
+        /// GetComponentsInChildren&lt;Graphic&gt; and set raycastTarget=false on all twelve, substituting one
+        /// hand-built transparent Image. Before it the button worked (it was hit-testable enough to eat map
+        /// clicks, reported twice); after it, dead on every peer, and a layer repair on the built face did
+        /// not revive it. The clone is an Instantiate of the native End Turn button and its face is already
+        /// correct; disarming it and re-deriving one is the defect.
+        ///
+        /// The shape flagged is the sweep specifically — a method that both enumerates children and clears
+        /// raycastTarget. Clearing it on a single graphic this class BUILT (the tint overlay, which must not
+        /// eat clicks) enumerates nothing and is untouched.
+        /// </summary>
+        private static IEnumerable<string> ScanFace(Type seam, string label)
+        {
+            foreach (var t in AllTypes(seam))
+                foreach (var m in AllMethodsOf(t))
+                    if (Reaches(m, null, "GetComponentsInChildren") &&
+                        Reaches(m, "Graphic", "set_raycastTarget"))
+                        yield return "L220 ready-face-disarmed: " + label + "." + m.Name + " sweeps the " +
+                                     "clone's children and clears Graphic.raycastTarget. That is the exact " +
+                                     "edit that killed this button in 30a64e3 — the clone is a copy of the " +
+                                     "native End Turn button and its own graphics ARE its clickable face, so " +
+                                     "silencing them leaves a widget nothing can hit no matter how carefully " +
+                                     "a replacement surface is built. A button answering the pointer over its " +
+                                     "own rect is not a bug; End Turn does the same. If a click must survive " +
+                                     "under this widget, move the widget.";
         }
 
         /// <summary>ARM (d). Never instantiated, never registered — it exists only to be walked. One
-        /// violation per arm: a child built without a layer, a press that only warns, and a report that
-        /// counts surfaces without asking whether any is drawn.</summary>
+        /// violation per arm: a child built without a layer, a press that only warns, a type that never asks
+        /// the raycaster anything (arm (c) needs no member here — its violation is the ABSENCE of a
+        /// RaycastAll call anywhere on this type), and a sweep that disarms the clone's own face.</summary>
         private sealed class FakeSeam
         {
             internal static void Build(Transform parent)
@@ -173,11 +234,10 @@ namespace RailCheck
                 Debug.LogWarning("no session");                     // (b): warns, never logs the press
             }
 
-            internal static int Report(Graphic[] graphics)
+            internal static void Trim(GameObject clone)
             {
-                int live = 0;
-                foreach (var g in graphics) if (g.raycastTarget) live++;   // (c): never reads depth
-                return live;
+                foreach (var g in clone.GetComponentsInChildren<Graphic>(true))
+                    g.raycastTarget = false;                        // (e): silences the clone's own face
             }
         }
 
