@@ -233,6 +233,11 @@ namespace RailCheck
             laws.AddRange(L158_PresentationSeamAltersNothing.Check());
             laws.AddRange(L159_PlayerPanelReportsOnly.Check());
             laws.AddRange(L160_PingMovesNoCameraOrSelection.Check());
+            laws.AddRange(L161_AutoEndTurnPremiseIsWholeSquad.Check());
+            laws.AddRange(L162_CameraReleaseIsNeverBlocked.Check());
+            laws.AddRange(L163_NotificationWaitsForTheMap.Check());
+            laws.AddRange(L164_PostMissionResupplyIsAskedWhenTheStateArrives.Check());
+            laws.AddRange(L165_SightingReachesEveryPeer.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -9675,12 +9680,20 @@ namespace RailCheck
                     yield return "L75 filter-too-wide: " + what + " counts as an action cinematic and can now be " +
                                  "suppressed — a camera that stops obeying looks nothing like a tactical change";
 
-            // ── arm C: both prefixes really bind, to the right overload, and still SKIP.
+            // ── arm C: the PUSH prefix really binds, to the right overload, and still SKIPS.
+            //
+            // REPAIRED 2026-08-07. This arm used to assert a second row, ("CameraAbilityUnhintGate",
+            // "RemoveHint") — and that row is why a camera lock shipped GREEN. It asserted that the pop gate
+            // BOUND; binding was the defect. CameraDirector.RemoveHint is one of only three ways to reach
+            // Evaluate(), and Evaluate is the only thing that can lift a chase whose LockCameraMovement is
+            // set (PlanarCamDef:22 says so in its own tooltip), so a prefix that can skip it is a player who
+            // never gets his camera back. The gate is deleted and the OUTCOME — nothing of ours patches any
+            // release member — is now asserted by L162. Keeping a row here that demanded its existence would
+            // have made the fix red.
             foreach (var (gate, target, ps) in new (string Gate, string Target, Type[] Params)[]
             {
                 ("CameraAbilityHintGate", "Hint",
                  new[] { typeof(Base.Cameras.CameraDirectorHint), typeof(Base.Cameras.CameraDirectorParams) }),
-                ("CameraAbilityUnhintGate", "RemoveHint", new[] { typeof(Base.Cameras.CameraDirectorHint) }),
             })
             {
                 var patch = policy.Assembly.GetType("Multiplayer.Tactical." + gate);

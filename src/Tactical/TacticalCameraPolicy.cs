@@ -186,27 +186,40 @@ namespace Multiplayer.Tactical
             });
         }
 
-        /// <summary>Companion guard, over the same family. <c>TacticalAbility.OnPlayingActionEnd</c>:1067-1069
-        /// pops <c>AbilityActivated</c> unconditionally, and <c>FireWeaponAtTargetCrt</c>:1592/1731 pops
-        /// <c>Shoot</c> off a <c>stepoutHint</c> flag it sets whether or not the push survived — so a
-        /// suppressed push still gets its pop, on both. The pop itself
-        /// is harmless (<c>CameraDirectorState.Pop</c> no-ops on an empty match) but <c>RemoveHint</c>:129
-        /// then runs <c>Evaluate()</c>, which re-matches the director tree and re-instantiates a
-        /// non-persistent <c>ActionCamDef</c> (<c>CameraDirector</c>:213-219) — a visible jolt on a peer that
-        /// was told nothing happened.
-        ///
-        /// ponytail: pops are matched by PRESENCE, not by ability identity. If this peer holds its OWN live
-        /// cinematic while a suppressed one ends, the foreign pop consumes the local hint (state stays
-        /// correct in count; the camera simply stops tracking one cinematic early and self-heals on the next
-        /// hint). Upgrade path if that ever reads badly in play: remember suppressed abilities and pair the
-        /// pop through a prefix on <c>TacticalAbility.OnPlayingActionEnd</c>.</summary>
-        internal static bool AllowRemoveHint(CameraDirector director, CameraDirectorHint hint)
-        {
-            if (!IsActionHint(hint)) return true;
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession) return true;
-            return director.DirectorState.Contains(hint);
-        }
+        // THE POP IS NEVER GATED — and the deleted gate that used to do it is why a peer's camera
+        // LOCKED onto a soldier and stopped obeying him (live, 3-peer session 2026-08-07, "when two players
+        // act simultaneously one player's camera locks onto a soldier and he can no longer move it").
+        //
+        // A CHASE ISSUED BY THE DIRECTOR CANNOT END BY ITSELF, and the game says so in its own tooltip:
+        // PlanarCamDef:22 — "Chasing a transform has to be manually deactivated or the camera will be
+        // locked." GetChaseParams:44 sets LockCameraMovement = DisableInputDuringChase, which
+        // DEFAULTS TO TRUE, and points ChaseTransform at the acting actor. From there:
+        // PlanarScrollCamera:468 drops every pan/drag/edge-scroll input while that flag is set,
+        // :838 StopCameraChase explicitly REFUSES to end a locked chase, and :747 can only self-end
+        // a chase whose ChaseTransform is null. The one and only release is
+        // CameraDirector.Evaluate() re-matching the tree and issuing a different chase (or a null
+        // one) — and Evaluate is reached from exactly three places, all of which are the pop side:
+        // RemoveHint:129, RemoveHints:135 and ForcedReset:290.
+        //
+        // THE OLD GATE SUPPRESSED RemoveHint WHOLESALE when the hint was not in
+        // DirectorState, to avoid a cosmetic jolt from a re-instantiated non-persistent
+        // ActionCamDef. But CameraDirectorState.Pop ALREADY no-ops on an empty match, so the
+        // gate protected nothing the game did not protect itself — while taking the Evaluate() with
+        // it. And the state does lose entries without a pop: Evaluate:157 ends with
+        // ClearUnmanagedParams, which drops every item whose params are Unmanaged and whose
+        // hint is not in the node's StateFrom — and the whole SHOT family is unmanaged
+        // (TacOrbitCamDirectorParams, "Unmanaged: True" in every director log line). Two peers acting
+        // at once is precisely what makes those extra evaluations happen: each mirrored order this peer
+        // suppresses still delivers its pop, each pop re-evaluates, and one of those sweeps this peer's own
+        // live entry. Its real pop then found nothing in the state, the gate skipped the original, no
+        // Evaluate ran, and the locked chase on that soldier stayed installed for good.
+        //
+        // So the release path is left exactly as the game wrote it. The cost is the jolt the gate was
+        // bought for, plus the pre-existing behaviour it never changed anyway: a suppressed cinematic's pop
+        // can consume this peer's own live hint, so a camera occasionally stops tracking one cinematic
+        // early and self-heals on the next hint. A camera that stops following is a frame of scenery; a
+        // camera that stops obeying is a lost turn.
+
     }
 
     /// <summary>Presentation seam (law 4c) on the game's hint choke point. The signature is PINNED:
@@ -236,15 +249,7 @@ namespace Multiplayer.Tactical
             => TacticalCameraPolicy.SnapToAbilitySubject(directorParams, __result);
     }
 
-    /// <summary>The pop half — see <see cref="TacticalCameraPolicy.AllowRemoveHint"/>.</summary>
-    [HarmonyPatch]
-    internal static class CameraAbilityUnhintGate
-    {
-        private static MethodBase TargetMethod() =>
-            AccessTools.Method(typeof(CameraDirector), nameof(CameraDirector.RemoveHint),
-                               new[] { typeof(CameraDirectorHint) });
-
-        private static bool Prefix(CameraDirector __instance, CameraDirectorHint hint)
-            => TacticalCameraPolicy.AllowRemoveHint(__instance, hint);
-    }
+    // NO POP HALF, DELIBERATELY — the note at the end of TacticalCameraPolicy says why. RemoveHint is the
+    // game's only release for a locked chase, and a prefix that can skip it is a camera a player never gets
+    // back. RailCheck L162 asserts this stays deleted.
 }
