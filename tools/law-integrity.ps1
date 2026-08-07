@@ -23,12 +23,16 @@ foreach ($f in $files) {
 }
 
 $progText = Get-Content -Path $program -Raw
-# Every law reaches the run through exactly one laws.AddRange(...) in Program.cs. Two classes:
-#   file-backed  laws.AddRange(L<n>_Name.Check(...))   -> tools/RailCheck/L<n>_*.cs
-#   inline       laws.AddRange(SomeLaw(...))           -> a private method in Program.cs
+# Every law reaches the run through exactly one Add(laws, () => ...) in Program.cs. Two classes:
+#   file-backed  Add(laws, () => L<n>_Name.Check(...))   -> tools/RailCheck/L<n>_*.cs
+#   inline       Add(laws, () => SomeLaw(...))           -> a private method in Program.cs
+# The shape was laws.AddRange(...) until 2026-08-08. It changed because a law that THREW aborted the
+# whole run and every law after it reported nothing -- which reads exactly like passing (Program.Add,
+# L193). The old spelling is still matched so a half-rebased Program.cs is reported honestly rather
+# than as 100+ orphan files; L193 arm (d) is what forbids it coming back for real.
 $regIds = @{}
 $inlineRegs = [System.Collections.Generic.List[string]]::new()
-foreach ($m in [regex]::Matches($progText, 'laws\.AddRange\(\s*([A-Za-z_][A-Za-z0-9_]*)')) {
+foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\)\s*=>\s*)\s*([A-Za-z_][A-Za-z0-9_]*)')) {
     $n = $m.Groups[1].Value
     if ($n -match '^L(\d+)') { $regIds[$Matches[1]] = $true } else { $inlineRegs.Add($n) }
 }

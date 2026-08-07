@@ -8,10 +8,12 @@
 - `git config core.hooksPath .githooks` — wires both into pre-commit; one-time, per clone.
 
 ## Laws
-- Two classes, both registered by one `laws.AddRange(...)` in `tools/RailCheck/Program.cs`: file-backed `L<n>_<Name>.cs` and inline private methods (`RoundTrip`, `CrcBackstopLaw`, `RootOwnershipLaw`, ...).
+- Two classes, both registered by one `Add(laws, () => ...)` in `tools/RailCheck/Program.cs`: file-backed `L<n>_<Name>.cs` and inline private methods (`RoundTrip`, `CrcBackstopLaw`, `RootOwnershipLaw`, ...).
+- **Never write `laws.AddRange(...)`** — that shape let one throwing law abort the run and silently disable every law after it (`Program.Add`, L193 arm (d) forbids it coming back).
 - `tools/law-count.txt` holds `files=` and `inline=`; bump the right one — the failure message names which class shrank.
-- New file-backed law needs all three: the `L<n>_<Name>.cs` file, `laws.AddRange(L<n>...Check(...))`, `files=` bumped, plus a `premise-changed` or `POSITIVE CONTROL` guard.
-- New inline law needs the method plus `laws.AddRange(<Method>(...))` and `inline=` bumped. Prefer a new `L<n>_<Name>.cs` file — inline laws carry no vacuity check.
+- New file-backed law needs all three: the `L<n>_<Name>.cs` file, `Add(laws, () => L<n>...Check(...))`, `files=` bumped, plus a `premise-changed` or `POSITIVE CONTROL` guard.
+- New inline law needs the method plus `Add(laws, () => <Method>(...))` and `inline=` bumped. Prefer a new `L<n>_<Name>.cs` file — inline laws carry no vacuity check.
+- RailCheck REFUSES to run against a `Multiplayer.dll` older than `src/**/*.cs` (exit 2, `RAILCHECK REFUSED`) — so never gate on `dotnet run --no-build`. In a shared tree it also fires when another agent edits during your build: re-run.
 - Guard is mandatory on file-backed laws — an unguarded law passes while checking nothing once its subject stops resolving.
 - `tools/vacuity-exempt.txt` = ratchet of pre-existing unguarded laws. Never add; only remove, after adding a guard.
 - Deleting either class: lower the matching number in `tools/law-count.txt` + explain why in the commit body — each law encodes a real past bug.

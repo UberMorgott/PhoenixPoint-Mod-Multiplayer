@@ -81,6 +81,9 @@ namespace RailCheck
             // SecurityException, so the rail's own warnings would abort the walk. Swap in a sink.
             Debug.unityLogger.logHandler = new Sink();
 
+            if (StaleBuild()) return 2;
+
+
             // The game builds its serializer in TWO steps (SerializationComponent.Initialize:81-83):
             // `new Serializer(this)` registers the built-in custom type data, then the PUBLIC STATIC
             // InitCustomTypes adds Bounds/Vector2/Vector2Int/Vector3/Vector3Int/Quaternion/Defineable/
@@ -99,171 +102,172 @@ namespace RailCheck
             var types = Closure(game, polymorphicCodec);
             var laws = new List<string>();
             var sb = new StringBuilder(Snapshot(types, polymorphicCodec, laws));
-            laws.AddRange(RoundTrip());
-            laws.AddRange(ValueRecordLaw());
-            laws.AddRange(TextBindCodecLaw());
-            laws.AddRange(OwnerBackRefCodecLaw());
-            laws.AddRange(ExitWriteBackLaw(types));
-            laws.AddRange(HandleSweepLaw());
-            laws.AddRange(CrcBackstopLaw());
-            laws.AddRange(FragmentLaw());
-            laws.AddRange(ReadOnlyFacadeLaw());
-            laws.AddRange(EventRaiseLaw());
-            laws.AddRange(MissionOutcomeLaw());
-            laws.AddRange(PreAnsweredEventLaw());
-            laws.AddRange(ReplayVisualsLaw());
-            laws.AddRange(DisplayOrderLaw());
-            laws.AddRange(OwnAnswerLaw());
-            laws.AddRange(WindowCoverageLaw(game));
-            laws.AddRange(ModalCoverageLaw());
-            laws.AddRange(WindowAutonomyLaw());
-            laws.AddRange(AnswerValidatorLaw());
-            laws.AddRange(FunnelCoverageLaw(game));
-            laws.AddRange(EventTokenDerefLaw());
-            laws.AddRange(VehicleIntentLaw());
-            laws.AddRange(VehicleGestureLaw(game));
-            laws.AddRange(DerivedPoseLaw(game));
-            laws.AddRange(HuskContentLaw(game));
-            laws.AddRange(RootOwnershipLaw(types));
-            laws.AddRange(RootCoverageLaw());
-            laws.AddRange(StructuralDescendLaw(game, types));
-            laws.AddRange(StructuralActorLaw());
-            laws.AddRange(RepaintRelevanceLaw(types, game));
-            laws.AddRange(SlicedWalkLaw());
-            laws.AddRange(AugmentRepaintGuardLaw());
-            laws.AddRange(AugmentClickParityLaw());
-            laws.AddRange(DerivedExplorationLaw());
-            laws.AddRange(HostSelfRepaintLaw());
-            laws.AddRange(DerivedObjectivesLaw(game));
-            laws.AddRange(SiteStatusTwinLaw());
-            laws.AddRange(RejectScopeLaw());
-            laws.AddRange(PeerLocalContainmentLaw(game));
-            laws.AddRange(MistCoverageLaw(game));
-            laws.AddRange(PersistentHudLaw(game));
-            laws.AddRange(TacEntryBlobLaw(game));
-            laws.AddRange(SurfaceBandLaw());
-            laws.AddRange(TurnControlLaw());
-            laws.AddRange(MissionEndLaw());
-            laws.AddRange(CommandSeamLaw(game));
-            laws.AddRange(ResolvedDamageLaw(game));
-            laws.AddRange(ActorLifecycleLaw(game));
-            laws.AddRange(EnemyActionLaw(game));
-            laws.AddRange(InventoryAndDestructionLaw(game));
-            laws.AddRange(LevelTeardownLaw());
-            laws.AddRange(EntryCurtainLaw());
-            laws.AddRange(RetiredReasonLaw());
-            laws.AddRange(ClockRebaseLaw());
-            laws.AddRange(WalkBudgetLaw());
-            laws.AddRange(CameraOwnershipLaw());
-            laws.AddRange(TacticalPayloadUseLaw(game));
-            laws.AddRange(TacticalFunnelLaw(game));
-            laws.AddRange(SettleVisionLaw(game));
-            laws.AddRange(L77_SitePoiRepaint.Check(game));
-            laws.AddRange(L26_PauseAndOneShot.Check());
-            laws.AddRange(L79AimAnimAndAbilityRefresh.Check(game));
-            laws.AddRange(L80_AbilityKeyStability.Check(game));
-            laws.AddRange(L84_NoPeerRemoval.Check());
-            laws.AddRange(L91_NoPeerDeadlock.Check());
-            laws.AddRange(L92_DerivedGeoWidgets.Check(game));
-            laws.AddRange(L93_WindowOrderAndHistory.Check(game));
-            laws.AddRange(L94_LoadBarrier.Check());
-            laws.AddRange(L95_TacUiReactive.Check(game));
-            laws.AddRange(L96_VisionAndDisplacement.Check(game));
-            laws.AddRange(L97AimPoseMirror.Check(game));
-            laws.AddRange(L98_ApAuthority.Check(game));
-            laws.AddRange(L99_MarketplaceIntent.Check());
-            laws.AddRange(L100_RailLatency.Check());
-            laws.AddRange(L101_RewardRows.Check());
-            laws.AddRange(L102_ExploreButtonDerive.Check(game));
-            laws.AddRange(L103_NativeTacticalEntry.Check());
-            laws.AddRange(L104_ActionAnchor.Check());
-            laws.AddRange(L105_StatOrdering.Check());
-            laws.AddRange(L106_ModalEntityRaise.Check());
-            laws.AddRange(L107_ModalRaiseDeferral.Check());
-            laws.AddRange(L108_GameBuildParity.Check());
-            laws.AddRange(L109_QueuedStateRaise.Check());
-            laws.AddRange(L110_ReplenishWalletChoke.Check());
-            laws.AddRange(L111_SharedOfferCommit.Check());
-            laws.AddRange(L112_ItemAddressOrdinal.Check());
-            laws.AddRange(L113_UnityIdentityEquality.Check());
-            laws.AddRange(L114_MultiplayerVersionParity.Check());
-            laws.AddRange(L115_AuthoritativeDoneBeatsAnimation.Check(game));
-            laws.AddRange(L116_EveryOpenContainerPanel.Check(game));
-            laws.AddRange(L117_RestoredSubjectStillLive.Check(game));
-            laws.AddRange(L118_MirroredHostLoad.Check(game));
-            laws.AddRange(L119_AdvisoryReadyLabel.Check());
-            laws.AddRange(L120_LeaveNotice.Check());
-            laws.AddRange(L121_ContainedSpawnInert.Check(game));
-            laws.AddRange(L122_OneEntryOneLoad.Check());
-            laws.AddRange(L123_SettleAndRefusalReach.Check(game));
-            laws.AddRange(L124_WindowOrdinalAndCampaignIntro.Check());
-            laws.AddRange(L125_EveryPatchBinds.Check());
-            laws.AddRange(L126_TranspilerSubstitutesNeverStores.Check());
-            laws.AddRange(L127_ConfirmSpeaksOrActivates.Check());
-            laws.AddRange(L128_BoundaryBaselineOwnsItsLevel.Check());
-            laws.AddRange(L129_HintStillShows.Check(game));
-            laws.AddRange(L130_HintReachesEveryPeer.Check(game));
-            laws.AddRange(L131_StatusSetIsRailed.Check());
-            laws.AddRange(L132_ChosenTargetIsOffered.Check());
-            laws.AddRange(L133_MirroredAbilityTerminates.Check());
-            laws.AddRange(L134_BootstrapSpentOnlyByAnOutcome.Check());
-            laws.AddRange(L135_OneProducerPerMirroredWindow.Check(game));
-            laws.AddRange(L136_RosterPeerIsBroadcastable.Check());
-            laws.AddRange(L137_AbilityTraitSetIsRailed.Check());
-            laws.AddRange(L138_ClientWritableLeafHasAnIntentSeam.Check());
-            laws.AddRange(L139_MirroredOrderReleasesTheLocalUi.Check());
-            laws.AddRange(L140_MirroredTargetIsResolvedNotApproximated.Check());
-            laws.AddRange(L141_EveryPeerReachesTheSquadScreen.Check());
-            laws.AddRange(L142_RevealLeavesNoInputLock.Check());
-            laws.AddRange(L143_EveryLoadBoundaryCurtainsEveryPeer.Check());
-            laws.AddRange(L145_OnePeersActionDoesNotFreezeAnother.Check());
-            laws.AddRange(L146_BusyActorBelongsToItsCommander.Check());
-            laws.AddRange(L147_MirroredTeardownReachesTheReceiver.Check());
-            laws.AddRange(L151_AnnouncedBoundaryPublishesProgress.Check());
-            laws.AddRange(L152_ChatDeliveredExactlyOnce.Check());
-            laws.AddRange(L144_QueuedSquadScreenIsServable.Check());
-            laws.AddRange(L148_MirroredIdentityRepaintsTheOpenScreen.Check());
-            laws.AddRange(L149_HelmetTogglesShareOneReactiveFunnel.Check());
-            laws.AddRange(L150_NoConcurrentSpendGoesNegative.Check());
-            laws.AddRange(L153_ClockPhaseIsMeasurable.Check());
-            laws.AddRange(L154_OneShotGestureKeepsItsUrgency.Check());
-            laws.AddRange(L155_EachEntryPointKeepsItsTransport.Check());
-            laws.AddRange(L156_InventoryReorderRepaintsTheOpenEquipScreen.Check());
-            laws.AddRange(L157_MirroredInventoryBatchMarksTheOpenScreen.Check());
-            laws.AddRange(L158_PresentationSeamAltersNothing.Check());
-            laws.AddRange(L159_PlayerPanelReportsOnly.Check());
-            laws.AddRange(L160_PingMovesNoCameraOrSelection.Check());
-            laws.AddRange(L161_AutoEndTurnPremiseIsWholeSquad.Check());
-            laws.AddRange(L162_CameraReleaseIsNeverBlocked.Check());
-            laws.AddRange(L163_NotificationWaitsForTheMap.Check());
-            laws.AddRange(L164_PostMissionResupplyIsAskedWhenTheStateArrives.Check());
-            laws.AddRange(L165_SightingReachesEveryPeer.Check());
-            laws.AddRange(L171_ConsumedOfferIsGoneEverywhere.Check());
-            laws.AddRange(L169_FreeAimGroundShotIsNotHeldToAList.Check());
-            laws.AddRange(L170_VehicleSecondarySurvivesTheRepaint.Check());
-            laws.AddRange(L172_AScrapCartFitsThePoolItIsTakenFrom.Check());
-            laws.AddRange(L168_MoveRangeIsNotSweptOnAnActorAnotherPeerDrives.Check());
-            laws.AddRange(L178_SeamCarriesWhatTheAbilityReads.Check());
-            laws.AddRange(L179_ContainerWindowOpensOnlyForItsOwnPeer.Check());
-            laws.AddRange(L175_HeldSquadScreenIsStillTheOneHeadedFor.Check());
-            laws.AddRange(L176_AQueuedWindowIsStillAnswerable.Check());
-            laws.AddRange(L177_TheDropCountsDownAloneAndOneVetoStopsIt.Check());
-            laws.AddRange(L173_GateEvidenceNamesEveryInput.Check());
-            laws.AddRange(L174_OneBoundaryOneLoadForTheHostToo.Check());
-            laws.AddRange(L180_AnUnjoinedRowIsNeverHeldAndNeverWaitsForever.Check());
-            laws.AddRange(L181_TheLobbyGateCountsOnlyPeersAHumanCouldReady.Check());
-            laws.AddRange(L182_ShownMeansSwitchedOn.Check());
-            laws.AddRange(L183_ARepaintObservesTheBatchThatCausedIt.Check());
-            laws.AddRange(L184_ARequestThatIsDroppedSaysSo.Check());
-            laws.AddRange(L185_CorpseManifestIsAnsweredByItemNotByOrder.Check());
-            laws.AddRange(L186_WeaponSelectionRidesTheSettle.Check());
-            laws.AddRange(L187_AStaleScreenNeverUndoesAnAppliedIntent.Check());
-            laws.AddRange(L188_APermanentExclusionIsNotAOneOffWarning.Check());
-            laws.AddRange(L189_AOneShotPushAPeerCannotTakeIsHeld.Check());
-            laws.AddRange(L191_NoPeerWaitsForStateItAuthored.Check());
-            laws.AddRange(L190_ClockJerkIsVisible.Check());
-            laws.AddRange(L85_RestartedHostStreamIsApplied.Check());
-            laws.AddRange(L86_AnnouncedBoundaryHoldsItsAnnouncer.Check());
+            Add(laws, () => RoundTrip());
+            Add(laws, () => ValueRecordLaw());
+            Add(laws, () => TextBindCodecLaw());
+            Add(laws, () => OwnerBackRefCodecLaw());
+            Add(laws, () => ExitWriteBackLaw(types));
+            Add(laws, () => HandleSweepLaw());
+            Add(laws, () => CrcBackstopLaw());
+            Add(laws, () => FragmentLaw());
+            Add(laws, () => ReadOnlyFacadeLaw());
+            Add(laws, () => EventRaiseLaw());
+            Add(laws, () => MissionOutcomeLaw());
+            Add(laws, () => PreAnsweredEventLaw());
+            Add(laws, () => ReplayVisualsLaw());
+            Add(laws, () => DisplayOrderLaw());
+            Add(laws, () => OwnAnswerLaw());
+            Add(laws, () => WindowCoverageLaw(game));
+            Add(laws, () => ModalCoverageLaw());
+            Add(laws, () => WindowAutonomyLaw());
+            Add(laws, () => AnswerValidatorLaw());
+            Add(laws, () => FunnelCoverageLaw(game));
+            Add(laws, () => EventTokenDerefLaw());
+            Add(laws, () => VehicleIntentLaw());
+            Add(laws, () => VehicleGestureLaw(game));
+            Add(laws, () => DerivedPoseLaw(game));
+            Add(laws, () => HuskContentLaw(game));
+            Add(laws, () => RootOwnershipLaw(types));
+            Add(laws, () => RootCoverageLaw());
+            Add(laws, () => StructuralDescendLaw(game, types));
+            Add(laws, () => StructuralActorLaw());
+            Add(laws, () => RepaintRelevanceLaw(types, game));
+            Add(laws, () => SlicedWalkLaw());
+            Add(laws, () => AugmentRepaintGuardLaw());
+            Add(laws, () => AugmentClickParityLaw());
+            Add(laws, () => DerivedExplorationLaw());
+            Add(laws, () => HostSelfRepaintLaw());
+            Add(laws, () => DerivedObjectivesLaw(game));
+            Add(laws, () => SiteStatusTwinLaw());
+            Add(laws, () => RejectScopeLaw());
+            Add(laws, () => PeerLocalContainmentLaw(game));
+            Add(laws, () => MistCoverageLaw(game));
+            Add(laws, () => PersistentHudLaw(game));
+            Add(laws, () => TacEntryBlobLaw(game));
+            Add(laws, () => SurfaceBandLaw());
+            Add(laws, () => TurnControlLaw());
+            Add(laws, () => MissionEndLaw());
+            Add(laws, () => CommandSeamLaw(game));
+            Add(laws, () => ResolvedDamageLaw(game));
+            Add(laws, () => ActorLifecycleLaw(game));
+            Add(laws, () => EnemyActionLaw(game));
+            Add(laws, () => InventoryAndDestructionLaw(game));
+            Add(laws, () => LevelTeardownLaw());
+            Add(laws, () => EntryCurtainLaw());
+            Add(laws, () => RetiredReasonLaw());
+            Add(laws, () => ClockRebaseLaw());
+            Add(laws, () => WalkBudgetLaw());
+            Add(laws, () => CameraOwnershipLaw());
+            Add(laws, () => TacticalPayloadUseLaw(game));
+            Add(laws, () => TacticalFunnelLaw(game));
+            Add(laws, () => SettleVisionLaw(game));
+            Add(laws, () => L77_SitePoiRepaint.Check(game));
+            Add(laws, () => L26_PauseAndOneShot.Check());
+            Add(laws, () => L79AimAnimAndAbilityRefresh.Check(game));
+            Add(laws, () => L80_AbilityKeyStability.Check(game));
+            Add(laws, () => L84_NoPeerRemoval.Check());
+            Add(laws, () => L91_NoPeerDeadlock.Check());
+            Add(laws, () => L92_DerivedGeoWidgets.Check(game));
+            Add(laws, () => L93_WindowOrderAndHistory.Check(game));
+            Add(laws, () => L94_LoadBarrier.Check());
+            Add(laws, () => L95_TacUiReactive.Check(game));
+            Add(laws, () => L96_VisionAndDisplacement.Check(game));
+            Add(laws, () => L97AimPoseMirror.Check(game));
+            Add(laws, () => L98_ApAuthority.Check(game));
+            Add(laws, () => L99_MarketplaceIntent.Check());
+            Add(laws, () => L100_RailLatency.Check());
+            Add(laws, () => L101_RewardRows.Check());
+            Add(laws, () => L102_ExploreButtonDerive.Check(game));
+            Add(laws, () => L103_NativeTacticalEntry.Check());
+            Add(laws, () => L104_ActionAnchor.Check());
+            Add(laws, () => L105_StatOrdering.Check());
+            Add(laws, () => L106_ModalEntityRaise.Check());
+            Add(laws, () => L107_ModalRaiseDeferral.Check());
+            Add(laws, () => L108_GameBuildParity.Check());
+            Add(laws, () => L109_QueuedStateRaise.Check());
+            Add(laws, () => L110_ReplenishWalletChoke.Check());
+            Add(laws, () => L111_SharedOfferCommit.Check());
+            Add(laws, () => L112_ItemAddressOrdinal.Check());
+            Add(laws, () => L113_UnityIdentityEquality.Check());
+            Add(laws, () => L114_MultiplayerVersionParity.Check());
+            Add(laws, () => L115_AuthoritativeDoneBeatsAnimation.Check(game));
+            Add(laws, () => L116_EveryOpenContainerPanel.Check(game));
+            Add(laws, () => L117_RestoredSubjectStillLive.Check(game));
+            Add(laws, () => L118_MirroredHostLoad.Check(game));
+            Add(laws, () => L119_AdvisoryReadyLabel.Check());
+            Add(laws, () => L120_LeaveNotice.Check());
+            Add(laws, () => L121_ContainedSpawnInert.Check(game));
+            Add(laws, () => L122_OneEntryOneLoad.Check());
+            Add(laws, () => L123_SettleAndRefusalReach.Check(game));
+            Add(laws, () => L124_WindowOrdinalAndCampaignIntro.Check());
+            Add(laws, () => L125_EveryPatchBinds.Check());
+            Add(laws, () => L126_TranspilerSubstitutesNeverStores.Check());
+            Add(laws, () => L127_ConfirmSpeaksOrActivates.Check());
+            Add(laws, () => L128_BoundaryBaselineOwnsItsLevel.Check());
+            Add(laws, () => L129_HintStillShows.Check(game));
+            Add(laws, () => L130_HintReachesEveryPeer.Check(game));
+            Add(laws, () => L131_StatusSetIsRailed.Check());
+            Add(laws, () => L132_ChosenTargetIsOffered.Check());
+            Add(laws, () => L133_MirroredAbilityTerminates.Check());
+            Add(laws, () => L134_BootstrapSpentOnlyByAnOutcome.Check());
+            Add(laws, () => L135_OneProducerPerMirroredWindow.Check(game));
+            Add(laws, () => L136_RosterPeerIsBroadcastable.Check());
+            Add(laws, () => L137_AbilityTraitSetIsRailed.Check());
+            Add(laws, () => L138_ClientWritableLeafHasAnIntentSeam.Check());
+            Add(laws, () => L139_MirroredOrderReleasesTheLocalUi.Check());
+            Add(laws, () => L140_MirroredTargetIsResolvedNotApproximated.Check());
+            Add(laws, () => L141_EveryPeerReachesTheSquadScreen.Check());
+            Add(laws, () => L142_RevealLeavesNoInputLock.Check());
+            Add(laws, () => L143_EveryLoadBoundaryCurtainsEveryPeer.Check());
+            Add(laws, () => L145_OnePeersActionDoesNotFreezeAnother.Check());
+            Add(laws, () => L146_BusyActorBelongsToItsCommander.Check());
+            Add(laws, () => L147_MirroredTeardownReachesTheReceiver.Check());
+            Add(laws, () => L151_AnnouncedBoundaryPublishesProgress.Check());
+            Add(laws, () => L152_ChatDeliveredExactlyOnce.Check());
+            Add(laws, () => L144_QueuedSquadScreenIsServable.Check());
+            Add(laws, () => L148_MirroredIdentityRepaintsTheOpenScreen.Check());
+            Add(laws, () => L149_HelmetTogglesShareOneReactiveFunnel.Check());
+            Add(laws, () => L150_NoConcurrentSpendGoesNegative.Check());
+            Add(laws, () => L153_ClockPhaseIsMeasurable.Check());
+            Add(laws, () => L154_OneShotGestureKeepsItsUrgency.Check());
+            Add(laws, () => L155_EachEntryPointKeepsItsTransport.Check());
+            Add(laws, () => L156_InventoryReorderRepaintsTheOpenEquipScreen.Check());
+            Add(laws, () => L157_MirroredInventoryBatchMarksTheOpenScreen.Check());
+            Add(laws, () => L158_PresentationSeamAltersNothing.Check());
+            Add(laws, () => L159_PlayerPanelReportsOnly.Check());
+            Add(laws, () => L160_PingMovesNoCameraOrSelection.Check());
+            Add(laws, () => L161_AutoEndTurnPremiseIsWholeSquad.Check());
+            Add(laws, () => L162_CameraReleaseIsNeverBlocked.Check());
+            Add(laws, () => L163_NotificationWaitsForTheMap.Check());
+            Add(laws, () => L164_PostMissionResupplyIsAskedWhenTheStateArrives.Check());
+            Add(laws, () => L165_SightingReachesEveryPeer.Check());
+            Add(laws, () => L171_ConsumedOfferIsGoneEverywhere.Check());
+            Add(laws, () => L169_FreeAimGroundShotIsNotHeldToAList.Check());
+            Add(laws, () => L170_VehicleSecondarySurvivesTheRepaint.Check());
+            Add(laws, () => L172_AScrapCartFitsThePoolItIsTakenFrom.Check());
+            Add(laws, () => L168_MoveRangeIsNotSweptOnAnActorAnotherPeerDrives.Check());
+            Add(laws, () => L178_SeamCarriesWhatTheAbilityReads.Check());
+            Add(laws, () => L179_ContainerWindowOpensOnlyForItsOwnPeer.Check());
+            Add(laws, () => L175_HeldSquadScreenIsStillTheOneHeadedFor.Check());
+            Add(laws, () => L176_AQueuedWindowIsStillAnswerable.Check());
+            Add(laws, () => L177_TheDropCountsDownAloneAndOneVetoStopsIt.Check());
+            Add(laws, () => L173_GateEvidenceNamesEveryInput.Check());
+            Add(laws, () => L174_OneBoundaryOneLoadForTheHostToo.Check());
+            Add(laws, () => L180_AnUnjoinedRowIsNeverHeldAndNeverWaitsForever.Check());
+            Add(laws, () => L181_TheLobbyGateCountsOnlyPeersAHumanCouldReady.Check());
+            Add(laws, () => L182_ShownMeansSwitchedOn.Check());
+            Add(laws, () => L183_ARepaintObservesTheBatchThatCausedIt.Check());
+            Add(laws, () => L184_ARequestThatIsDroppedSaysSo.Check());
+            Add(laws, () => L185_CorpseManifestIsAnsweredByItemNotByOrder.Check());
+            Add(laws, () => L186_WeaponSelectionRidesTheSettle.Check());
+            Add(laws, () => L187_AStaleScreenNeverUndoesAnAppliedIntent.Check());
+            Add(laws, () => L188_APermanentExclusionIsNotAOneOffWarning.Check());
+            Add(laws, () => L189_AOneShotPushAPeerCannotTakeIsHeld.Check());
+            Add(laws, () => L191_NoPeerWaitsForStateItAuthored.Check());
+            Add(laws, () => L190_ClockJerkIsVisible.Check());
+            Add(laws, () => L85_RestartedHostStreamIsApplied.Check());
+            Add(laws, () => L193_TheHarnessCannotReportAVerdictItDidNotEarn.Check());
+            Add(laws, () => L86_AnnouncedBoundaryHoldsItsAnnouncer.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -274,6 +278,9 @@ namespace RailCheck
             var snapshot = sb.ToString().Replace("\r\n", "\n");
 
             foreach (var v in laws) Console.Error.WriteLine("LAW VIOLATION  " + v);
+
+            if (AbortOnHarnessCrash()) return 2;
+
 
             // TWO committed artifacts, two review expectations. The baseline keeps its name (and so its
             // history) on the churny half; the contract carries the architectural promise, and its drift is
@@ -290,10 +297,108 @@ namespace RailCheck
                         "RAILCHECK RED — coverage drift vs docs/rail-baseline.txt:",
                         "Intended? Re-run with --update and commit the baseline WITH the change.");
             if (update || red != 0) return red;
+            // laws-run is part of the GREEN line, not a debug aside: "153 registered, 31 ran" must never be
+            // able to read like success (see Add).
             Console.WriteLine("RAILCHECK GREEN — types=" + types.Count +
                               " polymorphic-codec=" + (polymorphicCodec ? "yes" : "no") +
+                              " laws-run=" + (_lawsRegistered - _lawsCrashed) + "/" + _lawsRegistered +
                               " known-violations=" + laws.Count + " (baselined, see docs/rail-baseline.txt)");
             return 0;
+        }
+
+        // ─── HARNESS SELF-DEFENCE ────────────────────────────────────────────────────────────────────
+        // Both guards below exist because the harness reported a VERDICT IT HAD NOT EARNED, twice in one
+        // session. A false GREEN outranks any single law in this file, because a law that is red gets
+        // argued with and a harness that says GREEN gets believed.
+
+        private static int _lawsRegistered, _lawsCrashed;
+
+        /// <summary>Run ONE law inside its own blast radius. A law that threw used to abort the entire run:
+        /// <c>RailMeta.CountMiss</c>'s Unity ECall died at law #31 of 153 and the 122 registered after it
+        /// reported nothing, and <c>L98_ApAuthority</c> reflectively <c>Invoke</c>s a production method by a
+        /// hardcoded 7-argument array, so another agent changing that signature crashed the run instead of
+        /// turning one line red. Laws that never ran are indistinguishable from laws that passed — GREEN BY
+        /// OMISSION, the exact failure class every law in this file exists to kill. So: catch, report the
+        /// crash AS that law's violation, carry on.
+        ///
+        /// The second-order lesson, written here because it is what the next author needs: a law that
+        /// <c>Invoke</c>s a production method by a hardcoded argument array IS A TRIPWIRE ON THAT METHOD'S
+        /// SIGNATURE, and it fires as a crash rather than a red line. Containing it turns a global outage
+        /// into exactly the signal it should always have been.
+        ///
+        /// The <c>Func</c> defers the call on purpose: a law that throws BEFORE yielding anything is caught
+        /// too, not only an iterator that throws mid-drain.</summary>
+        private static void Add(List<string> laws, Func<IEnumerable<string>> law)
+        {
+            _lawsRegistered++;
+            try { foreach (var v in law()) laws.Add(v); }
+            catch (Exception ex)
+            {
+                _lawsCrashed++;
+                // An iterator's TargetSite is its compiler-generated state machine; walk out to the law type.
+                var t = ex.TargetSite == null ? null : ex.TargetSite.DeclaringType;
+                while (t != null && t.IsNested) t = t.DeclaringType;
+                laws.Add((t == null ? "UNKNOWN-LAW" : t.Name) + " HARNESS-CRASH: threw " + ex.GetType().Name +
+                         " (" + ex.Message.Replace("\r", "").Replace("\n", " ") + ") and did not finish. " +
+                         "Every arm after the throw proved NOTHING. Fix the law or the premise it reflects " +
+                         "over — this line is not baselineable and the run refuses a verdict while it exists.");
+            }
+        }
+
+        /// <summary>A CRASH IS NEVER A VERDICT, so it can never be baselined away. This runs BEFORE the
+        /// gates for exactly that reason: otherwise <c>--update</c> writes a HARNESS-CRASH line into
+        /// <c>docs/rail-baseline.txt</c> and every later run calls it green.</summary>
+        private static bool AbortOnHarnessCrash()
+        {
+            if (_lawsCrashed == 0) return false;
+            Console.Error.WriteLine("RAILCHECK ABORTED — " + _lawsCrashed + " of " + _lawsRegistered +
+                                    " law(s) CRASHED, so only " + (_lawsRegistered - _lawsCrashed) +
+                                    " actually ran and the rest proved nothing. No verdict is possible and " +
+                                    "the baseline gates are not consulted. Fix the law(s) named above.");
+            return true;
+        }
+
+        /// <summary>REFUSE TO REPORT ON A DLL NOBODY JUST BUILT. RailCheck reflects over the real shipped
+        /// <c>Multiplayer.dll</c>, which is the point — and <c>RailCheck.csproj</c>'s ProjectReference means
+        /// a plain <c>dotnet run</c> rebuilds it, so that path was never the hole. <c>dotnet run
+        /// --no-build</c>, and running <c>RailCheck.exe</c> directly, are: the assembly on disk can predate
+        /// the source and the harness will happily pronounce on code nobody compiled. Both directions were
+        /// observed in one session — thirteen violations that were pure artefact of a stale DLL plus
+        /// half-landed work, and worse, a FALSE GREEN in which an agent deleted the very call its new law
+        /// asserted, saw the law pass anyway, and nearly rewrote the law to match. A warning would not do:
+        /// the failure mode is a human reading GREEN and believing it, so this is a hard stop with a named
+        /// reason and a non-zero exit.
+        ///
+        /// The check itself fails OPEN (catch → false). A freshness probe that cannot read a timestamp must
+        /// not become the thing that stops the harness — that would be this guard inventing the outage it
+        /// exists to prevent.</summary>
+        private static bool StaleBuild()
+        {
+            try
+            {
+                var dll = typeof(RailMeta).Assembly.Location;
+                var src = Path.Combine(RepoRoot(), "src");
+                if (string.IsNullOrEmpty(dll) || !File.Exists(dll) || !Directory.Exists(src)) return false;
+                var built = File.GetLastWriteTimeUtc(dll);
+                string newest = null;
+                var newestAt = DateTime.MinValue;
+                foreach (var f in Directory.GetFiles(src, "*.cs", SearchOption.AllDirectories))
+                {
+                    var at = File.GetLastWriteTimeUtc(f);
+                    if (at > newestAt) { newestAt = at; newest = f; }
+                }
+                if (newest == null || newestAt <= built) return false;
+                Console.Error.WriteLine("RAILCHECK REFUSED — the Multiplayer.dll it would reflect over is " +
+                    "OLDER than the source it claims to be about:\n  dll     " + built.ToLocalTime() +
+                    "  " + dll + "\n  source  " + newestAt.ToLocalTime() + "  " + newest +
+                    "\nEvery verdict from this run would be about code nobody compiled — a GREEN one most " +
+                    "of all. Build the mod first: `dotnet run -c Debug --project tools/RailCheck` does it " +
+                    "through the ProjectReference; `--no-build` and running RailCheck.exe directly do not." +
+                    "\nIn a shared tree this also fires when another agent edited a source file during this " +
+                    "run's own build — a true positive with a boring fix: run it again.");
+                return true;
+            }
+            catch { return false; }
         }
 
         /// <summary>Write-or-compare ONE committed artifact. Parameterised rather than duplicated per file so
@@ -689,7 +794,7 @@ namespace RailCheck
                 lines.Sort(StringComparer.Ordinal);
                 foreach (var l in lines) sb.Append(l + "\n");
                 sb.Append("  (types swept: " + visited.Count + ")\n");
-                laws.AddRange(OwnerBackRefLaw(visited, parents, new HashSet<Type>(l15Seeds)));
+                Add(laws, () => OwnerBackRefLaw(visited, parents, new HashSet<Type>(l15Seeds)));
             }
 
             // ─── L16 — an owner-PostRead waiver must be HEALED on the path the owner is reached by ───────
