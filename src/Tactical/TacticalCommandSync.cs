@@ -163,10 +163,13 @@ namespace Multiplayer.Tactical
             _built = true;
             Debug.Log("[Multiplayer][tac] derived battle keys for " + keyless.Count + " actor(s) the geoscape " +
                       "never named (ordinals over battle-start position).");
-            // THE ORDERING SEAM. Everything that had to wait for a key waits until exactly here, and this is
-            // the only moment on any peer at which that wait can end. Its own method, NoInlining, so the
-            // ECalls it reaches stay out of this one (L113 — see ReportIfIndistinguishable).
-            TacticalCommandSync.FlushPendedSelections();
+            // THE ORDERING SEAM IS THIS FLAG, AND THE FLUSH READS IT FROM THE TICK — NOT FROM HERE.
+            // Calling TacticalCommandSync.FlushPendedSelections() inline was the obvious wiring and it broke
+            // L19: this method's only caller is TacNewTurnHook.Postfix, a postfix on the MODEL method
+            // TacMission.OnNewTurn, so an intent emitted anywhere below it is a result-ship by the law's IL
+            // walk. The flush therefore rides SyncEngineStub.Tick, which is where the rail already emits
+            // (the turn-epoch ceiling resnapshot does the same), and it costs one static bool read per frame.
+            // One frame of extra latency on a wait that was already 0.2 s long.
         }
 
         /// <summary>The battle-start tie diagnostic, deliberately in its OWN non-inlined method.
@@ -1678,14 +1681,22 @@ namespace Multiplayer.Tactical
         /// battle (<see cref="Reset"/>) because these are live component references.</summary>
         private static readonly HashSet<EquipmentComponent> _pendedSelections = new HashSet<EquipmentComponent>();
 
-        /// <summary>Called from <see cref="TacticalActorKey.BuildBattleKeys"/> the instant the map is built.
+        /// <summary>Driven every frame from <c>SyncEngineStub.Tick</c> on EVERY peer, and it fires on the
+        /// first frame after <see cref="TacticalActorKey.BuildBattleKeys"/> has run — a standing condition on
+        /// the flag rather than a call from inside the builder, because that builder is only ever reached
+        /// from <c>TacNewTurnHook.Postfix</c> and L19 forbids an intent below a model postfix. Two static
+        /// reads on the frames where there is nothing to do.
+        ///
         /// NoInlining for the reason <c>ReportIfIndistinguishable</c> spells out: this reaches
-        /// <c>UnityEngine.Object.name</c>, and an ECall inlined into BuildBattleKeys makes that whole method
-        /// un-compilable in the headless harness (L113).</summary>
+        /// <c>UnityEngine.Object.name</c>, and an inlined ECall makes its caller un-compilable in the
+        /// headless harness (L113).</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
         internal static void FlushPendedSelections()
         {
             if (_pendedSelections.Count == 0) return;
+            // Not yet keyable: keep holding. Flushing here would hit the "built WITHOUT keying it" arm below
+            // and drop every pended selection as if the actor were local-only.
+            if (!TacticalActorKey.Built) return;
             var batch = new List<EquipmentComponent>(_pendedSelections);
             _pendedSelections.Clear();
             var engine = LiveEngine();

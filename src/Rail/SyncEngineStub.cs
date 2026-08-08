@@ -156,6 +156,11 @@ namespace Multiplayer.Network.Sync
             // was still animating here. The acting peer plays speculatively and is therefore always a whole
             // animation ahead of us; refusing that follow-up is what made melee deal no damage (2026-08-01).
             Multiplayer.Tactical.TacticalCommandSync.HostTick(_engine);
+            // EVERY peer, host and client alike: relay the enter-play weapon selections that were raised
+            // before this peer could name their actor, on the first frame after the battle key map exists.
+            // Here and not inside BuildBattleKeys — that builder hangs off TacNewTurnHook.Postfix, a postfix
+            // on a MODEL method, and L19 condemns any intent reachable from one.
+            Multiplayer.Tactical.TacticalCommandSync.FlushPendedSelections();
             Multiplayer.Tactical.TacticalDamageSync.ClientTick(_engine);   // A3b: emit an armed 0x84-gap resnapshot request
             // host-only inside: A4 ships a death no damage record carried (a status kill, a scripted one, a
             // mod's). Deferred by one frame ON PURPOSE — inline it could overtake the damage stream it must
