@@ -60,7 +60,21 @@ namespace Multiplayer.Network
         // link is not one a co-op session survives anyway. 0 = empty / poisoned by a tick gap.
         private long _stamp;
         private long _prevStamp;
-        private long _lastTickMs;
+        /// <summary>STATIC on purpose: this is the MAIN THREAD's frame clock, a property of the process and
+        /// not of any one table, and every echo path below is reached from a static helper. One PingTable
+        /// exists per session; a harness table that never ticks leaves it 0, which reads as "no stall".</summary>
+        private static long _lastTickMs;
+
+        /// <summary>True while we are still inside the first frame AFTER a main-thread stall — the transport
+        /// pump runs BEFORE <c>SessionManager.Update</c> (NetworkEngine.cs:481-482), so every heartbeat that
+        /// queued up during the freeze is handled while <see cref="_lastTickMs"/> still holds the pre-stall
+        /// frame and <see cref="Tick"/> has not poisoned anything yet. Both directions are charged the freeze
+        /// in that window: ECHOING a stamp that crossed it bills our stall to the sender's link, and SAMPLING
+        /// an ack that crossed it bills it to ours. Loads make 0.2-2.3 s frames routine (measured, live 3-peer
+        /// session 2026-08-08: frameMax 2139 / 1683 / 1284 / 867 / 342 ms) and they land inside the two-probe
+        /// acceptance window, so without this the meter reads red/yellow for ~10 s after every load while SRTT
+        /// decays the fiction away.</summary>
+        private static bool StallCrossed(long nowMs) => _lastTickMs != 0 && nowMs - _lastTickMs > MaxTickGapMs;
 
         public static long NowMs() => DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
 
@@ -86,6 +100,7 @@ namespace Multiplayer.Network
         public void Sample(ulong peerId, long stamp, long nowMs)
         {
             if (stamp == 0 || (stamp != _stamp && stamp != _prevStamp)) return;
+            if (StallCrossed(nowMs)) return;         // our own freeze, not the link
             if (_acceptedStamp.TryGetValue(peerId, out var seen) && seen == stamp) return;
             _acceptedStamp[peerId] = stamp;
 
@@ -140,7 +155,9 @@ namespace Multiplayer.Network
         public long Decode(byte[] payload, long nowMs)
         {
             if (payload == null || payload.Length < 8) return 0;
-            var stamp = BitConverter.ToInt64(payload, 0);
+            // The host's ROWS are its own readings and survive our stall untouched; only the stamp we are
+            // about to ack is spoiled by it (see StallCrossed).
+            var stamp = StallCrossed(nowMs) ? 0L : BitConverter.ToInt64(payload, 0);
             if (payload.Length < 12) return stamp;
 
             var count = BitConverter.ToInt32(payload, 8);
@@ -161,7 +178,11 @@ namespace Multiplayer.Network
         public static byte[] EchoStamp(byte[] payload)
         {
             var echo = new byte[8];
-            if (payload != null && payload.Length >= 8) Array.Copy(payload, 0, echo, 0, 8);
+            // Zeroed — never withheld — when our own frame just stalled: the ack still goes out (it is the
+            // peer's outbound-liveness proof, SessionManager.cs:951) but carries no measurable stamp, and
+            // Sample() drops a zero stamp on arrival.
+            if (payload != null && payload.Length >= 8 && !StallCrossed(NowMs()))
+                Array.Copy(payload, 0, echo, 0, 8);
             return echo;
         }
 

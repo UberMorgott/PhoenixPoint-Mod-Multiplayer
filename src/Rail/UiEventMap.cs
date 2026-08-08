@@ -364,6 +364,13 @@ namespace Multiplayer.Network.Sync
         // diplomacy count. Site markers live on GeoscapeView, outside any view state — nothing else on
         // this screen reads the model.
         private static readonly MethodInfo NsObjectives = AccessTools.Method(typeof(UIStateNothingSelected), "OnFactionObjectivesChanged");
+        // UIStateUnitCustomization<T>.RefreshSelectedCharacter (:136-140) — the customization screens' own
+        // model-change reseed, resolved per closed form because the declaring base is generic. See the two
+        // Table entries below for why the Exit+Enter fallback cannot be used on these two screens.
+        private static readonly MethodInfo ScRefreshSelected =
+            AccessTools.Method(typeof(UIStateSoldierCustomization), "RefreshSelectedCharacter");
+        private static readonly MethodInfo VcRefreshSelected =
+            AccessTools.Method(typeof(UIStateVehicleCustomization), "RefreshSelectedCharacter");
         // UIModuleBaseLayout.SetLeftSideInfo (:605, also its own PxBase.Stats.OnStatsUpdated handler)
         // + SetupBaseLayout (:561, re-inits every slot from PxBase.Layout). Deliberately NOT
         // UIModuleBaseLayout.Init — Init closes an open build menu / facility info (:291-292).
@@ -470,6 +477,28 @@ namespace Multiplayer.Network.Sync
                     return true;
                 },
                 [typeof(UIStateNothingSelected)] = (s, v) => Call(NsObjectives, s, Viewer()),
+                // THE HALF L149 STATES AND NOTHING ENFORCED — a mirrored identity change must repaint
+                // UNDERNEATH whichever helmet toggle THIS peer is holding. Both customization screens were
+                // missing from this table, so they took the Exit+Enter fallback, and
+                // `UIStateSoldierCustomization.EnterState`:24 slams `HideHelmetToggle.isOn = true` on every
+                // entry (the screen's default is helmet HIDDEN, :48 passes `!isOn` as `showHelmet`). So every
+                // mirrored batch that marked this screen dirty threw the viewer's helmet choice away and
+                // re-hid the helmet, while a recolour — which the re-enter DOES re-read — kept working. That
+                // is exactly the reported divergence: colours sync, the helmet toggle "does nothing". The
+                // state landed on the rail all along; the REPAINT destroyed the view argument.
+                // `RefreshSelectedCharacter` is the game's own reseed for these screens and the only one that
+                // preserves it: `OnNewCharacter` re-Inits every selector from the LIVE identity and its tail
+                // raises `OnCustomizationChanged` (UIModuleSoldierCustomization.cs:135,
+                // UIModuleVehicleCustomization.cs:31), which `UIStateUnitCustomization.EnterState`:60 bound to
+                // `RefreshUnitDisplay` — whose overrides (soldier :44-48, vehicle :24-28) re-read the live
+                // toggle and drive `DisplaySoldier`/`DisplayVehicle`. The identity reseed has already emptied
+                // `AddonsCharacterBuilder.Addons`, so the :636-644 addon-set early-out cannot swallow an
+                // identity-only change on the way through.
+                // TFTV's edit-screen icon rides along for free, for the same reason it always did: its prefix
+                // sits on the GAME's `DisplaySoldier`, which this path calls — no TFTV type is named here, so
+                // no late bind and nothing to degrade when TFTV is absent (L149 arm (c)).
+                [typeof(UIStateSoldierCustomization)] = (s, v) => RepaintCustomization(s, v, ScRefreshSelected),
+                [typeof(UIStateVehicleCustomization)] = (s, v) => RepaintCustomization(s, v, VcRefreshSelected),
                 [typeof(UIStateBionics)] = (s, v) => RepaintAugmentScreen(v.GeoscapeModules.BionicsModule, v.GeoscapeModules),
                 [typeof(UIStateMutate)] = (s, v) => RepaintAugmentScreen(v.GeoscapeModules.MutateModule, v.GeoscapeModules),
                 [typeof(UIStatePhoenixBaseLayout)] = (s, v) =>
@@ -884,6 +913,17 @@ namespace Multiplayer.Network.Sync
             var level = GameUtl.CurrentLevel();
             var geo = level == null ? null : level.GetComponent<GeoLevelController>();
             return geo == null ? null : geo.ViewerFaction;
+        }
+
+        /// <summary>Both closed forms of <c>UIStateUnitCustomization&lt;T&gt;</c> repaint through the SAME
+        /// inherited reseed, so the guard lives here once rather than in each entry: an empty cycle would
+        /// hand <c>OnNewCharacter</c> a null character (UIModuleSoldierCustomization.cs:77 dereferences it),
+        /// and declining hands that case to the fallback re-enter, which rebuilds the roster from scratch.</summary>
+        private static bool RepaintCustomization(GeoscapeViewState s, GeoscapeView v, MethodInfo refreshSelected)
+        {
+            var cycle = v.GeoscapeModules.ActorCycleModule;
+            if (cycle == null || cycle.CurrentCharacter == null) return false;
+            return Call(refreshSelected, s);
         }
 
         /// <summary>Reflection guard: a game update renaming a member turns the entry into a decline
