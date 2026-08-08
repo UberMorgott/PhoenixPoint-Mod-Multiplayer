@@ -37,5 +37,19 @@ namespace Multiplayer
         /// NOT the default. H is free in both, is free in tactical/geoscape/deployment alike (the ban is
         /// per key, not per set), and reads as "here".</summary>
         public KeyCode PingMarkerKey = KeyCode.H;
+
+        /// <summary>Convenience only: when the advisory ready tally reaches everybody, the HOST runs the
+        /// game's own end-turn instead of somebody pressing a second button. Read live at the moment the
+        /// tally lands (<c>TacticalReadySync.HostBroadcastTally</c>), so toggling it mid-battle takes effect
+        /// on the very next tally — nothing caches it and no screen needs reopening.
+        ///
+        /// NOT A QUORUM, AND THE DIFFERENCE IS THE WHOLE POINT. End Turn stays pressable by anyone at any
+        /// moment whatever the tally says (RailCheck L119 EXECUTES both tactical arbiters against a hostile
+        /// tally to prove it), so a table where everyone else is AFK is finished by one player pressing End
+        /// Turn exactly as today — this setting only removes the second press when the table is genuinely
+        /// full. It is the HOST's copy that decides, because the host is the one that performs the turn.
+        ///
+        /// Off = today's behaviour, byte for byte.</summary>
+        public bool AutoEndTurnWhenAllReady = true;
     }
 }

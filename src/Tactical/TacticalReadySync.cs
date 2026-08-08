@@ -70,12 +70,20 @@ namespace Multiplayer.Tactical
         internal static int ReadyCount;
         internal static int TotalCount;
 
+        /// <summary>HOST ONLY: has the auto end-turn already fired for the round currently being played?
+        /// The one bit that makes <see cref="TacticalTurnSync.HostAutoEndTurn"/> an EDGE rather than a
+        /// standing condition — the tally is recomputed on every peer's press and would otherwise re-run
+        /// the end-turn on each one. It re-arms by itself: the round edge zeroes the flags, that broadcast
+        /// carries all-ready=false, and this drops with it. No timer, no second notion of "round".</summary>
+        private static bool _autoEndFired;
+
         /// <summary>Per-BATTLE teardown, driven from <see cref="TacticalTurnSync.Reset"/>.</summary>
         internal static void Reset()
         {
             LocalReady = false;
             ReadyCount = 0;
             TotalCount = 0;
+            _autoEndFired = false;
             TacticalReadyButton.Forget();
         }
 
@@ -162,6 +170,28 @@ namespace Multiplayer.Tactical
             TacticalTurnSync.Send(SurfaceIds.TacTurn, OpReadyTally,
                                   "ready tally " + ready + "/" + total + " (" + why + ")",
                                   w => { w.Write(ready); w.Write(total); });
+
+            // ─── THE ONE CONVENIENCE THE TALLY IS ALLOWED TO DRIVE (2026-08-08) ───
+            // Same predicate the green latch uses (`Repaint`: total > 0 && ready >= total), computed here
+            // from the LOCALS this method already holds — the two counters stay untouched outside their four
+            // declared methods, which is L119 arm (d) and is deliberately not worked around.
+            //
+            // WHY THIS IS NOT THE QUORUM L119 EXISTS TO FORBID, stated where the temptation lives: a quorum
+            // is a condition that must be MET before something is allowed to happen. Nothing below is a
+            // precondition of anything. End Turn is pressable by every peer at every instant — L119 proves it
+            // by EXECUTING both arbiters against 0-of-99 and 99-of-99 and requiring identical answers, and
+            // this edit adds no branch to either. If nobody ever presses ready, the edge never arrives and the
+            // game plays exactly as it did; a single player at a table of AFK peers finishes the campaign by
+            // pressing End Turn himself, as always. What is removed is the SECOND press when the table is
+            // already unanimous — never a wait, only a shortcut.
+            //
+            // Shipped AFTER the tally, always: the label everyone is about to see must leave the host before
+            // the turn edge that resets it, or the round would open on a stale count.
+            bool all = total > 0 && ready >= total;
+            if (!all) { _autoEndFired = false; return; }
+            if (_autoEndFired) return;
+            _autoEndFired = true;
+            TacticalTurnSync.HostAutoEndTurn();
         }
 
         // ─── CLIENT ────────────────────────────────────────────────────────

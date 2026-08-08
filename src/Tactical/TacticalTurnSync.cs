@@ -515,6 +515,49 @@ namespace Multiplayer.Tactical
                       Name(cur) + "' turn " + cur.TurnNumber);
         }
 
+        /// <summary>
+        /// THE COURTESY PRESS THE TABLE NO LONGER HAS TO MAKE — everybody said "done", so the host runs the
+        /// end-turn itself (opt-out, <c>MultiplayerConfig.AutoEndTurnWhenAllReady</c>). Called from
+        /// <see cref="TacticalReadySync.HostBroadcastTally"/> on the EDGE into all-ready, once per round.
+        ///
+        /// ADDITIVE, NEVER A PRECONDITION. Nothing here touches <see cref="Validate"/>, the button, or any
+        /// hold: End Turn stays pressable by anyone at any instant regardless of the tally, so a table of
+        /// AFK players is still driven to the end of the campaign by one person pressing it — this method
+        /// simply never fires for them, because a tally that never fills never reaches its edge.
+        ///
+        /// HOST ONLY, AND THAT IS WHAT KEEPS IT ONE TURN. Three peers each ending their own turn locally
+        /// would be three divergent turn machines; the host runs the SAME native <c>RequestEndTurn</c> its
+        /// own button and <see cref="HandleEndTurn"/> run, and the result reaches every peer as the ordinary
+        /// 0x80 turn message the clients are already paced by.
+        ///
+        /// The acceptance rule is <see cref="Validate"/>'s, reused verbatim against the host's own cursor —
+        /// a second notion of "is this turn endable" is exactly how the two paths would drift apart.
+        /// </summary>
+        internal static void HostAutoEndTurn()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            var cfg = MultiplayerMain.Instance?.Config;
+            if (cfg == null || !cfg.AutoEndTurnWhenAllReady) return;
+            var cur = Tlc()?.CurrentFaction;
+            string guid = Guid(cur);
+            string why = Validate(guid, guid, cur != null && cur.IsControlledByPlayer,
+                                  cur != null && cur.IsPlayingTurn);
+            if (why != null)
+            {
+                // NOT AN ERROR — mid-handoff or an AI faction's turn simply is not ours to end. Logged
+                // because a convenience that silently does nothing is this repo's dominant bug shape, and
+                // "everyone was ready and the turn did not end" needs a witness other than a player's memory.
+                Debug.Log("[Multiplayer][tac] auto end-turn on all-ready SKIPPED — " + why +
+                          ". Nothing is blocked: End Turn is pressable by anyone at any moment.");
+                return;
+            }
+            cur.RequestEndTurn();
+            Debug.Log("[Multiplayer][tac] auto end-turn: every seated peer is ready, so the HOST ended '" +
+                      Name(cur) + "' turn " + cur.TurnNumber + " (setting AutoEndTurnWhenAllReady). " +
+                      "Convenience only — the button was never gated on this.");
+        }
+
         // ─── THE LEAVE-BATTLE INTENT: peer autonomy over the mission END ────
 
         /// <summary>The host's OWN <c>TacticalView.GoToGeoscape</c> — the callback the Continue button on the
