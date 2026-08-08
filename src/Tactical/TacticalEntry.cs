@@ -214,6 +214,13 @@ namespace Multiplayer.Tactical
     [HarmonyPatch(typeof(TacticalFaction), "RequestEndTurn")]
     internal static class ClientEndTurnGate
     {
+        /// <summary>The (faction, turn) whose end has already been asked for. A faction's turn can be ended
+        /// exactly ONCE, so that pair — and not the nonce — is what makes a second click a repeat: the logs
+        /// show 62 and 53 intents from one impatient player, each with a genuinely distinct nonce, so
+        /// <c>IntentDedup</c> is right to let them all through and the debounce belongs HERE, on the thing the
+        /// game itself cannot do twice. Nothing clears it: the turn advancing changes the number.</summary>
+        private static string _asked;
+
         private static bool Prefix(TacticalFaction __instance)
         {
             if (IntentRail.ShouldRunNative()) return true;
@@ -224,6 +231,9 @@ namespace Multiplayer.Tactical
                                "intent, so the host cannot arbitrate it. The turn stays open.");
                 return false;
             }
+            string once = guid + "#" + __instance.TurnNumber;
+            if (once == _asked) return false;      // the same turn's end, asked for again; nothing new to send
+            _asked = once;
             IntentRail.Send(SurfaceIds.TacTurnIntent, TacticalTurnSync.OpEndTurn,
                             "end-turn " + __instance.TacticalFactionDef.name, w => w.Write(guid));
             return false;

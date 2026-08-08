@@ -153,12 +153,34 @@ namespace Multiplayer.Tactical
                 // every ordinal after it and point this peer's alien keys at different monsters.
                 if ((int)a.GeoUnitId == 0 && !_derived.ContainsKey(a)) keyless.Add(a);
             keyless.Sort(CanonicalOrder);
-            for (int i = 0; i < keyless.Count; i++)
+            // A FULL TIE GETS A KEY THAT CARRIES ITS OWN GROUP SIZE. Three Deploy_Crate_ZoneBounds at one
+            // position with one name (live 2026-08-08) are equal on every field CanonicalOrder can compare, so
+            // the ordinal each one takes came down to Map.GetActors enumeration order — and List.Sort is not
+            // even stable, so it need not agree between two peers that DO see the same board. Modelled on
+            // TacticalDestruction.AddressTags:161: the tied members are numbered #i/n and the COUNT rides
+            // inside the key, so a peer that found two where the sender found three mints a DIFFERENT number
+            // and every record naming it is refused OUT LOUD instead of landing on a lookalike. The running
+            // ordinal is still consumed for a tied actor, so no untied actor's key moves because of this.
+            int at = 0;
+            while (at < keyless.Count)
             {
-                if (i > 0) ReportIfIndistinguishable(keyless[i - 1], keyless[i]);
-                int key = _nextDerived--;
-                _derived[keyless[i]] = key;
-                _byDerived[key] = keyless[i];
+                int end = at + 1;
+                while (end < keyless.Count && CanonicalOrder(keyless[end - 1], keyless[end]) == 0) end++;
+                int n = end - at;
+                if (n > 1) ReportIndistinguishableRun(keyless[at], n);
+                for (int i = at; i < end; i++)
+                {
+                    int key = _nextDerived--;
+                    if (n > 1) key = TieKey(keyless[i], i - at, n);
+                    TacticalActorBase clash;
+                    if (_byDerived.TryGetValue(key, out clash) && !ReferenceEquals(clash, keyless[i]))
+                        Debug.LogError("[Multiplayer][tac] two battle-start actors were minted the SAME derived key " +
+                                       key + " — one of them now answers for both, and every command, hit and " +
+                                       "settle naming it reaches whichever the map hands back first.");
+                    _derived[keyless[i]] = key;
+                    _byDerived[key] = keyless[i];
+                }
+                at = end;
             }
             _built = true;
             Debug.Log("[Multiplayer][tac] derived battle keys for " + keyless.Count + " actor(s) the geoscape " +
@@ -188,13 +210,55 @@ namespace Multiplayer.Tactical
         /// actor list is empty), while the message itself stays exactly as loud in-game. Same reasoning as
         /// <c>RailCheck.Program.Run</c>, which carries the attribute for the same class of reason.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static void ReportIfIndistinguishable(TacticalActorBase a, TacticalActorBase b)
+        private static void ReportIndistinguishableRun(TacticalActorBase first, int n)
         {
-            if (CanonicalOrder(a, b) != 0) return;
-            Debug.LogError("[Multiplayer][tac] two key-less actors are indistinguishable at battle start (" +
-                           SafeName(b) + " and " + SafeName(a) + " at " + b.Pos +
-                           ") — their derived keys depend on enumeration order and the peers may disagree " +
-                           "about which is which. Every shot naming either of them is suspect.");
+            Debug.LogWarning("[Multiplayer][tac] " + n + " key-less actors are indistinguishable at battle start (" +
+                             SafeName(first) + " at " + first.Pos + ") — nothing this peer can compare tells them " +
+                             "apart, so each takes #i/" + n + " in enumeration order. The COUNT rides in their keys: " +
+                             "a peer that found a different number of them mints different keys and refuses every " +
+                             "record naming one, rather than silently answering with a lookalike.");
+        }
+
+        /// <summary>The key for one member of a tie run, and the ONLY key in this scheme that is not a running
+        /// ordinal. It is a function of (name, rounded position, index, GROUP SIZE) — the last field is the
+        /// point: it is what makes a peer that counted the run differently mint a different number.
+        ///
+        /// FNV-1a and not <c>string.GetHashCode</c>: the framework's string hash is explicitly an
+        /// implementation detail and can be randomised per process, so it is not a value two peers may compare.
+        /// The range is far below the running ordinals (which start at -1 and count down over the battle-start
+        /// roster), so a tie key can never collide with one; a collision between two tie keys is checked for
+        /// and shouted about at the call site rather than assumed away.
+        ///
+        /// NoInlining for <see cref="ReportIndistinguishableRun"/>'s reason: <c>name</c> and <c>Pos</c> are
+        /// native ECalls and an inlined ECall makes the whole enclosing method un-compilable outside the
+        /// player.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static int TieKey(TacticalActorBase a, int index, int n) =>
+            TieKeyOf(SafeName(a), Mathf.RoundToInt(a.Pos.x * 10f), Mathf.RoundToInt(a.Pos.y * 10f),
+                     Mathf.RoundToInt(a.Pos.z * 10f), index, n);
+
+        /// <summary>The rule itself, as a PURE function of the six numbers it is made of — so law L360 can
+        /// execute it rather than read it. <c>name</c> and <c>Pos</c> are the ECalls; they stay in the caller.</summary>
+        internal static int TieKeyOf(string name, int x, int y, int z, int index, int n)
+        {
+            uint h = 2166136261u;
+            foreach (char c in name ?? "") h = Fnv(h, c);
+            h = Fnv(h, (uint)x);
+            h = Fnv(h, (uint)y);
+            h = Fnv(h, (uint)z);
+            h = Fnv(h, (uint)index);
+            h = Fnv(h, (uint)n);
+            return -(TieKeyBase + (int)(h & 0x03FFFFFFu));
+        }
+
+        /// <summary>The first tie key. Every running ordinal is above -1000000 for any roster a battle can
+        /// hold, so the two ranges cannot meet.</summary>
+        private const int TieKeyBase = 1000000;
+
+        private static uint Fnv(uint h, uint word)
+        {
+            for (int i = 0; i < 4; i++) { h ^= (word >> (i * 8)) & 0xFFu; h *= 16777619u; }
+            return h;
         }
 
         /// <summary>Position first (the peers' save-restored floats are bit-identical, so this is a total
@@ -371,8 +435,30 @@ namespace Multiplayer.Tactical
         /// a DEF field (identical on every peer by mod parity, law 10), it is UNIQUE per actor because the
         /// game itself asserts that — <c>TacticalActor.ValidateActor</c>:1178-1186 logs an error for duplicate
         /// health-slot names — and it ROUND-TRIPS through the game's own resolver,
-        /// <c>CharacterBodyState.GetSlot(string)</c>:152-155.</summary>
-        internal static string SlotOf(IDamageReceiver receiver) => receiver == null ? null : (receiver.GetSlotName() ?? "");
+        /// <c>CharacterBodyState.GetSlot(string)</c>:152-155.
+        ///
+        /// THE THIRD SHAPE ANSWERS THE WRONG THING, AND THAT WAS A 0%-DELIVERY BUG. This repo believed
+        /// <c>TacticalItem</c> forwarded <c>GetSlotName()</c> to its slot — it does not.
+        /// <c>DamageReceiverImplementation.GetSlotName</c>:71-74 is the method that forwards to <c>_itemSlot</c>,
+        /// and <c>TacticalItem</c> does NOT delegate to it: <c>TacticalItem.GetSlotName</c>:634-637 is
+        /// <c>return "";</c>, hardcoded. So every carried item reported "the whole actor", <c>ItemGuidOf</c> saw
+        /// an empty slot and refused, and NOT ONE item-damage record ever crossed — the four log lines that
+        /// looked like four events were four DEFS collapsed by one <c>SayOnce</c>.
+        ///
+        /// The rung goes HERE and not at the call sites because every caller (the damage capture, the status
+        /// target tag, the resnapshot's item block, the ability-target rider) needs the same answer, and four
+        /// copies of it is four chances to drift. <c>TacticalItem.ParentItemSlot</c>:121 is
+        /// <c>base.ParentSlot as ItemSlot</c> — the slot the item actually hangs in — and its
+        /// <c>GetSlotName()</c>:215 is the very <c>ItemSlotDef.SlotName</c> the rest of this address rule is
+        /// built on, so the item and its slot now agree by derivation instead of by belief.</summary>
+        internal static string SlotOf(IDamageReceiver receiver)
+        {
+            if (receiver == null) return null;
+            var item = receiver as TacticalItem;
+            if (ReferenceEquals(item, null)) return receiver.GetSlotName() ?? "";   // L113: `as` asked it already
+            var parent = item.ParentItemSlot;
+            return ReferenceEquals(parent, null) ? "" : (parent.GetSlotName() ?? "");
+        }
 
         /// <summary>The other half of the round trip. "" is the actor itself — which is unambiguous because
         /// <c>ItemSlotDef.SlotName</c> is never empty for a real body part; anything else must resolve to a
@@ -400,8 +486,12 @@ namespace Multiplayer.Tactical
             var slot = tacActor.BodyState.GetSlot(slotName);
             if (slot == null)
             {
-                why = SafeName(actor) + " has no body-part slot named '" + slotName + "' on this peer — mod parity " +
-                      "should have made that impossible (law 10)";
+                // NO PARITY CLAIM HERE. Nothing on this path asked the def repository anything, so "the mods
+                // differ" and "this actor's body simply has no such slot" are indistinguishable from where we
+                // stand — and blaming the join for the second one cost a whole investigation on 2026-08-08.
+                // Say what was actually observed and stop.
+                why = SafeName(actor) + " has no body-part slot named '" + slotName + "' on this peer (its " +
+                      "BodyState resolved, and none of its slots answers to that name)";
                 return null;
             }
             return slot;
@@ -594,17 +684,40 @@ namespace Multiplayer.Tactical
         /// sorted differently") is answered rather than ignored: the ordinal only ever orders WITHIN an
         /// equivalence class whose members match in every field the address can see, so a differently sorted
         /// peer picks a different member of THAT class — never a different charge. Container order is still
-        /// not forced, and must not be: forcing it would unmount a weapon nobody touched.</summary>
+        /// not forced, and must not be: forcing it would unmount a weapon nobody touched.
+        ///
+        /// AND THE SECOND RUNG: A BODY PART IS IN NO INVENTORY AT ALL. <c>Item.InventoryComponent</c> is the
+        /// only anchor the rung above has, and a limb never entered one — it hangs in an <c>ItemSlot</c>
+        /// (<c>TacticalItem.ParentItemSlot</c>:121). The rider therefore used to drop every limb, and the
+        /// compensation in <see cref="Read"/> only refills it when the DamageReceiver IS the limb. It is not,
+        /// on the main aiming path: <c>Weapon.GetShootTargets</c>:841-844 sets <c>DamageReceiver</c> to the
+        /// target ACTOR and returns at :853, so a shot aimed at a head arrived naming the whole actor and the
+        /// receiving peer replayed it against whatever <c>GetWorkingPosition</c> picked. Health never diverged
+        /// (damage is authoritative and rides its own record) — the INTENT did, and so did what every other
+        /// screen showed. The second rung addresses it the way the game itself does, as (owning actor, slot
+        /// name, def guid), and resolution reuses <c>TacticalDamageSync.ResolveItem</c> rather than inventing a
+        /// third scheme.</summary>
         private static bool ItemAddress(Item item, out int actorKey, out byte kind, out string defGuid,
-                                        out int charge, out int ordinal)
+                                        out int charge, out int ordinal, out string slot)
         {
-            actorKey = 0; kind = 0; defGuid = null; charge = -1; ordinal = 0;
+            actorKey = 0; kind = 0; defGuid = null; charge = -1; ordinal = 0; slot = "";
             if (item == null) return false;
             defGuid = item.ItemDef == null ? null : item.ItemDef.Guid;
             if (string.IsNullOrEmpty(defGuid)) return false;
-            if (!TacticalInventorySync.AddressOf(item.InventoryComponent, out actorKey, out kind)) return false;
-            charge = TacticalInventorySync.ChargeOf(item);
-            ordinal = TacticalInventorySync.OrdinalOf(item);
+            if (TacticalInventorySync.AddressOf(item.InventoryComponent, out actorKey, out kind))
+            {
+                charge = TacticalInventorySync.ChargeOf(item);
+                ordinal = TacticalInventorySync.OrdinalOf(item);
+                return true;
+            }
+            var part = item as TacticalItem;                                 // L113: `as`, see AddressOf
+            var parent = ReferenceEquals(part, null) ? null : part.ParentItemSlot;
+            if (ReferenceEquals(parent, null)) return false;
+            actorKey = TacticalActorKey.Of(parent.GetActor());
+            if (actorKey == 0) return false;
+            slot = parent.GetSlotName() ?? "";
+            if (slot.Length == 0) return false;                              // "" means the actor; a limb is not one
+            kind = TacticalInventorySync.KindBodyPart;
             return true;
         }
 
@@ -617,12 +730,22 @@ namespace Multiplayer.Tactical
             string guid = r.ReadString();
             int charge = r.ReadInt32();
             int ordinal = r.ReadInt32();
+            string slot = r.ReadString();
             string why;
             var owner = TacticalActorKey.Resolve(tlc, key, out why);
             if (owner == null)
             {
                 if (unresolved != null) unresolved.Add(field + " owner (key " + key + "): " + why);
                 return null;
+            }
+            if (kind == TacticalInventorySync.KindBodyPart)
+            {
+                // THE GAME'S OWN TWO-PART LOOKUP, borrowed rather than re-written — TacticalDamageSync.ResolveItem
+                // is CharacterBodyState.GetItem(slotName, def) with the refusal sentence already attached.
+                var limb = TacticalDamageSync.ResolveItem(owner, slot, guid, out why) as Item;
+                if (limb == null && unresolved != null)
+                    unresolved.Add(field + " body part in slot '" + slot + "': " + why);
+                return limb;
             }
             var container = TacticalInventorySync.ContainerOf(owner, kind);
             if (container == null)
@@ -635,20 +758,19 @@ namespace Multiplayer.Tactical
             if (resolved != null) return resolved;
             if (unresolved != null)
                 unresolved.Add(field + ": no item #" + ordinal + " with def guid " + guid + " (charge " + charge +
-                               ") in " + owner.name + "'s container " + kind + " on this peer — mod parity should " +
-                               "have made the def impossible to miss (law 10), so this is a container that holds " +
-                               "fewer of them here than on the sender");
+                               ") in " + owner.name + "'s container " + kind + " on this peer — this container " +
+                               "holds fewer matching items here than on the sender. Nothing here asked whether " +
+                               "the def EXISTS on this peer, so this says nothing about mod parity.");
             return null;
         }
 
         /// <summary>A7 — an item field that RIDES but has no shared address still has to be audible.
         ///
-        /// WHICH ITEMS THESE ARE, measured rather than assumed: the address <see cref="ItemAddress"/> mints is
-        /// (owning actor, container kind, def guid, charge, ordinal), and its only anchor is
-        /// <c>Item.InventoryComponent</c>:45. A BODY PART has none — <c>ShootAbility</c>:205-212 takes the
-        /// target's <c>BodyState.GetHealthSlots()</c> aim-point items and <c>Weapon.GetShootTarget</c>:792-795
-        /// takes the <c>ItemSlot</c>'s first visible one, and neither ever entered an inventory. The target's
-        /// EQUIPPED items (<c>ShootAbility</c>:213) do have one and ride normally, so every miss here is a limb.
+        /// WHICH ITEMS THESE ARE, measured rather than assumed: <see cref="ItemAddress"/> has TWO rungs — an
+        /// inventory item is (owning actor, container kind, def guid, charge, ordinal) off
+        /// <c>Item.InventoryComponent</c>:45, and a BODY PART is (owning actor, KindBodyPart, def guid, slot
+        /// name) off <c>TacticalItem.ParentItemSlot</c>:121. What is left after both is an item that is in no
+        /// inventory AND hangs in no named slot, or whose slot has no actor with a shared key.
         ///
         /// NOT REFUSED, and not given a second addressing scheme either: the limb already has a shared address
         /// on this very target — <c>DamageReceiver</c> rides as (actor key, slot name) through
@@ -673,13 +795,13 @@ namespace Multiplayer.Tactical
         {
             int eqKey = 0, itKey = 0;
             byte eqKind = 0, itKind = 0;
-            string eqGuid = null, itGuid = null;
+            string eqGuid = null, itGuid = null, eqSlot = "", itSlot = "";
             int eqCharge = -1, itCharge = -1, eqOrd = 0, itOrd = 0;
             bool eqRides = false, itRides = false;
             if (t != null)
             {
-                eqRides = ItemAddress(t.Equipment, out eqKey, out eqKind, out eqGuid, out eqCharge, out eqOrd);
-                itRides = ItemAddress(t.TacticalItem, out itKey, out itKind, out itGuid, out itCharge, out itOrd);
+                eqRides = ItemAddress(t.Equipment, out eqKey, out eqKind, out eqGuid, out eqCharge, out eqOrd, out eqSlot);
+                itRides = ItemAddress(t.TacticalItem, out itKey, out itKind, out itGuid, out itCharge, out itOrd, out itSlot);
                 if (!eqRides) NoteUnkeyableItem("Equipment", t.Equipment);
                 if (!itRides) NoteUnkeyableItem("TacticalItem", t.TacticalItem);
                 NoteDroppedField("ItemContainer", t.ItemContainer);
@@ -723,8 +845,11 @@ namespace Multiplayer.Tactical
             }
             if ((mask & BitAttackType) != 0) w.Write((byte)t.AttackType);
             if ((mask & BitObstructionsCheckRadius) != 0) w.Write(t.ObstructionsCheckRadius);
-            if ((mask & BitEquipment) != 0) { w.Write(eqKey); w.Write(eqKind); w.Write(eqGuid); w.Write(eqCharge); w.Write(eqOrd); }
-            if ((mask & BitTacticalItem) != 0) { w.Write(itKey); w.Write(itKind); w.Write(itGuid); w.Write(itCharge); w.Write(itOrd); }
+            // The slot name is the BODY-PART rung's half of the address (kind == KindBodyPart) and "" for every
+            // inventory item. Written unconditionally rather than behind the kind, because a field that is
+            // sometimes there is a field the reader can misalign on.
+            if ((mask & BitEquipment) != 0) { w.Write(eqKey); w.Write(eqKind); w.Write(eqGuid); w.Write(eqCharge); w.Write(eqOrd); w.Write(eqSlot ?? ""); }
+            if ((mask & BitTacticalItem) != 0) { w.Write(itKey); w.Write(itKind); w.Write(itGuid); w.Write(itCharge); w.Write(itOrd); w.Write(itSlot ?? ""); }
         }
 
         /// <summary>Decode against the RECEIVING peer's own world: every actor-shaped field is a key that is
@@ -1159,6 +1284,22 @@ namespace Multiplayer.Tactical
         /// navigation and vanish without a trace — the silent-swallow class — so it is HELD instead.</summary>
         private static readonly Dictionary<int, PendingSettle> _pending = new Dictionary<int, PendingSettle>();
 
+        /// <summary>Per actor, the <see cref="RailOrdinal"/> of the newest 0x82 settle already APPLIED here.
+        /// 0x82 and 0x84 carry independent per-surface seq streams that cannot be ordered against each other,
+        /// so a resnapshot the host stamped at T can land after a settle it stamped at T+2s and rewind that
+        /// actor's action and will points to a value the host has already moved past. The ordinal is the one
+        /// key both surfaces carry (minted at the single encoder), which is why the comparison is possible at
+        /// all.</summary>
+        private static readonly Dictionary<int, uint> _settledAt = new Dictionary<int, uint>();
+
+        /// <summary>The newest applied settle's ordinal for <paramref name="key"/>, or 0 when this peer has
+        /// applied none. Read by <c>TacticalDamageSync.ApplyResnap</c>.</summary>
+        internal static uint LastSettleOrdinal(int key)
+        {
+            uint at;
+            return _settledAt.TryGetValue(key, out at) ? at : 0u;
+        }
+
         private struct PendingSettle
         {
             public Vector3 Pos;
@@ -1169,6 +1310,13 @@ namespace Multiplayer.Tactical
             /// <summary>L105: TacticalDamageSync.StatEpoch when this settle ARRIVED. A settle held behind a
             /// mirrored ability routinely outlives the death it was captured before.</summary>
             public int Epoch;
+
+            /// <summary><see cref="RailOrdinal"/> of the envelope that CARRIED this settle. Captured at arrival
+            /// rather than read at apply, because a held settle applies from the tick, outside any inbound
+            /// dispatch, where the ambient ordinal is 0. It is the only key that compares across surfaces —
+            /// 0x82 and 0x84 have independent seq streams — and the resnapshot reads it (see
+            /// <see cref="LastSettleOrdinal"/>).</summary>
+            public uint Ordinal;
 
             /// <summary>The host sent this one because it REFUSED an order for that actor. The refusing peer
             /// is precisely the peer whose actor is mid-speculation, so the ordinary "wait until it goes
@@ -1337,6 +1485,7 @@ namespace Multiplayer.Tactical
         {
             Seq.Reset();
             _pending.Clear();
+            _settledAt.Clear();   // ordinals reset with the session; a stale one would refuse the next battle's resnap
             _cmdOwner.Clear();
             _deferred.Clear();   // a held order belongs to ONE battle; releasing it into the next is a ghost order
             // Same contract, receiving side: Reset runs at tactical TEARDOWN (TacticalTurnSync's Playing→other
@@ -1888,8 +2037,17 @@ namespace Multiplayer.Tactical
                 var eq = it as Equipment;
                 if (eq != null && eq.ItemDef != null && eq.ItemDef.Guid == guid) { equipment = eq; return true; }
             }
-            why = SafeActorName(actor) + " carries no equipment with def guid " + guid + " on this peer — mod " +
-                  "parity should have made that impossible (law 10)";
+            // TWO DIFFERENT FAILURES, AND THIS SCAN COULD NOT TELL THEM APART. The loop above only asks what
+            // THIS ACTOR is carrying, so "the def does not exist on this peer" (a genuine build/mod difference)
+            // and "he simply is not holding it" (an ordinary inventory divergence) produced one identical
+            // sentence — and that sentence blamed the join. Ask the def repository, then say which it was.
+            var known = GameUtl.GameComponent<Base.Defs.DefRepository>()?.GetDef(guid);
+            why = known == null
+                ? SafeActorName(actor) + " carries no equipment with def guid " + guid + ", and NO def with that " +
+                  "guid exists on this peer at all — this peer's def set really does differ from the sender's"
+                : SafeActorName(actor) + " carries no '" + known.name + "' (def guid " + guid + ") on this peer. " +
+                  "The def itself resolves here, so the two peers disagree about this actor's EQUIPMENT, not " +
+                  "about their def sets";
             return false;
         }
 
@@ -3447,8 +3605,9 @@ namespace Multiplayer.Tactical
             if (ability == null)
             {
                 Debug.LogError("[Multiplayer][tac] " + actor.name + " has no ability with guid " + guid +
-                               " on this peer — mod parity should have made that impossible (law 10). The order " +
-                               "is dropped and this peer's battle has diverged.");
+                               " in his own ability list on this peer — nothing here asked whether the def " +
+                               "exists, so this is an ABILITY-SET difference on this actor and says nothing " +
+                               "about mod parity. The order is dropped and this peer's battle has diverged.");
                 ReleaseLocalUiHolding(actor, "a mirrored order naming an ability this peer does not have");
                 return;
             }
@@ -3677,7 +3836,8 @@ namespace Multiplayer.Tactical
             _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced,
                                                 Statuses = statuses, Traits = traits, Selected = selected,
                                                 Uses = uses, Champ = champ, Vision = vision,
-                                                Epoch = TacticalDamageSync.StatEpoch };
+                                                Epoch = TacticalDamageSync.StatEpoch,
+                                                Ordinal = RailOrdinal.Current };
         }
 
         /// <summary>The standing settle applier (driven from <c>SyncEngine.Tick</c>, client-only inside). A
@@ -3805,6 +3965,11 @@ namespace Multiplayer.Tactical
         /// underneath it (<c>TacticalAbility.PlayAction</c>:998 passes <c>cancelCurrent: true</c>).</summary>
         private static void ApplySettle(int key, TacticalActor actor, PendingSettle s)
         {
+            if (key != 0 && s.Ordinal != 0)
+            {
+                uint had;
+                if (!_settledAt.TryGetValue(key, out had) || s.Ordinal > had) _settledAt[key] = s.Ordinal;
+            }
             using (SyncApplyScope.Enter())
             {
                 // THE HOST HAS ANSWERED, AND THE ANSWER MAY BE "NO" (A9). A refused order is mirrored by

@@ -414,6 +414,7 @@ namespace Multiplayer.Tactical
             _statEpoch = 0;
             _resnapRequested = false;
             _resnapPending = false;
+            _resnapWaited = 0;
             _said.Clear();
             MirrorApplyScope.Reset();
             CooldownDurationMirror.Reset();
@@ -489,16 +490,24 @@ namespace Multiplayer.Tactical
             if (receiver == null) return;
             var actor = receiver.GetActor();
             int key = TacticalActorKey.Of(actor);
+            string slot = TacticalActorKey.SlotOf(receiver) ?? "";
             if (key == 0)
             {
-                SayOnce("unkeyed-" + (actor == null ? "<null>" : actor.name),
-                    "[Multiplayer][tac] damage to " + (actor == null ? "an ownerless receiver" : actor.name) +
+                // AN OWNERLESS RECEIVER IS LEGITIMATE AND MUST STILL BE NAMEABLE. Item.Actor:24-42 and
+                // ItemSlot.GetActor:142-145 both answer null when there is no InventoryComponent and no
+                // ActorComponent on the rig root, and DamageReceiverImplementation.OnActorExitPlay:97-101 nulls
+                // _actorBase outright — so damage landing after an actor left play arrives here by design.
+                // A full address for it would need an identity scheme for non-actor items, which is a redesign.
+                // What is NOT acceptable is what this used to say: the key and the message both collapsed to
+                // "<null>", so one SayOnce swallowed every distinct object and the recurrence was undiagnosable.
+                string what = Describe(receiver, slot);
+                SayOnce("unkeyed-" + (actor == null ? what : actor.name),
+                    "[Multiplayer][tac] damage to " + (actor == null ? "an ownerless " + what : actor.name) +
                     " is NOT relayed — it has no shared key (no GeoTacUnitId, no derived battle key and no " +
                     "host-assigned spawn key, which A4 mints for every mid-battle spawn). That actor's health " +
                     "will differ on every other screen for the rest of the mission.");
                 return;
             }
-            string slot = TacticalActorKey.SlotOf(receiver) ?? "";
             string itemGuid = ItemGuidOf(receiver, slot);
             if (itemGuid == null) return;                 // an item nobody could name; ItemGuidOf said so
             var stats = (actor as TacticalActor)?.CharacterStats;
@@ -527,6 +536,22 @@ namespace Multiplayer.Tactical
         }
 
         internal static float Stat(BaseStat s) => s == null ? float.NaN : (float)s;
+
+        /// <summary>What the thing that took the damage IS, for a refusal that has no actor to name it by: its
+        /// runtime type plus whichever def it carries. Enough to tell one recurrence from another, which the
+        /// bare "&lt;null&gt;" it replaces was not.</summary>
+        private static string Describe(IDamageReceiver receiver, string slot)
+        {
+            if (receiver == null) return "<null receiver>";
+            string type = receiver.GetType().Name;
+            var item = receiver as TacticalItem;
+            if (!ReferenceEquals(item, null) && !ReferenceEquals(item.ItemDef, null))
+                return type + " '" + item.ItemDef.name + "'" + (slot.Length == 0 ? "" : " in slot '" + slot + "'");
+            var part = receiver as ItemSlot;
+            if (!ReferenceEquals(part, null) && !ReferenceEquals(part.ItemSlotDef, null))
+                return type + " '" + part.ItemSlotDef.name + "'";
+            return type + (slot.Length == 0 ? "" : " in slot '" + slot + "'");
+        }
 
         // ─── THE THIRD RECEIVER SHAPE: A CARRIED ITEM ──────────────────────
 
@@ -582,11 +607,18 @@ namespace Multiplayer.Tactical
                 why = "that actor has no BodyState, so it can carry no addressable item";
                 return null;
             }
-            var def = GameUtl.GameComponent<DefRepository>()?.GetDef(guid) as ItemDef;
+            // The probe is REAL here, and its two outcomes are different diagnoses: no def at all is a def-set
+            // difference between the peers; a def of the wrong TYPE is this rail naming the wrong thing. The
+            // one sentence that covered both used to blame the join for either.
+            var any = GameUtl.GameComponent<DefRepository>()?.GetDef(guid);
+            var def = any as ItemDef;
             if (ReferenceEquals(def, null))
             {
-                why = "item def guid " + guid + " resolves to nothing on this peer (mod parity should have made " +
-                      "that impossible, law 10)";
+                why = any == null
+                    ? "item def guid " + guid + " resolves to NO def on this peer — the two peers' def sets " +
+                      "really do differ, which is the one thing here that mod parity (law 10) is about"
+                    : "item def guid " + guid + " resolves to a " + any.GetType().Name + " on this peer, not an " +
+                      "ItemDef — the def sets agree and this record is naming the wrong kind of thing";
                 return null;
             }
             var item = body.GetItem(slot, def);
@@ -707,7 +739,11 @@ namespace Multiplayer.Tactical
                     w.Write(items.Count);
                     foreach (var it in items)
                     {
-                        w.Write(it.GetSlotName() ?? "");
+                        // SlotOf, never it.GetSlotName(): TacticalItem.GetSlotName:634-637 is hardcoded "".
+                        // Writing that shipped every damaged item under the "whole actor" address, and the
+                        // reader's ResolveItem then found nothing and skipped it — silently, which is why the
+                        // recovery path looked healthy while repairing not one weapon.
+                        w.Write(TacticalActorKey.SlotOf(it) ?? "");
                         w.Write(it.ItemDef.Guid);
                         w.Write(Stat(it.GetHealth()));
                         w.Write(Stat(it.GetArmor()));
@@ -795,11 +831,35 @@ namespace Multiplayer.Tactical
         /// a request that could not be sent (no engine yet, mid-teardown) must not vanish.</summary>
         internal static void ClientTick(NetworkEngine engine)
         {
-            if (!_resnapPending) return;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) { _resnapPending = false; return; }
-            _resnapPending = false;
-            IntentRail.Send(SurfaceIds.TacCommandIntent, OpIntentResnap, "resnapshot after a 0x84 gap");
+            if (_resnapPending)
+            {
+                if (engine == null || !engine.IsActiveSession || engine.IsHost) { _resnapPending = false; return; }
+                _resnapPending = false;
+                _resnapWaited = 0;
+                IntentRail.Send(SurfaceIds.TacCommandIntent, OpIntentResnap, "resnapshot after a 0x84 gap");
+                return;
+            }
+            // THE LATCH HAD NO WAY BACK. _resnapRequested exists so one hole does not become a storm of
+            // requests, and it was cleared ONLY by a resnapshot actually arriving — so a request the host
+            // REFUSED (HandleResnapRequest rejects when it is not in a battle) or that never reached it left
+            // the flag set for the rest of the mission, and every later gap logged its error and recovered
+            // from nothing. The wait is counted in ticks rather than seconds deliberately: this method is the
+            // rail's own standing tick, and Time is a native ECall the headless harness cannot make.
+            if (!_resnapRequested || ++_resnapWaited < ResnapWaitTicks) return;
+            _resnapWaited = 0;
+            _resnapRequested = false;
+            Debug.LogError("[Multiplayer][tac] no resnapshot arrived within " + ResnapWaitTicks + " ticks of asking " +
+                           "for one — the request was lost or the host refused it. Re-arming, so the NEXT gap in " +
+                           "the resolved-attack stream can still ask; until one lands, somebody's health here is " +
+                           "still wrong.");
         }
+
+        /// <summary>How long an outstanding resnapshot request may go unanswered before the next gap is allowed
+        /// to ask again. At the rail's tick rate this is a handful of seconds — long enough that the answer to
+        /// a live request is not raced, short enough that a battle is not spent un-recoverable.</summary>
+        private const int ResnapWaitTicks = 600;
+
+        private static int _resnapWaited;
 
         private static void ApplyDamage(BinaryReader r)
         {
@@ -888,11 +948,25 @@ namespace Multiplayer.Tactical
                              "recomputed something the host had already resolved.");
         }
 
+        /// <summary>Is a resnapshot stamped <paramref name="ordinal"/> older than the newest settle already
+        /// applied to <paramref name="key"/>? A pure decision so law L363 can execute every corner of it: an
+        /// unstamped resnapshot (ordinal 0, no inbound dispatch) is never stale, and an actor this peer has
+        /// never settled has nothing to be older than.</summary>
+        internal static bool ResnapIsStale(uint ordinal, int key) =>
+            ordinal != 0 && ordinal < TacticalCommandSync.LastSettleOrdinal(key);
+
         private static void ApplyResnap(BinaryReader r)
         {
             var tlc = Tlc();
             int n = r.ReadInt32();
-            int fixedUp = 0, lost = 0;
+            int fixedUp = 0, lost = 0, itemsLost = 0, rewound = 0;
+            string firstItemWhy = null;
+            // THE RESNAPSHOT CAN BE OLDER THAN WHAT IS ALREADY HERE. ApplySettle has had a staleness guard
+            // since L105; this path had none, and the two surfaces cannot be ordered by their seqs — 0x84 and
+            // 0x82 mint independent streams. So a resnapshot the host stamped at T could land after a settle
+            // it stamped at T+2s and rewind that actor's action and will points. RailOrdinal is the ONE key
+            // both carry (minted at the single encoder, SyncProtocol:45), so it is the one comparison there is.
+            uint ordinal = RailOrdinal.Current;
             using (SyncApplyScope.Enter())
                 for (int i = 0; i < n; i++)
                 {
@@ -925,7 +999,16 @@ namespace Multiplayer.Tactical
                         float ih = r.ReadSingle(), ia = r.ReadSingle();
                         if (actor == null) continue;
                         var item = ResolveItem(actor, iSlot, iGuid, out why);
-                        if (item == null) continue;
+                        if (item == null)
+                        {
+                            // NOT A MUTE `continue`. This branch swallowed the entire item-repair half of the
+                            // recovery path: while the host wrote every damaged item under an empty slot name
+                            // (TacticalItem.GetSlotName is hardcoded ""), nothing here resolved and NOTHING
+                            // said so, so a resnapshot that repaired no weapon at all reported success.
+                            itemsLost++;
+                            if (firstItemWhy == null) firstItemWhy = actor.name + " slot '" + iSlot + "': " + why;
+                            continue;
+                        }
                         // Set, never re-damaged: the game's own StatChangeEvent then runs the whole cascade
                         // this peer is missing — TacticalActor.OnEquipmentHealthChange:1023-1033 shows the
                         // "EquipmentDamaged" popup and DamageReceiverImplementation.OnHealthChanged:112-127
@@ -940,7 +1023,12 @@ namespace Multiplayer.Tactical
                     fixedUp++;
                     Correct(actor.Health, hp, actor.name + " health");
                     var stats = (actor as TacticalActor)?.CharacterStats;
-                    if (stats != null)
+                    // Health is deliberately NOT gated: a settle never carries it, so an older resnapshot is
+                    // still the newest word on it. AP and WP are the two fields both surfaces write, and the
+                    // only two an out-of-order resnapshot can rewind.
+                    bool stale = ResnapIsStale(ordinal, key);
+                    if (stale) rewound++;
+                    if (stats != null && !stale)
                     {
                         Correct(stats.ActionPoints, ap, actor.name + " AP");
                         Correct(stats.WillPoints, wp, actor.name + " WP");
@@ -957,8 +1045,15 @@ namespace Multiplayer.Tactical
                     TacticalStatusSet.Reconcile(actor, tlc, statuses, "the host's resnapshot");
                 }
             _resnapRequested = false;
+            _resnapWaited = 0;
             Debug.LogWarning("[Multiplayer][tac] CLIENT applied the host's resnapshot: " + fixedUp + " actor(s) " +
-                             "reconciled, " + lost + " unresolvable.");
+                             "reconciled, " + lost + " unresolvable, " + rewound + " left alone as older than a " +
+                             "settle already applied here.");
+            if (itemsLost > 0)
+                Debug.LogError("[Multiplayer][tac] the host's resnapshot named " + itemsLost + " damaged item(s) " +
+                               "this peer could not resolve (first: " + firstItemWhy + ") — every one of them stays " +
+                               "at whatever health it has here, which is the divergence the resnapshot was asked " +
+                               "for. This used to be a silent `continue`.");
         }
     }
 

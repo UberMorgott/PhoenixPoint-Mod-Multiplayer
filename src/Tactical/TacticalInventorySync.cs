@@ -111,6 +111,13 @@ namespace Multiplayer.Tactical
         /// nothing to assign and nothing to adopt.</summary>
         private const byte KindGround = 2;
 
+        /// <summary>A BODY PART, which is in no <see cref="InventoryComponent"/> at all — it hangs in an
+        /// <c>ItemSlot</c> (<c>TacticalItem.ParentItemSlot</c>:121). Used ONLY by A7's target address
+        /// (<c>TacAbilityTargetCodec.ItemAddress</c>), never by A6's container batch: a limb is not a container
+        /// and <see cref="ContainerOf"/> deliberately does not answer for this kind. The kind lives here rather
+        /// than in the codec so there is one numbering for both riders and a future kind cannot reuse 3.</summary>
+        internal const byte KindBodyPart = 3;
+
         /// <summary>The acting peer's observed native charge, waiting for the batch it belongs to. Set by the
         /// <see cref="InventoryCostSeam"/> postfix, consumed by the commit. Never a deduction of our own.</summary>
         private static int _payerKey;

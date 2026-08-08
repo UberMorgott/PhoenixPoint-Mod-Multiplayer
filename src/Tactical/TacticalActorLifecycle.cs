@@ -442,9 +442,18 @@ namespace Multiplayer.Tactical
             {
                 var loot = _pendingDeath[key];
                 _pendingDeath.Remove(key);
+                // AND THE HOST'S HEALTH RIDES WITH IT. Without it this op could only BURY an actor: a peer
+                // whose hit points had already drifted was killed at the wrong number and the difference went
+                // with it into the corpse, unrepaired and unreported. It is also what makes the kill itself
+                // native — Health.Set(0) is the game's own death trigger, so writing the host's number
+                // normally IS the death and TacticalDamageSync.Correct says out loud when the two disagreed.
+                string why;
+                var dying = TacticalActorKey.Resolve(TacticalDamageSync.Tlc(), key, out why);
+                float hp = dying == null ? float.NaN : TacticalDamageSync.Stat(dying.Health);
                 TacticalDamageSync.Send(TacticalDamageSync.OpDeath, "death key=" + key, w =>
                 {
                     w.Write(key);
+                    w.Write(hp);
                     WriteLoot(w, loot);
                 });
             }
@@ -473,6 +482,7 @@ namespace Multiplayer.Tactical
         internal static void ApplyDeath(BinaryReader r)
         {
             int key = r.ReadInt32();
+            float hp = r.ReadSingle();
             var loot = ReadLoot(r);
             LootMirror.Declare(key, loot);
             string why;
@@ -483,6 +493,13 @@ namespace Multiplayer.Tactical
                                " — this peer keeps fighting something the host has already buried.");
                 return;
             }
+            // CORRECT, THEN KILL — never the other way round. The host's number is normally 0 and writing it
+            // IS the native death (Health.Set → OnHealthChange → Die), so ForceDeath below is left as the
+            // backstop it was always meant to be; and where the two peers disagreed, Correct names the gap
+            // instead of burying it. This is also why the observed "forcing X dead at 50 HP" was never the bug
+            // it read as: PoisonwormExplode_AbilityDef is a self-destruct that never enters ApplyDamageInternal,
+            // so 50 was simply full health and the death arrived by this op, exactly as designed.
+            using (SyncApplyScope.Enter()) TacticalDamageSync.Correct(actor.Health, hp, SafeName(actor) + " health");
             ForceDeath(actor, "the host's death record");
         }
 

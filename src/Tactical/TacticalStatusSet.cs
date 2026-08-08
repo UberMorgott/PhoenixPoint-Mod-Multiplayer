@@ -279,8 +279,10 @@ namespace Multiplayer.Tactical
                 if (def == null)
                 {
                     Debug.LogError("[Multiplayer][tac] the host has status '" + defName + "' on " + actor.name +
-                                   " and no def of that name exists on this peer — mod parity should have made " +
-                                   "that impossible (law 10). That actor's state stays different here.");
+                                   " and no def of that NAME resolves on this peer. A status def can be minted at " +
+                                   "runtime (L130 is why this rides as a name and not a guid), so this is as likely " +
+                                   "to be a def another mod made only on the host as it is a def-set difference — " +
+                                   "nothing here can tell those apart. That actor's state stays different here.");
                     return;
                 }
                 var repo = GameUtl.GameComponent<DefRepository>();
@@ -338,10 +340,25 @@ namespace Multiplayer.Tactical
         {
             var t = s == null ? null : s.Target;
             if (t == null) return "";
+            // AN EffectTarget IS A WRAPPER, NOT A SHAPE OF ITS OWN. Base.Entities.Effects.EffectTarget:5-13 is
+            // `object Object` plus a position, and the thing inside it is usually one of the two shapes below —
+            // so refusing the wrapper threw away an address that was right there. GameObject is the third form
+            // it holds (the property is literally `Object as GameObject`), and the actor on it is an
+            // IDamageReceiver like any other.
+            var wrapper = t as Base.Entities.Effects.EffectTarget;
+            if (wrapper != null)
+            {
+                t = wrapper.Object;
+                var go = t as GameObject;
+                if (go != null) t = go.GetComponent<TacticalActorBase>();
+                if (t == null) return "";
+            }
             var text = t as string;
             if (text != null) return "s:" + text;
             var receiver = t as IDamageReceiver;
-            if (receiver != null) return "r:" + (receiver.GetSlotName() ?? "");
+            // SlotOf, not GetSlotName(): TacticalItem.GetSlotName:634-637 is hardcoded "", so the naive call
+            // shipped a body-part status as "r:" and the far side rebuilt it onto the WHOLE ACTOR.
+            if (receiver != null) return "r:" + (TacticalActorKey.SlotOf(receiver) ?? "");
             string type = t.GetType().Name;
             if (_said.Add("target-" + type))
                 Debug.LogWarning("[Multiplayer][tac] a status is targeted at a " + type + ", which is neither a slot " +

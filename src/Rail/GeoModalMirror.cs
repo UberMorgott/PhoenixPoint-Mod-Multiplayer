@@ -456,7 +456,8 @@ namespace Multiplayer.Network.Sync
                            "casts before it reads";
                 if (keysResolved != keysWanted)
                     return "the shipped path resolves to a DIFFERENT class on this peer than the host " +
-                           "described (mod parity: law 10 should have blocked the join) — the data-bind's " +
+                           "described (" + keysResolved + " of " + keysWanted + " class keys matched; nothing " +
+                           "here tested the peers' def sets, so this is not a parity finding) — the data-bind's " +
                            "cast throws inside EnterState, which is the same half-built window by another route";
                 return null;
             }

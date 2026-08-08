@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using UnityEngine;
 
 namespace Multiplayer.Network.Sync
 {
@@ -8,8 +9,10 @@ namespace Multiplayer.Network.Sync
     /// envelope and dispatches to the LIVE tactical replication fast-path (<see cref="TacticalInbound"/>),
     /// then the geoscape hook (<see cref="GeoscapeInbound"/>, armed by <c>SyncEngine</c>: ResearchSync /
     /// ManufactureSync / IntentRail / GenericApplier); any envelope neither hook consumes is dropped
-    /// (forward-compat). PURE: references no transport / Unity / HarmonyLib type, so it is unit-tested in
-    /// isolation like every other sync primitive. The action-relay surfaces GeoIntent/GeoOutcome/GeoReject
+    /// (forward-compat). PURE of transport and HarmonyLib, so it is unit-tested in isolation like every other
+    /// sync primitive; its ONE Unity reference is <c>Debug</c>, because the undecodable-envelope drop below
+    /// must be audible and this repo has no second logger (the harness swaps in a sink, so it stays testable).
+    /// The action-relay surfaces GeoIntent/GeoOutcome/GeoReject
     /// (0xA2-0xA4) are retired tombstones — client intents ride each family's own surface via IntentRail.
     /// Both peers run the same DLL, so there is exactly ONE rail — no double-apply.
     /// </summary>
@@ -83,6 +86,7 @@ namespace Multiplayer.Network.Sync
         private readonly List<KeyValuePair<ulong, byte[]>> _held = new List<KeyValuePair<ulong, byte[]>>();
         private int _heldFrames;
         private bool _releasing;
+        private int _undecodable;
 
         /// <summary>How many records are waiting for this peer's turn edge (diagnostics + the executed law arm).</summary>
         public int HeldCount { get { return _held.Count; } }
@@ -116,7 +120,22 @@ namespace Multiplayer.Network.Sync
         /// per-family to wire up. Placement is the universality: the one chokepoint every surface passes.</summary>
         public void OnInbound(ulong senderPeerId, byte[] data)
         {
-            if (!SyncProtocol.TryDecodeEnvelope(data, out var surfaceId, out var kind, out var ordinal, out var payload)) return;
+            if (!SyncProtocol.TryDecodeEnvelope(data, out var surfaceId, out var kind, out var ordinal, out var payload))
+            {
+                // NAMED, NOT DROPPED. This is one of three places an envelope can end its life on this path and
+                // it was the only silent one — which is exactly why a lost 0x84 record in the 2026-08-08 capture
+                // could not be pinned to a hop. The channel is reliable and ordered by contract (SurfaceSeq:11-13,
+                // over TCP), so a failure here is a MALFORMED message, not a lost one: nothing to retransmit,
+                // everything to explain. Rate-limited because a decoder that fails once usually fails on
+                // everything after it.
+                _undecodable++;
+                if (_undecodable == 1 || _undecodable % 100 == 0)
+                    Debug.LogError("[Multiplayer][rail] an inbound envelope (" + (data == null ? 0 : data.Length) +
+                                   " bytes) does not decode and is DISCARDED — occurrence " + _undecodable +
+                                   ". Whatever surface it belonged to has a hole in its stream, and every " +
+                                   "recovery this rail has is armed by a hole its own surface can SEE.");
+                return;
+            }
             // TURN-EPOCH GATE (see ClientBehindTurnEdge): a record the host stamped after ITS faction-turn
             // edge is not applied before this peer crosses its own. Held BEFORE the ordinal is observed so
             // the replay re-enters this method whole and the batch keeps its arrival order. _releasing stops
