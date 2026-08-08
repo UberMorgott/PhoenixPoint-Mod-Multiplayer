@@ -337,6 +337,7 @@ namespace RailCheck
             Add(laws, () => L355_ALaunchedMissionDoesNotArmASecondCountdown.Check());
             Add(laws, () => L365_AClassSwapIsRecreatedNotFieldPatched.Check());
             Add(laws, () => L366_ACapacityShapedLoadoutFitsACompactVehicle.Check());
+            Add(laws, () => L368_AnUnansweredFullResendSaysSo.Check());
             Add(laws, () => L369_ABaseRenameReachesTheMirror.Check());
             Add(laws, () => L371_AMidSessionParityDiffIsSaidOutLoud.Check());
             Add(laws, () => L372_OneDeploymentCapForTheScreenAndTheValidator.Check());

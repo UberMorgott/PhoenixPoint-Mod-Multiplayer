@@ -46,6 +46,11 @@ namespace Multiplayer.Network.Sync
         /// Without it "the resend never came" and "it came and was applied silently" produce the same
         /// log — four requests in the 2026-08-07 session had ZERO acknowledgement of either kind.</summary>
         private static readonly Dictionary<string, float> _pendingScoped = new Dictionary<string, float>(StringComparer.Ordinal);
+        /// <summary>The FULL resend's counterpart of the deadline above (&lt; 0 = none in flight). It had
+        /// none, so the one request that covers the WORST losses — a seq gap, a torn batch, an unknown kind,
+        /// i.e. everything where this peer cannot even name what it lost — was the one request nothing ever
+        /// said had gone unanswered. A scoped backfill got a warning after 10 s and a full one got silence.</summary>
+        private static float _pendingFullAt = -1f;
         /// <summary>Referrer PATHS whose entry dropped a reference because the referent did not exist on
         /// this peer yet — an <c>Unresolved</c> leaf, an entity-list element, an order-vector member. The
         /// host will NEVER re-ship them (its snapshot is unchanged, so no diff ever fires for them), which
@@ -88,6 +93,7 @@ namespace Multiplayer.Network.Sync
             // answered now, and reporting it unanswered later would name a root that no longer means
             // what it meant when the request went out.
             _pendingScoped.Clear();
+            _pendingFullAt = -1f;
             _scopedDropN.Clear(); _scopedDropWhy.Clear();
             _refDropPaths.Clear(); // those referrers belonged to the replaced state; the save carries the refs
             _fragBuf.Clear(); _fragGot.Clear(); // the transferred save replaced the state these halves belonged to
@@ -850,7 +856,7 @@ namespace Multiplayer.Network.Sync
                 // backfills of the 2026-08-07 session reported UNANSWERED while the host had answered
                 // every one: they asked for the root a structural create had just delivered byte for
                 // byte, so every entry of the answer landed on this line.
-                if (_pendingScoped.Count > 0) NoteScopedAnswer(path);
+                if (_pendingScoped.Count > 0 || _pendingFullAt >= 0f) NoteScopedAnswer(path);
                 // Investigation diag (reassign retest), behind the ONE switch: a TacUnits delta that
                 // arrived but matched local bytes. Ungated it emitted 431 lines in a release build, 424
                 // of them inside ONE second of the first campaign load — MpDiag.On FIRST so the path
@@ -1000,7 +1006,7 @@ namespace Multiplayer.Network.Sync
                 }
                 touched.Add(entity);
                 MarkOrderChange(geo, path, entity, field.Name);
-                if (_pendingScoped.Count > 0) NoteScopedAnswer(path);
+                if (_pendingScoped.Count > 0 || _pendingFullAt >= 0f) NoteScopedAnswer(path);
             }
             catch (Exception ex)
             {
@@ -1764,6 +1770,14 @@ namespace Multiplayer.Network.Sync
         /// for is the mirror's contents, not a write.</summary>
         private static void NoteScopedAnswer(string path)
         {
+            // A FULL resend has no scope to match, so ANY entry that lands is its answer — that is what
+            // "resend everything" asked for and there is no other acknowledgement on the wire.
+            if (_pendingFullAt >= 0f)
+            {
+                _pendingFullAt = -1f;
+                Debug.Log("[Multiplayer][rail] GenericApplier: full resend ANSWERED — the mirror holds the " +
+                          "host's entry at " + path);
+            }
             var hit = PendingRootOf(path);
             if (hit == null) return;
             _pendingScoped.Remove(hit);
@@ -1824,9 +1838,37 @@ namespace Multiplayer.Network.Sync
         /// <summary>The other half: a request nobody answered must say so, or "the resend never came" and
         /// "it came and applied silently" stay indistinguishable — which is exactly what four unacknowledged
         /// backfill requests looked like in the 2026-08-07 session.</summary>
+        /// <summary>The give-up LINE, as a pure decision so the outcome can be asserted headless (RailCheck
+        /// L368) rather than only observed in a live session. "" = still inside the deadline, say nothing.
+        /// <paramref name="root"/> null = the rootless FULL request.</summary>
+        internal static string GiveUpLine(string root, float now, float deadline, int dropped, string why)
+        {
+            if (now < deadline) return "";
+            return (root == null ? "full resend" : "scoped resend of root '" + root + "'") +
+                   " went UNANSWERED for " + ScopedAnswerDeadlineSec + "s. This peer's mirror " +
+                   (root == null ? "stays as it was — and this is the request it sends when it cannot even " +
+                                   "NAME what it lost (a seq gap, a torn batch, an unknown kind), so what is " +
+                                   "missing is unknown as well. "
+                                 : "of that root stays as it was. ") +
+                   (dropped > 0
+                       ? dropped + " entr" + (dropped == 1 ? "y" : "ies") + " under it DID arrive and were " +
+                         "discarded here — first: " + why
+                       : "Nothing arrived at all, so the answer never reached this peer (or the host's scope " +
+                         "matched no covered path — it says so).");
+        }
+
         private static void ExpireScopedRequests()
         {
             float now = Time.realtimeSinceStartup;
+            if (_pendingFullAt >= 0f)
+            {
+                var full = GiveUpLine(null, now, _pendingFullAt, 0, null);
+                if (full.Length > 0)
+                {
+                    _pendingFullAt = -1f;
+                    Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + full);
+                }
+            }
             List<string> dead = null;
             foreach (var kv in _pendingScoped)
                 if (now >= kv.Value) (dead ?? (dead = new List<string>())).Add(kv.Key);
@@ -1837,14 +1879,7 @@ namespace Multiplayer.Network.Sync
                 _scopedDropN.TryGetValue(k, out int dropped);
                 _scopedDropWhy.TryGetValue(k, out var why);
                 _scopedDropN.Remove(k); _scopedDropWhy.Remove(k);
-                Debug.LogWarning("[Multiplayer][rail] GenericApplier: scoped resend of root '" + k +
-                                 "' went UNANSWERED for " + ScopedAnswerDeadlineSec + "s. This peer's " +
-                                 "mirror of that root stays as it was. " +
-                                 (dropped > 0
-                                     ? dropped + " entr" + (dropped == 1 ? "y" : "ies") + " under it DID " +
-                                       "arrive and were discarded here — first: " + why
-                                     : "Nothing under it arrived at all, so the answer never reached this " +
-                                       "peer (or the host's scope matched no covered path — it says so)."));
+                Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + GiveUpLine(k, now, 0f, dropped, why));
             }
         }
 
@@ -1919,7 +1954,7 @@ namespace Multiplayer.Network.Sync
             if (engine == null || engine.IsHost || !engine.IsActiveSession) return;
             // BEFORE the CRC's own interval gate: an unanswered request must be reported on its OWN
             // deadline, not on whenever the roster-scaled backstop next happens to come round.
-            if (_pendingScoped.Count > 0) ExpireScopedRequests();
+            if (_pendingScoped.Count > 0 || _pendingFullAt >= 0f) ExpireScopedRequests();
             if (Time.realtimeSinceStartup < _crcNextAt) return;
             // ROSTER-SCALED interval (N=50 mandate). Every client reports on its own clock and the HOST pays
             // one subtree walk per report, so a fixed 1 s interval makes the host's backstop cost grow
@@ -2013,7 +2048,7 @@ namespace Multiplayer.Network.Sync
                 _nextScopedAt[rootKey] = now + ResyncThrottleSec;
                 _pendingScoped[rootKey] = now + ScopedAnswerDeadlineSec;
             }
-            else _nextFullResyncAt = now + ResyncThrottleSec;
+            else { _nextFullResyncAt = now + ResyncThrottleSec; _pendingFullAt = now + ScopedAnswerDeadlineSec; }
             Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + reason + " — requesting resend" +
                              (scoped ? " of root '" + rootKey + "'" : " (full)"));
             try
