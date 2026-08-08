@@ -502,7 +502,7 @@ PhoenixPoint.Geoscape.Levels.Factions.FactionDiplomacyState  [direct]  covered=6
   + Leaf PointOfInterest (GeoSite)
   + Descend Relation (Relation)
   + Leaf Title (LocalizedTextBind)
-PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction  [bridge:GeoFactionInstanceData]  covered=16/32
+PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction  [bridge:GeoFactionInstanceData]  covered=17/32
   + Leaf AlienActivityEnabled (Boolean) -> live _alienActivityEnabled
   + Descend AlienRaidManager (AlienRaidManager)
   + EntityList AncientSiteProbeHistory (List`1) unordered=no apply=IList
@@ -513,7 +513,7 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction  [bridge:GeoFactionInstanc
   - EXCLUDED EvolutionProgress (Int32): read-only
   - EXCLUDED ExtendedInstanceData (Object): flattened onto live type (PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction+ExtendedInstanceData)
   - EXCLUDED FactionDef (PPFactionDef): read-only
-  - EXCLUDED GameTags (GameTagsList): bridge-unresolved
+  + LeafList GameTags (GameTagsList) -> live _factionTags unordered=no apply=ICollection<T>
   - EXCLUDED GenerateRecruitsNextUpdate (NextUpdate): bridge-unresolved
   - EXCLUDED InfestedHavenAircrafts (Dictionary`2): bridge-unresolved
   + Descend ItemStorage (ItemStorage)
@@ -535,7 +535,7 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction  [bridge:GeoFactionInstanc
   + LeafList UnlockedAugmentations (HashSet`1) unordered=yes apply=ICollection<T>
   + Descend VehicleEquipmentStorage (VehicleEquipmentStorage) -> live AircraftItemStorage
   + Descend Wallet (Wallet)
-PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInstanceData]  covered=21/36
+PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInstanceData]  covered=22/36
   + EntityList AlienBasesWithDiplomacyPenalty (Dictionary`2) -> live _alienBasesWithRevealPenalty unordered=yes apply=ICollection<T>
   + EntityList AncientSiteProbeHistory (List`1) unordered=no apply=IList
   + Leaf AncientSiteProbes (Int32)
@@ -550,7 +550,7 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInsta
   - EXCLUDED ExcavatingSites (List`1): blob husk on SiteExcavationState (_excavatingUpdateable:IUpdateable,_excavatingVisualsPrefab:GeoActorProgressionVisualController,_levelController:GeoLevelController)
   - EXCLUDED ExtendedInstanceData (Object): flattened onto live type (PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction+ExtendedInstanceData)
   - EXCLUDED FactionDef (PPFactionDef): read-only
-  - EXCLUDED GameTags (GameTagsList): bridge-unresolved
+  + LeafList GameTags (GameTagsList) -> live _factionTags unordered=no apply=ICollection<T>
   - EXCLUDED GenerateRecruitsNextUpdate (NextUpdate): bridge-unresolved
   + Descend ItemStorage (ItemStorage)
   + Leaf LastNakedRecruitRefresh (TimeUnit) -> live _lastNakedRecruitRefresh
@@ -572,14 +572,14 @@ PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction  [bridge:GeoFactionInsta
   + Descend VehicleEquipmentStorage (VehicleEquipmentStorage) -> live AircraftItemStorage
   + Descend Wallet (Wallet)
   - EXCLUDED _oldNakedRecruits (Dictionary`2): bridge-unresolved
-PhoenixPoint.Geoscape.Levels.GeoFaction  [bridge:GeoFactionInstanceData]  covered=11/20
+PhoenixPoint.Geoscape.Levels.GeoFaction  [bridge:GeoFactionInstanceData]  covered=12/20
   + EntityList AncientSiteProbeHistory (List`1) unordered=no apply=IList
   - EXCLUDED AncientSiteTargets (List`1): blob husk on SiteAttackSchedule (_updateable:IUpdateable)
   + Leaf BuildingZone (GeoHavenZone)
   + Descend Diplomacy (FactionDiplomacy)
   - EXCLUDED ExtendedInstanceData (Object): bridge-unresolved
   - EXCLUDED FactionDef (PPFactionDef): read-only
-  - EXCLUDED GameTags (GameTagsList): bridge-unresolved
+  + LeafList GameTags (GameTagsList) -> live _factionTags unordered=no apply=ICollection<T>
   - EXCLUDED GenerateRecruitsNextUpdate (NextUpdate): bridge-unresolved
   + Descend ItemStorage (ItemStorage)
   + Leaf LastVehicleIndex (Int32) -> live _lastVehicleIndex
@@ -820,7 +820,7 @@ twin summary: resolved=80 gaps=35 dispatch=7
 
 null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), GeoHavenDefenseMissionInstanceData.AttackingSites (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
 
-summary: covered=460 excluded=80 blobbable=31 geoItemDicts=1
+summary: covered=463 excluded=77 blobbable=31 geoItemDicts=1
 
 known law violations (1) — each one is a rail bug, not a harness limit:
   ! L62 unbanded-name: ClockPhaseProbe (0xC0) starts with neither Geo nor Tac, so which band it must live in is undecidable — the partition that keeps the tactical-first router from eating geoscape traffic is only enforceable by name

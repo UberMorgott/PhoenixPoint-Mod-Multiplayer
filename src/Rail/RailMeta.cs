@@ -954,6 +954,39 @@ namespace Multiplayer.Network.Sync
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.SupressEvents", "SuppressEvents" },  // GeoscapeEventSystem.RecordInstanceData:667 (game typo in the DTO member)
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.RemoveEventsAfterTimers", "_removeEventsAfterTimerExpires" }, // GeoscapeEventSystem.RecordInstanceData:669 — DTO name is not the storage name and no convention reaches it
 
+            // A faction's GAME TAGS — the carrier of every research-granted UNLOCK and of "faction
+            // discovered". Not a cosmetic member: GeoPhoenixFaction.RecruitmentFunctionalityUnlocked
+            // (:124) is DERIVED from GameTags.Contains(FactionDef.RecruitFunctionalityTag)
+            // (CheckForUiUnlocks:1647-1652) and gates the roster's Recruits tab
+            // (UIModuleGeoRosterTabs.CheckAvailableTabs:83-84); IsFactionDiscovered:1200-1212 reads the
+            // DiscoveredTag the same way and UIModuleDiplomacySection.cs:74-79 hides a whole faction
+            // section on false. Both tags arrive natively through GeoFaction.AddTag ->
+            // _factionTags.AddNotContained (GeoFaction.cs:1634-1637), a path only the HOST runs, so
+            // without this row every unlock is false on the client FOREVER — no repaint could have
+            // helped, the flag itself was never true.
+            //
+            // Auto-resolution could not reach it: the same-named public member is a
+            // GameTagsProviderList PROPERTY (GeoFaction.cs:161), not TwinTypeCompatible with the DTO's
+            // GameTagsList (GeoFactionInstanceData.cs:40), and there is no `_gameTags` field for the
+            // backing-field rung. `_factionTags` IS the store the game itself records
+            // (RecordInstanceData:369 `GameTags = _factionTags`) and IS one of the two providers behind
+            // the public view (Init:346). Keyed on GeoFaction, so the one row covers GeoPhoenixFaction,
+            // GeoAlienFaction and GeoFaction alike (ResolveLive walks base types, :1004-1011).
+            //
+            // Once the tags land the native chain self-drives the unlock with no mod code: the
+            // ICollection<T> Clear+Add in ApplyListCore fires GameTagsList.Changed (GameTagsList.cs:292,
+            // :77) -> GameTagsProviderList forwards it -> GeoPhoenixFaction.OnGameTagsChanged (subscribed
+            // OnLevelStart:306) -> CheckForUiUnlocks + CheckForRevealingPhoenixBases (:1741-1747).
+            // The Clear pass momentarily reports an EMPTY tag set, so each unlock flag flips false and
+            // back; every side effect behind those flips is idempotent by the game's own guards
+            // (UnlockArcheology -> AddNotContained / AddAvailableItem's Any() test,
+            // ApplyAcheologyToVehicle / ApplyInterceptionToVehicle both GetAbilityWithDef-guarded), so
+            // the flicker costs a redundant UI refresh and nothing else. AddImpl THROWS on a duplicate
+            // or mutually-exclusive tag (GameTagsList.cs:107-120), which the Clear-first makes
+            // unreachable — and a throw here is caught per FIELD by GenericApplier's LogMissOnce
+            // (:950-953), so it could never abort a rail batch.
+            { "PhoenixPoint.Geoscape.Levels.GeoFaction.GameTags", "_factionTags" },       // GeoFaction.RecordInstanceData:369
+
             // ─── Haven / base / alien-base status (the "capture + faction behaviour" twins) ───
             // Every row below is the game's OWN Record/Process mapping, read off the decompile. They were
             // all "dto-twin unresolved": the DTO name is not the storage name, or the carrier sits one/two

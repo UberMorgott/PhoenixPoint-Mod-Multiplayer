@@ -450,6 +450,20 @@ namespace Multiplayer.Network.Sync
                     if (!Call(GrStatChanged, s, null, default(StatChangeType), 0f, 0f)) return false;
                     // module re-Init dropped the highlight — re-select the character being viewed
                     v.GeoscapeModules.GeneralPersonelRosterModule?.SetSelectSlot(cur, scrollToSoldier: true);
+                    // THE TAB BAR IS NOT PART OF THE ROSTER REBUILD. This arm returns true, which
+                    // suppresses the universal fallback re-enter — so EnterState:151 never runs again and
+                    // the tabs keep whatever availability they were painted with when the screen opened.
+                    // Every one of them is derived state a mirrored delta moves: Recruits reads
+                    // RecruitmentFunctionalityUnlocked, Aliens AlienContainmentUnlocked (both now live
+                    // through the faction GameTags rail row), Memorial Level.DeadSoldiers.Count, Aliens'
+                    // interactable CapturedUnits.Count. Native re-derives all of them from the model in
+                    // ONE call and writes nothing back (UIStateGeoRoster.cs:151 ->
+                    // UIModuleGeoRosterTabs.CheckAvailableTabs:74-90), which is exactly what a repaint may
+                    // do. ShowFilterButtons (:401) is deliberately NOT called: it toggles on the view's
+                    // deployment mode, which no rail delta moves.
+                    var rosterCtx = StateContext(s);
+                    if (rosterCtx?.ViewerFaction is PhoenixPoint.Geoscape.Levels.Factions.GeoPhoenixFaction)
+                        v.GeoscapeModules.GeoRosterTabsModule?.CheckAvailableTabs(rosterCtx);
                     return true;
                 },
                 [typeof(UIStateVehicleSelected)] = (s, v) =>

@@ -325,6 +325,44 @@ namespace Multiplayer.Tactical
             return found;
         }
 
+        /// <summary>THE SAME RESOLVE PLUS THE CAST EVERY TACTICAL CALLER MAKES — and the reason a dozen of
+        /// them were lying about why they refused a record.
+        ///
+        /// <c>Resolve(...) as TacticalActor</c> throws away the difference between "this peer never heard of
+        /// that key" and "this peer HAS that object and it is not a <c>TacticalActor</c>". The first fills
+        /// <c>why</c> in every branch; the second leaves it null, so the caller printed <c>— .</c> and named
+        /// NOTHING. Live 2026-08-08, rescue mission, client-derived battle key -69: ~30 host records (settle,
+        /// command, weapon switch) refused for the whole mission with an empty reason, the peers' evacuated
+        /// counts came out 3 on the host and 2 on the client, and the XP followed
+        /// (<c>TacticalFaction.GiveExperienceForObjectives</c> is computed locally on each peer from LOCAL
+        /// objective state).
+        ///
+        /// IT WAS INVISIBLE TO THE DETECTOR THAT EXISTS, which is the worse half: <see cref="Refuse"/> DROPS
+        /// an empty reason, so <see cref="RosterDivergence"/> — law L67e, the arm written precisely to catch
+        /// "this peer is fighting a smaller battle" — stayed green through a mission-long divergence. Textbook
+        /// silent swallow: an early return with nothing in any log.
+        ///
+        /// So the cast lives HERE, it NAMES the type it actually got, and it FILES the refusal. Filing is
+        /// correct for this failure and only this one: an object's type never changes, so a key that resolves
+        /// to a non-actor is a PERMANENT structural divergence, which is exactly what the ledger is for. The
+        /// transient failures are deliberately left unfiled — <see cref="Resolve"/> consults <c>_refused</c>
+        /// as the winning answer (A5), so filing "the map is not built yet" would permanently refuse a key
+        /// that becomes resolvable one frame later.</summary>
+        internal static TacticalActor ResolveActor(TacticalLevelController tlc, int key, out string why)
+        {
+            var found = Resolve(tlc, key, out why);
+            if (ReferenceEquals(found, null)) return null;   // Resolve already named the reason
+            var actor = found as TacticalActor;
+            if (actor != null) return actor;
+            // GetType().Name, not the Unity name: no ECall, so this path is as safe in the headless harness
+            // as it is in the player (same reason SafeName exists one method down).
+            why = "actor key " + key + " names a " + found.GetType().Name + " on this peer, not a TacticalActor" +
+                  " — it carries no CharacterStats, no abilities and no faction turn, so it can be neither " +
+                  "commanded, settled nor status-reconciled here while the host counts it as a soldier";
+            Refuse(key, why);
+            return null;
+        }
+
         /// <summary>THE RECEIVER KEY (law L66c): an <c>IDamageReceiver</c> is named by its actor plus
         /// <c>IDamageReceiver.GetSlotName()</c> — the interface's OWN identity string, not something invented
         /// here. <c>TacticalActorBase.GetSlotName</c>:764 returns "" (the whole actor),
@@ -1673,7 +1711,7 @@ namespace Multiplayer.Tactical
             {
                 _awaitingEcho.Remove(key);
                 string why;
-                var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
+                var actor = TacticalActorKey.ResolveActor(Tlc(), key, out why);
                 Debug.LogError("[Multiplayer][tac] ECHO LOST for " + (actor == null ? "actor " + key : actor.name) +
                                " — an order was published " + (EchoCeilingFrames / 60) + "s ago and the host " +
                                "never mirrored it back, so that soldier never played the action every other " +
@@ -1818,7 +1856,7 @@ namespace Multiplayer.Tactical
             int key = r.ReadInt32();
             string guid = r.ReadString();
             string why;
-            var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
+            var actor = TacticalActorKey.ResolveActor(Tlc(), key, out why);
             var faction = actor == null ? null : actor.TacticalFaction;
             EquipmentComponent comp = null; Equipment eq = null; string resolve = null;
             if (actor != null) ResolveEquipment(actor, guid, out comp, out eq, out resolve);
@@ -1873,7 +1911,7 @@ namespace Multiplayer.Tactical
         private static void ApplySelectEquipment(int key, string guid)
         {
             string why;
-            var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
+            var actor = TacticalActorKey.ResolveActor(Tlc(), key, out why);
             if (actor == null)
             {
                 Debug.LogWarning("[Multiplayer][tac] the host's weapon switch for actor " + key + " cannot be " +
@@ -2681,7 +2719,7 @@ namespace Multiplayer.Tactical
             }
 
             string why;
-            var actor = TacticalActorKey.Resolve(tlc, key, out why) as TacticalActor;
+            var actor = TacticalActorKey.ResolveActor(tlc, key, out why);
             var faction = actor == null ? null : actor.TacticalFaction;
             // BY SELECTION, NOT BY FIRST MATCH — several instances share one def guid (see ResolveAbility).
             TacticalAbility ability = ResolveAbility(actor, guid);
@@ -2752,7 +2790,7 @@ namespace Multiplayer.Tactical
         /// order.</summary>
         private static bool BusyWithOwnOrder(int key, ulong peer)
         {
-            var actor = TacticalActorKey.Resolve(Tlc(), key, out _) as TacticalActor;
+            var actor = TacticalActorKey.ResolveActor(Tlc(), key, out _);
             ulong owner;
             return actor != null && actor.HasExecutingAbility() &&
                    _cmdOwner.TryGetValue(key, out owner) && owner == peer;
@@ -3314,7 +3352,7 @@ namespace Multiplayer.Tactical
             // freeze that soldier for the full ceiling on top of an already-named failure.
             NoteEchoArrived(key);
             string why;
-            var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
+            var actor = TacticalActorKey.ResolveActor(Tlc(), key, out why);
             // ONE VERDICT, TWO SENTENCES. The decision is pure so RailCheck L140 can execute it; the branch
             // below only chooses which of the two failures to name. Playing a command whose actor-shaped keys
             // did not resolve would aim it somewhere else entirely — TacticalAbilityTarget.GetWorkingPosition
@@ -3603,7 +3641,7 @@ namespace Multiplayer.Tactical
             foreach (var kv in new List<KeyValuePair<int, PendingSettle>>(_pending))
             {
                 string why;
-                var actor = TacticalActorKey.Resolve(tlc, kv.Key, out why) as TacticalActor;
+                var actor = TacticalActorKey.ResolveActor(tlc, kv.Key, out why);
                 if (actor == null)
                 {
                     Debug.LogError("[Multiplayer][tac] settle for actor " + kv.Key + " DROPPED — " + why +
