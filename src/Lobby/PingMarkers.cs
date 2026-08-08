@@ -812,24 +812,43 @@ namespace Multiplayer.UI
             return Vector3.Dot(world - centre, cam.transform.position - centre) > 0f;
         }
 
+        /// <summary>
+        /// THE GLYPH, BUILT ONCE AND CACHED — and built BIG, because the aliasing was in the SOURCE and no
+        /// draw-side setting could have fixed it.
+        ///
+        /// At 32 px this texture was drawn at <c>half*2</c> = 144 px on a 1440p screen (see
+        /// <see cref="ArrowHalfMin"/>/<see cref="ArrowHalfFraction"/>), a 4.5x UPSCALE, and every edge pixel
+        /// was fully opaque or fully clear — a binary in/out test leaves bilinear filtering nothing but 0s
+        /// and 255s to interpolate between, so the 1-px steps survived at full size and
+        /// <c>GUIUtility.RotateAroundPivot</c> turned them into visible diagonal stairs.
+        ///
+        /// Two changes, both on the source: 256 px, so the same draw is a DOWNSCALE (which bilinear handles
+        /// cleanly at any resolution the game runs at), and a COVERAGE RAMP into the alpha instead of the
+        /// in/out test — how much of the pixel the triangle's edge actually covers, which is the
+        /// anti-aliasing the rotation then resamples. One ~256 KB allocation for the whole run; the cache
+        /// above is what keeps it out of the per-frame draw.
+        /// </summary>
         private static Texture2D Arrow()
         {
             if (_arrow != null) return _arrow;
-            const int n = 32;
+            const int n = 256;
             var tex = new Texture2D(n, n, TextureFormat.ARGB32, false) { hideFlags = HideFlags.HideAndDontSave };
             var px = new Color32[n * n];
             // WHITE, not the amber it used to be: the glyph is now tinted per ping through GUI.color, and
             // GUI.color MULTIPLIES. Amber times the peer blue is olive, not blue — a white glyph is the only
-            // one that renders the two owner colours as themselves.
-            var solid = new Color32(255, 255, 255, 255);
-            var clear = new Color32(0, 0, 0, 0);
+            // one that renders the two owner colours as themselves. Only the ALPHA carries the shape.
             for (var y = 0; y < n; y++)
             {
                 // Apex at the texture's TOP row, which GUI.DrawTexture draws at the rect's top — so the
                 // untransformed glyph points "up" and the rotation below is the only aiming step.
                 var width = (n - 1 - y) * 0.4f;
                 for (var x = 0; x < n; x++)
-                    px[y * n + x] = Mathf.Abs(x - (n - 1) * 0.5f) <= width ? solid : clear;
+                {
+                    // 1 well inside the triangle, 0 well outside, and the fraction the edge covers between —
+                    // the +0.5f is the pixel's own half-width, so the ramp is centred on the true edge.
+                    var a = Mathf.Clamp01(width - Mathf.Abs(x - (n - 1) * 0.5f) + 0.5f);
+                    px[y * n + x] = new Color32(255, 255, 255, (byte)(a * 255f));
+                }
             }
             tex.SetPixels32(px);
             tex.Apply();
