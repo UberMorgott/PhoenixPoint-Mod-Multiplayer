@@ -603,16 +603,32 @@ namespace Multiplayer.Tactical
             return null;
         }
 
-        /// <summary>A7 — an item field that RIDES but has no shared address (an item in no container at all,
-        /// or one whose owner this peer cannot key) still has to be audible: the order crosses without it and
-        /// the far side silently picks its own weapon. Same shape as <see cref="NoteDroppedField"/>.</summary>
+        /// <summary>A7 — an item field that RIDES but has no shared address still has to be audible.
+        ///
+        /// WHICH ITEMS THESE ARE, measured rather than assumed: the address <see cref="ItemAddress"/> mints is
+        /// (owning actor, container kind, def guid, charge, ordinal), and its only anchor is
+        /// <c>Item.InventoryComponent</c>:45. A BODY PART has none — <c>ShootAbility</c>:205-212 takes the
+        /// target's <c>BodyState.GetHealthSlots()</c> aim-point items and <c>Weapon.GetShootTarget</c>:792-795
+        /// takes the <c>ItemSlot</c>'s first visible one, and neither ever entered an inventory. The target's
+        /// EQUIPPED items (<c>ShootAbility</c>:213) do have one and ride normally, so every miss here is a limb.
+        ///
+        /// NOT REFUSED, and not given a second addressing scheme either: the limb already has a shared address
+        /// on this very target — <c>DamageReceiver</c> rides as (actor key, slot name) through
+        /// <c>TacticalActorKey.SlotOf</c>/<c>ResolveReceiver</c>, and <see cref="Read"/> now replays
+        /// <c>Weapon.GetShootTarget</c>:792-795's own rule off it, so the peers land on the same item by the
+        /// host's derivation instead of by luck. This line is what remains: the cases where even that yields
+        /// nothing. COUNTED through the rail's own digest rather than said once, because "first occurrence
+        /// only" is exactly what left the real frequency unknown.</summary>
         private static void NoteUnkeyableItem(string field, Item item)
         {
-            if (item == null || !_saidDropped.Add("unkeyed:" + field)) return;
-            Debug.LogWarning("[Multiplayer][tac] an activation carried TacticalAbilityTarget." + field +
-                             " that has NO shared address (it is in no keyed container), so it cannot ride. The " +
-                             "order still crosses, but every other peer resolves that field for itself — " +
-                             "first occurrence only.");
+            if (item == null) return;
+            var line = "[Multiplayer][tac] an activation carried TacticalAbilityTarget." + field +
+                       " (" + (item.ItemDef == null ? item.GetType().Name : item.ItemDef.name) +
+                       ") that has NO shared address — it is in no keyed container, which " +
+                       "is what a body part looks like. The order still crosses; the receiving peer re-derives " +
+                       "that field from the DamageReceiver slot, and falls back to its own aim point only if " +
+                       "that yields nothing.";
+            if (RailMeta.CountMiss(line)) Debug.LogWarning(line);
         }
 
         internal static void Write(BinaryWriter w, TacticalAbilityTarget t)
@@ -714,6 +730,19 @@ namespace Multiplayer.Tactical
             if ((mask & BitObstructionsCheckRadius) != 0) t.ObstructionsCheckRadius = r.ReadSingle();
             if ((mask & BitEquipment) != 0) t.Equipment = ResolveItem(r, "Equipment", tlc, unresolved) as Equipment;
             if ((mask & BitTacticalItem) != 0) t.TacticalItem = ResolveItem(r, "TacticalItem", tlc, unresolved) as TacticalItem;
+            // THE LIMB THE HOST AIMED AT, DERIVED THE HOST'S OWN WAY rather than left null. A body part is in no
+            // inventory, so ItemAddress cannot key it (see NoteUnkeyableItem) and the field does not ride — but
+            // the SAME limb rides as DamageReceiver's (actor key, slot name). Weapon.GetShootTarget:792-795 sets
+            // both fields off one receiver by exactly this rule, so replaying it here reproduces the host's
+            // choice instead of letting GetWorkingPosition:181 skip to a different aim point on this screen.
+            if (t.TacticalItem == null && t.DamageReceiver != null)
+            {
+                t.TacticalItem = t.DamageReceiver as TacticalItem;
+                var slot = t.DamageReceiver as ItemSlot;
+                if (t.TacticalItem == null && slot != null)
+                    foreach (var candidate in slot.GetAllDirectItems())
+                        if (candidate != null && candidate.IsVisible) { t.TacticalItem = candidate; break; }
+            }
             return t;
         }
 
@@ -3345,30 +3374,35 @@ namespace Multiplayer.Tactical
             ReleaseLocalUiHolding(actor, "a mirrored " +
                                   (ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name));
             using (SyncApplyScope.Enter()) ability.Activate(target);
-            // DID IT START, OR ONLY GET IN LINE? PlayingAction.SetState(Playing) calls StartPlayingAction
-            // SYNCHRONOUSLY (PlayingAction:47-53 -> TacticalActorBase.AddExecutingAbility:709), so the moment
-            // Activate returns a PLAYED order is in ExecutingAbilities and an ENQUEUED one is not —
-            // ActionComponent.CheckForActionToPlay:120-128 starts only the FIRST action in the channel.
-            // This is the "the other screens only start once my animation finished" report, measured rather
-            // than argued: EnqueueAction(soloAfterCurrent: true) at ShootAbility.Activate:167 is
-            // INDISTINGUISHABLE from PlayAction on an idle actor, so it bites only when the mirror lands on a
-            // busy one — which is why a run of six orders on idle soldiers showed nothing. Deliberately NOT
-            // deduplicated: how OFTEN this fires is the measurement, and it costs one line only when broken.
-            if (!actor.ExecutingAbilities.Contains(ability))
-            {
-                Debug.LogError("[Multiplayer][tac] MIRROR QUEUED, not played — " + actor.name + " " +
-                               (ability.AbilityDef == null ? "?" : ability.AbilityDef.name) + " is waiting behind " +
-                               (actor.ExecutingAbilities.Count == 0
-                                    ? "<nothing — it never started at all>"
-                                    : actor.ExecutingAbilities[0].GetType().Name) +
-                               " and will begin only when that ends (law L78).");
-                // AND SOMETHING WATCHES THAT PROMISE (2026-08-05). "Will begin when that ends" was the whole
-                // guarantee and nothing checked it: on 2026-08-05 a mirrored Overwatch queued behind an
-                // IdleAbility that never ended and was simply gone, with this one line as its only trace and
-                // the player's screen stuck behind it. A record now carries a deadline.
+            // DID IT START, OR ONLY GET IN LINE? THE ENGINE'S OWN ANSWER — and the reason the old read of
+            // ExecutingAbilities alone had to go: it fired on 8 of 8 mirrors in a whole battle and named
+            // IdleAbility as the blocker every time, which sent an RCA after the normal path.
+            //
+            // LANDING BEHIND IdleAbility IS THE NORMAL PATH, on the acting peer exactly as here.
+            // ShootAbility.Activate:167 takes EnqueueAction whenever no AI evaluation is running — true for
+            // every player-turn click on host and client alike — and EnqueueAction:947-951 appends behind
+            // whatever holds ActionChannel.ActorActions, which on a resting soldier is IdleAbility's
+            // never-ending IdleAction:276-292 loop. It does not stay there: the same EnqueueAction then calls
+            // TacticalActor.OnAbilityEnqueued:1361-1365, which is IdleAbility.RequestStop(), so the loop's
+            // `while (!ShouldForceViewInWaitingState)` exits on its next resumption and
+            // ActionComponent.CompletedAction:112-119 starts ours. One frame, and no peer waits on another.
+            //
+            // So the record is armed only on the state TacticalAbility itself reports: IsExecuting:257 (its
+            // action is Playing) or IsEnqueued:269 (_nextAction is still pending). NEITHER means the ability
+            // never took an action at all — a def whose Activate does its work synchronously — and there is
+            // nothing to wait for. Watching those was the other half of the false alarm: they could never
+            // start, so they always reached the ceiling and were reported as never played when they had been.
+            if (MirrorIsWaitingInLine(ability.IsExecuting || actor.ExecutingAbilities.Contains(ability),
+                                      ability.IsEnqueued))
                 WatchQueuedMirror(actor, ability);
-            }
         }
+
+        /// <summary>Whether a mirrored order that has just been activated is genuinely WAITING ITS TURN, kept
+        /// pure so RailCheck can execute the decision instead of asserting that a call to it exists (L137's
+        /// lesson). Two axes and no more, both read off the engine: is its action running, and does it still
+        /// hold a pending one. Only the second alone is a wait — an ability that took no action is finished,
+        /// not queued, and an ability already playing is not queued either.</summary>
+        internal static bool MirrorIsWaitingInLine(bool executing, bool enqueued) => !executing && enqueued;
 
         /// <summary>A mirrored order the engine ENQUEUED instead of playing, with the frames it has waited.
         /// Live ability refs, so it is cleared with the battle exactly like <c>_mirrorSkipsCameraWait</c>.</summary>
@@ -3416,17 +3450,38 @@ namespace Multiplayer.Tactical
                     _queuedMirrors.RemoveAt(i);
                     continue;
                 }
+                // IT LEFT THE LINE WITHOUT EVER PLAYING — said on the frame it happens, not after ten seconds
+                // of "it is still waiting its turn", and this is what actually eats a mirrored order.
+                // IsEnqueued:269 goes false the moment ClearPlayingAction:1041-1047 runs for that action, and
+                // PlayingAction.SetState:55-63 runs it on CANCEL too — so it catches
+                // ActionComponent.PlayActionAfterCurrent:80-91, which cancels every entry past the FIRST
+                // whenever a later soloAfterCurrent enqueue arrives on the same actor. A second order on that
+                // soldier deletes the one already in line, silently. The idle loop was never the blocker.
+                if (!q.Ability.IsEnqueued)
+                {
+                    _queuedMirrors.RemoveAt(i);
+                    Debug.LogError("[Multiplayer][tac] a mirrored " + q.Name + " on " + q.Actor.name + " was " +
+                                   "DROPPED before it played — it left this actor's action channel without " +
+                                   "ever executing, which ActionComponent.PlayActionAfterCurrent:80-91 does " +
+                                   "when a later solo enqueue on the same soldier cancels everything behind " +
+                                   "the current action. This peer never played an action every other peer did " +
+                                   "(law L78). It is NOT replayed: re-activating it is the second shot from " +
+                                   "one actor that L83 exists to prevent — the settle under host authority is " +
+                                   "the repair, and this line is the evidence it had to run.");
+                    continue;
+                }
                 if (++q.WaitedFrames < QueuedMirrorCeilingFrames) { _queuedMirrors[i] = q; continue; }
                 _queuedMirrors.RemoveAt(i);
                 Debug.LogError("[Multiplayer][tac] a mirrored " + q.Name + " on " + q.Actor.name + " NEVER " +
-                               "STARTED — it has been queued for " + (q.WaitedFrames / 60) + "s behind " +
+                               "STARTED — it is STILL enqueued after " + (q.WaitedFrames / 60) + "s, behind " +
                                (q.Actor.ExecutingAbilities.Count == 0
-                                    ? "<nothing, so it was dropped rather than queued>"
+                                    ? "<nothing, so nothing is going to end and release it>"
                                     : q.Actor.ExecutingAbilities[0].GetType().Name) +
                                ", which means this peer never played an action every other peer did (law " +
-                               "L78). It is NOT force-played: it may be a duplicate, and replaying one is a " +
-                               "second shot from one actor. The actor is the thing to unwedge — the settle " +
-                               "ceiling in ClientTick does that, and this line is the evidence that it had to.");
+                               "L78). One frame is the normal handoff, so ten seconds is an action ahead of " +
+                               "it that will not end. It is NOT force-played: it may be a duplicate, and " +
+                               "replaying one is a second shot from one actor. The actor is the thing to " +
+                               "unwedge — the settle ceiling in ClientTick does that.");
             }
         }
 
