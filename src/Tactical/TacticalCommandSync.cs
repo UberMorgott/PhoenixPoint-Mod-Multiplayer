@@ -163,6 +163,10 @@ namespace Multiplayer.Tactical
             _built = true;
             Debug.Log("[Multiplayer][tac] derived battle keys for " + keyless.Count + " actor(s) the geoscape " +
                       "never named (ordinals over battle-start position).");
+            // THE ORDERING SEAM. Everything that had to wait for a key waits until exactly here, and this is
+            // the only moment on any peer at which that wait can end. Its own method, NoInlining, so the
+            // ECalls it reaches stay out of this one (L113 — see ReportIfIndistinguishable).
+            TacticalCommandSync.FlushPendedSelections();
         }
 
         /// <summary>The battle-start tie diagnostic, deliberately in its OWN non-inlined method.
@@ -1224,6 +1228,13 @@ namespace Multiplayer.Tactical
             _pending.Clear();
             _cmdOwner.Clear();
             _deferred.Clear();   // a held order belongs to ONE battle; releasing it into the next is a ghost order
+            // Same contract, receiving side: Reset runs at tactical TEARDOWN (TacticalTurnSync's Playing→other
+            // transition) and at session teardown — never on the way IN — so a record held while this peer was
+            // still loading survives to be drained, and one still held when the battle ends is discarded.
+            _heldRecords.Clear();
+            _saidHeldOverflow = false;
+            _heldFrames = 0;
+            _pendedSelections.Clear();   // an un-keyable selection belongs to ONE battle (live component refs)
             _saidUncovered.Clear();
             _mirrorSkipsCameraWait.Clear();   // live ability refs: never let them outlive the battle
             _queuedMirrors.Clear();           // same: a watched record belongs to the battle it queued in
@@ -1532,14 +1543,23 @@ namespace Multiplayer.Tactical
 
             if (_awaitingEcho.ContainsKey(key))
             {
-                // A SECOND CLICK INSIDE THE PING WINDOW. Dropped rather than sent, because sending it would
-                // put two orders for one soldier on the wire and the host would play both. Loud, throttled by
-                // the actor+ability so a mashed button costs one line.
+                // A SECOND CLICK INSIDE THE PING WINDOW. Still not sent — two orders for one soldier on the
+                // wire is two shots from one actor when both mirrors land, which is what L83 exists to
+                // prevent, so QUEUEING it is the wrong answer and stays rejected.
+                //
+                // What changes is that the refusal is now VISIBLE (law L231). Since L230 the click's native
+                // activation is suppressed WITH its state switch, so returning true here left the player
+                // standing in the targeting state their click never left, with nothing on screen to say the
+                // click had been thrown away — they pressed again, and the second press was thrown away too.
+                // Releasing the hold puts the screen back where the game itself puts it when an activation
+                // does not happen, which reads as "not yet" instead of as a dead button.
                 if (_saidUncovered.Add("echo2:" + key + "/" + name))
                     Debug.LogWarning("[Multiplayer][tac] ECHO busy — " + actor.name + " already has an order " +
-                                     "waiting for the host's mirror, so this " + name + " click was DROPPED " +
-                                     "rather than sent twice. It is bounded: the wait gives up after " +
+                                     "waiting for the host's mirror, so this " + name + " click was REFUSED " +
+                                     "rather than sent twice, and this peer's UI is released so the refusal is " +
+                                     "visible. It is bounded: the wait gives up after " +
                                      (EchoCeilingFrames / 60) + "s and says so.");
+                ReleaseLocalUiHolding(actor, "an order for this soldier already waiting for the host's mirror");
                 return true;
             }
 
@@ -1618,17 +1638,31 @@ namespace Multiplayer.Tactical
             int key = TacticalActorKey.Of(actor);
             if (key == 0)
             {
+                // THE EMITTING HALF OF THE SAME ORDERING BUG, and it is one this peer causes to ITSELF.
+                // EquipmentComponent:56 raises the enter-play selection while the battle key map does not exist
+                // yet — measured on the host, 2026-08-08: Soldier_7/8/9 were un-relayable at 12:22:46.198-46.320
+                // and "derived battle keys for 67 actor(s)" landed at 12:22:46.511, 0.2 s later. So it PENDS
+                // rather than drops, and BuildBattleKeys flushes it the instant the key exists — the one moment
+                // that resolves the ordering, on every peer, host and client alike, with no new pump.
+                //
+                // Building the map EARLIER is the wrong fix and stays rejected: it is a hard one-shot over the
+                // complete battle-start board (see BuildBattleKeys), and running it while actors are still
+                // entering play would give the peers two different ordinal sets.
+                if (!TacticalActorKey.Built) { _pendedSelections.Add(component); return; }
                 if (_saidKeyless.Add("sel:" + SafeActorName(actor)))
                     Debug.LogWarning("[Multiplayer][tac] a weapon switch on " + SafeActorName(actor) + " cannot be " +
-                                     "relayed — that actor has no shared key yet. This is the mission-entry window: " +
-                                     "EquipmentComponent:56 raises the enter-play selection before this peer has " +
-                                     "built its battle key map, so it is a DERIVED selection rather than a click. " +
-                                     "The host's own answer for this actor now rides every settle, so the peers " +
+                                     "relayed — that actor has no shared key at all, and the battle key map IS " +
+                                     "built, so this is not the mission-entry window: it entered play on this peer " +
+                                     "alone. The host's own answer for this actor rides every settle, so the peers " +
                                      "converge at the next one and no ability is left refused for " +
-                                     "EquipmentNotSelected. A CLICK lost here would still be lost — if this line " +
-                                     "appears mid-battle rather than at entry, that is what happened.");
+                                     "EquipmentNotSelected — but a CLICK is lost here.");
                 return;
             }
+            RelaySelection(engine, actor, key, equipment);
+        }
+
+        private static void RelaySelection(NetworkEngine engine, TacticalActorBase actor, int key, Equipment equipment)
+        {
             string guid = equipment == null || equipment.ItemDef == null ? "" : equipment.ItemDef.Guid;
             string what = "select " + actor.name + " -> " + EqName(equipment);
             if (engine.IsHost)
@@ -1636,6 +1670,44 @@ namespace Multiplayer.Tactical
             else if (actor.TacticalFaction != null && actor.TacticalFaction.IsControlledByPlayer)
                 IntentRail.Send(SurfaceIds.TacCommandIntent, OpIntentSelectEquipment, what,
                                 w => { w.Write(key); w.Write(guid); });
+        }
+
+        /// <summary>Selections raised before this peer could name their actor. A SET, not a queue: only the
+        /// component's CURRENT selection is worth relaying, so it is re-read at flush time and a soldier that
+        /// switched twice in the window costs one entry. Bounded by the actor count, and cleared with the
+        /// battle (<see cref="Reset"/>) because these are live component references.</summary>
+        private static readonly HashSet<EquipmentComponent> _pendedSelections = new HashSet<EquipmentComponent>();
+
+        /// <summary>Called from <see cref="TacticalActorKey.BuildBattleKeys"/> the instant the map is built.
+        /// NoInlining for the reason <c>ReportIfIndistinguishable</c> spells out: this reaches
+        /// <c>UnityEngine.Object.name</c>, and an ECall inlined into BuildBattleKeys makes that whole method
+        /// un-compilable in the headless harness (L113).</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        internal static void FlushPendedSelections()
+        {
+            if (_pendedSelections.Count == 0) return;
+            var batch = new List<EquipmentComponent>(_pendedSelections);
+            _pendedSelections.Clear();
+            var engine = LiveEngine();
+            if (engine == null) return;
+            foreach (var comp in batch)
+            {
+                var actor = comp == null ? null : comp.Actor as TacticalActorBase;
+                if (actor == null) continue;
+                int key = TacticalActorKey.Of(actor);
+                if (key == 0)
+                {
+                    if (_saidKeyless.Add("pendsel:" + SafeActorName(actor)))
+                        Debug.LogWarning("[Multiplayer][tac] " + SafeActorName(actor) + "'s weapon selection was " +
+                                         "held for the battle key map and that map has now been built WITHOUT " +
+                                         "keying it — this actor is on this peer alone, so the selection is " +
+                                         "dropped here rather than held forever.");
+                    continue;
+                }
+                Debug.Log("[Multiplayer][tac] relaying " + SafeActorName(actor) + "'s enter-play weapon selection " +
+                          "now that the battle key map exists — it was raised before this peer could name it.");
+                RelaySelection(engine, actor, key, comp.SelectedEquipment);
+            }
         }
 
         /// <summary>The equipment named by <paramref name="guid"/> in this actor's own equipment component,
@@ -2649,12 +2721,119 @@ namespace Multiplayer.Tactical
 
         // ─── CLIENT: apply ─────────────────────────────────────────────────
 
+        /// <summary>RECORDS THAT ARRIVED BEFORE THIS PEER HAD A BATTLE TO APPLY THEM TO, kept as the raw bytes
+        /// they came in — the decoder is re-entered on replay, so exactly one place knows the payload layout
+        /// (the same posture <see cref="DeferredCommand"/> already takes for a held order).
+        ///
+        /// MEASURED, NOT ARGUED (2026-08-08, three instances). The host starts broadcasting on 0x82 the moment
+        /// IT enters play: <c>HOST select Soldier_2..6</c> at 12:22:45.868-46.134. Both clients received those
+        /// five records at 12:22:45.8-46.1 — while still DOWNLOADING the save blob (<c>OnSaveChunk FIRST</c>
+        /// 12:22:47.657, <c>ClientLoadCrt</c> 12:22:47.658, the tactical load itself only starting at
+        /// 12:22:48.788), standing in <c>UIStateRosterDeployment</c> on the geoscape with no tactical level at
+        /// all. <see cref="TacticalActorKey.Resolve"/> answered "no tactical map on this peer" for every one of
+        /// them and the whole squad's weapon selection was dropped, on each client, every battle.
+        ///
+        /// AN ORDERING BUG, NOT A RACE: the host's broadcast BEGINS before a joining peer's battle EXISTS, so
+        /// there is no instant at which the arrival could have worked. Nothing about it is specific to a weapon
+        /// switch, either — every 0x82 op is keyed by actor and every one of them resolves against that same
+        /// missing map — which is why the gate is on the SURFACE and not inside one op's applier.</summary>
+        private static readonly List<byte[]> _heldRecords = new List<byte[]>();
+
+        /// <summary>The hold is BOUNDED TWICE, and deliberately: this is the one mechanism in this file that
+        /// can stop a peer applying the host's battle, so "it is still waiting" may never become permanent.
+        /// Past EITHER bound the whole hold is released and every record takes the pre-hold path — applied for
+        /// real, refused with its own sentence if it cannot resolve — which is exactly today's behaviour, so
+        /// the worst case of the fix is the status quo rather than a peer frozen out of its own battle.</summary>
+        private const int HeldRecordCeiling = 2048;
+
+        /// <summary>~60 s of RUNNING frames. A frame count and not a clock on purpose: it is pumped from
+        /// <see cref="ClientTick"/>, so it advances slowly through a heavy tactical load (which is the legitimate
+        /// wait) and quickly once this peer is running and simply never joined the battle (which is not).</summary>
+        private const int HoldCeilingFrames = 3600;
+
+        private static bool _saidHeldOverflow;
+        private static int _heldFrames;
+
         /// <summary>Consumes <see cref="SurfaceIds.TacCommand"/> only; every other surface (including this
         /// family's own 0x83 intent, which <see cref="IntentRail"/> owns) falls through untouched.</summary>
         internal static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
         {
             if (surfaceId != SurfaceIds.TacCommand) return false;
             if (engine == null || engine.IsHost) return true;   // the host never mirrors its own commands
+            // HOLD, NEVER DROP. The `_heldRecords.Count > 0` arm is part of the condition and not an
+            // optimisation: the frame the map appears, a NEW record must not overtake the ones already waiting.
+            // 0x82 carries ONE seq stream precisely so a settle can never pass its own activate
+            // (SurfaceIds:36), and the drain is the only thing allowed to empty the queue.
+            if (_heldRecords.Count > 0 || BattleNotReadyHere())
+            {
+                HoldRecord(payload);
+                return true;
+            }
+            ApplyInbound(payload);
+            return true;
+        }
+
+        /// <summary>TRUE while this peer cannot name an actor yet — BOTH pre-battle windows, because a record
+        /// keyed by an actor is unappliable in either one and the difference is invisible from the wire.
+        ///
+        ///  • NO TACTICAL LEVEL: the save is still transferring or the level is still loading. Measured above.
+        ///  • NO BATTLE KEY MAP: the level is up but <see cref="TacticalActorKey.BuildBattleKeys"/> has not run
+        ///    here, so every NEGATIVE (derived) key resolves to nothing. That window is not small — on
+        ///    2026-08-08 the host built at 12:22:46.511 and the two clients at 12:22:58.088 and 12:22:58.650,
+        ///    twelve seconds in which any mirrored enemy action would have been refused. It cost nothing that
+        ///    run only because the host happened to act after the barrier; nothing makes that a rule.
+        ///
+        /// <c>ReferenceEquals</c> for the reason L113 gives and <see cref="TacticalActorKey.Resolve"/> already
+        /// relies on.</summary>
+        private static bool BattleNotReadyHere()
+        {
+            var tlc = Tlc();
+            if (ReferenceEquals(tlc, null) || ReferenceEquals(tlc.Map, null)) return true;
+            return !TacticalActorKey.Built;
+        }
+
+        private static void HoldRecord(byte[] payload)
+        {
+            if (payload == null) return;
+            if (_heldRecords.Count < HeldRecordCeiling) { _heldRecords.Add(payload); return; }
+            if (!_saidHeldOverflow)
+            {
+                _saidHeldOverflow = true;
+                Debug.LogError("[Multiplayer][tac] " + HeldRecordCeiling + " battle records are waiting for a " +
+                               "battle this peer can name actors in — the hold is FULL, and every record from " +
+                               "here on is applied immediately, which for an actor-keyed op means refused. This " +
+                               "peer has not joined the host's battle.");
+            }
+            ApplyInbound(payload);
+        }
+
+        /// <summary>Pumped from <see cref="ClientTick"/> every frame, INCLUDING the frames where this peer has
+        /// no battle at all — which is exactly the window the hold exists for. Replayed in ARRIVAL order
+        /// through the same decoder, so law 7's seq is evaluated once, here, against the same stream it always
+        /// was; nothing is marked for a record that was never applied.</summary>
+        private static void DrainHeldRecords()
+        {
+            if (_heldRecords.Count == 0) return;
+            if (BattleNotReadyHere())
+            {
+                if (++_heldFrames < HoldCeilingFrames) return;
+                Debug.LogError("[Multiplayer][tac] " + _heldRecords.Count + " battle record(s) have been held for " +
+                               (_heldFrames / 60) + "s waiting for a battle this peer can name actors in, and are " +
+                               "being applied ANYWAY. Whatever cannot resolve is refused with its own sentence " +
+                               "from here — the hold is a head start, never a place a record disappears into.");
+            }
+            var batch = _heldRecords.ToArray();
+            _heldRecords.Clear();
+            _saidHeldOverflow = false;
+            _heldFrames = 0;
+            Debug.Log("[Multiplayer][tac] replaying " + batch.Length + " battle record(s) held while this peer " +
+                      "could not name an actor — the host broadcasts from the moment IT enters play, which on " +
+                      "2026-08-08 was before a joining peer's save transfer had even finished.");
+            foreach (var p in batch) ApplyInbound(p);
+        }
+
+        private static void ApplyInbound(byte[] payload)
+        {
             _recordArrived = Time.realtimeSinceStartup;
             try
             {
@@ -2663,7 +2842,7 @@ namespace Multiplayer.Tactical
                 {
                     uint seq = r.ReadUInt32();
                     byte op = r.ReadByte();
-                    if (!Seq.ShouldApply(SurfaceIds.TacCommand, seq)) return true;  // stale re-delivery (law 7)
+                    if (!Seq.ShouldApply(SurfaceIds.TacCommand, seq)) return;  // stale re-delivery (law 7)
                     if (op == OpActivate)
                     {
                         NoteCatchUpBurst();
@@ -2685,7 +2864,7 @@ namespace Multiplayer.Tactical
                     {
                         Debug.LogError("[Multiplayer][tac] unknown host→all command op " + op + " (seq=" + seq +
                                        ") — this peer can no longer follow the shared battle.");
-                        return true;
+                        return;
                     }
                     Seq.Mark(SurfaceIds.TacCommand, seq);
                 }
@@ -2695,7 +2874,6 @@ namespace Multiplayer.Tactical
                 Debug.LogError("[Multiplayer][tac] command inbound FAILED — this peer's battle has diverged from " +
                                "the host's: " + ex);
             }
-            return true;
         }
 
         private static int _burstFrame;
@@ -3207,6 +3385,9 @@ namespace Multiplayer.Tactical
             // Same reasoning, same place: an echo wait is independent of both, and it is the one that leaves a
             // soldier unclickable while it runs (A9).
             TickEchoWaits();
+            // BEFORE the settle guard, and before every early return below it: the whole point of the hold is
+            // that it is drained on the frames where this peer has NOTHING pending and no battle yet.
+            DrainHeldRecords();
             if (_pending.Count == 0) return;
             var tlc = Tlc();
             if (tlc == null) { _pending.Clear(); return; }   // left the battle: nothing left to correct
