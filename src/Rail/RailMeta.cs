@@ -2316,9 +2316,17 @@ namespace Multiplayer.Network.Sync
             var poolEnc = new byte[pool.Count][];
             for (int j = 0; j < pool.Count; j++)
                 try { poolEnc[j] = EncodeElement(f, pool[j]); } catch { poolEnc[j] = null; }
+            // An item the decode already RECONCILED IN PLACE is a pool element itself. Claim its own slot
+            // up front: without this, two value-equal reconciled elements let the byte match below rebind
+            // item i onto pool[j!=i], and the Clear+Add that follows would add one live instance twice and
+            // drop the other outright.
+            for (int i = 0; i < items.Count; i++)
+                for (int j = 0; j < pool.Count; j++)
+                    if (ReferenceEquals(pool[j], items[i])) { poolEnc[j] = null; break; }
             for (int i = 0; i < items.Count; i++)
             {
                 if (items[i] == null) continue;
+                if (ContainsRef(pool, items[i])) continue; // already a live instance — nothing to substitute
                 byte[] enc;
                 try { enc = EncodeElement(f, items[i]); } catch { continue; }
                 for (int j = 0; j < pool.Count; j++)
@@ -2550,7 +2558,47 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        public static List<object> DecodeEntityList(byte[] bytes, RailField f, GeoLevelController geo)
+        /// <summary>The client's OWN elements of an EntityList, positionally, or null when the container
+        /// is not order-bearing. This is the whole licence for the in-place decode below: an ORDERED
+        /// container (List&lt;T&gt;, T[]) has a position that means the same thing on both peers, so
+        /// element i on the wire and element i here are the same element. A Dictionary or HashSet does
+        /// NOT — its enumeration order is an implementation detail, so pairing by position there would
+        /// reconcile arbitrary elements into each other; those keep the plain Clear+Add rebuild.
+        /// A pair blob (ElemType = KVP) is excluded too: its element is reconstructed by the KVP arm of
+        /// <see cref="DecodeValue"/>, which never reaches <see cref="DecodeObjectBody"/>.</summary>
+        private static List<object> OrderedLiveElements(object container, Type elemType)
+        {
+            if (!(container is IList il) || elemType == null || elemType.IsValueType || IsKvpType(elemType)) return null;
+            var res = new List<object>(il.Count);
+            foreach (var e in il) res.Add(e);
+            return res.Count == 0 ? null : res;
+        }
+
+        private static bool ContainsRef(List<object> l, object o)
+        {
+            if (l == null) return false;
+            for (int i = 0; i < l.Count; i++) if (ReferenceEquals(l[i], o)) return true;
+            return false;
+        }
+
+        /// <summary><paramref name="liveContainer"/> = the client's CURRENT container for this field. Given
+        /// one, an ordered list's elements are RECONCILED IN PLACE instead of rebuilt: the decode writes
+        /// the mirrored values into the live element (and into its live sub-objects) rather than into a
+        /// freshly constructed twin.
+        ///
+        /// This is not an optimization — it is the only way an ALIASED element can receive a value.
+        /// `FactionDiplomacy._factionsDiplomacyState` is the measured case: `FactionDiplomacyState.Relation`
+        /// is a READONLY field holding the very same `PartyDiplomacy.Relation` instance the
+        /// `_relations` dictionary holds (FactionDiplomacyState.cs:12/:31-33), and `_relations` is the side
+        /// every read goes through — the UI, `GetDiplomacy`, `ModifyDiplomacy`, `SetDiplomacy`
+        /// (PartyDiplomacy.cs:84/:105-116/:126-136) — while being itself excluded from the rail
+        /// (interface-keyed dict, rail-baseline.txt:497). Rebuilding the list handed the mirror a fresh
+        /// `Relation` (whose `_thisParty`/`_withParty` are excluded, so it is not even addressable) and
+        /// left `_relations` pointing at the original: from the first delta on, every reputation
+        /// percentage on the client was frozen while the log showed the delta arriving and the screen
+        /// repainting normally. Readonly means the field cannot be re-pointed after the fact, so the
+        /// element must never be replaced in the first place.</summary>
+        public static List<object> DecodeEntityList(byte[] bytes, RailField f, GeoLevelController geo, object liveContainer = null)
         {
             var ser = GameSerializer ?? throw new InvalidOperationException("no game serializer");
             using (var ms = new MemoryStream(bytes))
@@ -2559,18 +2607,25 @@ namespace Multiplayer.Network.Sync
                 if (r.ReadByte() != EntityListMarker) throw new IOException("bad entity-list marker");
                 if (!r.ReadBoolean()) return null;
                 int n = r.ReadUInt16();
+                var live = OrderedLiveElements(liveContainer, f.ElemType);
                 var list = new List<object>(n);
                 for (int i = 0; i < n; i++)
                 {
                     var locals = new List<object>();
                     var fixups = new List<Fixup>();
-                    var v = DecodeValue(r, ser, f.ElemType, geo, locals, fixups, 0, new List<OwnerFrame>());
+                    var kept = new List<object>();   // live instances reconciled in place — see below
+                    var v = DecodeValue(r, ser, f.ElemType, geo, locals, fixups, 0, new List<OwnerFrame>(),
+                                        live != null && i < live.Count ? live[i] : null, kept);
                     foreach (var fx in fixups)
                     {
                         try { fx.Field.SetValue(fx.Target, locals[fx.Idx]); }
                         catch (Exception ex) { WarnOnce("blob fixup failed on " + fx.Target.GetType().Name + "." + fx.Field.Name + ": " + ex.Message); }
                     }
-                    foreach (var lo in locals) InvokePostReadSafe(ser, lo);
+                    // Post-read fires over the blob's own LOCALS. A reconciled-in-place object is not one:
+                    // it is a live client object, already constructed and already post-read once, and
+                    // re-running a game post-read on a live object is exactly what ApplyList's
+                    // OwnerPostReadWaiver refuses to do unlicensed. Skip those, run it on the rest.
+                    foreach (var lo in locals) if (!ContainsRef(kept, lo)) InvokePostReadSafe(ser, lo);
                     list.Add(v);
                 }
                 return list;
@@ -2612,7 +2667,8 @@ namespace Multiplayer.Network.Sync
         }
 
         private static object DecodeValue(BinaryReader r, Serializer ser, Type declared, GeoLevelController geo,
-                                          List<object> locals, List<Fixup> fixups, int depth, List<OwnerFrame> chain)
+                                          List<object> locals, List<Fixup> fixups, int depth, List<OwnerFrame> chain,
+                                          object existing = null, List<object> kept = null)
         {
             byte tag = r.ReadByte();
             switch (tag)
@@ -2645,7 +2701,7 @@ namespace Multiplayer.Network.Sync
                         if (ReferenceEquals(k, Unresolved) || ReferenceEquals(val, Unresolved) || k == null) return Unresolved;
                         return Activator.CreateInstance(declared, k, val);
                     }
-                    return DecodeObjectBody(r, ser, declared, geo, locals, fixups, depth, chain);
+                    return DecodeObjectBody(r, ser, declared, geo, locals, fixups, depth, chain, existing, kept);
                 case TagLeafList:
                 {
                     var le = ElemTypeOf(declared);
@@ -2664,7 +2720,8 @@ namespace Multiplayer.Network.Sync
         }
 
         private static object DecodeObjectBody(BinaryReader r, Serializer ser, Type t, GeoLevelController geo,
-                                               List<object> locals, List<Fixup> fixups, int depth, List<OwnerFrame> chain)
+                                               List<object> locals, List<Fixup> fixups, int depth, List<OwnerFrame> chain,
+                                               object existing = null, List<object> kept = null)
         {
             int myIdx = locals.Count;
             locals.Add(null); // placeholder: mirrors encode registration order; backfilled after construction
@@ -2676,6 +2733,12 @@ namespace Multiplayer.Network.Sync
             int cpCount = r.ReadByte();
             var ci = CreateInfoOf(ser, t);
             object o;
+            // RECONCILE, don't reconstruct: when the caller handed us the live object this blob describes,
+            // the mirrored values are written INTO it, so every reference held to it stays valid (see
+            // DecodeEntityList's header for the alias this exists for). Only on the Activator rung — a
+            // custom-create type carries state in its create ARGS, and re-running the create is how that
+            // state is applied, so those still construct.
+            bool reuse = existing != null && existing.GetType() == t && !(ci != null && ci.Params.Length == cpCount);
             if (ci != null && ci.Params.Length == cpCount)
             {
                 var args = new object[cpCount + 1]; // [0] = SerializedObjectData (null — creates like GeoItem's ignore it)
@@ -2692,9 +2755,10 @@ namespace Multiplayer.Network.Sync
             else
             {
                 for (int i = 0; i < cpCount; i++) DecodeValue(r, ser, typeof(object), geo, locals, fixups, depth + 1, chain); // drift: consume
-                o = Activator.CreateInstance(t, true);
+                o = reuse ? existing : Activator.CreateInstance(t, true);
             }
             locals[myIdx] = o;
+            if (reuse) kept?.Add(o);
 
             var rt = RailType.Get(t);
             // Which field indices the wire actually carried — the owner re-wire below must never overwrite
@@ -2724,8 +2788,20 @@ namespace Multiplayer.Network.Sync
                         fixups.Add(new Fixup { Target = o, Field = f, Idx = r.ReadUInt16() });
                         break;
                     case TagBlob:
-                        f.SetValue(o, DecodeObjectBody(r, ser, f.ValueType, geo, locals, fixups, depth + 1, chain));
+                    {
+                        // The other half of the in-place reconcile, and the half that actually saves the
+                        // alias: `FactionDiplomacyState.Relation` is a Descend member, so it rides as a
+                        // nested blob and the old unconditional SetValue re-pointed it at a fresh object
+                        // even on an element we had just decided to keep (readonly is no obstacle —
+                        // FieldInfo.SetValue writes initonly fields, RailField.IsWritable:127-131).
+                        // Only reached when the OWNER is itself a reconciled live object; a freshly
+                        // constructed element's members are null/default, so nothing changes there.
+                        object sub = null;
+                        if (reuse && f.CanRead) { try { sub = f.GetValue(o); } catch { sub = null; } }
+                        var nv = DecodeObjectBody(r, ser, f.ValueType, geo, locals, fixups, depth + 1, chain, sub, kept);
+                        if (!ReferenceEquals(nv, sub)) f.SetValue(o, nv);
                         break;
+                    }
                     case TagList:
                     {
                         if (f.ElemType == null) throw new IOException("blob list tag on non-list field " + t.Name + "." + f.Name);
@@ -2733,6 +2809,9 @@ namespace Multiplayer.Network.Sync
                         var elems = new List<object>(en);
                         for (int j = 0; j < en; j++)
                             elems.Add(DecodeValue(r, ser, f.ElemType, geo, locals, fixups, depth + 1, chain));
+                        // ponytail: a nested entity list is still rebuilt from fresh elements even inside a
+                        // reconciled owner — pass o's own element at index j as `existing` if a nested list
+                        // ever turns out to hold aliased elements too. None does today.
                         ApplyList(o, f, elems);
                         break;
                     }

@@ -46,6 +46,18 @@ namespace Multiplayer.Network.Sync
         /// Without it "the resend never came" and "it came and was applied silently" produce the same
         /// log — four requests in the 2026-08-07 session had ZERO acknowledgement of either kind.</summary>
         private static readonly Dictionary<string, float> _pendingScoped = new Dictionary<string, float>(StringComparer.Ordinal);
+        /// <summary>Referrer PATHS whose entry dropped a reference because the referent did not exist on
+        /// this peer yet — an <c>Unresolved</c> leaf, an entity-list element, an order-vector member. The
+        /// host will NEVER re-ship them (its snapshot is unchanged, so no diff ever fires for them), which
+        /// makes the structural create that finally mints the referent the ONE moment they can be
+        /// recovered — and the scope that recovers them is the REFERRER's path, never the created root's.
+        /// See <see cref="BackfillScopes"/>.</summary>
+        private static readonly HashSet<string> _refDropPaths = new HashSet<string>(StringComparer.Ordinal);
+        /// <summary>Evidence for a pending scoped request: how many entries ARRIVED under that root and
+        /// were discarded anyway, and why the first of them was. Without it the 10 s give-up can only say
+        /// the mirror stayed as it was — never whether the answer came and died on this side.</summary>
+        private static readonly Dictionary<string, int> _scopedDropN = new Dictionary<string, int>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, string> _scopedDropWhy = new Dictionary<string, string>(StringComparer.Ordinal);
         internal const float ResyncThrottleSec = 5f;
         private const float ScopedAnswerDeadlineSec = 10f;
         private const float CrcInterval = 1f; // one root subtree per second (see ClientCrcTick)
@@ -75,6 +87,8 @@ namespace Multiplayer.Network.Sync
             // answered now, and reporting it unanswered later would name a root that no longer means
             // what it meant when the request went out.
             _pendingScoped.Clear();
+            _scopedDropN.Clear(); _scopedDropWhy.Clear();
+            _refDropPaths.Clear(); // those referrers belonged to the replaced state; the save carries the refs
             _fragBuf.Clear(); _fragGot.Clear(); // the transferred save replaced the state these halves belonged to
             // (No EventPopup reset here anymore: event windows are live 0xB6 raises, so there is no
             // record-derived latch to re-seed. Its raise-seq stream is a host monotonic counter and MUST
@@ -391,9 +405,17 @@ namespace Multiplayer.Network.Sync
                 // client had already applied — two round-trips at tactical entry, one for `_squad` and one for
                 // `GlobalTime`, every mission. Real packet loss is still covered, by the seq-gap resync.
                 if (created && !DiffEngine.IsDescendPath(rootKey))
-                    // The ONE resync caller that knows its scope: the ref-lists that need reconverging all
-                    // hang off the root just created, so this costs a scoped re-emit, not the whole graph.
-                    RequestResync(engine, "structural create backfill", rootKey); // ref-lists shipped pre-create reconverge
+                {
+                    // The ONE resync caller that knows its scope — and the scope is the REFERRER, never the
+                    // root just created (see BackfillScopes). Still a scoped re-emit, not the whole graph.
+                    foreach (var scope in BackfillScopes(rootKey, _refDropPaths))
+                        RequestResync(engine, "structural create backfill for '" + rootKey + "'", scope);
+                    // Consumed either way: a recorded path UNDER the created root was just restated by the
+                    // create blob, and one we did ask for is either answered or reported unanswered by the
+                    // pending-scoped bookkeeping. A ref that is STILL unresolvable re-records itself on the
+                    // next entry that carries it.
+                    _refDropPaths.Clear();
+                }
             }
         }
 
@@ -774,7 +796,7 @@ namespace Multiplayer.Network.Sync
                 _pathCache.Remove(path);
                 entity = IdentityResolver.Resolve(geo, path, _pathCache);
             }
-            if (entity == null) { LogMissOnce("entity not found: " + path + DescendGapUnder(geo, path)); return; }
+            if (entity == null) { LogMissDrop(path, "entity not found: " + path + DescendGapUnder(geo, path)); return; }
             if (!rt.Type.IsInstanceOfType(entity))
             {
                 // The resolver returned the LIVE TWIN of a recorded *InstanceData DTO (writes into the
@@ -783,9 +805,9 @@ namespace Multiplayer.Network.Sync
                 var bt = RailType.GetBridged(entity.GetType(), rt.Type);
                 var bf = bt != null && bt.Fields.Count == rt.Fields.Count ? bt.Fields[fieldIdx] : null;
                 if (bf == null || !string.Equals(bf.Name, field.Name, StringComparison.Ordinal))
-                { LogMissOnce("type mismatch at " + path + ": " + entity.GetType().Name + " vs " + rt.Type.Name); return; }
+                { LogMissDrop(path, "type mismatch at " + path + ": " + entity.GetType().Name + " vs " + rt.Type.Name); return; }
                 if (bf.Class == FieldClass.Excluded)
-                { LogMissOnce("dto-twin gap: " + rt.Type.Name + "." + bf.Name + " has no live counterpart on " + entity.GetType().Name + " (" + bf.Exclude + ") — not mirrored"); return; }
+                { LogMissDrop(path, "dto-twin gap: " + rt.Type.Name + "." + bf.Name + " has no live counterpart on " + entity.GetType().Name + " (" + bf.Exclude + ") — not mirrored"); return; }
                 field = bf;
             }
             // Walk-time ownership law BACKSTOP (belt = host's DiffEngine refusal; this guards version
@@ -795,13 +817,13 @@ namespace Multiplayer.Network.Sync
             // apply REPLACES the entity's reference, it never mutates the shared instance (and the
             // entity itself was just checked).
             if (DefOwnership.IsDefOwned(entity))
-            { LogMissOnce("def-owned instance at " + path + " — write refused (ownership law)"); return; }
+            { LogMissDrop(path, "def-owned instance at " + path + " — write refused (ownership law)"); return; }
             if (field.Class != FieldClass.Leaf && field.CanRead)
             {
                 object cur;
                 try { cur = field.GetValue(entity); } catch { cur = null; }
                 if (cur != null && DefOwnership.IsDefOwned(cur))
-                { LogMissOnce("def-owned container at " + path + "." + field.Name + " — write refused (ownership law)"); return; }
+                { LogMissDrop(path, "def-owned container at " + path + "." + field.Name + " — write refused (ownership law)"); return; }
             }
             // Resync-only dict CENSUS (SubKey "" + marker — a real dict entry always carries its key, and
             // no leaf/GeoItem value starts with the marker in that slot): prune local keys the host does not
@@ -816,6 +838,13 @@ namespace Multiplayer.Network.Sync
             }
             if (Unchanged(entity, field, subKey, value))
             {
+                // A SCOPED RESEND IS ANSWERED HERE TOO. What the request asks for is that this peer's
+                // mirror hold the host's entry — and an entry whose bytes already equal the mirror
+                // delivers exactly that. Keying the acknowledgement on the WRITE alone is why all four
+                // backfills of the 2026-08-07 session reported UNANSWERED while the host had answered
+                // every one: they asked for the root a structural create had just delivered byte for
+                // byte, so every entry of the answer landed on this line.
+                if (_pendingScoped.Count > 0) NoteScopedAnswer(path);
                 // Investigation diag (reassign retest), behind the ONE switch: a TacUnits delta that
                 // arrived but matched local bytes. Ungated it emitted 431 lines in a release build, 424
                 // of them inside ONE second of the first campaign load — MpDiag.On FIRST so the path
@@ -835,7 +864,15 @@ namespace Multiplayer.Network.Sync
                         // Unresolved referent (RailMeta.Unresolved, already warned once at decode): keep the
                         // client's live value — writing null over a valid ref would never be re-shipped
                         // (the host snapshot is unchanged) and the divergence would be silent.
-                        if (ReferenceEquals(v, RailMeta.Unresolved)) return;
+                        if (ReferenceEquals(v, RailMeta.Unresolved))
+                        {
+                            // WHERE the ref was dropped, so the create that finally makes it resolvable can
+                            // ask for THIS path back (BackfillScopes). Ref-addressable declared type only:
+                            // an unknown def GUID is a mod-parity gap no create will ever fix, and recording
+                            // it would make every later create re-ask for it forever.
+                            if (IdentityResolver.IsRefAddressableType(field.ValueType)) NoteRefDrop(path);
+                            return;
+                        }
                         // FactionRef twin: the wire carries the faction's DEF; the live member holds the
                         // GeoFaction. Unknown def → keep the live value (same L-C shape as Unresolved).
                         if (field.FactionRef && v != null && (v = RailMeta.FactionByDef(geo, v)) == null) return;
@@ -888,7 +925,15 @@ namespace Multiplayer.Network.Sync
                         // branch). Ship side and apply side stay symmetric: what the host refuses to send,
                         // the client refuses to reconstruct.
                         if (value.Length == 0 || value[0] != RailMeta.EntityListMarker) return;
-                        var items = RailMeta.DecodeEntityList(value, field, geo);
+                        // Hand the decoder the client's CURRENT container: an ORDERED one lets it reconcile
+                        // element i in place instead of building a twin, which is the only way an element
+                        // holding an aliased reference (FactionDiplomacyState.Relation, shared with the
+                        // rail-excluded PartyDiplomacy._relations) can ever receive the mirrored value.
+                        var items = RailMeta.DecodeEntityList(value, field, geo, field.GetValue(entity));
+                        // An element whose referent is not on this peer yet decodes to the Unresolved
+                        // sentinel and ApplyListCore removes the hole (RailMeta:3117-3127) — the list
+                        // applies SHORT and the host, whose own list did not change, never re-ships it.
+                        if (items != null && items.Contains(RailMeta.Unresolved)) NoteRefDrop(path);
                         // Keep LIVE instances wherever the blob element is value-identical: a pure reorder
                         // then MOVES the client's existing objects (order rides inside the blob), and state
                         // the blob cannot carry (AmmoManager) survives on every unchanged element.
@@ -916,7 +961,11 @@ namespace Multiplayer.Network.Sync
                             changed = RailMeta.SyncMembersByKeys(container, keys, k =>
                             {
                                 var inst = ResolveSiblingElement(entity, field, k);
-                                if (inst == null) LogMissOnce("order-vector member '" + k + "' unresolved at " + p + "." + fn);
+                                if (inst == null)
+                                {
+                                    NoteRefDrop(p); // same loss as an Unresolved leaf: the member is simply absent here
+                                    LogMissOnce("order-vector member '" + k + "' unresolved at " + p + "." + fn);
+                                }
                                 return inst;
                             });
                         }
@@ -928,12 +977,12 @@ namespace Multiplayer.Network.Sync
                         var target = RailMeta.MaterializeContainer(entity, field);
                         if (!(target is IDictionary dict))
                         {
-                            LogMissOnce("GeoItemDict field not a live non-generic IDictionary at " + path + "." + field.Name +
+                            LogMissDrop(path, "GeoItemDict field not a live non-generic IDictionary at " + path + "." + field.Name +
                                         " (" + (target == null ? "null" : target.GetType().Name) + ") — entry dropped");
                             return;
                         }
                         var def = GeoItemCodec.ResolveDef(subKey); // key IS the ItemDef
-                        if (def == null) { LogMissOnce("GeoItemDict unknown item def " + subKey + " at " + path); return; }
+                        if (def == null) { LogMissDrop(path, "GeoItemDict unknown item def " + subKey + " at " + path); return; }
                         // DIRECT dict write / remove — NOT AddItem/RemoveItem (those fire StorageChanged/ItemAdded
                         // events + faction ammo-unload = gameplay side-effects a projector client must not run).
                         if (value.Length == 1 && value[0] == RailMeta.DictTombstone) { dict.Remove(def); break; }
@@ -949,7 +998,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                LogMissOnce("apply failed " + path + "." + field.Name + ": " + ex.Message);
+                LogMissDrop(path, "apply failed " + path + "." + field.Name + ": " + ex.Message);
             }
         }
 
@@ -1673,21 +1722,82 @@ namespace Multiplayer.Network.Sync
             if (RailMeta.CountMiss(line)) Debug.LogWarning(line);
         }
 
-        /// <summary>An applied entry under a root this peer asked to have re-sent IS the acknowledgement —
-        /// there is no other one on the wire, and the host's answer is an ordinary delta by design
-        /// (DiffEngine.ForceReemit). Whole-segment prefix match, the same rule the host's scope uses, so
-        /// "S#29" never claims "S#293"'s answer.</summary>
+        /// <summary>Whole-segment path-prefix match — the same rule the host's forced scope uses
+        /// (DiffEngine.PrefixMatchOne), so "S#29" never claims "S#293"'s answer.</summary>
+        private static bool UnderRoot(string path, string root) =>
+            !string.IsNullOrEmpty(root) && path != null && path.Length >= root.Length &&
+            string.CompareOrdinal(path, 0, root, 0, root.Length) == 0 &&
+            (path.Length == root.Length || path[root.Length] == '.');
+
+        /// <summary>The pending scoped root <paramref name="path"/> sits under, or null.</summary>
+        private static string PendingRootOf(string path)
+        {
+            foreach (var k in _pendingScoped.Keys) if (UnderRoot(path, k)) return k;
+            return null;
+        }
+
+        /// <summary>An entry under a root this peer asked to have re-sent that leaves the mirror holding
+        /// the HOST's value IS the acknowledgement — there is no other one on the wire, and the host's
+        /// answer is an ordinary delta by design (DiffEngine.ForceReemit). Both ways of holding it count:
+        /// an entry that WROTE, and an entry whose bytes already equalled the mirror. The outcome asked
+        /// for is the mirror's contents, not a write.</summary>
         private static void NoteScopedAnswer(string path)
         {
-            string hit = null;
-            foreach (var k in _pendingScoped.Keys)
-                if (path.Length >= k.Length && string.CompareOrdinal(path, 0, k, 0, k.Length) == 0 &&
-                    (path.Length == k.Length || path[k.Length] == '.'))
-                { hit = k; break; }
+            var hit = PendingRootOf(path);
             if (hit == null) return;
             _pendingScoped.Remove(hit);
+            _scopedDropN.Remove(hit); _scopedDropWhy.Remove(hit);
             Debug.Log("[Multiplayer][rail] GenericApplier: scoped resend of root '" + hit +
-                      "' ANSWERED — first entry applied at " + path);
+                      "' ANSWERED — the mirror holds the host's entry at " + path);
+        }
+
+        /// <summary>Referrer path of a dropped reference — WHERE it was dropped, not what it pointed at:
+        /// the recovery re-emits the referrer, while the decoder that saw the unresolvable key is three
+        /// layers down and the entry that carried it is already gone.</summary>
+        private static void NoteRefDrop(string path)
+        {
+            if (!string.IsNullOrEmpty(path)) _refDropPaths.Add(path);
+        }
+
+        /// <summary>WHICH SCOPE a structural create's backfill must ask the host to re-emit — pure, so
+        /// RailCheck L335 can execute it case by case.
+        ///
+        /// THE CREATED ROOT IS NEVER THE ANSWER. What a create leaves broken is not the new entity: the
+        /// create blob delivered its whole graph byte for byte (19288 B for `U#6`). It is every entry that
+        /// ALREADY shipped a REFERENCE to it and had that reference dropped for being unresolvable — an
+        /// Unresolved leaf, a hole removed from an entity list, an unresolved order-vector member — and
+        /// those entries live on the REFERRER. The host re-emits only on CHANGE and its own value did not
+        /// change, so nothing will ever restate them unless this asks for them by name.
+        ///
+        /// Measured: in the 2026-08-07 session all four backfills asked for the root just created
+        /// (U#6/U#7/U#8 the rescued soldiers, U#9 the faction-base recruit), the host answered every one
+        /// (host log :5030 `SCOPED re-emit of root 'U#9'`), and not one arriving entry differed from the
+        /// mirror — while the leaf that had dropped `U#6` 0.3 s BEFORE the create (client log :2528) was
+        /// never re-emitted at all and stayed dropped for the rest of the session.
+        ///
+        /// A recorded path UNDER the created root is skipped: the create blob just restated it.</summary>
+        internal static List<string> BackfillScopes(string createdRoot, IEnumerable<string> refDropPaths)
+        {
+            var scopes = new List<string>();
+            if (refDropPaths == null) return scopes;
+            foreach (var p in refDropPaths)
+                if (!string.IsNullOrEmpty(p) && !UnderRoot(p, createdRoot) && !scopes.Contains(p))
+                    scopes.Add(p);
+            return scopes;
+        }
+
+        /// <summary><see cref="LogMissOnce"/> for a discard that happened at a PATH: same counted line, plus
+        /// the one fact the 10 s give-up could never state — that the answer to a scoped request did arrive
+        /// and died on this side, how often, and why the first one did.</summary>
+        private static void LogMissDrop(string path, string msg)
+        {
+            LogMissOnce(msg);
+            if (_pendingScoped.Count == 0) return;
+            var hit = PendingRootOf(path);
+            if (hit == null) return;
+            _scopedDropN.TryGetValue(hit, out int n);
+            _scopedDropN[hit] = n + 1;
+            if (!_scopedDropWhy.ContainsKey(hit)) _scopedDropWhy[hit] = msg;
         }
 
         /// <summary>The other half: a request nobody answered must say so, or "the resend never came" and
@@ -1703,9 +1813,17 @@ namespace Multiplayer.Network.Sync
             foreach (var k in dead)
             {
                 _pendingScoped.Remove(k);
+                _scopedDropN.TryGetValue(k, out int dropped);
+                _scopedDropWhy.TryGetValue(k, out var why);
+                _scopedDropN.Remove(k); _scopedDropWhy.Remove(k);
                 Debug.LogWarning("[Multiplayer][rail] GenericApplier: scoped resend of root '" + k +
-                                 "' went UNANSWERED for " + ScopedAnswerDeadlineSec + "s — not one entry " +
-                                 "under it applied. This peer's mirror of that root stays as it was.");
+                                 "' went UNANSWERED for " + ScopedAnswerDeadlineSec + "s. This peer's " +
+                                 "mirror of that root stays as it was. " +
+                                 (dropped > 0
+                                     ? dropped + " entr" + (dropped == 1 ? "y" : "ies") + " under it DID " +
+                                       "arrive and were discarded here — first: " + why
+                                     : "Nothing under it arrived at all, so the answer never reached this " +
+                                       "peer (or the host's scope matched no covered path — it says so)."));
             }
         }
 
