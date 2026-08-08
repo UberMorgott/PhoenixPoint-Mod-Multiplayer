@@ -706,6 +706,17 @@ namespace Multiplayer.Network.Sync
             { "PhoenixPoint.Common.Entities.Characters.CharacterIdentity._sharedGameTags", "self-healing shared-def ref — InitSharedTags() lazily re-resolves (CharacterIdentity.cs:131-139)" },
             { "PhoenixPoint.Common.Entities.Characters.CharacterIdentity._humanCustomization", "self-healing shared-def ref — InitSharedTags() lazily re-resolves (CharacterIdentity.cs:131-139)" },
 
+            // The other half of the map-plot miss (48b1377). With MapPlotInstanceData structurally created
+            // on the client, its LAYOUT still did not cross: ParcelInstances excluded as "blob husk on
+            // MapParcelInstance (TargetInPlot)", so only MapPlotDef rode and the site shipped a plot with
+            // no parcels. TargetInPlot is not state and never was: the GAME's own serializer does not
+            // carry it either (MapParcelInstance.cs — the other three members are [SerializeMember], this
+            // one is not), and MapPlot.LoadParcels re-derives it for EVERY instance on EVERY plot load
+            // from the SceneObjectId the rail does carry (MapPlot.cs:189,201-208
+            // `parcelInstance.TargetInPlot = dictionary[parcelInstance.MapParcelPositionId]`). So a
+            // blob-rebuilt instance reaches the tactical scene in precisely the state a loaded save does.
+            { "PhoenixPoint.Common.Levels.MapGeneration.MapParcelInstance.TargetInPlot", "self-healing scene handle — the game does not serialize it either, and MapPlot.LoadParcels re-resolves every instance from the carried MapParcelPositionId on each plot load (MapPlot.cs:201-208)" },
+
             // v<4 save-migration leftover (EventSystemInstanceData.OldTriggeredEncounters, PreviousNames
             // "TriggeredEncounters") with NO live member — ResolveLive's unique-type fallback lands it on
             // EmptyExplorationEventIds, the only other List<string> on GeoscapeEventSystem, which is

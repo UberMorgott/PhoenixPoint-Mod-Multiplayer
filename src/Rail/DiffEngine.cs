@@ -293,17 +293,50 @@ namespace Multiplayer.Network.Sync
         //     BOTH directions were dead, not just one: without the row the null→obj create never emitted
         //     (every entry under the path died at GenericApplier "entity not found", both clients, mission
         //     entry) and GeoSite.cs:782's `MapPlotInstanceData = null` could never reach a client either.
-        // DELIBERATELY ABSENT — GeoHavenZone (GeoStealAircraftMission._zone, GeoFaction.BuildingZone):
-        // constructing one would hand the client a phantom instead of the haven's own zone. It was a KEYING
-        // gap, and it is closed as one: the zone is named by the path its haven addresses it by
-        // (IdentityResolver.IsRefAddressableType / HavenZoneRef), so the field rides as a Leaf/EntityRef —
-        // a reference, never a create. Belt = RailCheck L28 subentity-ref-*.
+        //   • DeathDetails (GroundVehicleStat.DeathDetails) — found by the sweep below, same shape as the
+        //     row above it. No initializer (GroundVehicleStat.cs:16); the manager assigns it the moment a
+        //     ground vehicle dies (PhoenixStatisticsManager.cs:835), so every loss after the save transfer
+        //     landed on a null field and the client's end-of-game vehicle record stayed blank forever.
+        //     Plain Embedded bag of defs + enums + a TimeUnit, implicit parameterless ctor, and every
+        //     construction site is a fresh `new DeathDetails()` written to ONE owner
+        //     (PhoenixStatisticsManager.cs:747,811; the Clone at GroundVehicleStat.cs:35 deep-copies) — so
+        //     it is unaliased and holds no identity. (SoldierStats.DeathCause is the same type but its
+        //     owner is not on the rail at all — a coverage gap, not this one.)
+        //
+        // THE SWEEP (2026-08-08) — every `+ Descend` row of docs/rail-baseline.txt read back against the
+        // decompile, asking one question per field: can it be NULL here while the host has it non-null?
+        // Everything not named on this page answered no by construction — a field initializer, an
+        // unconditional ctor assign, or a throwaway *InstanceData twin whose getter never returns null.
+        // The four that answered YES and STILL must not get a row are below; they are open gaps, and the
+        // client now names each one as it happens (GenericApplier.DescendGapUnder).
+        //
+        // DELIBERATELY ABSENT — a create here would hand the client a phantom beside an object the host
+        // reaches by a second route, which is a KEYING gap wearing a create's clothes. The settled
+        // precedent is GeoHavenZone (GeoStealAircraftMission._zone, GeoFaction.BuildingZone): the zone is
+        // named by the path its haven addresses it by (IdentityResolver.IsRefAddressableType /
+        // HavenZoneRef), so the field rides as a Leaf/EntityRef — a reference, never a create. Belt =
+        // RailCheck L28 subentity-ref-*. The sweep found four more owed the same treatment:
+        //   • FactionAggressionRequest (FactionDiplomacyState.AggresionMission) — genuinely null↔non-null
+        //     (FactionDiplomacy.cs:204/:264), but the SAME instance is already on the rail inside
+        //     GeoSabotageZoneMission.FactionRequests, which ships as ONE canonical EntityList blob. A
+        //     create would give the client two objects where the host has one, and the accept/decline the
+        //     player presses would land on the copy nobody reads.
+        //   • ResearchElement (Research.CurrentResearch) — an element of Research's own keyed collection;
+        //     the client already holds it, so the field wants that element's key, not a second element.
+        //   • GeoHavenLeader (GeoHaven.Leader), GeoUnitDescriptor (GeoHaven.NewRecruit,
+        //     GeoPhoenixFaction.DismambleUnit), GeoAlienMonster (GeoAlienBase.Monster) — each carries a
+        //     unit id only the level may mint (GeoHaven.cs:329 CreateGeoUnitId, GeoAlienMonster.cs
+        //     readonly GeoTacUnitId _id), so a constructed one is a duplicate soldier/monster.
+        //   • GeoPhoenixBaseLayout (GeoPhoenixBase.Layout) — readonly _def/_baseEntranceSide that only a
+        //     real ctor fills, and it owns the GeoPhoenixFacility list the rail already ships as roots
+        //     (IsPeerLocal corridors), so a blank one would be a second base next to the real one.
         private static readonly Type[] StructuralDescendKindTable =
         {
             typeof(PhoenixPoint.Geoscape.Entities.GeoMission),
             typeof(Base.Utils.UnityDateTime),
             typeof(PhoenixPoint.Geoscape.Entities.GeoSquad),
             typeof(PhoenixPoint.Common.Levels.MapGeneration.MapPlotInstanceData),
+            typeof(PhoenixPoint.Common.Core.DeathDetails),
         };
         private static readonly HashSet<Type> StructuralDescendTypes = new HashSet<Type>(StructuralDescendKindTable);
 
