@@ -94,14 +94,41 @@ namespace Multiplayer.Tactical
         /// the wrong wall or on none.
         ///
         /// A COLLIDED GUID IS THEREFORE DROPPED, on both peers, and the object is addressed by something both
-        /// peers DERIVE rather than are told: where it stands. The two peers walk the same generated map (that
-        /// is already this arc's premise — the stable walk) and read the same baked transforms, so a rounded
-        /// world position is symmetric for the same reason the walk is, and — unlike an ordinal — it is
-        /// SELF-CHECKING: a peer whose map really did differ simply fails to resolve and says so, instead of
-        /// confidently naming the wrong wall. Rounded to a tenth of a unit because the positions are baked
-        /// rather than simulated; the grid is one unit, so a tenth is three orders of margin.</summary>
+        /// peers DERIVE rather than are told: where it stands, and — because that alone does not tell two
+        /// objects apart — WHICH ONE it is among everything standing there.
+        ///
+        /// WHY THE CELL ALONE IS NOT AN ADDRESS, and why a finer rounding cannot make it one. The 2026-08-08
+        /// battle indexed 1269 destructibles and reported 358 of them sharing a cell with another — 28% of the
+        /// map. That is not jitter to be rounded away, because a destructible's <c>transform</c> is its PREFAB
+        /// PIVOT and the game never locates it by that: <c>Destructable.Init</c>:647 takes
+        /// <c>MeshRenderer.bounds</c>, :721 keeps <c>_gridOrigin = bounds.min</c>, and :712-716 parents one
+        /// receiver GameObject per tile positioned by <c>GridToWorld(bounds.min…)</c>. A kit-built wall/floor
+        /// set exported with one shared pivot therefore puts every panel of a building at the SAME world point
+        /// — bit-identical, so no number of decimal places separates them. Nor can the bounds be used as the
+        /// address instead: <c>Destructable.CheckAndDisableSelf</c>:254-256 DESTROYS the MeshRenderer and the
+        /// Collider of a fully broken object, so a bounds-derived address stops existing exactly when the
+        /// object is still there and still being talked about.
+        ///
+        /// SO THE DISCRIMINATOR IS THE WALK, WHICH IS ALREADY THIS ARC'S PREMISE. The address is
+        /// <c>cell#i/n</c>: the rounded cell, this object's index among the n destructibles found in that cell,
+        /// and n itself. <c>GetComponentsInChildrenStable</c> (<c>UnityUtil</c>:69-74) is a strict depth-first
+        /// walk — own components, then children in sibling order — so i and n are fixed by the hierarchy, which
+        /// both peers build from the same generated map. Nothing shortens that hierarchy mid-mission either:
+        /// <c>CheckAndDisableSelf</c>:261 only <c>SetActive(false)</c> and <c>Breakable.DisableSelf</c>:374 only
+        /// clears <c>enabled</c> — the GameObject, the transform and the component all survive, and an inactive
+        /// child is still walked. So the tags a peer assigns at battle start stay true for the whole mission.
+        ///
+        /// AND IT IS STILL SELF-CHECKING, which is the property a bare ordinal never had: <c>n</c> RIDES IN THE
+        /// KEY. A peer whose cell holds a different number of destructibles produces tags that cannot match any
+        /// tag the host produced — it fails to resolve and says so, instead of confidently naming the wrong
+        /// wall. Rounded to a tenth of a unit, unchanged: the positions are baked rather than simulated, the
+        /// grid is one unit, and a coarser cell is the more forgiving half of the pair now that the index
+        /// carries the discrimination.</summary>
         private static readonly Dictionary<string, DestructableBase> _byPos =
             new Dictionary<string, DestructableBase>(StringComparer.Ordinal);
+        /// <summary>The address the index assigned, by instance id, so the CAPTURE side ships the very tag the
+        /// index minted rather than deriving a second one that could disagree with it.</summary>
+        private static readonly Dictionary<int, string> _tagOf = new Dictionary<int, string>();
         private static bool _indexed;
         private static readonly HashSet<string> _said = new HashSet<string>(StringComparer.Ordinal);
 
@@ -109,14 +136,15 @@ namespace Multiplayer.Tactical
         {
             _byGuid.Clear();
             _byPos.Clear();
+            _tagOf.Clear();
             _indexed = false;
             _said.Clear();
         }
 
-        /// <summary>Where this object stands, to a tenth of a unit — the peer-independent half of its address.
-        /// Invariant culture, because a comma decimal separator on one peer and a dot on the other would be
-        /// exactly the silent mismatch this replaces.</summary>
-        internal static string PosTag(DestructableBase d)
+        /// <summary>Which cell this object stands in, to a tenth of a unit — the peer-independent, but NOT
+        /// discriminating, half of its address. Invariant culture, because a comma decimal separator on one
+        /// peer and a dot on the other would be exactly the silent mismatch this replaces.</summary>
+        internal static string PosCell(DestructableBase d)
         {
             var t = d == null ? null : d.transform;
             if (t == null) return null;
@@ -124,6 +152,26 @@ namespace Multiplayer.Tactical
             return Mathf.Round(p.x * 10f).ToString(CultureInfo.InvariantCulture) + "," +
                    Mathf.Round(p.y * 10f).ToString(CultureInfo.InvariantCulture) + "," +
                    Mathf.Round(p.z * 10f).ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>The addresses of the <paramref name="occupants"/> destructibles found in one cell, in walk
+        /// order. PURE, and the only place an address is ever spelled: index i tells two co-located objects
+        /// apart, and the occupant COUNT rides along so a peer that found a different number there resolves
+        /// nothing rather than resolving the wrong one.</summary>
+        internal static string[] AddressTags(string cell, int occupants)
+        {
+            var tags = new string[occupants < 0 ? 0 : occupants];
+            for (int i = 0; i < tags.Length; i++)
+                tags[i] = cell + "#" + i.ToString(CultureInfo.InvariantCulture) + "/" +
+                          occupants.ToString(CultureInfo.InvariantCulture);
+            return tags;
+        }
+
+        /// <summary>The address the index gave this object, or null when it has none.</summary>
+        private static string TagOf(DestructableBase d)
+        {
+            string tag;
+            return d != null && _tagOf.TryGetValue(d.GetInstanceID(), out tag) ? tag : null;
         }
 
         private static void SayOnce(string key, string message)
@@ -159,35 +207,48 @@ namespace Multiplayer.Tactical
             var root = map == null ? null : map.NavigableRoot;
             if (root == null) return false;
 
-            int idless = 0, total = 0, posClash = 0;
+            int idless = 0, total = 0, homeless = 0, sharedCells = 0, dupHits = 0;
             var byGuid = new Dictionary<string, DestructableBase>(StringComparer.Ordinal);
             var collided = new HashSet<string>(StringComparer.Ordinal);
+            var cells = new Dictionary<string, List<DestructableBase>>(StringComparer.Ordinal);
             foreach (var d in root.transform.GetComponentsInChildrenStable<DestructableBase>())
             {
                 total++;
-                string pos = PosTag(d);
-                if (pos != null)
+                string cell = PosCell(d);
+                if (cell == null) homeless++;
+                else
                 {
-                    DestructableBase atPos;
-                    if (_byPos.TryGetValue(pos, out atPos) && !ReferenceEquals(atPos, d)) posClash++;
-                    else _byPos[pos] = d;      // first in the stable walk wins, identically on both peers
+                    List<DestructableBase> here;
+                    if (!cells.TryGetValue(cell, out here)) cells[cell] = here = new List<DestructableBase>();
+                    here.Add(d);          // walk order, and the walk is the same on both peers
                 }
                 string guid = GuidOf(d);
                 if (string.IsNullOrEmpty(guid)) { idless++; continue; }
                 DestructableBase other;
-                if (byGuid.TryGetValue(guid, out other) && !ReferenceEquals(other, d)) collided.Add(guid);
+                if (byGuid.TryGetValue(guid, out other) && !ReferenceEquals(other, d)) { collided.Add(guid); dupHits++; }
                 else byGuid[guid] = d;
+            }
+            // EVERY OCCUPANT OF A CELL GETS AN ADDRESS, not just the first one the walk reached. The old index
+            // let the first arrival keep the cell and left every later one unreachable — 358 of 1269 on the
+            // 2026-08-08 map — so a host's damage to any of them landed nowhere here.
+            foreach (var kv in cells)
+            {
+                var here = kv.Value;
+                if (here.Count > 1) sharedCells++;
+                var tags = AddressTags(kv.Key, here.Count);
+                for (int i = 0; i < here.Count; i++) { _byPos[tags[i]] = here[i]; _tagOf[here[i].GetInstanceID()] = tags[i]; }
             }
             // A GUID THAT NAMES TWO OBJECTS NAMES NONE, and it is dropped on BOTH peers rather than
             // last-write-wins: the collision set itself can differ between peers (MergeWith's replacement id is
             // random), so keeping a colliding guid anywhere means one peer resolves it and the other resolves
-            // it to something else. The position address below still names every one of them.
+            // it to something else. The position address above still names every one of them.
             foreach (var g in collided) byGuid.Remove(g);
             foreach (var kv in byGuid) _byGuid[kv.Key] = kv.Value;
             _indexed = true;
-            Debug.Log("[Multiplayer][tac] indexed " + _byGuid.Count + " destructible(s) of " + total +
-                      " under the navigable root by the same GuidInScene the game's own save uses, and " +
-                      _byPos.Count + " by position as the peer-independent fallback.");
+            Debug.Log("[Multiplayer][tac] indexed " + total + " destructible(s) under the navigable root: " +
+                      _byGuid.Count + " carry a usable GuidInScene (the game's own save key) and " + _tagOf.Count +
+                      " carry a position address, of which " + sharedCells + " cell(s) hold more than one object " +
+                      "and are told apart by their index in the same stable walk both peers make.");
             // Both of these are the v1 failure class caught at battle start instead of at the first grenade.
             if (idless > 0)
                 Debug.LogWarning("[Multiplayer][tac] " + idless + " of " + total + " destructible(s) have NO readable " +
@@ -195,15 +256,18 @@ namespace Multiplayer.Tactical
                                  "MapPlot:230-243 leaves behind when a parcel's registry was merged and destroyed. " +
                                  "They are still addressable by position, so this is no longer a lost object.");
             if (collided.Count > 0)
-                Debug.LogWarning("[Multiplayer][tac] " + collided.Count + " destructible guid collision(s) — " +
-                                 "SceneObjectIdsComponent.MergeWith:29-34 mints a FRESH RANDOM guid when a combined " +
-                                 "one collides, and a random guid is different on every peer. Those guids are DROPPED " +
-                                 "on every peer and those objects are addressed by position instead.");
-            if (posClash > 0)
-                Debug.LogError("[Multiplayer][tac] " + posClash + " destructible(s) stand within a tenth of a unit of " +
-                               "another, so the position address cannot tell them apart. One of each pair is " +
-                               "unreachable by that address; if its guid also collided, the host's damage to it is " +
-                               "dropped on this peer with a line of its own.");
+                Debug.LogWarning("[Multiplayer][tac] " + collided.Count + " destructible guid collision(s) covering " +
+                                 (collided.Count + dupHits) + " object(s) — SceneObjectIdsComponent.MergeWith:29-34 " +
+                                 "mints a FRESH RANDOM guid when a combined one collides, and a random guid is " +
+                                 "different on every peer. Those guids are DROPPED on every peer, which is the WHOLE " +
+                                 "of the gap between " + total + " walked and " + _byGuid.Count + " guid-indexed — " +
+                                 "nothing else is missing from that index. Every one of them is addressed by " +
+                                 "position instead.");
+            if (homeless > 0)
+                Debug.LogError("[Multiplayer][tac] " + homeless + " destructible(s) have no transform to stand on, so " +
+                               "they have NO position address. If a guid collision also cost one of them its guid it " +
+                               "cannot be addressed at all, and the host's damage to it is refused here with a line " +
+                               "of its own rather than landing on some other wall.");
             return true;
         }
 
@@ -223,8 +287,25 @@ namespace Multiplayer.Tactical
             if (!string.IsNullOrEmpty(guid) && _byGuid.TryGetValue(guid, out d) && d != null) return d;
             if (!string.IsNullOrEmpty(posTag) && _byPos.TryGetValue(posTag, out d) && d != null) return d;
             why = "no destructible under this peer's navigable root carries GuidInScene '" + guid + "' (the index " +
-                  "holds " + _byGuid.Count + ") and none stands at " + posTag + " (" + _byPos.Count + " positions)";
+                  "holds " + _byGuid.Count + ") and none answers to the address " + posTag + " (" + _byPos.Count +
+                  " addresses). This peer found " + Occupants(posTag) + " destructible(s) in that cell, so if that " +
+                  "count differs from the one the address carries the two maps really are not the same map — which " +
+                  "is what the count is in the address for";
             return null;
+        }
+
+        /// <summary>How many destructibles THIS peer put in the cell the host's address names — the number that
+        /// makes a failed resolve legible. Walks the keys because it only ever runs on the failure path.</summary>
+        private static int Occupants(string posTag)
+        {
+            if (string.IsNullOrEmpty(posTag)) return 0;
+            int hash = posTag.IndexOf('#');
+            string cell = hash < 0 ? posTag : posTag.Substring(0, hash);
+            int n = 0;
+            foreach (var key in _byPos.Keys)
+                if (key.Length > cell.Length && key[cell.Length] == '#' &&
+                    string.CompareOrdinal(key, 0, cell, 0, cell.Length) == 0) n++;
+            return n;
         }
 
         // ─── HOST: capture ─────────────────────────────────────────────────
@@ -245,7 +326,9 @@ namespace Multiplayer.Tactical
             Index();                                       // the collided guids must be dropped before one is read
             string guid = GuidOf(destructable);
             if (!string.IsNullOrEmpty(guid) && !_byGuid.ContainsKey(guid)) guid = "";   // collided: it names nothing
-            string posTag = PosTag(destructable) ?? "";
+            // THE TAG THE INDEX MINTED, never a second one derived here: the index is what knows how many
+            // objects share this cell, and an address computed without that count could not be checked.
+            string posTag = TagOf(destructable) ?? "";
             if (guid.Length == 0 && posTag.Length == 0)
             {
                 SayOnce("envkey-" + TacticalActorLifecycle.SafeName(destructable),

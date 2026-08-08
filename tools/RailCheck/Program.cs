@@ -298,6 +298,7 @@ namespace RailCheck
             Add(laws, () => L291_AMirroredActorClockDecidesNothingLocally.Check(game));
             Add(laws, () => L300_RenderedTextSurvivesTheWire.Check());
             Add(laws, () => L310_TheMoveOverlayNeverReadsANullSweep.Check());
+            Add(laws, () => L311_ACoLocatedDestructibleStillHasItsOwnAddress.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -9261,12 +9262,12 @@ namespace RailCheck
                     yield return "L69 merge-premise-stale: SceneObjectIdsComponent.MergeWith no longer mints a fresh " +
                                  "random id on a collision. If that is genuinely gone, GuidInScene is peer-stable " +
                                  "everywhere and the position fallback below is sprawl — check before keeping it";
-                var posTag = ModMethod(dest, "PosTag");
+                var posTag = ModMethod(dest, "PosCell");
                 if (posTag == null)
-                    yield return "L69 destructible-second-address-gone: TacticalDestruction.PosTag no longer exists. " +
+                    yield return "L69 destructible-second-address-gone: TacticalDestruction.PosCell no longer exists. " +
                                  "A destructible whose guid collided then has NO address at all, and the host's " +
                                  "damage to it is dropped on every other peer";
-                if (index != null && (!Reaches(index, "TacticalDestruction", "PosTag") ||
+                if (index != null && (!Reaches(index, "TacticalDestruction", "PosCell") ||
                                       !Reaches(ModMethod(dest, "ApplyEnvDamage"), "TacticalDestruction", "Resolve")))
                     yield return "L69 destructible-second-address-unused: the index or the applier no longer uses " +
                                  "the position address, so a colliding guid is back to being resolved by whichever " +
