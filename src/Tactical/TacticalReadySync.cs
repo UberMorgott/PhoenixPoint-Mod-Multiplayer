@@ -751,7 +751,20 @@ namespace Multiplayer.Tactical
             float gap = NativeSpacing(height, out spacingFrom);
             string clearanceFrom;
             float extra = ExtraClearance(me, height, out clearanceFrom);
-            me.anchoredPosition = Source.anchoredPosition - new Vector2(0f, height + gap + extra);
+            // THE LARGER OF THE TWO SEPARATIONS, NOT THEIR SUM — this is what stops the clone floating in
+            // the battlefield instead of reading as the row's second line. The live measurement:
+            // height=60 + gap=30 + extra=20 = 110 parent-local, 1.83 button heights of step, which left
+            // 16.67 WORLD units of empty air between the HUD row's bottom edge and the top of this button.
+            // The two terms are alternatives, not layers: `extra` is how far the row's art actually draws
+            // below End Turn's rect (live: 20, by the sibling 'UIMainButton_HPriority'), and `gap` is the
+            // breathing room we want between two stacked buttons. Adding them charges for the same air
+            // twice. Stacking them was over-correction left from the four placement misses this class
+            // documents — each of those pushed the clone FURTHER down, and the unit bug that actually
+            // caused "overlaps by about half" was fixed by ParentLocalHeight, not by this padding.
+            // ponytail: max() leaves 10 parent-local units past the drawn art. The clone's own upward glow
+            // is feathered and will graze End Turn's — which is what a native stacked row looks like. If it
+            // reads as a smear in game, go back to `gap + extra`; nothing else depends on this line.
+            me.anchoredPosition = Source.anchoredPosition - new Vector2(0f, height + Mathf.Max(gap, extra));
 
             // AND THEN BACK ONTO THE SCREEN. Every fix so far pushed this clone FURTHER down — a height,
             // then a spacing, then the row's drawn overhang — and nothing ever checked that the place it
@@ -783,7 +796,8 @@ namespace Multiplayer.Tactical
                       (Source.parent == null ? 1f : Source.parent.lossyScale.y) +
                       " | worldHeight=" + WorldHeight(Source) + " -> parentLocalHeight=" + height +
                       " | gap=" + gap + " (" + spacingFrom + "), extraClearance=" + extra + " (" +
-                      clearanceFrom + "), offset=" + (height + gap + extra) + ", onScreenLift=" + lift +
+                      clearanceFrom + "), offset=" + (height + Mathf.Max(gap, extra)) +
+                      " (height + the LARGER of gap/clearance, never their sum), onScreenLift=" + lift +
                       " | EndTurn anchoredPosition=" + Source.anchoredPosition + " ready anchoredPosition=" +
                       me.anchoredPosition + " ready worldHeight=" + WorldHeight(me) +
                       " (must equal EndTurn's worldHeight — a 0 here means the clone has no rect for the " +
@@ -822,17 +836,23 @@ namespace Multiplayer.Tactical
                 float pTop = Mathf.Max(Corners[1].y, Corners[2].y);
                 hud = parent.name + " world y=[" + pBottom + ".." + pTop + "]";
                 // BY CONSTRUCTION, AND SAID AS SUCH. This used to read "OVERHANGS ... drawn over the tactical
-                // map", which is a defect's phrasing for the widget's own specification: the ask was a SECOND
-                // button UNDER the native End Turn one, and this container is exactly ONE button tall (End
-                // Turn fills it). There is no layout that fits a second row inside a one-row rect without
-                // resizing native UI, which this file refuses to do on purpose. The number stays because it is
-                // the useful part — it is how far below the row the clone sits — but it is a measurement, not
-                // a finding. The bound that CAN make this widget unhittable is the canvas, measured next and
-                // clamped against every frame in Apply.
+                // map", which is a defect's phrasing for the widget's own specification. The container is
+                // exactly ONE button tall (live: EndTurnContainerModule world y=[633.33..653.33], End Turn's
+                // own height 20 — it fills it), and the ask was a SECOND button UNDER that one, so no layout
+                // puts this clone inside that rect without resizing native UI, which this file refuses to do.
+                // Nor is the container a bound anything else respects: the row's own art already draws past
+                // its bottom edge (live: the sibling 'UIMainButton_HPriority', which is what ExtraClearance
+                // measures). The bound that CAN make this widget unhittable is the CANVAS, measured next and
+                // re-clamped every frame in Apply — and the live reading there is ON SCREEN.
+                //
+                // What DID matter here was distance, not containment: the clone used to sit 16.67 world units
+                // of empty air below the row and read as floating over the battlefield. That is fixed at the
+                // placement line in Apply, not by this measurement.
                 verdict = myBottom < pBottom
-                    ? "sits " + (pBottom - myBottom) + " world units below it — expected: this clone is the " +
-                      "deliberate second row under a container that is one button tall, and the native End " +
-                      "Turn button's own glow draws past that same edge (not a clipping parent)"
+                    ? "extends " + (pBottom - myBottom) + " world units below it — expected: this clone is " +
+                      "the deliberate second row under a container that is one button tall, and the row's own " +
+                      "art already draws past that same edge (not a clipping parent). Watch this number for " +
+                      "DRIFT, not for being non-zero"
                     : "inside its HUD container";
             }
 
@@ -887,9 +907,17 @@ namespace Multiplayer.Tactical
                       "]. These are the clone's OWN native graphics and they are meant to be live — they are " +
                       "the button's face, exactly as the native End Turn button's are. A count of 0 means " +
                       "something disarmed them and the button is dead.");
-            if (undrawn > 0)
-                Debug.LogError("[Multiplayer][tac] ready button is NOT HIT-TESTABLE: " + undrawn + " of its " +
-                               live + " raycast surface(s) report depth=-1, which is uGUI's own marker for " +
+            // ALL OF THEM, NOT ANY OF THEM. `undrawn > 0` was the wrong test and the live settled log proves
+            // it: 6 of 12 read depth=-1 on a button that worked, and they are the ones that SHOULD — the
+            // `highlight` graphic is only drawn while hovering, `Mask`/`pattern`/`inline`/`underlight` are
+            // state or mask layers the canvas culls. A partly-undrawn button is the NORMAL resting state of
+            // this prefab. What is actually fatal is NOTHING drawn: then GraphicRaycaster has no surface to
+            // return and the button takes neither hover nor click. For the partial case the authority is the
+            // raycaster itself, asked directly in ProbeReachable below — an inference from our own fields
+            // never could answer it, which is the whole reason that probe exists.
+            if (live > 0 && undrawn == live)
+                Debug.LogError("[Multiplayer][tac] ready button is NOT HIT-TESTABLE: ALL " + live + " of its " +
+                               "raycast surface(s) report depth=-1, which is uGUI's own marker for " +
                                "\"the canvas never drew this\" — GraphicRaycaster skips exactly those, so the " +
                                "button takes neither hover nor click even though every wire on it is correct. " +
                                "The usual cause is a layer the HUD camera does not render (a runtime-built UI " +
