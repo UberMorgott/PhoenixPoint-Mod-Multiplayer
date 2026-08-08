@@ -68,9 +68,9 @@ namespace Multiplayer.UI
     /// name prefix to match the band. One packet type serves both screens. Client → host → everyone else,
     /// exactly like <c>ChatMessage</c>; the sender shows its own ping locally the same frame it sends.
     ///
-    /// NATIVE VISUALS ONLY, AND THE MOD OWNS EVERY INSTANCE. Geoscape: the game's own HAVEN-DEFENCE RING,
-    /// <c>GeoSiteVisualsDefs.Instance.HavenDefenseVisualsPrefab</c> — the thick outline the globe already
-    /// fills around a site while one faction is taking it off another. Tactical: the
+    /// NATIVE VISUALS ONLY, AND THE MOD OWNS EVERY INSTANCE. Geoscape: the RADIATING WAVES of the game's own
+    /// haven-defence marker, <c>GeoSiteVisualsDefs.Instance.HavenDefenseVisualsPrefab</c> — its rings are
+    /// switched off, see <see cref="WavesOnly"/>. Tactical: the
     /// <c>LocatedBeaconPrefab</c> shaft (<c>TacticalView.cs:83</c>) the game already raises over a
     /// heard-but-unseen actor, i.e. the native "something is HERE" idiom. AND A NATIVE SOUND — a silent
     /// marker is easy to miss, so every shown ping also plays the game's own modal-appears cue through the
@@ -98,7 +98,7 @@ namespace Multiplayer.UI
     /// point and <c>rotation</c> = <c>Quaternion.Euler(GetSphericalCoordinates(pos))</c>, which is the same
     /// orientation <c>Surface</c> inherits from its pivot. Owning the instance is what buys the rest: the
     /// expiry is ours (one <see cref="Expire"/> for both screens) and so is the COLOUR (see
-    /// <see cref="Tint"/> and <see cref="Ink"/>).
+    /// <see cref="Tint"/> and <see cref="WavesOnly"/>).
     ///
     /// THE OFF-SCREEN ARROW IS OURS, and the recon's <c>UIObjectTracker.KeepOnScreen</c> route is NOT
     /// usable: <c>UIObjectTrackersController.LateUpdate</c>'s <c>shouldUpdateTracker</c>
@@ -502,9 +502,8 @@ namespace Multiplayer.UI
 
             var ring = Instantiate(prefab, host);
             ring.gameObject.SetActive(true);
-            if (ring.Progress != null) ring.Progress.SetActive(true);
             Tint(ring.gameObject, mine);
-            Ink(ring.Progress == null ? null : ring.Progress.GetComponent<Renderer>(), mine);
+            WavesOnly(ring.gameObject);
             _instance.Track(new Live
             {
                 Geo = true,
@@ -663,40 +662,40 @@ namespace Multiplayer.UI
         private static bool _loggedTint;
 
         /// <summary>
-        /// THE RING, WHOLE AND STILL, IN THE PING'S ONE COLOUR — AND THE SPINNER IS GONE (2026-08-09, owner).
-        /// Three shader inputs, all three taken off the game's own writer for this exact prefab
-        /// (GeoUpdatedableMissionVisualsController.cs:29-31,:38-41): <c>_FirstColor</c> is what the site's
-        /// owner wears, <c>_SecondColor</c> what the attacker wears, and <c>_Progress</c> is the 0-1 fill
-        /// between them.
+        /// THE RING IS GONE, THE WAVES STAY (2026-08-09, owner). Several points of interest already wear a
+        /// ring of their own in vanilla — this IS the haven-defence ring prefab — so a ping laid over one of
+        /// them stacked ring on ring and read as garbage. What names the spot is the motion, not the outline.
         ///
-        /// WHAT WAS WRONG WITH SWEEPING IT. A ping has no progress to show, so <c>_Progress</c> used to be
-        /// walked round and round by <see cref="Blink"/> — and a fill that grows to full and RESTARTS AT ZERO
-        /// is not a rotation, it is a saw tooth: the arc's trailing edge snaps back across the ring every
-        /// 1.25 s, which is the "spinner that jitters back and forth" the owner reported. There is no phase
-        /// to fix, because a 0-1 fill has no wrap-around to be continuous through. So it is not animated at
-        /// all: <c>_Progress</c> = 1 and BOTH colours the ping's own, which draws the whole ring in one flat
-        /// colour with no arc boundary anywhere on it. The MOTION the owner kept is the prefab's own
-        /// radiating waves, which <see cref="Tint"/> now loops for the marker's whole life.
+        /// THE PREFAB'S PARTS ARE MEASURED, NOT GUESSED. <see cref="Tint"/>'s one-shot log named all five
+        /// renderers in a live 2026-08-08 session: <c>Progress</c>&lt;Unlit/Circular Progress Cutout&gt; (the
+        /// fill), <c>Outline</c>, <c>Pulse1</c>, <c>Pulse2</c> and <c>OngoingBattle_Swords</c> (all four
+        /// &lt;Unlit/Colored, Animated Mask&gt;). The waves are <c>Pulse1</c>/<c>Pulse2</c>: separate
+        /// renderers on separate objects, animated by their own shader, so switching the rest off cannot
+        /// take them with it. The swords icon goes too — a ping is not an ongoing battle.
         ///
-        /// A property block again: <see cref="Tint"/>'s <c>_Color</c>/<c>_TintColor</c> must survive this,
-        /// which <c>GetPropertyBlock</c>-then-<c>SetPropertyBlock</c> is what guarantees (the block is read
-        /// back out of the renderer, added to, and written whole). Allocated lazily inside the method, never
-        /// into a static initialiser — see the note on <see cref="_loggedTint"/> for what a Unity ecall in
-        /// this type's static constructor costs the harness.
+        /// <c>renderer.enabled</c>, NOT <c>SetActive(false)</c>: deactivating an object takes its CHILDREN
+        /// down with it, and nothing here proves the pulses are not parented under the ring. Disabling one
+        /// renderer stops exactly one mesh drawing and touches nothing below it.
+        ///
+        /// FAILS SAFE. If a build renames the pulses, this finds no wave and hides NOTHING — the marker
+        /// draws as it did before, which is a ring too many rather than a ping nobody can see.
         /// </summary>
-        private static void Ink(Renderer ring, bool mine)
+        private static void WavesOnly(GameObject go)
         {
-            if (ring == null) return;
-            if (_ink == null) _ink = new MaterialPropertyBlock();
-            var colour = mine ? Own : Peer;
-            ring.GetPropertyBlock(_ink);
-            _ink.SetColor("_SecondColor", colour);
-            _ink.SetColor("_FirstColor", colour);
-            _ink.SetFloat("_Progress", 1f);
-            ring.SetPropertyBlock(_ink);
+            var rs = go.GetComponentsInChildren<Renderer>(true);
+            int waves = 0;
+            foreach (var r in rs) if (r != null && IsWave(r)) waves++;
+            if (waves == 0)
+            {
+                Debug.LogWarning("[Multiplayer] ping marker keeps its ring — no renderer named Pulse* under " +
+                                 "the haven-defence prefab, so hiding the rest would leave nothing at all " +
+                                 "to see. The tint log names the renderers this build actually has.");
+                return;
+            }
+            foreach (var r in rs) if (r != null && !IsWave(r)) r.enabled = false;
         }
 
-        private static MaterialPropertyBlock _ink;
+        private static bool IsWave(Renderer r) => r.gameObject.name.StartsWith("Pulse", StringComparison.Ordinal);
 
         /// <summary>
         /// THE PINGED ACTOR, PAINTED WHOLE AND BLINKING — green mine, blue somebody else's, the same two
