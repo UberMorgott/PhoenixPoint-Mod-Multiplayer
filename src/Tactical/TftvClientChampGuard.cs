@@ -70,6 +70,16 @@ namespace Multiplayer.Tactical
             {
                 var engine = TacticalDamageSync.LiveEngine();
                 if (engine == null || engine.IsHost) return true;
+                // TFTV'S OWN CANDIDATE PREDICATE, not a parameter-type guess. GiveRankAndNameToHumaoidEnemy
+                // (TFTVHumanEnemies.cs:1617) does nothing whatever unless `actor.BaseDef.name ==
+                // "Soldier_ActorDef"` — every deploy crate, AI waypoint, dropped container, structural target
+                // and scenery prop reaches this method and every one of them fails that line, so guarding them
+                // suppressed nothing and cost 77 log lines per client (live 3-instance sweep 2026-08-08). This
+                // is NARROWER, never weaker: a real champ candidate has to satisfy TFTV's own line to be rolled
+                // at all, so it still lands here. It is also the recorded lesson — narrow by the marker the
+                // owning code actually tests, not by the parameter type Harmony happens to hand you.
+                var baseDef = actor == null ? null : actor.BaseDef;
+                if (baseDef == null || baseDef.name != "Soldier_ActorDef") return true;
                 Debug.Log("[Multiplayer][tac] TFTV rank/name roll SUPPRESSED on this client for " +
                           (actor == null ? "<null>" : actor.name) + " — the champ, its rank and its name are the " +
                           "host's roll. Running it here would mint a different elite on this screen than the one " +

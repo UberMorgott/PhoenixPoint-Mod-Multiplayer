@@ -86,7 +86,31 @@ namespace Multiplayer.Tactical
             }
             if (!hasFaction) return null;
             names.Sort(StringComparer.Ordinal);   // so two peers' sets compare as sets, not as enumeration order
-            return new Identity { Name = actor.name, Tags = names };
+            var id = new Identity { Name = actor.name, Tags = names };
+            Announce(actor, id);
+            return id;
+        }
+
+        private static readonly HashSet<string> _announced = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>SAY WHAT THE HOST IS SENDING, once. Without this the rider is unfalsifiable from a log: the
+        /// host's <see cref="Collect"/> was silent and the client's <see cref="Apply"/> speaks only when it
+        /// CHANGES something, so a session where no line appeared could equally mean "no human enemy was in
+        /// that mission" or "the identity is not being collected at all" — and the 2026-08-08 sweep could not
+        /// tell them apart. With this line the two are distinguishable: a host line and no client line is a
+        /// carry that is failing, no host line at all is a mission with nothing to carry.
+        ///
+        /// ON CHANGE ONLY, never per settle — <see cref="Collect"/> runs on every settle of every actor, and
+        /// the identity is rolled once. The key is the identity itself, so a re-roll speaks again and a repeat
+        /// says nothing.</summary>
+        private static void Announce(TacticalActorBase actor, Identity id)
+        {
+            int key = TacticalActorKey.Of(actor);
+            string tags = string.Join(", ", id.Tags.ToArray());
+            if (!_announced.Add(key + "|" + id.Name + "|" + tags)) return;
+            Debug.Log("[Multiplayer][tac] HOST champ identity for key " + key + " — " + id.Name + " (" + tags +
+                      "). TFTV rolled this off a Stopwatch-seeded generator, so it rides every spawn record and " +
+                      "every settle naming that key and the clients adopt it instead of rolling their own.");
         }
 
         // ─── the codec ─────────────────────────────────────────────────────
