@@ -441,10 +441,17 @@ namespace Multiplayer.Tactical
         /// it through instead of bouncing the ask back to the host as a second restart (law 8).</summary>
         private static void ApplyRestart()
         {
+            // Opens the trace on a FOLLOWER (this runs BEFORE its own FinishLevel reaches LoadBarrierGate),
+            // and continues an already-open one on the client whose own press was blocked into an ask —
+            // which is what makes the elapsed on that peer the full press → host → reload round trip.
+            RestartTrace.Mark("the host's RESTART announcement arrived — this peer is about to run its own " +
+                              "FinishLevel(RestartGameResult) inside a SyncApplyScope.");
             var level = GameUtl.CurrentLevel();
             var game = GameUtl.GameComponent<PhoenixGame>();
             if (level == null || game == null)
             {
+                RestartTrace.Note("...and there is NO live level/PhoenixGame here, so nothing reloads on this " +
+                                  "peer. From here on it is in a different level from the host.");
                 Debug.LogError("[Multiplayer][tac] host mission RESTART arrived with no live level on this peer " +
                                "— nothing to reload here, so this peer and the host are now in different levels " +
                                "and every actor key they exchange names a different board.");
@@ -767,6 +774,8 @@ namespace Multiplayer.Tactical
                 var game = GameUtl.GameComponent<PhoenixGame>();
                 if (level == null || game == null) why = "this host has no PhoenixGame/level to restart through";
             }
+            RestartTrace.Mark("HOST received a restart ask from peer=" + senderPeerId + " nonce=" + nonce +
+                              " — verdict: " + (why ?? "ACCEPTED, running the host's own restart"));
             if (why != null)
             {
                 // QUIETLY (law L123 arm g). Both refusal arms mean the host's battle is already over or gone,
@@ -795,6 +804,9 @@ namespace Multiplayer.Tactical
         {
             if (!IntentRail.ShouldRunNative())
             {
+                RestartTrace.Note("OnLocalRestart: this peer may NOT run the native restart — the press " +
+                                  "becomes an ask on the tactical intent surface and NOTHING is torn down " +
+                                  "here. The trace stays open and continues when the host's answer arrives.");
                 IntentRail.Send(SurfaceIds.TacTurnIntent, OpRestartMission, "restart mission");
                 Debug.Log("[Multiplayer][tac] LOCAL mission restart BLOCKED on this client and sent to the host " +
                           "as an ask — a peer that reloads the map on its own is fighting a different battle " +
@@ -802,6 +814,9 @@ namespace Multiplayer.Tactical
                 return false;
             }
             HostBroadcastRestart();
+            RestartTrace.Note("OnLocalRestart: the native restart is allowed to run here, and every other " +
+                              "peer has been told to run its own (HostBroadcastRestart self-gates on " +
+                              "host+session, so a follower re-entering from ApplyRestart sends nothing).");
             return true;
         }
     }

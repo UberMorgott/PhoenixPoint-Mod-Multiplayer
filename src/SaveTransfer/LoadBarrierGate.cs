@@ -118,17 +118,31 @@ namespace Multiplayer.Harmony
                 // levels with different key maps and every actor key on the wire named a different board.
                 // The HOST's restart is broadcast so every peer follows without anybody pressing anything;
                 // the CLIENT's becomes an ask and is BLOCKED here.
+                //
+                // RestartTrace is INSTRUMENTATION ONLY and gates nothing. It sits here because this is the
+                // one place in the mod that knows a restart is beginning; everything downstream only writes
+                // into an already-open trace, so no other seam can emit outside one.
+                if (boundary == Boundary.Restart) RestartTrace.Enter(result);
                 if (boundary == Boundary.Restart && !TacticalTurnSync.OnLocalRestart()) return false;
 
                 var coord = NetworkEngine.Instance?.SaveTransfer;
-                if (coord == null) return true;
+                if (coord == null)
+                {
+                    RestartTrace.Note("no SaveTransfer coordinator on this peer — the load barrier is NOT " +
+                                      "armed for this restart (solo, or the session is already down).");
+                    return true;
+                }
                 // Self-guarded: a no-op unless this boundary is one nobody else armed (see class doc). A
                 // restart that DOES run reaches it, and should: every peer is about to load the same map, so
                 // they wait behind the curtain for each other exactly as they do on every other boundary.
                 coord.OpenReturnBarrier();
+                RestartTrace.Note("load barrier armed (OpenReturnBarrier) — the curtain now stays down until " +
+                                  "every live peer reports its own load done.");
             }
             catch (Exception e)
             {
+                RestartTrace.Note("LoadBarrierGate.Prefix THREW — the native FinishLevel still runs, but " +
+                                  "nothing after the throw ran: " + e.Message);
                 // Never throw into FinishLevel — an escaping exception here kills the level-switch coroutine
                 // outright ("Broken coroutine call chain"), which is law L70's blocker one level down.
                 Debug.LogError("[Multiplayer] LoadBarrierGate.Prefix failed: " + e.Message);

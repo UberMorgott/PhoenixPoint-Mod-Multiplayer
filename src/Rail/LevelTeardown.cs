@@ -72,7 +72,16 @@ namespace Multiplayer.Network.Sync
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return; // solo: vanilla teardown, untouched
             var view = (GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>())?.View;
-            if (view == null) return;                              // not leaving a geoscape
+            if (view == null)
+            {
+                // Instrumentation only, and it must be visible as a NON-event: a mission restart is a
+                // tactical→tactical change, so this geoscape teardown correctly does nothing. A reader
+                // reconstructing the order needs to see that it ran and self-returned, not to guess.
+                Multiplayer.Tactical.RestartTrace.Note("GeoTeardownResetGate ran and self-returned — this " +
+                    "peer holds no GeoLevelController, so no geoscape view state was parked (expected: a " +
+                    "restart never leaves the geoscape).");
+                return;                                            // not leaving a geoscape
+            }
 
             DumpStack(view);
             // Already parked by the game's own path (host tactical launch) — re-pushing would only churn.

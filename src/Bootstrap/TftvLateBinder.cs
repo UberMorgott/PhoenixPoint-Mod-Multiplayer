@@ -31,7 +31,13 @@ namespace Multiplayer.Harmony
             typeof(Multiplayer.Network.Sync.PersonnelSync.TftvTrainDeployCapturePatch),
             typeof(Multiplayer.Network.Sync.PersonnelSync.TftvPromoteCapturePatch),
             typeof(Multiplayer.Tactical.TftvClientChampGuard),
+            typeof(Multiplayer.Tactical.TftvErrorMirror),
         };
+
+        /// <summary>What this peer can say about TFTV's patch state, for the diagnostics that ask
+        /// (<c>RestartTrace</c>). "Bound" here means Harmony really produced a replacement method — the one
+        /// question a reader of a mixed-mod incident log always has and no other line answers.</summary>
+        internal static string BoundSummary { get; private set; } = "TFTV not loaded (no guard patches bound)";
 
         private static readonly object _lock = new object();
         private static HarmonyLib.Harmony _harmony;
@@ -50,6 +56,7 @@ namespace Multiplayer.Harmony
             if (TftvLoaded())
             {
                 _done = true;
+                BoundSummary = "bound by PatchAll (TFTV was already loaded), " + _patchClasses.Length + " class(es)";
                 Debug.Log("[Multiplayer] TFTV already loaded at PatchAll; guard patches bound by PatchAll (no defer).");
                 Multiplayer.Tactical.MirrorApplyGuard.Install(harmony);
                 return;
@@ -95,6 +102,7 @@ namespace Multiplayer.Harmony
 
         private static void BindAll()
         {
+            var summary = new System.Text.StringBuilder("late-bound: ");
             foreach (var t in _patchClasses)
             {
                 try
@@ -103,16 +111,24 @@ namespace Multiplayer.Harmony
                     // (Prepare true because TFTV is loaded). Returns the created replacement methods, or empty.
                     var bound = new PatchClassProcessor(_harmony, t).Patch();
                     if (bound != null && bound.Count > 0)
+                    {
+                        summary.Append(t.Name).Append("=").Append(bound.Count).Append(" ");
                         Debug.Log("[Multiplayer] TFTV patch BOUND (late): " + t.Name + " (" + bound.Count + " method)");
+                    }
                     else
+                    {
+                        summary.Append(t.Name).Append("=NOTARGET ");
                         Debug.LogWarning("[Multiplayer] TFTV patch late-bind NO target: " + t.Name
                             + " (Prepare false / method unresolved — TFTV renamed?)");
+                    }
                 }
                 catch (Exception e)
                 {
+                    summary.Append(t.Name).Append("=FAILED ");
                     Debug.LogWarning("[Multiplayer] TFTV patch late-bind FAILED: " + t.Name + " — " + e.Message);
                 }
             }
+            BoundSummary = summary.ToString().TrimEnd();
             // A3b's mirror-apply guard is late-bound for the SAME reason and at the SAME moment: it asks
             // Harmony which foreign patches sit on the four vanilla damage entries, and at PatchAll time TFTV
             // has installed none of them yet, so an early install would find nothing and bind nothing —
