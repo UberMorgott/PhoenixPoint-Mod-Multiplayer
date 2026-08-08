@@ -1705,18 +1705,24 @@ namespace Multiplayer.Network.Sync
             if (!(field.GetValue(entity) is IDictionary dict)) return;
             var present = new HashSet<string>(RailMeta.DecodeDictCensus(value), StringComparer.Ordinal);
             List<object> extras = null;
+            List<string> extraSubs = null;
             foreach (var k in dict.Keys)
             {
                 var sub = field.Class == FieldClass.GeoItemDict ? GeoItemCodec.SubKey(k) : RailMeta.EncodeDictKey(k);
                 if (present.Contains(sub)) continue;
-                if (extras == null) extras = new List<object>();
+                if (extras == null) { extras = new List<object>(); extraSubs = new List<string>(); }
                 extras.Add(k);
+                extraSubs.Add(sub);
             }
             if (extras == null) return;
             foreach (var k in extras) dict.Remove(k);
             touched.Add(entity);
+            // NAME them. This store is the SHARED Phoenix inventory as often as it is anything else
+            // (F#…ItemStorage._storageItems), so "pruned 2 phantom dict keys" threw away the only evidence
+            // of WHICH two items the peers disagreed about — and the prune is where that evidence dies.
+            // The sub-keys are already in hand from the loop above; printing them costs nothing.
             Debug.Log("[Multiplayer][rail] GenericApplier: census pruned " + extras.Count + " phantom dict key(s) at " +
-                      path + "." + field.Name);
+                      path + "." + field.Name + ": " + string.Join(", ", extraSubs));
         }
 
         private static bool SameBytes(byte[] a, byte[] b)
