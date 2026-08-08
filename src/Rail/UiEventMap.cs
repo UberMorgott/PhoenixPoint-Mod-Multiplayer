@@ -568,8 +568,24 @@ namespace Multiplayer.Network.Sync
         internal static readonly Dictionary<Type, HashSet<Type>> IgnoredKinds =
             new Dictionary<Type, HashSet<Type>>
             {
-                [typeof(UIStateEditSoldier)] = new HashSet<Type>(WorldLayerKinds),
+                [typeof(UIStateEditSoldier)] = EveryWorldKindExcept(typeof(GeoVehicle)),
             };
+
+        /// <summary>The exclusion row above, minus the kinds the screen DOES paint. Named rather than
+        /// hand-listed so the exception carries its reason: <c>GeoVehicle</c> is where the squad lives.
+        /// A soldier's membership of an aircraft rides inside <c>GeoVehicle.SerializationData</c>, so the
+        /// roster this screen cycles through IS a GeoVehicle delta — declaring that kind irrelevant made
+        /// the one screen that MUST react to a squad-roster change the one screen that could not. Measured
+        /// 2026-08-08: a dismissal on one peer left the soldier standing on another peer's open edit
+        /// screen, with `[MP][uirepaint] SKIP GeoVehicle on UIStateEditSoldier` as the only trace. The rest
+        /// of <see cref="WorldLayerKinds"/> stays ignored — a site timer or a haven still has no business
+        /// rebuilding the perk tree.</summary>
+        private static HashSet<Type> EveryWorldKindExcept(params Type[] painted)
+        {
+            var set = new HashSet<Type>(WorldLayerKinds);
+            foreach (var kind in painted) set.Remove(kind);
+            return set;
+        }
 
         /// <summary>
         /// AN UNPAID OFFER OVER A SHARED PURSE IS NOT A FROZEN SNAPSHOT. Reported 2026-08-06: two peers
