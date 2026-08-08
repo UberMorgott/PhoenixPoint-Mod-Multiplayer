@@ -366,6 +366,9 @@ namespace Multiplayer.Network.Sync
         }
         private static readonly Dictionary<string, object> _walkRoots = new Dictionary<string, object>(StringComparer.Ordinal);
         private static readonly HashSet<string> _prevRoots = new HashSet<string>(StringComparer.Ordinal);
+        // Concrete class the path held when it entered _prevRoots — the FOURTH structural shape: same path,
+        // different class. See ClassSwappedPaths.
+        private static readonly Dictionary<string, string> _prevRootTypes = new Dictionary<string, string>(StringComparer.Ordinal);
         private static bool _rootsSeeded;
         private static readonly HashSet<string> _structuralSkipsLogged = new HashSet<string>(StringComparer.Ordinal);
 
@@ -418,7 +421,7 @@ namespace Multiplayer.Network.Sync
             // Session teardown is the ONE place the structural root set dies: across a mere reload boundary
             // it is kept on purpose (see ResetForReloadBoundary), but a new session's peers share nothing
             // with the old one's, so a surviving set would diff the next level against a foreign campaign.
-            _prevRoots.Clear(); _rootsSeeded = false;
+            _prevRoots.Clear(); _prevRootTypes.Clear(); _rootsSeeded = false;
             _kindIds.Clear(); _kinds.Clear();
             _rootTouchedSeq.Clear(); // the seq stream restarts, so recorded touch-seqs would over-gate
             _reportWritten = false;
@@ -920,6 +923,14 @@ namespace Multiplayer.Network.Sync
             var ordered = _ordered;
             var newSnap = _snapshotBack;
 
+            // Class swaps are detected BEFORE the diff, not inside EmitStructural, because the re-created
+            // object needs its WHOLE subtree on the wire: a field that happens to be byte-equal to the old
+            // class's field at the same index shares a SnapKey and would otherwise never be emitted, leaving
+            // the freshly constructed client object holding a default there. Forcing the path is the existing
+            // machinery for exactly that.
+            var swapped = ClassSwappedPaths();
+            if (swapped != null) _cycleForcePrefixes.AddRange(swapped);
+
             // Diff: changed/new pairs in walk order (canonical), then subKey deletions. An unchanged field
             // kept the previous tick's array (RailMeta.EncodeFieldValue with prev), so BytesEqual's
             // ReferenceEquals fast path settles it without a byte compare.
@@ -1021,7 +1032,7 @@ namespace Multiplayer.Network.Sync
             int packets = 0, bytes = 0;
             // Structural create/destroy FIRST: the same batch's value entries for a just-created root
             // (and refs to it) then resolve on the client in seq order.
-            EmitStructural(engine, ref packets, ref bytes);
+            EmitStructural(engine, swapped, ref packets, ref bytes);
             if (changed.Count > 0)
                 Emit(engine, changed, ref packets, ref bytes);
 
@@ -1468,7 +1479,8 @@ namespace Multiplayer.Network.Sync
         private static void SeedRoots()
         {
             _prevRoots.Clear();
-            foreach (var k in _walkRoots.Keys) _prevRoots.Add(k);
+            _prevRootTypes.Clear();
+            foreach (var kv in _walkRoots) { _prevRoots.Add(kv.Key); _prevRootTypes[kv.Key] = kv.Value.GetType().FullName; }
             _rootsSeeded = true;
         }
 
@@ -1489,16 +1501,59 @@ namespace Multiplayer.Network.Sync
         /// own seq on the ONE ordered stream, emitted BEFORE the value delta of the same walk. A root
         /// whose blob fails to serialize stays OUT of _prevRoots, so the next walk retries it. Non-enabled
         /// kinds log once — the visible opt-out line, same contract as the coverage report.</summary>
-        private static void EmitStructural(NetworkEngine engine, ref int packets, ref int bytes)
+        /// <summary>THE FOURTH STRUCTURAL SHAPE: the path is still there, but it now holds an object of a
+        /// DIFFERENT CONCRETE CLASS. The set-diff cannot see it — the key is unchanged — and neither can the
+        /// value diff, because <see cref="SnapKey"/> carries no kind: field 5 of the old class and field 5 of
+        /// the new one share a snapshot key, so the delta keeps landing on the wrong-class instance forever.
+        /// Measured: the host's `S#88.SerializationData.ActiveMission` became a GeoStealResourcesFromHavenMission
+        /// while the client still held the GeoCustomMission created earlier ("dto-twin gap:
+        /// GeoStealResourcesFromHavenMission._attackedZoneDef has no live counterpart on GeoCustomMission"),
+        /// and the client never saw the haven-attack window at all.
+        ///
+        /// Scoped to the Descend shape, which is the only one where a swap is legitimate AND safely
+        /// re-creatable: an actor root must never be destroyed+recreated (law 3), and a blob root changing
+        /// class means an id was reused, which is a KEYING gap this cannot repair. Both of those get a line
+        /// instead of a fix — visible, per the same anti-silence contract as the not-enabled skips.</summary>
+        private static List<string> ClassSwappedPaths()
+        {
+            List<string> swapped = null;
+            foreach (var kv in _walkRoots)
+            {
+                if (!_prevRootTypes.TryGetValue(kv.Key, out var was)) continue;
+                var now = kv.Value.GetType();
+                if (string.Equals(was, now.FullName, StringComparison.Ordinal)) continue;
+                if (PayloadFor(kv.Key, now) != CreatePayload.DescendFrame)
+                {
+                    if (_structuralSkipsLogged.Add("x:" + kv.Key))
+                        Debug.LogError("[Multiplayer][rail] structural: '" + kv.Key + "' changed class " + was +
+                                       " → " + now.FullName + ", which is NOT a Descend field — no destroy+create is " +
+                                       "emitted (an actor may never be re-created, law 3; a re-used blob-root id is a " +
+                                       "keying gap). Every delta under this path lands on the wrong-class instance.");
+                    continue;
+                }
+                (swapped = swapped ?? new List<string>()).Add(kv.Key);
+                Debug.Log("[Multiplayer][rail] structural: '" + kv.Key + "' changed class " + was + " → " +
+                          now.FullName + " — re-creating (destroy+create), subtree forced");
+            }
+            return swapped;
+        }
+
+        private static void EmitStructural(NetworkEngine engine, List<string> swapped, ref int packets, ref int bytes)
         {
             if (!_rootsSeeded) { SeedRoots(); return; } // first non-baseline walk after an old-format boundary
             List<string> removed = null;
             foreach (var k in _prevRoots)
                 if (!_walkRoots.ContainsKey(k)) (removed = removed ?? new List<string>()).Add(k);
+            // A class swap rides the SAME two loops as any other structural change: dropping the path out of
+            // _prevRoots here makes the create loop below re-emit it from the new runtime type, and the client
+            // half is already the pair it needs (ApplyDescendDestroy nulls the field, ApplyDescendCreate then
+            // builds from the payload's type name — GenericApplier:328-331).
+            if (swapped != null) (removed = removed ?? new List<string>()).AddRange(swapped);
             if (removed != null)
                 foreach (var k in removed)
                 {
                     _prevRoots.Remove(k);
+                    _prevRootTypes.Remove(k);
                     if (!StructuralEnabled(k))
                     {
                         if (_structuralSkipsLogged.Add("d:" + k))
@@ -1513,6 +1568,7 @@ namespace Multiplayer.Network.Sync
                 if (!StructuralEnabled(kv.Key))
                 {
                     _prevRoots.Add(kv.Key); // remember it either way — the skip line must not repeat per walk
+                    _prevRootTypes[kv.Key] = kv.Value.GetType().FullName;
                     if (_structuralSkipsLogged.Add("c:" + kv.Key))
                         Debug.Log("[Multiplayer][rail] structural: create of '" + kv.Key + "' (" + kv.Value.GetType().Name + ") not enabled — not mirrored");
                     continue;
@@ -1543,6 +1599,7 @@ namespace Multiplayer.Network.Sync
                 }
                 SendStructural(engine, 1, kv.Key, blob, ref packets, ref bytes);
                 _prevRoots.Add(kv.Key);
+                _prevRootTypes[kv.Key] = kv.Value.GetType().FullName;
             }
         }
 
