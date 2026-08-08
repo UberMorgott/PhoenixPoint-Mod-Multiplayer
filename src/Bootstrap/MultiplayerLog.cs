@@ -15,8 +15,12 @@ namespace Multiplayer.Util
     /// stacktraces), past and future, with zero migration of call sites.
     ///
     /// File: &lt;Application.persistentDataPath&gt;/Multiplayer/multiplayer.log
-    /// (same "Multiplayer" dir used by ClientIdentity). On each launch the previous run's log is
-    /// rotated to multiplayer-prev.log, mirroring Unity's Player.log / Player-prev.log scheme.
+    /// (same "Multiplayer" dir used by ClientIdentity). On each launch the previous runs are shifted
+    /// down a bounded ring — multiplayer-prev.log … multiplayer-prev9.log — so a co-op session's log
+    /// survives later launches. Unity's single Player-prev.log scheme was the model and it is the wrong
+    /// one here: a sweep of the 13:30 co-op session found the whole HOST side gone, overwritten by two
+    /// IDLE solo relaunches at 14:06 and 14:08. One slot means two boots erase the authoritative half of
+    /// every session, and this project debugs from these files.
     /// </summary>
     public static class MultiplayerLog
     {
@@ -31,6 +35,10 @@ namespace Multiplayer.Util
         // Same-machine instance cap for the suffixed-file fallback (multiplayer-2.log … -N.log) when
         // the primary log is locked by an earlier instance (co-op client on the local 2-instance rig).
         private const int MaxInstances = 5;
+        // Rotation ring per base name: how many previous runs to keep, and a total byte cap across them
+        // so a long-log session can never let the ring grow without bound. Oldest is pruned first.
+        private const int PrevKeep = 9;
+        private const long PrevTotalCapBytes = 64L * 1024 * 1024;
 
         private static readonly object Gate = new object();
         private static StreamWriter _writer;
@@ -80,28 +88,15 @@ namespace Multiplayer.Util
                             : "multiplayer-" + instance + ".log";
                         var attemptPath = Path.Combine(dir, attemptName);
 
-                        // Rotate HERE, per suffix — keep exactly one previous run each
-                        // (multiplayer-prev.log, multiplayer-2-prev.log, …). This used to sit before the
+                        // Rotate HERE, per suffix — each base name keeps its OWN ring
+                        // (multiplayer-prev*.log, multiplayer-2-prev*.log, …). This used to sit before the
                         // loop and so only ever rotated multiplayer.log: the -N suffix is picked by LOCK
                         // ORDER at runtime, not by instance folder, so every fallback instance overwrote
                         // its own history on launch and two investigations were run without it.
                         // Best-effort by design — a first launch has nothing to move and a locked file
                         // must cost a log, never the boot.
-                        try
-                        {
-                            if (File.Exists(attemptPath))
-                            {
-                                var prevPath = Path.Combine(
-                                    dir, Path.ChangeExtension(attemptName, null) + "-prev.log");
-                                if (File.Exists(prevPath))
-                                    File.Delete(prevPath);
-                                File.Move(attemptPath, prevPath);
-                            }
-                        }
-                        catch
-                        {
-                            // Locked or unmovable; the append:false open below still truncates it.
-                        }
+                        if (File.Exists(attemptPath))
+                            RotateRing(dir, Path.ChangeExtension(attemptName, null), attemptPath);
 
                         try
                         {
@@ -135,6 +130,44 @@ namespace Multiplayer.Util
 
                 // Subscribe regardless: even if the file failed, Handler is a safe no-op then.
                 Application.logMessageReceived += Handler;
+            }
+        }
+
+        // Slot 1 keeps the historical "-prev.log" name so existing notes and habits still find the last
+        // run; 2..PrevKeep are "-prev2.log" … Deliberately NOT "-2.log": that space belongs to the
+        // same-machine INSTANCE fallback above and colliding the two would make a client's live log
+        // look like the primary's history.
+        private static string PrevPath(string dir, string baseName, int slot)
+            => Path.Combine(dir, baseName + (slot == 1 ? "-prev.log" : "-prev" + slot + ".log"));
+
+        // Every step is individually best-effort: one locked ring member must not cost the rotation of
+        // the file we are about to truncate (that is the run we would lose).
+        private static void TryMove(string from, string to)
+        {
+            try { if (File.Exists(from)) File.Move(from, to); } catch { }
+        }
+
+        private static void RotateRing(string dir, string baseName, string currentPath)
+        {
+            try { File.Delete(PrevPath(dir, baseName, PrevKeep)); } catch { }
+            for (var slot = PrevKeep - 1; slot >= 1; slot--)
+                TryMove(PrevPath(dir, baseName, slot), PrevPath(dir, baseName, slot + 1));
+            TryMove(currentPath, PrevPath(dir, baseName, 1));
+
+            // Byte cap, newest-first: keep adding until the next file would breach it, then drop that one
+            // and everything older. Walking 1→PrevKeep is oldest-pruned-first because slot 1 is newest.
+            long total = 0;
+            for (var slot = 1; slot <= PrevKeep; slot++)
+            {
+                var path = PrevPath(dir, baseName, slot);
+                try
+                {
+                    if (!File.Exists(path)) continue;
+                    var len = new FileInfo(path).Length;
+                    if (total + len > PrevTotalCapBytes) File.Delete(path);
+                    else total += len;
+                }
+                catch { }
             }
         }
 

@@ -2120,6 +2120,13 @@ namespace Multiplayer.Network
             // Hide the mod overlay roster.
             try { MultiplayerUI.Instance?.HideLoadOverlay(); }
             catch (Exception e) { Debug.LogError("[Multiplayer] HideLoadOverlay failed: " + e.Message); }
+
+            // The reveal IS the end of the load window on every peer (_revealed is set here for all of
+            // them), so it is where the throttled progress lines pay their debt: exact final values plus
+            // the sample count the banding suppressed.
+            CloseProgressWindow(_sendGate, "RosterProgress SEND");
+            CloseProgressWindow(_recvGate, "RosterProgress RECV");
+            CloseProgressWindow(_pumpGate, "phase-2 pump");
         }
 
         // The reveal machinery above REMOVES the game's only input-unlock edge; RevealInputLock puts it back
@@ -2163,6 +2170,60 @@ namespace Multiplayer.Network
             TryReleaseBarrier();
         }
 
+        // ── Progress-line cadence ────────────────────────────────────────────────────────────────
+        // RosterProgress SEND/RECV and the phase-2 pump fire at ≤20 Hz for the WHOLE of every load.
+        // Measured on one client's session log: 766 of 1378 lines (56%) were the single RECV line and
+        // 113 more were the pump — synchronous disk I/O during the very load they measure, and enough
+        // noise to drown every other signal in a hand sweep.
+        //
+        // RailMeta.CountMiss ("first sighting + periodic digest") is the codebase's own answer to
+        // repetition and it does NOT fit here: it keys on the exact line text, and every percent makes
+        // a new key, so all 766 lines would still print as first sightings and the tally would fill its
+        // 500-family cap with load noise. The shape that fits a MOVING value is a band: print when it
+        // crosses a 10% step or changes phase, plus a heartbeat so a stall still leaves a trace, plus
+        // one summary at the reveal carrying the exact final values and the suppressed count. No
+        // information is lost — the numbers between two band edges are interpolation.
+        private const int ProgressBandPct = 10;
+        private const long ProgressHeartbeatMs = 2000;
+
+        private sealed class ProgressGate
+        {
+            public string Band;    // last band actually printed
+            public long AtMs;      // when it was printed
+            public int Seen;       // observations this window, printed or not
+            public string Last;    // exact detail of the most recent observation
+        }
+
+        private readonly ProgressGate _sendGate = new ProgressGate();
+        private readonly ProgressGate _recvGate = new ProgressGate();
+        private readonly ProgressGate _pumpGate = new ProgressGate();
+
+        /// <summary>True when this observation earns a line: the band moved, or the heartbeat is due.
+        /// Always records the observation so the window summary can report what was suppressed.</summary>
+        private static bool ProgressDue(ProgressGate gate, string band, string detail)
+        {
+            var now = NowMs();
+            gate.Seen++;
+            gate.Last = detail;
+            if (band == gate.Band && now - gate.AtMs < ProgressHeartbeatMs) return false;
+            gate.Band = band;
+            gate.AtMs = now;
+            return true;
+        }
+
+        /// <summary>Close one progress window: print the exact last values and how many snapshots the
+        /// banding swallowed, then re-arm for the next load. The summary is what makes the throttle
+        /// safe — a stall that never reaches its band edge is still visible as "last […]" here.</summary>
+        private static void CloseProgressWindow(ProgressGate gate, string what)
+        {
+            if (gate.Seen == 0) return;
+            Debug.Log($"[Multiplayer] {what} window closed — {gate.Seen} sample(s), last [{gate.Last}]");
+            gate.Band = null;
+            gate.AtMs = 0;
+            gate.Seen = 0;
+            gate.Last = null;
+        }
+
         /// <summary>All peers: merge a host RosterProgress snapshot into the shared tracker for the overlay.</summary>
         public void OnRosterProgress(NetworkMessage msg)
         {
@@ -2172,7 +2233,9 @@ namespace Multiplayer.Network
             NoteProgress();
             var rows = MessageSerializer.DeserializeRosterProgress(msg.Payload);
             var recvDetail = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent}"));
-            Debug.Log($"[Multiplayer] RosterProgress RECV [{recvDetail}]");
+            var recvBand = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent / ProgressBandPct}"));
+            if (ProgressDue(_recvGate, recvBand, recvDetail))
+                Debug.Log($"[Multiplayer] RosterProgress RECV [{recvDetail}]");
             foreach (var r in rows) _tracker.Merge(r.SlotIndex, r.Phase, r.Percent);
         }
 
@@ -2469,8 +2532,12 @@ namespace Multiplayer.Network
                     {
                         _lastReportedLoadPct = pct;
                         NoteProgress(); // own phase-2 load advancing = progress
-                        Debug.Log($"[Multiplayer] phase-2 pump: slot={_engine.Session.LocalSlotIndex} " +
-                                  $"pct={pct} (src={(_liveProgressBar != null ? "nativeBar" : "levelProgress")})");
+                        // Throttled LINE only — the publish below still runs on every single percent,
+                        // because that one drives the other peers' overlays, not a human reading a log.
+                        var pumpDetail = $"slot={_engine.Session.LocalSlotIndex} pct={pct} " +
+                                         $"(src={(_liveProgressBar != null ? "nativeBar" : "levelProgress")})";
+                        if (ProgressDue(_pumpGate, (pct / ProgressBandPct).ToString(), pumpDetail))
+                            Debug.Log($"[Multiplayer] phase-2 pump: {pumpDetail}");
                         if (InPhase2) ReportLoadProgress(pct);
                         else PublishHostEntryLoad(pct);
                     }
@@ -2618,7 +2685,9 @@ namespace Multiplayer.Network
             foreach (var kv in _slotProgress)
                 rows.Add(new ProgressRow { SlotIndex = kv.Key, Phase = kv.Value.phase, Percent = kv.Value.percent });
             var sendDetail = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent}"));
-            Debug.Log($"[Multiplayer] RosterProgress SEND [{sendDetail}]");
+            var sendBand = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent / ProgressBandPct}"));
+            if (ProgressDue(_sendGate, sendBand, sendDetail))
+                Debug.Log($"[Multiplayer] RosterProgress SEND [{sendDetail}]");
             var payload = MessageSerializer.SerializeRosterProgress(rows);
             _engine.BroadcastUnreliable(new NetworkMessage(PacketType.RosterProgress, payload));
         }
