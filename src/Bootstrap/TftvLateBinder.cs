@@ -30,6 +30,7 @@ namespace Multiplayer.Harmony
             typeof(Multiplayer.Network.Sync.PersonnelSync.TftvRedeployCapturePatch),
             typeof(Multiplayer.Network.Sync.PersonnelSync.TftvTrainDeployCapturePatch),
             typeof(Multiplayer.Network.Sync.PersonnelSync.TftvPromoteCapturePatch),
+            typeof(Multiplayer.Tactical.TftvClientChampGuard),
         };
 
         private static readonly object _lock = new object();
