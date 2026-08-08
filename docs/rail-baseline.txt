@@ -685,7 +685,7 @@ nested husk sweep (recursive over the blob closure; waived = justified opt-out):
   (types swept: 46)
 
 twin tables (GetBridged: *InstanceData wire entries -> live owner members):
-PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=19/32
+PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=20/32
   + Descend ActiveMission (GeoMission)
   + LeafList Addons (List`1) -> live _addons unordered=no apply=IList
   > dispatch AlienBaseData -> GetComponent(GeoAlienBase)
@@ -700,7 +700,7 @@ PhoenixPoint.Geoscape.Entities.GeoSite  <=  GeoSiteInstaceData  resolved=19/32
   + Descend ItemStorage (ItemStorage)
   + Descend MapPlotInstanceData (MapPlotInstanceData)
   + Leaf Motto (LocalizedTextBind)
-  - EXCLUDED Name (LocalizedTextBind): dto-twin unresolved
+  + Leaf Name (LocalizedTextBind) -> live SiteName
   - EXCLUDED OverrideTransform (Boolean): dto-twin unresolved
   + Leaf OwnerFactionDef (GeoFactionDef) -> live Owner
   > dispatch PhoenixBaseData -> GetComponent(GeoPhoenixBase)
@@ -816,7 +816,7 @@ PhoenixPoint.Geoscape.Entities.VehicleFactionController  <=  InstanceData  resol
   + Leaf LastVisitedSite (GeoSite) -> live _lastVisitedSited
   + Leaf WaitForSiteMission (GeoSite) -> live _waitSiteMission
   - EXCLUDED WaitingUpdateTime (NextUpdate): scheduler handle, not state — the DTO records an IUpdateable.NextUpdate whose writer is Timing.Start and whose live handle field is private with no counterpart of this name. What it schedules is a MONOTONE ACCUMULATOR clamped to a def-fixed maximum, and the accumulated VALUE now mirrors through a twin alias, which is the half that matters. Mirroring the client's own next-wakeup time on top of its own live scheduler would fight it (law 4b); correcting the value will not. Same class as the exploration handle above
-twin summary: resolved=80 gaps=35 dispatch=7
+twin summary: resolved=81 gaps=34 dispatch=7
 
 null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), GeoHavenDefenseMissionInstanceData.AttackingSites (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
 

@@ -950,6 +950,14 @@ namespace Multiplayer.Network.Sync
             { "Base.Entities.ActorComponent.Rot", "transform.rotation" },
             { "PhoenixPoint.Geoscape.Entities.GeoVehicle.StartExplorationTime", "StartedExplorationAt" }, // GeoVehicle.RecordInstanceData:1069 / ProcessInstanceData:1123 — private store, DTO name differs and no convention reaches it
             { "PhoenixPoint.Geoscape.Entities.GeoSite.OwnerFactionDef", "Owner" },        // GeoSite.ProcessInstanceData:1552 — def⇄faction via FactionRef coercion
+            // A BASE's name, and every other site's. The same-name rung reaches `GeoSite.Name`
+            // (GeoSite.cs:213), which is a get-only `=> LocalizedSiteName` string — not the store and not
+            // even the DTO's type — so the member resolved to something unwritable and the field never
+            // shipped. `SiteName` (GeoSite.cs:215, LocalizedTextBind get/set) is what the game itself
+            // records and restores, and what GeoPhoenixBase.RenameBase:991-993 writes; without the row a
+            // player renaming a base was the only peer who ever saw the new name. Same shape as the
+            // GeoVehicle.Name -> _vehicleName row above, which is why this was an oversight, not a choice.
+            { "PhoenixPoint.Geoscape.Entities.GeoSite.Name", "SiteName" },               // GeoSite.RecordInstanceData:1486 / ProcessInstanceData:1557
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.EncounterRecords", "_records" },     // GeoscapeEventSystem.RecordInstanceData:666 (_records.Values.ToList())
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.SupressEvents", "SuppressEvents" },  // GeoscapeEventSystem.RecordInstanceData:667 (game typo in the DTO member)
             { "PhoenixPoint.Geoscape.Events.GeoscapeEventSystem.RemoveEventsAfterTimers", "_removeEventsAfterTimerExpires" }, // GeoscapeEventSystem.RecordInstanceData:669 — DTO name is not the storage name and no convention reaches it
@@ -1030,6 +1038,25 @@ namespace Multiplayer.Network.Sync
         /// game exposes storage through read-only or shape-changed properties: _weapons/_modules/_addons),
         /// then the UNIQUE live member of the identical class type (catches renames like
         /// ManufactureQueue → Manufacture).</summary>
+        /// <summary><c>AccessTools.Field</c> without HarmonyX's log line for the probes that MISS. This
+        /// resolver asks for a field FIRST and a property second, and most bridge members are auto-properties
+        /// (GeoVehicle.RangeRemaining, GeoActor.Surface) — so the field probe is expected to miss and the
+        /// very next line finds the member. Nothing is lost and nothing goes unreported: an unresolvable
+        /// member still ends as a "dto-twin unresolved" incident. What is lost is 462 lines of HarmonyX
+        /// "could not find field" on a single client join. Same lookup as AccessTools.Field otherwise —
+        /// exact name, public+non-public, instance or static, walking base types.</summary>
+        private static FieldInfo QuietField(Type t, string name)
+        {
+            const BindingFlags Q = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance |
+                                   BindingFlags.Static | BindingFlags.DeclaredOnly;
+            for (var cur = t; cur != null; cur = cur.BaseType)
+            {
+                var f = cur.GetField(name, Q);
+                if (f != null) return f;
+            }
+            return null;
+        }
+
         internal static MemberInfo ResolveLive(Type live, string name, Type valType, out string alias, out MemberInfo[] hop)
         {
             alias = null;
@@ -1044,14 +1071,14 @@ namespace Multiplayer.Network.Sync
             }
 
             const BindingFlags F = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-            var fi = HarmonyLib.AccessTools.Field(live, name);
+            var fi = QuietField(live, name);
             if (fi != null && TwinTypeCompatible(fi.FieldType, valType)) return fi;
             var pi = HarmonyLib.AccessTools.Property(live, name);
             if (pi != null && TwinTypeCompatible(pi.PropertyType, valType)) return pi;
 
             if (name[0] != '_')
             {
-                var bf = HarmonyLib.AccessTools.Field(live, "_" + char.ToLowerInvariant(name[0]) + name.Substring(1));
+                var bf = QuietField(live, "_" + char.ToLowerInvariant(name[0]) + name.Substring(1));
                 if (bf != null && TwinTypeCompatible(bf.FieldType, valType)) { alias = bf.Name; return bf; }
             }
 
