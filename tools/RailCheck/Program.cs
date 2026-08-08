@@ -308,6 +308,7 @@ namespace RailCheck
             Add(laws, () => L325_OnlyAnEnemyTftvWouldNameIsSuppressed.Check(game));
             Add(laws, () => L326_ADestroyedSoldierLeavesNobodysScreen.Check());
             Add(laws, () => L327_AViewSettingNeverRidesTheCampaignRail.Check());
+            Add(laws, () => L333_AVariableIntentLandsOrSaysWhyNot.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

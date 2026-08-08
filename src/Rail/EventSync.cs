@@ -79,6 +79,21 @@ namespace Multiplayer.Network.Sync
             return null;
         }
 
+        /// <summary>Why a relayed variable write changes nothing, or null when it must be applied. PURE so
+        /// the harness can execute both corners (RailCheck L333), and NAMED so the no-op cannot go back to
+        /// being a bare <c>return</c>: an intent that reaches the host and leaves no line behind is
+        /// indistinguishable from one that was lost in transit, and that ambiguity cost a whole cross-peer
+        /// log sweep on 2026-08-08 chasing six "vanished" intents that had in fact all applied.
+        ///
+        /// <paramref name="current"/> is read with <c>int.MinValue</c> as the absent-key sentinel
+        /// (GeoscapeEventSystem.GetVariable:270-277), so a first write of 0 to a variable nobody has set is
+        /// a real change and lands — comparing against 0 would silently drop every "clear this flag" on a
+        /// fresh campaign. The reason is never blank: a swallow with a return value is still a swallow.</summary>
+        internal static string NoOpReason(int current, int value)
+        {
+            return current == value ? "the host already has " + value + " — no state to change" : null;
+        }
+
         // ─── HOST: apply through the SAME native funnel (dedup/decode/reject = IntentRail) ─────
 
         private static void HandleAnswer(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
@@ -169,7 +184,13 @@ namespace Multiplayer.Network.Sync
             var es = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.EventSystem;
             if (es == null)
             { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "no geoscape for variable '" + name + "'"); return; }
-            if (es.GetVariable(name, int.MinValue) == value) return;
+            string noop = NoOpReason(es.GetVariable(name, int.MinValue), value);
+            if (noop != null)
+            {
+                Debug.Log("[MP][events] HOST variable '" + name + "'=" + value + " NOT applied — " + noop +
+                          " nonce=" + nonce + " peer=" + senderPeerId);
+                return;
+            }
 
             es.SetVariable(name, value);   // GeoscapeEventSystem.cs:251 — the game's own setter
             Debug.Log("[MP][events] HOST variable '" + name + "'=" + value + " nonce=" + nonce + " peer=" + senderPeerId);
