@@ -1000,7 +1000,17 @@ namespace Multiplayer.Network.Sync
         private static void MarkOrderChange(GeoLevelController geo, string path, object entity, string fieldName)
         {
             if (IdentityWriteConsequence(entity)) { MarkTagRefresh(geo, path); return; }
-            if (IsOrderLeaf(fieldName) && entity is GeoVehicle v) { _reseed.Add(v); return; }
+            if (IsOrderLeaf(fieldName) && entity is GeoVehicle v)
+            {
+                _reseed.Add(v);
+                // THE HOST'S "EXPLORE NOW" EDGE. The leaf's VALUE is unusable on this peer (see
+                // ExplorationStartInLocalEpoch); its ARRIVAL is not. StartedExplorationAt moves in exactly
+                // one place, StartExploringCurrentSite:423, whose sole caller is ExploreSiteAbility.cs:14 —
+                // and a client's own explore click is an INTENT (ClientSimGate.cs:341), so on a client this
+                // edge is host-authored by construction.
+                if (fieldName == "StartExplorationTime") _hostExplorationEdge.Add(v);
+                return;
+            }
             if (entity is GeoSite s)
             {
                 SiteWriteConsequences(fieldName, out var repaintMarker, out var reseedParked);
@@ -1108,11 +1118,12 @@ namespace Multiplayer.Network.Sync
                 try { ReseedNavigation(v); }
                 catch (Exception ex)
                 { LogMissOnce("nav re-seed failed for " + (IdentityResolver.RootRef(v) ?? "?") + ": " + ex.Message); }
-                try { ReseedExploration(v); }
+                try { ReseedExploration(v, _hostExplorationEdge.Contains(v)); }
                 catch (Exception ex)
                 { LogMissOnce("exploration re-seed failed for " + (IdentityResolver.RootRef(v) ?? "?") + ": " + ex.Message); }
             }
             _reseed.Clear();
+            _hostExplorationEdge.Clear();
             foreach (var s in _siteRepaint)
             {
                 // The game's OWN refresh entry (GeoSiteVisualsController.Refresh:202 — sets _refresh, which
@@ -1155,8 +1166,10 @@ namespace Multiplayer.Network.Sync
         /// <c>GeoActorProgressionVisualController.Progression</c> is
         /// <c>(Timing.Now - Start).TotalMinutes / (End - Start).TotalMinutes</c> recomputed from scratch in
         /// <c>Update()</c> EVERY FRAME (GeoActorProgressionVisualController.cs:25-35, :53-56) — the same
-        /// shape as <c>NavigateRoutine</c>'s <c>Ratio01</c>. Both of its inputs are mirrored or def-fixed:
-        /// <c>Start</c> is the <c>StartExplorationTime</c> leaf (docs/rail-baseline.txt) and
+        /// shape as <c>NavigateRoutine</c>'s <c>Ratio01</c>. Both of its inputs are host-authored or def-fixed:
+        /// <c>Start</c> is this peer's own stamp of the instant the <c>StartExplorationTime</c> delta LANDED
+        /// (<see cref="ExplorationStartInLocalEpoch"/> — the leaf's value is in the host's per-actor epoch and
+        /// is never comparable here) and
         /// <c>End = Start + CurrentSite.ExplorationTime</c>, which is exactly the sum
         /// <c>StartExploringCurrentSite</c>:424 makes out of <c>GeoSite.ExplorationTime</c> —
         /// <c>TimeUnit.FromHours(geoSiteDef.ExplorationTimeHours)</c> (GeoSite.cs:490), def-fixed, no RNG,
@@ -1197,7 +1210,56 @@ namespace Multiplayer.Network.Sync
             return start > TimeUnit.Zero && explorationTime != TimeUnit.Zero && now < start + explorationTime;
         }
 
-        private static void ReseedExploration(GeoVehicle v)
+        /// <summary>The vehicles whose <c>StartExplorationTime</c> leaf CHANGED in the batch being flushed —
+        /// i.e. the host issued an exploration order. Batch-scoped, cleared with <see cref="_reseed"/>.</summary>
+        private static readonly HashSet<GeoVehicle> _hostExplorationEdge = new HashSet<GeoVehicle>();
+
+        /// <summary>THIS peer's own epoch for an exploration the host ordered, stamped when the order LANDED.
+        /// Dropped when the exploration ends, so a vehicle that is not exploring holds no entry.</summary>
+        private static readonly Dictionary<GeoVehicle, TimeUnit> _localExplorationStart =
+            new Dictionary<GeoVehicle, TimeUnit>();
+
+        /// <summary>
+        /// A MIRRORED TIMESTAMP IS ONLY MEANINGFUL IN A MIRRORED EPOCH, and this one is not in one.
+        /// <c>StartedExplorationAt = base.Timing.Now</c> (GeoVehicle.cs:423) reads the PER-ACTOR clock:
+        /// every <c>ActorComponent</c> gets its own <c>new Timing()</c> (ActorComponent.cs:85) whose
+        /// <c>StartTime</c> is never set — only the LEVEL's is (GeoLevelController.cs:571) — so
+        /// <c>Now = StartTime + OwnNow</c> (Timing.cs:55) is that actor's AGE, counted from the instant its
+        /// <c>ParentTime</c> was assigned (Timing.cs:148) and rooted in the process's own
+        /// <c>Time.time</c> (Timing.cs:176). The rail mirrors the LEAF (rail-baseline.txt:727/:753) and
+        /// DELIBERATELY EXCLUDES the clock it is measured in (rail-baseline.txt:33 — "per-actor clock …
+        /// client clocks tick locally, the level clock rides the TimeAnchor 'TA' root"). So the host's
+        /// number and this peer's <c>Timing.Now</c> are two different epochs, and the skew between them is
+        /// unbounded: live 2026-08-08, both clients printed a mirrored start of 01:06:09.428 against a local
+        /// clock of 06:26:33.428 — five hours of nothing but epoch. That is the same class of bug the
+        /// level-vs-actor comment in <see cref="ReseedExploration"/> already fixed once, one level up.
+        ///
+        /// So the VALUE never decides anything; only its ARRIVAL does, and the answer is stamped in the
+        /// epoch this peer can actually read:
+        ///   • the host's order just landed → stamp NOW. The client's timer therefore starts LATER than the
+        ///     host's by the wire delay and runs the identical def-fixed duration, so it can only ever
+        ///     finish AFTER the host's. A client is structurally incapable of completing an exploration the
+        ///     host has not — which is the property, not the arithmetic, that keeps the host sole author.
+        ///   • already stamped → keep it, or an unrelated order delta would restart the fill.
+        ///   • no stamp but the handle is already running (the join case: a mid-exploration aircraft arrives
+        ///     through the save transfer, law 1b, never as a delta) → ADOPT the running handle with a local
+        ///     epoch rather than tear it down. Worst case its bar runs one full duration long; it still
+        ///     cannot finish early, and the host's own DONE cuts it short.
+        ///   • otherwise ZERO, which <see cref="ShouldBeExploring"/> reads as "not exploring". A vehicle that
+        ///     explored once keeps a non-zero mirrored leaf FOREVER (nothing clears it — neither
+        ///     EndExploreCurrentSite:460 nor SiteExplorationCompleted:474), so falling back to it here is
+        ///     precisely how a client would mint a phantom exploration at the next site it parks at.
+        /// Pure so RailCheck L290 can execute it case by case.
+        /// </summary>
+        internal static TimeUnit ExplorationStartInLocalEpoch(bool hostStartLanded, bool alreadyExploring,
+                                                              bool haveStamp, TimeUnit stamp, TimeUnit localNow)
+        {
+            if (haveStamp) return stamp;
+            if (hostStartLanded || alreadyExploring) return localNow;
+            return TimeUnit.Zero;
+        }
+
+        private static void ReseedExploration(GeoVehicle v, bool hostStartLanded)
         {
             if (v == null || ExplorationStartField == null ||
                 ExploreCurrentSiteMethod == null || EndExploreCurrentSiteMethod == null) return;
@@ -1214,7 +1276,12 @@ namespace Multiplayer.Network.Sync
             var timing = v.Timing;
             if (timing == null) return;
             var site = v.CurrentSite;
-            var start = (TimeUnit)ExplorationStartField.GetValue(v);
+            // FORENSICS ONLY — the host's own number, in the HOST's per-actor epoch. It is printed below so a
+            // log still names both timestamps, and it is passed to NOTHING that decides.
+            var mirrored = (TimeUnit)ExplorationStartField.GetValue(v);
+            bool haveStamp = _localExplorationStart.TryGetValue(v, out var stamped);
+            var start = ExplorationStartInLocalEpoch(hostStartLanded, v.IsExploringSite, haveStamp, stamped, timing.Now);
+            if (!haveStamp && start > TimeUnit.Zero) _localExplorationStart[v] = start;
             var end = site == null ? TimeUnit.Zero : start + site.ExplorationTime;
             bool inspected = site != null && v.Owner != null && site.GetInspected(v.Owner);
             bool should = site != null && ShouldBeExploring(UnderTravelOrder(v), inspected, start,
@@ -1232,13 +1299,17 @@ namespace Multiplayer.Network.Sync
                 if (!should && site != null && site.ExplorationTime != TimeUnit.Zero && !inspected)
                 {
                     string why = UnderTravelOrder(v) ? "the mirrored order still holds a destination (in flight)"
-                               : start <= TimeUnit.Zero ? "StartExplorationTime is still zero — no host delta has " +
-                                                          "named an exploration start for this aircraft"
-                               : "the mirrored start " + start + " + the site's def-fixed ExplorationTime ends at " +
-                                 end + ", which the clock (" + timing.Now + ") is already past — a STALE start, so " +
-                                 "the host's newer one has not arrived";
+                               : start <= TimeUnit.Zero ? "no StartExplorationTime delta has landed for this " +
+                                                          "aircraft and nothing is exploring locally, so this peer " +
+                                                          "has no epoch of its own for an exploration"
+                               : "the local start " + start + " this peer stamped when the host's order landed, " +
+                                 "plus the site's def-fixed ExplorationTime, ends at " + end + ", which the local " +
+                                 "clock (" + timing.Now + ") is already past — a STALE start, so the host's DONE " +
+                                 "(SetInspected on FactionsData) never arrived";
                     LogMissOnce("exploration NOT re-seeded for " + (IdentityResolver.RootRef(v) ?? "V#?") +
-                                " parked at " + (IdentityResolver.RootRef(site) ?? "S#?") + " — " + why);
+                                " parked at " + (IdentityResolver.RootRef(site) ?? "S#?") + " — " + why +
+                                " [host's own StartExplorationTime leaf reads " + mirrored + ", in the HOST's " +
+                                "per-actor epoch — not comparable to this clock, rail-baseline.txt:33]");
                 }
                 return; // the live handle already matches the mirrored order
             }
@@ -1248,7 +1319,9 @@ namespace Multiplayer.Network.Sync
             {
                 ExploreCurrentSiteMethod.Invoke(v, new object[] { start, end }); // ProcessInstanceData:1126
                 Debug.Log("[Multiplayer][rail] exploration re-seed " + root + " → started " + start +
-                          ", ends " + end + " (progress derived locally, outcome stays host-only)");
+                          ", ends " + end + " (LOCAL epoch, stamped when the host's order landed; the host's own " +
+                          "leaf reads " + mirrored + " in its own per-actor epoch. Progress derived locally, " +
+                          "outcome stays host-only — this timer cannot finish before the host's)");
             }
             else
             {
@@ -1257,6 +1330,7 @@ namespace Multiplayer.Network.Sync
                 // forcing it here ends the local presentation the same way the host's did — the spinner is
                 // destroyed at the AUTHORITATIVE instant instead of finishing on this peer's own clock.
                 EndExploreCurrentSiteMethod.Invoke(v, null);
+                _localExplorationStart.Remove(v);   // the exploration is over; the next one stamps afresh
                 Debug.Log("[Multiplayer][rail] exploration re-seed " + root + " → cleared (" +
                           (inspected ? "the site is now INSPECTED on the host — authoritative DONE forced this " +
                                        "peer's in-flight spinner to completion rather than letting it run out locally"
