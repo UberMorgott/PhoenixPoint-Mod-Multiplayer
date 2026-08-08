@@ -367,7 +367,19 @@ namespace Multiplayer.Network.Sync
                 if (touched.Count > 0)
                     using (SyncApplyScope.Enter())
                         UiEventMap.Fire(touched, geo); // law 11: open roster/equip screens repaint NOW
-                if (created)
+                // NOT for a DESCEND field. The backfill exists for ref-lists that shipped BEFORE their root
+                // existed (a U#/V# actor can be listed in a container a tick before it is registered), and a
+                // descend field's subtree is reachable ONLY through the field just assigned — nothing can
+                // have addressed it earlier, and a ref INTO it names the same key the create just made
+                // resolvable. Its values ride the SAME batch immediately behind the create: DiffEngine:975-977
+                // emits every structural packet before any value entry on the one ordered seq stream, the
+                // invariant IsDescendPath's own doc states at :310-312. PROVEN, not assumed — 2026-08-08
+                // client log, ONE frame (4965): `structural create 'S#602…ActiveMission' applied` 12:21:03.684
+                // → `repaint S#602 … activeMission=StoryNJ0_CustomMissionTypeDef` 12:21:03.696, while the host
+                // only answered the backfill at 12:21:03.698. So this asked the host to resend a root the
+                // client had already applied — two round-trips at tactical entry, one for `_squad` and one for
+                // `GlobalTime`, every mission. Real packet loss is still covered, by the seq-gap resync.
+                if (created && !DiffEngine.IsDescendPath(rootKey))
                     // The ONE resync caller that knows its scope: the ref-lists that need reconverging all
                     // hang off the root just created, so this costs a scoped re-emit, not the whole graph.
                     RequestResync(engine, "structural create backfill", rootKey); // ref-lists shipped pre-create reconverge
@@ -399,6 +411,28 @@ namespace Multiplayer.Network.Sync
                 field = dto == null ? null : RailType.GetBridged(owner.GetType(), dto)?.FieldByName(name);
             }
             return field != null && field.Class == FieldClass.Descend;
+        }
+
+        /// <summary>Why a path whose OWNER resolves is still unresolvable: its last segment is a Descend
+        /// field that is NULL on this peer because the host WALKS INTO it and ships its values but never a
+        /// structural create — the field's type is missing from
+        /// <see cref="DiffEngine.StructuralDescendKinds"/>. Every entry under such a path is lost
+        /// PERMANENTLY (the host's snapshot diff re-emits only on change, so nothing ever asks again), and
+        /// the bare "entity not found" names none of that: `S#602.SerializationData.MapPlotInstanceData`
+        /// spent the 2026-08-08 session as one counted line on both clients while the site's whole map-plot
+        /// layout never crossed. Returns "" for every other miss shape, so an ordinary unresolved path
+        /// still reads the way it always did.</summary>
+        private static string DescendGapUnder(GeoLevelController geo, string path)
+        {
+            if (!DiffEngine.IsDescendPath(path) || !ResolveDescendTarget(geo, path, out var owner, out var field))
+                return "";
+            object cur;
+            try { cur = field.GetValue(owner); } catch { return ""; }
+            if (cur != null) return "";
+            return " — " + owner.GetType().Name + "." + field.Name + " is a NULL Descend field here: the host " +
+                   "ships this subtree's values but never a structural create for it, because " +
+                   field.ValueType.Name + " is not in DiffEngine.StructuralDescendKindTable. Every entry " +
+                   "under this path is lost until that row exists.";
         }
 
         // GeoSite.RegisterMission (private, GeoSite.cs:787) — the load path's own mission wiring:
@@ -465,8 +499,19 @@ namespace Multiplayer.Network.Sync
                     SiteRegisterMission.Invoke(site, new object[] { mission }); // GeoSite.cs:1629
                 }
             }
-            else LogMissOnce("descend create at " + rootKey + ": no native wiring for " +
-                             owner.GetType().Name + "." + field.Name + " — field assigned RAW");
+            // A RAW assign is NOT a gap by itself, and the blanket warning that used to sit here said it was
+            // — twice per mission entry, on both clients, every battle. For the plain [SerializeType] data
+            // members the structural table vets, raw IS the game's own load path: the native Serializer
+            // restores GeoMission.GlobalTime and _squad as ordinary serialized members (decompile
+            // GeoMission.cs:139 `{ get; set; }`, :108 `private GeoSquad _squad`, both written raw at :237 and
+            // :217/:230), and GeoSite.ProcessInstanceData:1621-1631 is that same restore on load. There is no
+            // wiring to miss. What IS a real unwired create is a MISSION landing on an owner that is not a
+            // GeoSite: that one loses RegisterMission — the native subscriptions AND the marker repaint.
+            else if (made is PhoenixPoint.Geoscape.Entities.GeoMission)
+                LogMissOnce("descend create at " + rootKey + ": a mission was assigned to " +
+                            owner.GetType().Name + "." + field.Name + ", which is not a GeoSite — " +
+                            "GeoSite.RegisterMission did NOT run, so its native subscriptions and the site's " +
+                            "marker repaint are missing on this peer");
             touched.Add(owner);
             MarkOrderChange(geo, rootKey, owner, field.Name); // the mission wrapper is a MARKER, not a view state (law 11)
             OpenUiRepaint.MarkDirty(); // law 11: the open geoscape shows the new marker NOW
@@ -718,7 +763,7 @@ namespace Multiplayer.Network.Sync
                 _pathCache.Remove(path);
                 entity = IdentityResolver.Resolve(geo, path, _pathCache);
             }
-            if (entity == null) { LogMissOnce("entity not found: " + path); return; }
+            if (entity == null) { LogMissOnce("entity not found: " + path + DescendGapUnder(geo, path)); return; }
             if (!rt.Type.IsInstanceOfType(entity))
             {
                 // The resolver returned the LIVE TWIN of a recorded *InstanceData DTO (writes into the
