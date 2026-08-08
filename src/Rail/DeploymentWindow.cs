@@ -431,6 +431,10 @@ namespace Multiplayer.Network.Sync
         // ─── HOST-ONLY pending launch (never mirrored: it holds live model refs, law 3) ───
         private static GeoMission _pending;
         private static GeoSquad _pendingSquad;
+        /// <summary>The mission a countdown already released. Host-local by construction: GeoMission.Launch
+        /// writes nothing a peer could mirror, which is exactly why neither Validate nor IsRunnable can answer
+        /// "already launched" and why this latch has to exist at all. Cleared at the reload boundary.</summary>
+        private static GeoMission _launched;
         private static float _nextDecrementAt;
         private static bool _committed;
         private static int _hostSecondsLeft;
@@ -478,6 +482,51 @@ namespace Multiplayer.Network.Sync
         internal static bool RunsNative(bool inSession, bool isHost, bool committed) =>
             !inSession || !isHost || committed;
 
+        /// <summary>PURE (RailCheck L355). DOES THIS LAUNCH ARM A COUNTDOWN? The whole decision, and the two
+        /// terms <see cref="RunsNative"/> does not have.
+        ///
+        /// THE RACE IT CLOSES, frame by frame from the host log of 2026-08-08 22:52. The countdown armed at
+        /// <c>3569,652</c> on the host's own press. Nonces 213-219 then each hit <c>_pending != null</c> and
+        /// were refused — SILENTLY, while <c>MissionSync</c> still printed "HOST intent APPLIED op=launch" for
+        /// every one of them. At <c>3574,697</c> the count reached zero and the native launch ran. At
+        /// <c>3574,806</c> — 109 ms later — nonce 220 arrived, found <c>_pending</c> empty, and ARMED A SECOND
+        /// COUNTDOWN ON AN ALREADY-LAUNCHED MISSION; at <c>3579,979</c> that one reached zero and
+        /// <c>GeoMission.Launch_Patch2</c> threw. The same profile at <c>1803,385→1814,413</c> (nonces
+        /// 150/151), twice in one session.
+        ///
+        /// NOTHING CAUGHT IT because nothing could. <c>HostTick</c>'s <c>!mission.IsRunnable</c> guard is
+        /// VACUOUS — <c>GeoMission.cs:147 IsRunnable => true</c> with zero overrides — and
+        /// <see cref="MissionSync.Validate"/> cannot see "already launched" either, because
+        /// <c>GeoMission.Launch</c>:226-245 never touches <c>Site.ActiveMission</c> (only <c>Cancel</c>:253
+        /// does). <c>IntentDedup</c> is right to let them through: nine distinct nonces are nine distinct
+        /// clicks. The missing fact is a launch that already HAPPENED, and it is host-local, so it is kept
+        /// host-local.
+        ///
+        /// <paramref name="alreadyLaunched"/> is checked AFTER the <see cref="RunsNative"/> early-out, so the
+        /// host's own re-issue at the end of the count still passes; the UI grey-out cannot substitute for it,
+        /// because a repaint round trip is inherently longer than the 109 ms this window measured.</summary>
+        internal static bool ArmsFor(bool inSession, bool isHost, bool committed, bool pendingBusy,
+                                     bool alreadyLaunched) =>
+            !RunsNative(inSession, isHost, committed) && !pendingBusy && !alreadyLaunched;
+
+        /// <summary>PURE (RailCheck L355). May the START MISSION button be pressed? The native verdict
+        /// (<c>CheckForDeployment</c>:377 <c>flag &amp;&amp; flag3 &amp;&amp; flag2</c>) AND no countdown in
+        /// flight — a second press during the count is the click the race above is made of, and it is the same
+        /// answer on every peer because <see cref="State"/> is replicated.</summary>
+        internal static bool ButtonLive(bool nativeVerdict, bool countdownRunning) =>
+            nativeVerdict && !countdownRunning;
+
+        /// <summary>Is a countdown in flight ON THIS PEER? Read off the replicated arm, not off the host's
+        /// private <see cref="_pending"/>, so a client greys its own button too.</summary>
+        internal static bool CountdownRunning => State.SecondsLeft > 0;
+
+        /// <summary>For the applier's log line only (see <see cref="MissionSync"/>): a launch the gate ate is
+        /// not an "APPLIED" launch, and printing it as one is what hid seven swallowed intents.</summary>
+        internal static bool IsHolding(GeoMission mission) => mission != null && ReferenceEquals(_pending, mission);
+
+        internal static bool WasAlreadyLaunched(GeoMission mission) =>
+            mission != null && ReferenceEquals(_launched, mission);
+
         /// <summary>PURE (RailCheck L177). The tick, with nothing but two numbers in it — this is the
         /// "waits on no human" property in one line: the only input is elapsed local realtime, so the
         /// countdown advances identically whether every other peer is playing or asleep.</summary>
@@ -496,7 +545,31 @@ namespace Multiplayer.Network.Sync
             }
             try
             {
-                if (_pending != null) return false;   // already counting for somebody; a second press waits
+                // THE ALREADY-LAUNCHED LATCH, and it is checked BEFORE _pending on purpose: the 109 ms window
+                // that produced the double launch is exactly the moment _pending is empty again (ClearPending
+                // runs before the native call) and the mission is already in the air. Host-local, because a
+                // launch that happened is not shared state — the battle itself is.
+                if (ReferenceEquals(mission, _launched))
+                {
+                    Debug.LogWarning("[MP][deploy] launch REFUSED for " +
+                                     (IdentityResolver.RootRef(mission?.Site) ?? "S#?") + " — this mission has " +
+                                     "ALREADY been launched by a countdown that reached zero. Arming a second " +
+                                     "one on it is what threw in GeoMission.Launch on 2026-08-08 (twice): the " +
+                                     "gate is host-local because GeoMission.Launch never touches " +
+                                     "Site.ActiveMission, so neither Validate nor IsRunnable can see this");
+                    return false;
+                }
+                if (!ArmsFor(inSession, engine.IsHost, _committed, _pending != null, false))
+                {
+                    // NEVER SILENT (P1): seven refusals rode this line unlogged in the reported session while
+                    // MissionSync printed "HOST intent APPLIED" for every one of them.
+                    Debug.Log("[MP][deploy] launch of " + (IdentityResolver.RootRef(mission?.Site) ?? "S#?") +
+                              " HELD BEHIND the countdown already running for " +
+                              (string.IsNullOrEmpty(State.SiteRef) ? "S#?" : State.SiteRef) + " — a second " +
+                              "press does not stack a second drop and does not queue one either. Nothing was " +
+                              "lost that the running countdown will not do in " + _hostSecondsLeft + " s");
+                    return false;
+                }
 
                 // Launch's own default (GeoMission.cs:227-235): a null argument means "the squad the mission
                 // already holds". Resolve it HERE so the re-issue five seconds later is the same launch.
@@ -506,6 +579,9 @@ namespace Multiplayer.Network.Sync
                 _hostSecondsLeft = CountdownSeconds;
                 State.SiteRef = IdentityResolver.RootRef(mission?.Site) ?? "";
                 State.SecondsLeft = CountdownSeconds;   // the ARM — one rail write, then nothing until the CLEAR
+                // The host's own arm rides no rail batch, so nothing would re-run CheckForDeployment here and
+                // the host's START MISSION button would stay live through its own countdown.
+                OpenUiRepaint.MarkDirty();
                 Debug.Log("[MP][deploy] launch HELD for " + CountdownSeconds + " s at " +
                           (string.IsNullOrEmpty(State.SiteRef) ? "S#?" : State.SiteRef) + " — every peer is " +
                           "shown the countdown and ANY ONE of them may cancel it for everyone. Nobody has to " +
@@ -556,6 +632,7 @@ namespace Multiplayer.Network.Sync
                 }
 
                 _committed = true;
+                _launched = mission;   // the latch the 109 ms re-arm window needs (see ArmsFor)
                 Debug.Log("[MP][deploy] countdown reached zero — launching " +
                           (IdentityResolver.RootRef(mission.Site) ?? "S#?") + " natively; every peer joins " +
                           "through the save transfer as it always did");
@@ -624,6 +701,9 @@ namespace Multiplayer.Network.Sync
             _shownArm = 0;
             State.SiteRef = "";
             State.SecondsLeft = 0;   // the CLEAR — the second and last rail write of a countdown
+            // Same reason as the ARM: on the host the clear is local, and without this the button the arm
+            // greyed would never come back after a cancel.
+            OpenUiRepaint.MarkDirty();
         }
 
         /// <summary>Mod-root contract (IdentityResolver.cs:205-206): mod state must be EMPTY at every reload
@@ -633,11 +713,58 @@ namespace Multiplayer.Network.Sync
         internal static void ResetForReloadBoundary()
         {
             ClearPending();
+            _launched = null;
             _committed = false;
             _nextDecrementAt = 0f;
         }
 
         internal static void Reset() => ResetForReloadBoundary();
+    }
+
+    /// <summary>
+    /// START MISSION IS DEAD WHILE THE COUNTDOWN RUNS — the other half of the double-launch fix, and the half
+    /// the player can see.
+    ///
+    /// The owner asked for exactly this ("grey out the start button while the countdown runs") and it is
+    /// necessary but NOT sufficient: the measured re-arm window was 109 ms (host 2026-08-08 22:52, nonce 220
+    /// against a launch at <c>3574,697</c>), and a repaint round trip is longer than that. The latch in
+    /// <see cref="DeployCountdown.ArmsFor"/> is what actually closes the race; this is what stops the player
+    /// generating the clicks in the first place — nine of them in the reported session, seven swallowed.
+    ///
+    /// ONE FUNNEL FOR ALL CALLERS. <c>UIStateRosterDeployment.cs:377</c> is the ONLY writer of the button's
+    /// interactability (<c>PhoenixGeneralButton.SetInteractable</c>:283-288 greys the visual itself), and a
+    /// POSTFIX also runs when TFTV's own Prefix on this method returns false
+    /// (<c>TFTVAircraftRework/AircraftReworkMissionDeployment.cs</c>:136-179), so the TFTV branch is covered
+    /// without naming TFTV.
+    ///
+    /// RE-ENABLE NEEDS NO EDGE OF ITS OWN: the countdown's CLEAR is a rail write on <c>"M#deploy"</c>, and
+    /// <c>UiEventMap</c>'s new <c>UIStateRosterDeployment</c> arm re-runs <c>SetUpInitialDeployment</c> →
+    /// <c>CheckForDeployment</c> → this postfix. On the HOST the arm and the clear are local, so
+    /// <see cref="DeployCountdown"/> marks the UI dirty at both.
+    /// </summary>
+    [HarmonyPatch(typeof(UIStateRosterDeployment), "CheckForDeployment")]
+    internal static class DeployButtonCountdownLock
+    {
+        private static void Postfix()
+        {
+            if (!DeployCountdown.CountdownRunning) return;
+            try
+            {
+                var button = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.View?
+                             .GeoscapeModules?.DeploymentMissionBriefingModule?.DeployButton;
+                if (button == null) return;
+                // ButtonLive's false arm, applied: the native verdict has already been written one line
+                // earlier (:377) and this only ever takes it AWAY, never grants it.
+                button.SetInteractable(DeployCountdown.ButtonLive(true, true));
+                button.ResetButtonAnimations();
+            }
+            catch (Exception ex)
+            {
+                // Presentation seam (P4c): a failure here leaves the button as the game painted it, which is
+                // the pre-fix behaviour — the host-side latch still refuses the second launch.
+                Debug.LogError("[MP][deploy] could not grey START MISSION for the running countdown: " + ex);
+            }
+        }
     }
 
     /// <summary>

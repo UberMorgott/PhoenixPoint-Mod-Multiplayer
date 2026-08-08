@@ -334,6 +334,7 @@ namespace RailCheck
             Add(laws, () => L351_ADeclinedBriefDestroysNothing.Check());
             Add(laws, () => L352_ThePerPeerAnswerStaysHomeAndStillLands.Check());
             Add(laws, () => L354_AnEmptySquadScreenIsNotServed.Check());
+            Add(laws, () => L355_ALaunchedMissionDoesNotArmASecondCountdown.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

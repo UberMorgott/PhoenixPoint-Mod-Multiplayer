@@ -258,8 +258,19 @@ namespace Multiplayer.Network.Sync
                 // GlobalTime, the threat roll, the tactical level itself — is host-computed by construction,
                 // and every peer joins through TacticalEntry's save transfer, not through this call.
                 mission.Launch(new GeoSquad(units));
-                Debug.Log("[MP][mission] HOST intent APPLIED op=launch " + siteRef + " squad=" + units.Count +
-                          " nonce=" + nonce + " peer=" + senderPeerId);
+                // "APPLIED" ONLY IF IT WAS. DeployCountdown.Gate sits in front of this call and can refuse it
+                // three ways; the old line printed APPLIED for all of them, and in the 2026-08-08 22:52 window
+                // it said so SEVEN times for launches that never happened (nonces 213-219). A log that lies is
+                // worse than no log — it is what made the double-launch race unreadable for a whole session.
+                string outcome = DeployCountdown.IsHolding(mission)
+                                     ? "HELD for the countdown (the drop starts when it reaches zero)"
+                                     : DeployCountdown.WasAlreadyLaunched(mission)
+                                         ? "REFUSED — this mission has already launched; nothing ran"
+                                         : DeployCountdown.CountdownRunning
+                                             ? "REFUSED — a countdown is already running; nothing ran"
+                                             : "APPLIED";
+                Debug.Log("[MP][mission] HOST intent " + outcome + " op=launch " + siteRef +
+                          " squad=" + units.Count + " nonce=" + nonce + " peer=" + senderPeerId);
             }
             catch (Exception ex) { Reject(senderPeerId, siteRef, "launch (throw) " + ex.Message); }
         }
