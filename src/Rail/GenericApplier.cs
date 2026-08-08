@@ -1226,6 +1226,15 @@ namespace Multiplayer.Network.Sync
                 try { ReseedExploration(v, _hostExplorationEdge.Contains(v)); }
                 catch (Exception ex)
                 { LogMissOnce("exploration re-seed failed for " + (IdentityResolver.RootRef(v) ?? "?") + ": " + ex.Message); }
+                // A FOREIGN FACTION'S AIRCRAFT IS NOT RAIL STATE AT ALL: GeoVehicle.IsVisible is
+                // VisualsRoot.activeInHierarchy (GeoVehicle.cs:174-186), so no leaf can ever carry it, and its
+                // only writer is RefreshVisibility (:606-612). The native trigger for one parked at a site the
+                // viewer just inspected is GeoSite.SetInspected:403-406 -> GeoMap.cs:571 -> GeoFaction.cs:394 ->
+                // GeoPhoenixFaction.OnSiteInspectedChanged:1187, whose loop :1191-1196 does exactly this call —
+                // but the rail writes FactionsData by direct field write, so that event never fires here. Law L347.
+                try { v.RefreshVisibility(); }
+                catch (Exception ex)
+                { LogMissOnce("visibility re-derive failed for " + (IdentityResolver.RootRef(v) ?? "?") + ": " + ex.Message); }
             }
             _reseed.Clear();
             _hostExplorationEdge.Clear();
