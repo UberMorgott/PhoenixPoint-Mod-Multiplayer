@@ -595,13 +595,23 @@ namespace Multiplayer.UI
         /// selection marker from the prefab rather than asking the pool for one).
         ///
         /// <c>MaterialPropertyBlock</c>, never <c>renderer.material</c>: the block writes per-renderer
-        /// without instancing a material — so there is no clone to leak when the marker is destroyed — and,
-        /// the point here, a property the shader does not declare is silently IGNORED rather than logged as
-        /// an error. That is what makes it safe to offer both of the two names Unity's own shaders use for
-        /// a tint (<c>_Color</c> on the standard/UI family, <c>_TintColor</c> on the particle/additive one)
-        /// without knowing which family an asset-only prefab was authored against.
-        /// ponytail: if the marker still draws in its stock colour, the one-shot log below names the shader
-        /// per renderer — that is the property to add, and it is one line.
+        /// without instancing a material — so there is no clone to leak when the marker is destroyed — and a
+        /// property the shader does not declare is silently IGNORED rather than logged as an error.
+        ///
+        /// <c>_TintColor</c> IS THE WAVES' COLOUR, AND THAT IS MEASURED, NOT GUESSED (2026-08-09). The waves
+        /// are <c>Pulse1</c>/<c>Pulse2</c> — MESH renderers on <c>Unlit/Colored, Animated Mask</c>, per this
+        /// method's own live log — and that shader's property table was read straight out of the shipped
+        /// asset (<c>PhoenixPointWin64_Data/sharedassets0.assets</c>, byte 68715084 — the file's ONLY
+        /// occurrence of the shader name): <c>_TintColor</c> "Tint Color", <c>_MainTex</c> "Particle Texture",
+        /// <c>_Cutout</c>, <c>_InvFade</c> "Soft Particles Factor", <c>_SrcMode</c>/<c>_DstMode</c>,
+        /// <c>_Tiling</c>. So the <c>_TintColor</c> line below is the one that paints the waves, and it was
+        /// already there — the claim in <c>dbf5dbc</c> that "a property block reaches only the renderer's
+        /// material, which is why the waves stayed stock red" was an inference, and the
+        /// <c>ParticleSystem.main.startColor</c> code it justified could never have coloured anything on this
+        /// prefab. That code is deleted rather than kept: it said the waves were coloured somewhere they are
+        /// not. <c>_Color</c> stays as the belt for the tactical beacon's own shaders.
+        /// ponytail: if a Pulse ever draws dark instead of green, the shader multiplies the tint by
+        /// <c>_MainTex</c> and the fix is a lighter colour, not another property.
         /// </summary>
         private static void Tint(GameObject go, bool mine)
         {
@@ -612,44 +622,22 @@ namespace Multiplayer.UI
             {
                 if (r == null) continue;
                 r.GetPropertyBlock(block);
-                block.SetColor("_Color", colour);
-                block.SetColor("_TintColor", colour);
+                block.SetColor("_TintColor", colour);   // the waves (Unlit/Colored, Animated Mask)
+                block.SetColor("_Color", colour);       // belt: ignored where undeclared
                 r.SetPropertyBlock(block);
                 var mat = r.sharedMaterial;
                 if (seen != null)
                     seen.Add(r.gameObject.name + "<" + (mat == null || mat.shader == null ? "no-shader" : mat.shader.name) + ">");
             }
 
-            // THE WAVES, KEPT AND MADE ENDLESS — the second half of the owner's 2026-08-09 ask, and the one
-            // the renderer loop above cannot do on its own. The prefab's radiating pulse is a ParticleSystem,
-            // authored for a haven defence that lasts a whole mission, and a burst that plays once leaves a
-            // 5-second marker sitting still for four of those seconds. `loop` is what runs it for the
-            // marker's whole life; Destroy at Expire is what ends it.
-            //
-            // AND `startColor` IS WHERE A PARTICLE'S COLOUR ACTUALLY LIVES. A property block reaches a
-            // ParticleSystemRenderer's MATERIAL, but the per-particle colour the system multiplies over it
-            // is the module's, which is why the waves stayed stock red through the tint above.
-            var puffs = 0;
-            foreach (var ps in go.GetComponentsInChildren<ParticleSystem>(true))
-            {
-                if (ps == null) continue;
-                var main = ps.main;                      // a handle back into the system, not a copy
-                main.loop = true;
-                main.startColor = colour;
-                ps.Play(true);
-                puffs++;
-            }
-
             if (seen == null) return;
             _loggedTint = true;
             Debug.Log("[Multiplayer] ping marker tinted " + (mine ? "OWN green" : "PEER blue") +
-                      " over _Color/_TintColor on " + seen.Count + " renderer(s): " +
-                      string.Join(", ", seen.ToArray()) + ", and over startColor on " + puffs +
-                      " looping particle system(s) (logged once per run). A count of 0, or a marker " +
-                      "still drawing in its stock colour, means the visual is not a Renderer or does not " +
-                      "declare either property — the shader names above are what to write instead. A " +
-                      "particle count of 0 means the radiating waves are NOT particles in this build and " +
-                      "whatever animates them still owns their colour and their one-shot life.");
+                      " over _TintColor/_Color on " + seen.Count + " renderer(s): " +
+                      string.Join(", ", seen.ToArray()) + " (logged once per run). The waves are the Pulse* " +
+                      "entries and their shader declares _TintColor, so those two are the ones that must " +
+                      "change colour; a Pulse drawing stock red means the shader multiplies the tint by its " +
+                      "_MainTex and the answer is a lighter colour, not another property name.");
         }
 
         /// <summary>THE SHADER IDS ARE NOT CACHED, AND MUST NOT BE. They used to be two

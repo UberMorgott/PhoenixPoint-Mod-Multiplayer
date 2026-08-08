@@ -35,13 +35,17 @@ namespace RailCheck
     ///       reads <c>Live.Mine</c> and loads both colour fields. The arrow is the half a player sees when
     ///       the ping is off screen, which is exactly when "who is pointing" matters most, and it used to be
     ///       drawn in a fixed white.
+    ///   (e) <c>tint-misses-the-waves-property</c> — the colour must be written to <c>_TintColor</c>, the
+    ///       ONE colour property the waves' shader declares (measured out of the shipped asset; see the arm).
+    ///       Arms (a)-(c) are all satisfied by a build that computes the right colour and writes it to a
+    ///       property nothing reads, which is how this shipped twice.
     ///   (d) POSITIVE CONTROL, EXECUTED — the same green/blue predicates are run over a deliberately swapped
     ///       pair (blue offered as "own", green as "peer"). Both must be flagged, or arm (a) is a predicate
     ///       that says yes to anything and its green above means nothing.
     ///
     /// Falsify: set <c>Own</c> to blue → (a); swap the <c>true</c>/<c>false</c> in <c>Show</c>/<c>ShowLocal</c>
     /// → (b); draw the arrow in <c>Color.white</c> again → (c); make <see cref="IsGreen"/> return true
-    /// unconditionally → (d).
+    /// unconditionally → (d); delete the <c>_TintColor</c> write from <c>Tint</c> → (e).
     /// </summary>
     internal static class L251_PingColourAnswersWhoPinged
     {
@@ -66,13 +70,14 @@ namespace RailCheck
             var showCore = seam.GetMethod("ShowCore", AllMembers);
             var onGui = seam.GetMethod("OnGUI", AllMembers);
             var mine = seam.GetNestedType("Live", BindingFlags.NonPublic)?.GetField("Mine", AllMembers);
+            var tint = seam.GetMethod("Tint", AllMembers);
 
             if (ownField == null || peerField == null || show == null || showLocal == null ||
-                showCore == null || onGui == null || mine == null ||
+                showCore == null || onGui == null || mine == null || tint == null ||
                 ownField.FieldType != typeof(Color) || peerField.FieldType != typeof(Color))
             {
                 yield return "L251 premise-changed: one of PingMarkers.Own / PingMarkers.Peer (both must be " +
-                             "UnityEngine.Color) / Show / ShowLocal / ShowCore / OnGUI / Live.Mine no longer " +
+                             "UnityEngine.Color) / Show / ShowLocal / ShowCore / OnGUI / Live.Mine / Tint no longer " +
                              "resolves. The owner-colour mechanism is two colour constants, two entry doors " +
                              "and one flag carried to the arrow — every arm below is asserting about a shape " +
                              "the build no longer has.";
@@ -113,6 +118,19 @@ namespace RailCheck
                              "arrow cannot be picking its colour per ping. Two peers pinging at once must " +
                              "produce two arrows of different colours on every screen.";
 
+            // ── arm (e): the colour has to reach the ONE thing the geoscape ping still draws.
+            if (!WritesTo(tint, "_TintColor"))
+                yield return "L251 tint-misses-the-waves-property: PingMarkers.Tint no longer writes " +
+                             "_TintColor. The geoscape ping's ring is switched off, so the radiating waves " +
+                             "(Pulse1/Pulse2) ARE the marker — and their shader, Unlit/Colored, Animated Mask, " +
+                             "declares exactly one colour property, _TintColor. That is read out of the " +
+                             "shipped asset (sharedassets0.assets, byte 68715084, the file's only occurrence " +
+                             "of the shader name), not guessed: _TintColor \"Tint Color\", _MainTex \"Particle " +
+                             "Texture\", _Cutout, _InvFade, _SrcMode/_DstMode, _Tiling. Two guesses were " +
+                             "already spent here — _Color alone, then ParticleSystem.main.startColor on a " +
+                             "prefab that has no particle system — and each left the whole green-mine / " +
+                             "blue-yours rule correct in code and invisible on screen.";
+
             // ── arm (d): the predicates must be able to say NO.
             var control = Judge(Color.blue, Color.green, "FakeColours").ToList();
             foreach (var want in new[] { "own-colour-is-not-green", "peer-colour-is-not-blue" })
@@ -136,6 +154,22 @@ namespace RailCheck
             if (own == peer)
                 yield return "L251 own-colour-is-not-green: " + label + "'s two ping colours are identical (" +
                              own + "), so the own/peer distinction is drawn but invisible.";
+        }
+
+        /// <summary>Does this method push <paramref name="literal"/> as a string constant (<c>ldstr</c>)?</summary>
+        private static bool WritesTo(MethodBase m, string literal)
+        {
+            byte[] il;
+            try { il = m?.GetMethodBody()?.GetILAsByteArray(); } catch { il = null; }
+            if (il == null) return false;
+            for (int i = 0; i + 4 < il.Length; i++)
+            {
+                if (il[i] != 0x72) continue;                       // ldstr
+                string s = null;
+                try { s = m.Module.ResolveString(BitConverter.ToInt32(il, i + 1)); } catch { }
+                if (s == literal) return true;
+            }
+            return false;
         }
 
         /// <summary>The constant handed to <paramref name="callee"/> as its LAST argument, read off the byte
