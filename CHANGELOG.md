@@ -3,6 +3,81 @@
 Player-facing notes for each release. Releases before `0.9.5-beta` are documented on the
 [GitHub releases page](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/releases).
 
+## 0.9.6-beta
+
+A patch release on top of `0.9.5-beta`. Same mod, same install — replace the `Multiplayer` folder
+in your `Mods` directory. **Every player must run the same version**; a mismatch is reported when
+you join. This release changes what travels over the wire, so a `0.9.5-beta` player and a
+`0.9.6-beta` player genuinely cannot play together.
+
+A co-op session that used to fall apart at the seams now holds together: peers see the same screens
+in the same order, a client's shots actually fire, and a soldier answers for the weapon in his
+hands.
+
+### In battle
+
+- **Attack animations start at the same moment on every peer.** Every attack — shot, free-aim,
+  grenade, melee, ability — now plays from the host's record on every machine, including the player
+  who pressed the button. No more "the grenade already exploded here but is still in the air over
+  there". The acting player trades a ping's worth of delay for everyone seeing the same battle.
+- **A client can fire.** Free-aim and aimed shots from a client were refused outright by the host;
+  grenades and cone weapons went through the same refusal and should now work as well.
+- **A wounded soldier answers for the weapon he is holding.** With a broken arm, pressing reload on
+  the pistol swapped to the unusable rifle and failed; overwatch answered for the rifle too. Both
+  now resolve against the selected weapon, and a refused order no longer burns the ability's use for
+  that turn.
+- **A crash that silently disabled the movement overlay** on a peer watching someone else's move is
+  gone.
+
+### Starting a campaign and reaching a mission
+
+- **Campaign start plays in one order for everyone.** The intro runs first on every peer and the
+  opening dialogs follow it, instead of the host getting dialogs while clients got the video.
+- **The intro cutscene can be skipped on every peer.** Escape used to be silently dead on one
+  client, which then sat through the entire video.
+- **Everyone reaches the squad screen**, including the players who did not answer the mission event
+  themselves. The screen now opens when the mission arrives, not when a local dialog closes.
+- **Stealing an aircraft and other haven infiltration missions work from a client.** The client used
+  to create the mission only on its own copy of the world, so the host rejected the launch as "no
+  runnable mission".
+- **Returning from a mission no longer leaves a finished mission's window on screen**, and host and
+  clients arrive at the geoscape with the same windows.
+- **A client no longer finishes site exploration on its own schedule.** Exploration timers were
+  compared against the wrong clock, so a client could complete — or lose — an exploration the host
+  never agreed to.
+
+### Seeing the other players
+
+- **Ping markers tell you who pinged.** Your own pings are green, everyone else's are blue.
+- **The off-screen ping arrow is 2.5× larger and takes a click** — clicking it smoothly moves the
+  camera onto the pinged target using the game's own camera moves.
+- **Per-peer latency in the tactical player panel** — name, ping bars and status for every player,
+  measured on the existing heartbeat.
+- **A ready indicator beside End Turn** showing how many players have finished their turn, echoed as
+  a tick or cross per player in the panel. Purely informational — it gates nothing, and the round
+  never waits for anybody.
+- **A five-second deployment countdown** when someone launches a mission, with a Cancel any single
+  player can press to stop it for everyone.
+- **The countdown panel's text fits inside it, and its Cancel button works.**
+- **The ready button can be hovered and clicked again.**
+
+### Known issues / unverified
+
+This build is published for testing. Everything above has been built and verified against the
+RailCheck law harness, but only the campaign-start fixes and item transfer have been confirmed in a
+live three-player session. The rest — animation timing above all, since it changes the path of every
+action in combat — still needs a real game.
+
+If the animation change misbehaves, it is a single revert: nothing else depends on it.
+
+Every player needs the same mod set. A session running with mismatched mods will pass items whose
+definitions the other side cannot resolve.
+
+### Internals
+
+67 new law files were added to the RailCheck harness to hold these fixes down, bringing it to 134
+file-backed laws plus 60 inline checks (194 total).
+
 ## 0.9.5-beta
 
 A patch release on top of `0.9.4-beta`. Same mod, same install — replace the `Multiplayer` folder
