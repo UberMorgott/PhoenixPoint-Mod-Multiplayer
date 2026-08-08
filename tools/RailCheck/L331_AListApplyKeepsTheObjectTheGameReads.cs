@@ -1,7 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using Base.Serialization.General;
 using Multiplayer.Network.Sync;
+using PhoenixPoint.Common.Core;
+using PhoenixPoint.Geoscape.Levels.Factions;
 
 namespace RailCheck
 {
@@ -37,12 +41,17 @@ namespace RailCheck
     ///   (c) <c>pairing-overruns</c> — a wire list LONGER than the live one reconciles element 0 in place
     ///       and BUILDS element 1. The list grows in play (StartRelations appends on first contact), and
     ///       reusing the live element for every index would collapse two mirrored entries onto one object.
+    ///   (d) <c>custom-create-alias-replaced</c> — the SAME outcome on the rung arms (a)-(c) never reach, run
+    ///       over the game's own <c>FactionDiplomacyState</c>/<c>PartyDiplomacy.Relation</c>. See the arm itself:
+    ///       this is why the three arms above stayed green through the live re-break.
     ///
     /// Falsify (each verified RED, then restored):
     ///   • drop the `existing` argument in DecodeEntityList → <c>value-landed-on-an-orphan</c> (both halves)
     ///   • keep element reuse but restore the unconditional `f.SetValue` on the TagBlob arm →
     ///     <c>value-landed-on-an-orphan</c> (the alias half only — the exact original defect)
     ///   • let OrderedLiveElements accept any IEnumerable → <c>ordinal-pairing-widened</c>
+    ///   • restore the unconditional construct-fresh on the custom-create rung (`argsUnchanged = false`) →
+    ///     <c>custom-create-alias-replaced</c>
     /// </summary>
     internal static class L331_AListApplyKeepsTheObjectTheGameReads
     {
@@ -160,6 +169,91 @@ namespace RailCheck
                                  "a party is met — so pairing that runs past the end would collapse two " +
                                  "mirrored entries onto one live object and drop the other's state entirely.";
             }
+
+            // ── (d) THE REAL SUBJECT, on the rung the fabricated one never reaches ───────────────────
+            foreach (var v in CustomCreateSubject()) yield return v;
+        }
+
+        /// <summary>
+        /// (d) <c>custom-create-alias-replaced</c>. Arms (a)-(c) run over <c>Aliased</c>/<c>Entry</c>, which carry
+        /// NO <c>[SerializeCustomCreate]</c> — so they exercise the Activator rung, and the real subject never
+        /// goes down it. <c>PartyDiplomacy.Relation</c> IS a custom-create type (one param, <c>WithParty</c>,
+        /// PartyDiplomacy.cs:70-74), and the decoder's carve-out excluded that whole rung from in-place reuse:
+        /// it minted a fresh Relation on every delta and re-pointed the readonly
+        /// <c>FactionDiplomacyState.Relation</c> at it, while <c>PartyDiplomacy._relations</c> — off the rail,
+        /// and the side every read goes through (:104-116, the top bar's
+        /// <c>MainDiplomacyRelationDisplayRowElement</c>:22) — kept the original. The mirror then AGREED with the
+        /// host on CRC, because the sibling it ships held the correct value; only the screen was wrong, and a
+        /// re-emit just minted another orphan. That is why arms (a)-(c) were green through live breakage, and why
+        /// this arm runs the GAME's own types rather than a stand-in.
+        /// </summary>
+        private static IEnumerable<string> CustomCreateSubject()
+        {
+            var relT = typeof(PartyDiplomacy.Relation);
+            var ctor = relT.GetConstructor(BindingFlags.NonPublic | BindingFlags.Instance, null,
+                                           new[] { typeof(IDiplomaticPartyKey) }, null);
+            var dip = relT.GetField("_diplomacy", BindingFlags.NonPublic | BindingFlags.Instance);
+            bool customCreate = relT.GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
+                .Any(m => m.GetCustomAttributes(true).Any(a => a.GetType().Name == "SerializeCustomCreateAttribute"));
+            if (ctor == null || dip == null || !customCreate)
+            {
+                yield return "L331 premise-changed: PartyDiplomacy.Relation is no longer the shape this arm is " +
+                             "about (" + (ctor == null ? "no Relation(IDiplomaticPartyKey)" :
+                                          dip == null ? "no _diplomacy field" : "no [SerializeCustomCreate]") +
+                             "). Arms (a)-(c) run over a fabricated pair with no custom create, so with this arm " +
+                             "gone the law is back to testing an Activator rung the real subject never reaches — " +
+                             "re-point it at whatever carries a relation now.";
+                yield break;
+            }
+
+            var field = new RailField
+            {
+                Name = "probe", Class = FieldClass.EntityList,
+                ValueType = typeof(List<FactionDiplomacyState>), ElemType = typeof(FactionDiplomacyState),
+            };
+
+            var hostRel = ctor.Invoke(new object[] { null });
+            dip.SetValue(hostRel, 7);
+            var source = new List<FactionDiplomacyState>
+            {
+                new FactionDiplomacyState((PartyDiplomacy.Relation)hostRel) { AtWar = true },
+            };
+            byte[] wire = null;
+            Exception failed = null;
+            try { wire = RailMeta.EncodeEntityList(field, source); }
+            catch (Exception ex) { failed = ex; }
+            if (wire == null)
+            {
+                yield return "L331 premise-changed: a FactionDiplomacyState would not encode (" +
+                             (failed == null ? "null wire" : failed.GetType().Name + ": " + failed.Message) +
+                             "). This arm is the only one that reaches the custom-create rung; if the codec " +
+                             "stopped carrying the real subject, the alias defect is unguarded again.";
+                yield break;
+            }
+
+            // The client's side: the relation instance PartyDiplomacy._relations also holds.
+            var liveRel = (PartyDiplomacy.Relation)ctor.Invoke(new object[] { null });
+            var liveState = new FactionDiplomacyState(liveRel);
+            var live = new List<FactionDiplomacyState> { liveState };
+            var back = RailMeta.DecodeEntityList(wire, field, null, live);
+
+            var got = back != null && back.Count == 1 ? back[0] as FactionDiplomacyState : null;
+            if (got == null || !ReferenceEquals(got, liveState))
+                yield return "L331 custom-create-alias-replaced: the apply produced a NEW FactionDiplomacyState " +
+                             "instead of reconciling the live one, so nothing the game already wired to it can " +
+                             "see the mirrored value.";
+            else if (!ReferenceEquals(got.Relation, liveRel))
+                yield return "L331 custom-create-alias-replaced: the state survived but its READONLY Relation was " +
+                             "re-pointed at a freshly CREATED one. This is the shipped defect: a custom-create " +
+                             "type was excluded from in-place reuse, so every diplomacy delta minted an orphan " +
+                             "while PartyDiplomacy._relations — the side the top bar reads — kept the original. " +
+                             "The mirror still agreed on CRC, because the sibling we ship held the right number, " +
+                             "so nothing reported it and a re-emit only minted another orphan.";
+            else if ((int)dip.GetValue(liveRel) != 7 || !got.AtWar)
+                yield return "L331 custom-create-alias-replaced: the aliased Relation was kept but did not receive " +
+                             "the value (_diplomacy=" + dip.GetValue(liveRel) + " expected 7, AtWar=" + got.AtWar +
+                             " expected true). Keeping the instance without writing into it freezes the number on " +
+                             "every peer but the host, exactly as replacing it did.";
         }
     }
 }

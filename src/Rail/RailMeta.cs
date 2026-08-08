@@ -2719,6 +2719,17 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>Does the live object already hold this decoded create arg? Read through the SAME accessor the
+        /// encoder wrote it with (<c>GetMemberValue</c>, :2464), so the two sides cannot disagree about what the
+        /// arg IS. Reference identity first — a create param is usually a def or a key, and a decoded ref comes
+        /// back as the very instance the game holds — then <c>Equals</c> for the value cases.</summary>
+        private static bool SameCreateArg(MemberInfo mi, object existing, object decoded)
+        {
+            object current;
+            try { current = GetMemberValue(mi, existing); } catch { return false; }
+            return ReferenceEquals(current, decoded) || (current != null && current.Equals(decoded));
+        }
+
         private static object DecodeObjectBody(BinaryReader r, Serializer ser, Type t, GeoLevelController geo,
                                                List<object> locals, List<Fixup> fixups, int depth, List<OwnerFrame> chain,
                                                object existing = null, List<object> kept = null)
@@ -2738,19 +2749,35 @@ namespace Multiplayer.Network.Sync
             // DecodeEntityList's header for the alias this exists for). Only on the Activator rung — a
             // custom-create type carries state in its create ARGS, and re-running the create is how that
             // state is applied, so those still construct.
-            bool reuse = existing != null && existing.GetType() == t && !(ci != null && ci.Params.Length == cpCount);
-            if (ci != null && ci.Params.Length == cpCount)
+            bool customCreate = ci != null && ci.Params.Length == cpCount;
+            bool reuse = existing != null && existing.GetType() == t && !customCreate;
+            if (customCreate)
             {
                 var args = new object[cpCount + 1]; // [0] = SerializedObjectData (null — creates like GeoItem's ignore it)
+                // A CUSTOM-CREATE TYPE IS STILL AN ALIAS. The carve-out above excluded the whole rung from
+                // in-place reuse, on the reasoning that a create carries state in its ARGS — true, but only when
+                // an arg MOVED. `PartyDiplomacy.Relation` is exactly this shape: one create param (WithParty,
+                // PartyDiplomacy.cs:70-74) that never changes for the life of a relation, and the live instance
+                // is the one `_relations` holds — the side every read goes through, and itself off the rail.
+                // Re-creating it re-pointed FactionDiplomacyState.Relation (:2802) at an orphan the game never
+                // reads, while the sibling we DO ship held the correct value, so CRC saw agreement and a re-emit
+                // only minted another orphan. That is the defect b9eb69c was written to kill, re-opened by its
+                // own carve-out. So: construct only when an arg actually differs from what the live object holds.
+                bool argsUnchanged = existing != null && existing.GetType() == t;
                 for (int i = 0; i < cpCount; i++)
                 {
                     var a = DecodeValue(r, ser, MemberType(ci.Params[i]), geo, locals, fixups, depth + 1, chain);
                     // Unresolved ref as a create arg: pass null (fresh construction, nothing clobbered) —
                     // the sentinel itself would throw a type mismatch inside the create method.
                     args[i + 1] = ReferenceEquals(a, Unresolved) ? null : a;
+                    if (argsUnchanged && !SameCreateArg(ci.Params[i], existing, args[i + 1])) argsUnchanged = false;
                 }
-                o = ci.Method.Invoke(args);
-                if (o == null) throw new IOException("custom create returned null for " + t.Name);
+                if (argsUnchanged) { o = existing; reuse = true; }
+                else
+                {
+                    o = ci.Method.Invoke(args);
+                    if (o == null) throw new IOException("custom create returned null for " + t.Name);
+                }
             }
             else
             {
