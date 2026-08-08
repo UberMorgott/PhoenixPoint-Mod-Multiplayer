@@ -19,7 +19,10 @@ namespace RailCheck
     /// probably from TFTV. Everything must work reactively." The literal reading — make the helmet state
     /// cross the wire — IS WRONG, and this law exists mostly to stop the next reader implementing it.
     ///
-    /// NEITHER TOGGLE IS REPLICATED STATE, AND NEITHER SHOULD BE. The vanilla tick writes NOTHING to the
+    /// THE TOGGLE ITSELF IS NOT REPLICATED STATE — but WHERE A MOD CHOOSES TO PERSIST ITS PREFERENCE CAN BE,
+    /// and the original wording of this law ("neither toggle is replicated state and neither should be")
+    /// papered over that distinction. Corrected 2026-08-08; see the STATED LIMIT at the bottom, which is
+    /// now a fixed defect rather than an accepted one. The vanilla tick writes NOTHING to the
     /// character: `UIStateSoldierCustomization.EnterState`:24 binds a Unity `Toggle`, `:51 UpdateHelmetShown`
     /// just re-runs `RefreshUnitDisplay`, and `:44` passes `!isOn` as the `showHelmet` ARGUMENT to
     /// `UIModuleActorCycle.DisplaySoldier`, which filters `Head`/`HeadAttachment` items out of the addon list
@@ -52,13 +55,22 @@ namespace RailCheck
     /// FALSIFY: give `CharacterIdentity` a helmet-ish field → (a); change the overload → (b); reference any
     /// TFTV type from the identity reseed → (c).
     ///
-    /// STATED LIMIT, deliberately not fixed here: TFTV persists its own preference into the SHARED campaign
-    /// store — `GeoLevelController.EventSystem.SetVariable("TFTV_HelmetsOff", …)`
-    /// (TFTVUI/Personnel/ShowWithoutHelmet.cs:31/:107) — which the value rail replicates like any other event
-    /// variable, so one peer's preference does reach the others' saved state and takes effect on their next
-    /// read of it. That is TFTV's storage choice inside TFTV's own data; overriding it would mean patching a
-    /// foreign mod's persistence to make a view preference peer-local, which is a bigger and more fragile
-    /// change than the defect deserves. Written down so it is a known consequence and not a future surprise.
+    /// THE STATED LIMIT WAS A DEFECT, AND IT IS FIXED (2026-08-08). A mod may persist its preference into the
+    /// SHARED campaign store — TFTV does, `GeoLevelController.EventSystem.SetVariable("TFTV_HelmetsOff", …)`
+    /// (TFTVUI/Personnel/ShowWithoutHelmet.cs:31/:107) — and `GeoscapeEventSystem._customVariables` is
+    /// rail-covered host-authoritative state (docs/rail-baseline.txt:473). This law used to call that
+    /// harmless. It was not: the direction that worked was host→client only. A CLIENT's write landed in its
+    /// own dictionary, crossed to nobody, and was reverted by the next mirrored diff — which writes the dict
+    /// RAW, so the revert produced no exception and no log line. The user's report ("the helmet toggle does
+    /// nothing on the other peers") was that hole, not a repaint bug.
+    ///
+    /// The fix is a gap-CLASS seam and names no mod and no variable: `EventVariableCapture` (src/Rail/
+    /// EventSync.cs) blocks `GeoscapeEventSystem.SetVariable(string,int)` on a client and ships (name, value)
+    /// as 0xB4 op 2; the host replays the game's OWN setter, and the existing `CustomVariables` coverage
+    /// carries the result to every peer. So the CONSEQUENCE the old limit described stands and is now
+    /// deliberate: a preference stored in campaign state is GLOBAL, and one peer flipping it changes what
+    /// every peer sees. That is the storage choice's own semantics, made to work in both directions instead
+    /// of one. A mod wanting a per-player preference must keep it out of the campaign store.
     /// </summary>
     internal static class L149_HelmetTogglesShareOneReactiveFunnel
     {

@@ -40,7 +40,8 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     public static class EventSync
     {
-        internal const byte OpAnswer = 1;  // [eventId:string][choiceIndex:i32]
+        internal const byte OpAnswer = 1;       // [eventId:string][choiceIndex:i32]
+        internal const byte OpSetVariable = 2;  // [name:string][value:i32]
 
         /// <summary>The forced re-emit scope for a rejected answer — the "ES" ROOT, not a per-record path.
         /// <c>EncounterRecords</c> classifies <see cref="FieldClass.EntityList"/> (docs/rail-baseline.txt:470),
@@ -56,7 +57,11 @@ namespace Multiplayer.Network.Sync
 
         internal static void RegisterIntents()
         {
-            var ops = new Dictionary<byte, IntentRail.OpHandler> { [OpAnswer] = HandleAnswer };
+            var ops = new Dictionary<byte, IntentRail.OpHandler>
+            {
+                [OpAnswer] = HandleAnswer,
+                [OpSetVariable] = HandleSetVariable,
+            };
             IntentRail.Register(SurfaceIds.GeoEventIntent, "event", ops);
         }
 
@@ -143,6 +148,87 @@ namespace Multiplayer.Network.Sync
                 MissionEncounterNav.FinishOwnEncounterWindow(geo.View, eventId, true);   // :611
                 geo.View.LaunchMission(mission, ev.Context.Vehicle);                     // :612
             }
+        }
+
+        /// <summary>HOST: replay the client's variable write through the game's OWN setter. NEVER the
+        /// backing dictionary — <c>SetVariable</c>:261 raises <c>VariableSet</c>, which is the notification
+        /// anything listening (the game's own trigger evaluation, a mod's UI) is subscribed to, and the
+        /// mirrored apply on the other side writes the dict RAW precisely because it must not re-raise it.
+        /// The result travels back to every peer as ordinary <c>CustomVariables</c> deltas — this surface
+        /// ships no host→all message and needs none.
+        ///
+        /// NO VALIDATOR, deliberately, and the same posture as the aim-pose intent (0x88): a variable write
+        /// spends nothing, orders nothing and names no entity, so there is no host-side fact that could
+        /// refuse it and arrival order IS the arbitration (law 7). The equality early-out is not a guard, it
+        /// is noise control: a no-op write still logs and still re-raises.</summary>
+        private static void HandleSetVariable(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
+        {
+            string name = r.ReadString();
+            int value = r.ReadInt32();
+
+            var es = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.EventSystem;
+            if (es == null)
+            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "no geoscape for variable '" + name + "'"); return; }
+            if (es.GetVariable(name, int.MinValue) == value) return;
+
+            es.SetVariable(name, value);   // GeoscapeEventSystem.cs:251 — the game's own setter
+            Debug.Log("[MP][events] HOST variable '" + name + "'=" + value + " nonce=" + nonce + " peer=" + senderPeerId);
+        }
+    }
+
+    /// <summary>
+    /// THE CLIENT HALF OF THE EVENT-VARIABLE GAP, and a gap CLASS rather than one feature.
+    /// <c>GeoscapeEventSystem._customVariables</c> is rail-covered campaign state
+    /// (docs/rail-baseline.txt:473, <c>EntityList CustomVariables</c>) and therefore HOST-AUTHORITATIVE —
+    /// but until now nothing in the mod ever sent a <c>SetVariable</c> anywhere. A client writing one wrote
+    /// it into its own dictionary, shipped nothing, and had it silently reverted by the next mirrored diff:
+    /// the apply writes the dict RAW, so the revert produced no exception and no log line. That is the
+    /// silent-swallow class this repo exists to kill, and it is not specific to any one variable — every
+    /// mod that stores a campaign flag here was broken in the same way and is fixed by this one seam.
+    ///
+    /// BLOCK-FIRST, like every other geoscape family and for the same reason (law 3 + RailCheck L19): this
+    /// is a MODEL method, so a postfix would have let the client's write land first and shipped a RESULT —
+    /// which is precisely the state the next mirrored diff silently reverts. <see cref="IntentRail
+    /// .ShouldRunNative"/> carries the three arms verbatim: solo runs native (the write IS the truth), an
+    /// APPLY runs native (that is the mirror landing — and it must never bounce back at the host, once per
+    /// batch, forever), the HOST runs native (its own write IS the shared state, and the generic diff
+    /// already carries it to everyone).
+    ///
+    /// LOCAL FEEDBACK IS NOT LOST BY BLOCKING, because a caller that stores a preference here keeps its own
+    /// in-memory copy and repaints off that; what the block removes is only the divergent CAMPAIGN value.
+    /// The authoritative one lands a round trip later as an ordinary <c>CustomVariables</c> delta and
+    /// repaints again through the same universal seam.
+    ///
+    /// THE EQUALITY CHECK IS NOT A GUARD, it is noise control, and it reads the LIVE dictionary rather than
+    /// a remembered value (<see cref="int.MinValue"/> = the absent-key sentinel of the game's own
+    /// <c>GetVariable(string,int)</c>:270). An unchanged write is the COMMON case, not a rare one — a
+    /// screen that re-applies its stored value on every repaint writes it back unchanged — and shipping
+    /// those turns one gesture into a stream of identical intents.
+    ///
+    /// NO VALIDATOR AND NO REJECT PATH is the deliberate posture, so nothing needs reconverging when the
+    /// host declines: it never declines. See <see cref="EventSync"/>'s handler for why.
+    ///
+    /// GENERALITY VERIFIED, not assumed: the game's own callers of this setter are
+    /// <c>GeoFactionReward.Apply</c>:199, <c>EncounterVarResearchReward</c>:22/:26 and
+    /// <c>GeoMarketplace</c>:163/:173. None of them can reach this on a client — event completion is
+    /// refused by <see cref="EventCompleteArbiter"/>, the marketplace one by
+    /// <see cref="MarketplaceCompleteArbiter"/>, and research rewards hang off the hourly sim, which
+    /// <c>ClientSimGate</c> does not run on a client at all. So what remains on a client is a live gesture,
+    /// which is exactly what this ships — and blocking those three costs nothing even if one ever did
+    /// reach here, since all three are host-authoritative writes a client has no business making.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoscapeEventSystem), nameof(GeoscapeEventSystem.SetVariable),
+                  new[] { typeof(string), typeof(int) })]
+    internal static class EventVariableCapture
+    {
+        private static bool Prefix(GeoscapeEventSystem __instance, string variable, int value)
+        {
+            if (IntentRail.ShouldRunNative()) return true;
+            if (__instance.GetVariable(variable, int.MinValue) != value)
+                IntentRail.Send(SurfaceIds.GeoEventIntent, EventSync.OpSetVariable,
+                    "variable '" + variable + "'=" + value,
+                    w => { w.Write(variable); w.Write(value); });
+            return false;
         }
     }
 

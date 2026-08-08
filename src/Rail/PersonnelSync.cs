@@ -1288,6 +1288,25 @@ namespace Multiplayer.Network.Sync
             return true;
         }
 
+        /// <summary>What was last put on the wire for a character, keyed by its id — the "did the IDENTITY
+        /// actually change" answer for <see cref="ShipCustomize"/>. THE FUNNEL IS NOT A GESTURE DETECTOR:
+        /// `RefreshUnitDisplay` is the customization screens' repaint, so it also runs for every VIEW-only
+        /// write on that screen (a helmet tick, a mod re-applying a stored per-screen preference), each of
+        /// which shipped a full 15-leaf identity intent carrying nothing new — measured live 2026-08-08 as
+        /// four intents, nonces 8-11, from one screen visit with no edit in it. Comparing the ENCODED bytes
+        /// rather than inventing a change-detector keeps the comparison exactly as wide as the payload: a
+        /// 16th leaf appearing on <c>CharacterIdentity</c> is compared automatically, like it is encoded
+        /// automatically. Never a correctness gate — the entry records only what we SENT, so a value the
+        /// host later reverts differs from the live identity again and the next gesture ships.</summary>
+        private static readonly Dictionary<int, byte[]> _lastCustomizeSent = new Dictionary<int, byte[]>();
+
+        /// <summary>Which session <see cref="_lastCustomizeSent"/> belongs to. A new
+        /// <c>NetworkEngine</c> instance is built per session (NetworkEngine.cs:156, nulled at :295), so
+        /// comparing the reference scopes the cache without a Reset hook nobody would remember to call — and
+        /// a cache that outlived its session could suppress the FIRST edit of the next one, silently, which
+        /// is the exact failure this whole file is written against.</summary>
+        private static NetworkEngine _customizeCacheOwner;
+
         private static void ShipCustomize(GeoCharacter character, string why)
         {
             if (character == null) return;
@@ -1299,9 +1318,19 @@ namespace Multiplayer.Network.Sync
             if (identity == null) return;
             try
             {
+                if (!ReferenceEquals(_customizeCacheOwner, engine)) { _customizeCacheOwner = engine; _lastCustomizeSent.Clear(); }
+
+                byte[] body;
+                using (var ms = new MemoryStream())
+                using (var w = new BinaryWriter(ms)) { EncodeIdentity(w, identity); w.Flush(); body = ms.ToArray(); }
+
+                int id = (int)character.Id;
+                if (_lastCustomizeSent.TryGetValue(id, out var sent) && sent.SequenceEqual(body)) return;
+                _lastCustomizeSent[id] = body;
+
                 IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpCustomize,
-                    "customize U#" + (int)character.Id + " (" + why + ")",
-                    w => { w.Write((int)character.Id); EncodeIdentity(w, identity); });
+                    "customize U#" + id + " (" + why + ")",
+                    w => { w.Write(id); w.Write(body); });
             }
             catch (Exception ex) { Debug.LogError("[MP][personnel] customize capture failed: " + ex); }
         }
