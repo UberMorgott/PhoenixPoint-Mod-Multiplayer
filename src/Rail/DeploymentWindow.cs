@@ -8,6 +8,8 @@ using Base.Serialization.General;
 using HarmonyLib;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Levels;
+using PhoenixPoint.Geoscape.View;
+using PhoenixPoint.Geoscape.View.ViewControllers.Roster;
 using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
 
@@ -55,10 +57,10 @@ namespace Multiplayer.Network.Sync
     {
         private const BindingFlags All = BindingFlags.NonPublic | BindingFlags.Instance;
 
-        private static readonly FieldInfo MissionField = AccessTools.Field(typeof(UIStateRosterDeployment), "_mission");
-        private static readonly FieldInfo ContainersField = AccessTools.Field(typeof(UIStateRosterDeployment), "_characterContainers");
-        private static readonly FieldInfo InitialContainerField = AccessTools.Field(typeof(UIStateRosterDeployment), "_initialContainer");
-        private static readonly FieldInfo SelectedField = AccessTools.Field(typeof(UIStateRosterDeployment), "_selectedDeployment");
+        internal static readonly FieldInfo MissionField = AccessTools.Field(typeof(UIStateRosterDeployment), "_mission");
+        internal static readonly FieldInfo ContainersField = AccessTools.Field(typeof(UIStateRosterDeployment), "_characterContainers");
+        internal static readonly FieldInfo InitialContainerField = AccessTools.Field(typeof(UIStateRosterDeployment), "_initialContainer");
+        internal static readonly FieldInfo SelectedField = AccessTools.Field(typeof(UIStateRosterDeployment), "_selectedDeployment");
 
         private static bool _bindLogged;
 
@@ -66,6 +68,42 @@ namespace Multiplayer.Network.Sync
         /// the re-ask itself is unconditional, because "the queued answer happens to equal the live one" is
         /// not knowable without asking.</summary>
         internal static bool SnapshotWentStale(int queuedSquad, int liveSquad) => queuedSquad != liveSquad;
+
+        /// <summary>PURE (RailCheck L354). MAY THIS SQUAD SCREEN BE SERVED AT ALL? Both numbers, because the
+        /// live log shows both shapes: host 22:16:38 opened it with 0 containers / 0 soldiers (the aircraft
+        /// had already flown to another site), client 00:19:08 and 00:21:03 with 1 container / 0 soldiers
+        /// (the aircraft was in transit and its roster went with it).
+        ///
+        /// An empty screen is not a cosmetic defect: <c>CheckForDeployment</c>:371 gates the START MISSION
+        /// button on <c>squad.Any()</c>, so with nothing to enrol the button is DEAD and there is no gesture
+        /// that can ever make it live — the player is parked in a screen whose only exit is Back. The same
+        /// question governs the BRIEF that opens this screen, which is why it lives here and not inside the
+        /// EnterState prefix: a brief for a mission this peer can no longer deploy to is the same window.
+        ///
+        /// The question is asked of <c>GeoMission.GetDeploymentSources</c> and NOT of "is there an aircraft
+        /// on the site" — a <c>GeoPhoenixBaseDefenseMission</c> deploys from the SITE (GeoMission.cs:1493-1497,
+        /// <c>Site.Owner == faction</c>) and has no aircraft to lose, and <c>OnSiteMissionStarted</c>:1706-1712
+        /// raises its brief with a null vehicle on purpose.</summary>
+        internal static bool IsServable(int containers, int soldiers) => containers > 0 && soldiers > 0;
+
+        /// <summary>The two numbers <see cref="IsServable"/> wants, taken from the GAME's own method on THIS
+        /// peer's live graph. Returns false when they cannot be taken at all (no mission, no viewer faction),
+        /// which is deliberately NOT "unservable": refusing on a question we could not ask would close
+        /// screens for a reason nobody could read.</summary>
+        internal static bool TryCount(GeoMission mission, IGeoCharacterContainer priority,
+                                      out List<IGeoCharacterContainer> sources, out List<GeoCharacter> pool)
+        {
+            sources = null;
+            pool = null;
+            var faction = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.ViewerFaction;
+            if (mission == null || mission.Site == null || faction == null) return false;
+            sources = mission.GetDeploymentSources(faction, priority) ?? new List<IGeoCharacterContainer>();
+            pool = sources.SelectMany(s => s == null
+                                               ? Enumerable.Empty<GeoCharacter>()
+                                               : (s.GetAllCharacters() ?? Enumerable.Empty<GeoCharacter>()))
+                          .ToList();
+            return true;
+        }
 
         private static void Prefix(UIStateRosterDeployment __instance)
         {
@@ -95,6 +133,9 @@ namespace Multiplayer.Network.Sync
 
                 // THE GAME'S OWN TWO QUESTIONS, asked here and not re-implemented (see the class doc).
                 var priority = InitialContainerField.GetValue(__instance) as IGeoCharacterContainer;
+                // CALLED HERE, INLINE, and not through TryCount below: RailCheck L176 asserts THIS method
+                // reaches GeoMission.GetDeploymentSources itself, because factoring the question into a helper
+                // is the drift a1c11dd already paid for once on the resupply gate.
                 var sources = mission.GetDeploymentSources(faction, priority) ?? new List<IGeoCharacterContainer>();
                 var pool = sources.SelectMany(s => s == null
                                                        ? Enumerable.Empty<GeoCharacter>()
@@ -127,6 +168,210 @@ namespace Multiplayer.Network.Sync
                 Debug.LogError("[MP][deploy] squad-screen re-ask failed — the screen keeps its queue-time " +
                                "roster snapshot: " + ex);
             }
+        }
+
+        /// <summary>A SCREEN WITH NOTHING IN IT IS NOT SERVED — it is closed again, in the same frame.
+        ///
+        /// A POSTFIX and not a bail in the prefix above: refusing <c>EnterState</c> leaves the state CURRENT
+        /// but half-built, and its own <c>ExitState</c>:194 then walks a null <c>_deploymentItems</c>. Letting
+        /// the game build the screen and closing it through its own door costs one frame and cannot wedge the
+        /// queue. <c>FinishQueriedState</c> + <c>ResetViewState</c> is <c>ToPreviousScreen</c>:259-267 MINUS
+        /// its first line, <c>_mission.Cancel()</c> — which is the whole point: the mission is not cancelled,
+        /// this peer simply has nothing to deploy to it.</summary>
+        private static void Postfix(UIStateRosterDeployment __instance)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return;
+            try
+            {
+                var mission = MissionField?.GetValue(__instance) as GeoMission;
+                var priority = InitialContainerField?.GetValue(__instance) as IGeoCharacterContainer;
+                if (!TryCount(mission, priority, out var sources, out var pool)) return;
+                if (IsServable(sources.Count, pool.Count)) return;
+                DeploymentWindowClose.CloseCurrent(
+                    "the squad screen for " + (IdentityResolver.RootRef(mission.Site) ?? "S#?") + " has " +
+                    sources.Count + " container(s) and " + pool.Count + " soldier(s) — there is nothing to " +
+                    "enrol, so START MISSION is dead by construction (CheckForDeployment:371 squad.Any()) and " +
+                    "no click can revive it. The aircraft that backed this screen left the site while the " +
+                    "screen was QUEUED. The mission is untouched: fly an aircraft back and open it again");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MP][deploy] servability check threw — the squad screen stays open as it was " +
+                               "built, which is the pre-fix behaviour: " + ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// THE WINDOW DIES WITH THE AIRCRAFT THAT BACKED IT — current or queued, on every peer.
+    ///
+    /// FOUR OBSERVED FAILURES, worse than "the window stays open": the squad screen opened EMPTY. Host
+    /// 22:04:10 <c>SKIP re-enter of queued window UIStateRosterDeployment</c>; host 22:16:38 opened with 0
+    /// containers / 0 soldiers with the aircraft already at another site; client 00:19:08 and 00:21:03 opened
+    /// with 1 container / 0 soldiers while the aircraft was in transit. In co-op a window can sit QUEUED for
+    /// minutes (<c>WindowOrder.HoldsForOpenScreen</c>), so the aircraft leaving between the queue and the
+    /// serve is ordinary, not a race.
+    ///
+    /// ONE QUESTION FOR BOTH WINDOWS, and it is the game's own: <see cref="DeploymentRosterRefresh.IsServable"/>
+    /// over <c>GeoMission.GetDeploymentSources</c>. A brief is the screen's own front door
+    /// (<c>ModalResultCallback</c>:825 → <c>LaunchMission</c>:1043 → <c>ToDeploymentState</c>), so a brief for
+    /// a mission this peer can no longer deploy to is exactly as dead as the screen behind it.
+    ///
+    /// MULTI-AIRCRAFT COMES FREE, because the screen is backed by a SET: <c>_characterContainers</c>
+    /// (UIStateRosterDeployment.cs:26) is filled from <c>GetDeploymentSources</c>, which is priority container
+    /// + <c>Site.Vehicles.Where(Owner == faction)</c> + the Site (GeoMission.cs:1477-1499). Re-asking it on an
+    /// OPEN screen therefore makes a departing aircraft and its soldiers vanish from that screen while the
+    /// rest stay — and only the LAST departure empties the set and closes it.
+    ///
+    /// NOT <c>ToPreviousScreen</c>, ever: its first line is <c>_mission.Cancel()</c> (:258), which would
+    /// cancel the mission for everybody — the very bug L351 is about. And through
+    /// <c>FinishQueriedState</c>:2164 rather than by poking the stack, or <c>L93</c> arm C turns red.
+    /// </summary>
+    internal static class DeploymentWindowClose
+    {
+        private const BindingFlags All = BindingFlags.NonPublic | BindingFlags.Instance;
+
+        private static readonly FieldInfo ItemsField = AccessTools.Field(typeof(UIStateRosterDeployment), "_deploymentItems");
+        private static readonly FieldInfo FilterField = AccessTools.Field(typeof(UIStateRosterDeployment), "_preferableFilterMode");
+        private static readonly MethodInfo SetUpInitial = AccessTools.Method(typeof(UIStateRosterDeployment), "SetUpInitialDeployment");
+        private static readonly MethodInfo OnEnrollment = AccessTools.Method(typeof(UIStateRosterDeployment), "OnEnrollmentChanged");
+        private static readonly MethodInfo ContextGetter = AccessTools.PropertyGetter(typeof(GeoscapeViewState), "Context");
+
+        private static GeoscapeView View() =>
+            GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.View;
+
+        /// <summary>Close whatever the game's queue is currently showing, through the game's own two calls.
+        /// <c>ResetViewState</c> also clears <c>SetUiInDeploymentMode</c> (GeoscapeView.cs:414-416), which
+        /// <c>ToDeploymentState</c>:591 set and nothing else would put back.</summary>
+        internal static void CloseCurrent(string why, bool resetViewState = true)
+        {
+            var view = View();
+            if (view == null) return;
+            Debug.Log("[MP][deploy] closing the current window — " + why);
+            // A MODAL closes with FinishQueriedState alone — that is its own OnCancel:96-99. The squad SCREEN
+            // additionally needs ResetViewState, which is what ToPreviousScreen:259-261 does and the only
+            // writer that clears SetUiInDeploymentMode (GeoscapeView.cs:414-416).
+            if (resetViewState) view.ResetViewState();
+            view.FinishQueriedState();
+        }
+
+        /// <summary>THE BRIEF HALF, run from the <c>UIStateGeoModal</c> repaint entry. A mission brief whose
+        /// last deployment container is gone is a window whose only button leads to a screen that cannot be
+        /// served — <see cref="MissionBehind"/> keeps this to the per-peer brief/outcome class, so no other
+        /// modal in the family can be closed by it.</summary>
+        internal static void CloseDepartedBrief(GeoscapeViewState s)
+        {
+            var mission = MissionBehind(s);
+            if (mission == null || Servable(mission)) return;
+            CloseCurrent("the mission brief for " + (IdentityResolver.RootRef(mission.Site) ?? "S#?") +
+                         " has no deployment container left on this peer — the aircraft it was raised for " +
+                         "left the site, so its Confirm would open an empty squad screen. The mission is NOT " +
+                         "cancelled (that would be one peer deciding for everyone, L351)", false);
+        }
+
+        /// <summary>THE QUEUED HALF. A window that is not on screen yet cannot be closed — it is DROPPED from
+        /// the game's own pending list, exactly as <c>WindowQueueSync.AnswerQueued</c> edits it. Without this,
+        /// an unservable screen is merely deferred: it opens (empty) the moment the player leaves whatever
+        /// screen was holding it.</summary>
+        internal static void DropUnservableQueued()
+        {
+            var view = View();
+            var query = WindowQueueSync.SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
+            if (query == null || WindowOrder.RequestsField == null) return;
+            if (!(WindowOrder.RequestsField.GetValue(query) is IList<GeoscapeViewStateSwitchRequest> pending)) return;
+            for (int i = pending.Count - 1; i >= 0; i--)
+            {
+                var mission = MissionBehind(pending[i]?.State);
+                if (mission == null || Servable(mission)) continue;
+                Debug.Log("[MP][deploy] DROPPED the queued " + pending[i].State.GetType().Name + " for " +
+                          (IdentityResolver.RootRef(mission.Site) ?? "S#?") + " — this peer has no container " +
+                          "left to deploy from (the aircraft left the site while the window waited in the " +
+                          "queue), so serving it later would open an empty screen with a dead START MISSION " +
+                          "button. The mission itself is untouched");
+                pending.RemoveAt(i);
+            }
+        }
+
+        /// <summary>The mission a queued/open window is ABOUT, or null for a window this rule does not own.
+        /// The modal arm is deliberately the per-peer class and not "any modal holding a mission": that class
+        /// is the brief/outcome family the deployment flow runs through (GeoWindowCoverage.IsPerPeerAnswer).</summary>
+        internal static GeoMission MissionBehind(object state)
+        {
+            if (state is UIStateRosterDeployment dep) return dep.Mission;
+            return state is UIStateGeoModal modal && GeoWindowCoverage.IsPerPeerAnswer(modal.ModalType, modal.ModalData)
+                       ? modal.ModalData as GeoMission
+                       : null;
+        }
+
+        internal static bool Servable(GeoMission mission) =>
+            !DeploymentRosterRefresh.TryCount(mission, null, out var sources, out var pool) ||
+            DeploymentRosterRefresh.IsServable(sources.Count, pool.Count);
+
+        /// <summary>THE OPEN SCREEN, re-asked (<c>UiNativeRepaint.Table</c> entry). Reached at
+        /// <c>OpenUiRepaint</c>:554, BEFORE the <c>PauseHold.IsCurrentQueuedWindow</c> skip at :586 — which is
+        /// why a table entry is the only repaint this screen can ever have: it holds the current queued slot
+        /// (priority int.MaxValue, GeoscapeView.cs:592-600) so the fallback Exit+Enter declines it.
+        ///
+        /// The native tail is the game's own, in the game's own order: <c>_geoRosterModule.Init</c> (:90),
+        /// rebuild <c>_deploymentItems</c> off the live slots (:118-120), <c>SetUpInitialDeployment</c> (:121
+        /// → <c>CheckForDeployment</c>:369-379).
+        ///
+        /// <c>_selectedDeployment</c> is PRUNED, not regenerated. <c>GetDefaultDeploymentSetup</c> would be
+        /// the game's own answer but it is the answer to a different question — "who would we pick if nobody
+        /// had picked yet" — and running it once per rail batch would throw away the local player's own
+        /// enrolment every time any peer moved anything. Pruning keeps exactly the picks that still have a
+        /// soldier behind them, which is what a departing aircraft actually changes. Same list OBJECT
+        /// throughout: <c>OnEnrollmentChanged</c>:361-364 mutates it through the reference it was handed.</summary>
+        internal static bool RepaintDeploymentScreen(GeoscapeViewState s, GeoscapeView view)
+        {
+            var state = s as UIStateRosterDeployment;
+            if (state == null || ItemsField == null || SetUpInitial == null || ContextGetter == null) return false;
+            var mission = state.Mission;
+            var priority = DeploymentRosterRefresh.InitialContainerField?.GetValue(state) as IGeoCharacterContainer;
+            if (!DeploymentRosterRefresh.TryCount(mission, priority, out var sources, out var pool)) return false;
+
+            var containers = DeploymentRosterRefresh.ContainersField?.GetValue(state) as List<IGeoCharacterContainer>;
+            var selected = DeploymentRosterRefresh.SelectedField?.GetValue(state) as List<GeoCharacter>;
+            if (containers == null || selected == null) return false;
+
+            if (!DeploymentRosterRefresh.IsServable(sources.Count, pool.Count))
+            {
+                CloseCurrent("the last container backing the open squad screen for " +
+                             (IdentityResolver.RootRef(mission.Site) ?? "S#?") + " is gone (" + sources.Count +
+                             " container(s), " + pool.Count + " soldier(s)) — the aircraft left the site. The " +
+                             "mission is NOT cancelled; this peer simply has nothing to send to it");
+                return true;
+            }
+
+            containers.Clear();
+            containers.AddRange(sources);
+            selected.RemoveAll(c => c == null || !pool.Contains(c));
+
+            var ctx = ContextGetter.Invoke(state, null) as GeoscapeViewContext;
+            var roster = view?.GeoscapeModules?.GeneralPersonelRosterModule;
+            if (ctx == null || roster == null) return false;
+            roster.Init(ctx, containers, priority, (GeoRosterFilterMode)(FilterField?.GetValue(state) ??
+                                                                         GeoRosterFilterMode.Deployment));
+            var items = (roster.Slots ?? Enumerable.Empty<GeoRosterItem>())
+                        .Where(x => x != null && x.gameObject.activeSelf)
+                        .Select(x => x.GetComponent<GeoRosterDeploymentItem>())
+                        .Where(x => x != null).ToList();
+            // EnterState:123-126 subscribes the screen's own handler to the items it built; a slot the re-Init
+            // just activated has none, and its checkbox would silently do nothing. Remove-then-Combine so a
+            // slot that survived the re-Init keeps exactly one subscription rather than N.
+            var handler = OnEnrollment == null
+                              ? null
+                              : Delegate.CreateDelegate(typeof(Action<GeoRosterDeploymentItem>), state,
+                                                        OnEnrollment, false) as Action<GeoRosterDeploymentItem>;
+            if (handler != null)
+                foreach (var item in items)
+                    item.EnrollmentChanged = (Action<GeoRosterDeploymentItem>)
+                        Delegate.Combine(Delegate.Remove(item.EnrollmentChanged, handler), handler);
+
+            ItemsField.SetValue(state, items);
+            SetUpInitial.Invoke(state, null);
+            return true;
         }
     }
 

@@ -392,7 +392,15 @@ namespace Multiplayer.Network.Sync
                 // HAPPENED and genuinely has nothing to re-read. The ability-purchase confirmation is the one
                 // that is not: it is an OFFER, still unpaid, standing over a SHARED purse — see
                 // CloseUnaffordableBuyConfirm.
-                [typeof(UIStateGeoModal)] = (s, v) => { CloseUnaffordableBuyConfirm(s, v); return true; },
+                // The mission-brief arm joined it 2026-08-09: a brief is the squad screen's own front door
+                // (ModalResultCallback:825 -> LaunchMission:1043 -> ToDeploymentState), so a brief for a
+                // mission this peer has no container left to deploy from must go the same way the screen does.
+                [typeof(UIStateGeoModal)] = (s, v) =>
+                {
+                    CloseUnaffordableBuyConfirm(s, v);
+                    DeploymentWindowClose.CloseDepartedBrief(s);
+                    return true;
+                },
                 // Kaos marketplace: also a queued window, so the fallback Exit+Enter skips it (and must —
                 // re-entering re-posts the shop's opening narration). Its rows come off 0xBF and its prices
                 // are paid from the SHARED wallet, so a spend anywhere else must re-gate this screen's buttons.
@@ -423,6 +431,15 @@ namespace Multiplayer.Network.Sync
                     m.Init(ctx, px.GetMissingItems());
                     return true;
                 },
+                // Fourth queued-window citizen, and like the replenish screen above a Table entry is the ONLY
+                // repaint it can ever have: it holds the current queued slot (GeoscapeView.cs:592-600,
+                // priority int.MaxValue, held until FinishCurrentStateSwitch:116), so
+                // PauseHold.IsCurrentQueuedWindow makes the fallback Exit+Enter SKIP it — and skip it it must,
+                // because a re-enter re-seeds every soldier's pose. What goes stale is the SET the screen is
+                // backed by: _characterContainers (UIStateRosterDeployment.cs:26) comes from
+                // GeoMission.GetDeploymentSources, so an aircraft flying off takes its soldiers with it and
+                // the open screen must lose them — and lose ITSELF when the last container goes.
+                [typeof(UIStateRosterDeployment)] = (s, v) => DeploymentWindowClose.RepaintDeploymentScreen(s, v),
                 [typeof(UIStateResearch)] = (s, v) => { ResearchSync.RepaintResearchUi(); return true; },
                 [typeof(UIStateEditSoldier)] = (s, v) =>
                 {

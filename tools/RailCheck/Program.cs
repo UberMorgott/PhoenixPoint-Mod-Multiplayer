@@ -330,8 +330,10 @@ namespace RailCheck
             Add(laws, () => L347_AForeignAircraftIsAsVisibleHereAsOnItsOwner.Check());
             Add(laws, () => L348_ADiscardedBatchIsAskedForBack.Check());
             Add(laws, () => L349_AHeldWindowWaitsForTheResupplyVerdict.Check());
+            Add(laws, () => L350_ADepartedBriefIsGoneEverywhere.Check());
             Add(laws, () => L351_ADeclinedBriefDestroysNothing.Check());
             Add(laws, () => L352_ThePerPeerAnswerStaysHomeAndStillLands.Check());
+            Add(laws, () => L354_AnEmptySquadScreenIsNotServed.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

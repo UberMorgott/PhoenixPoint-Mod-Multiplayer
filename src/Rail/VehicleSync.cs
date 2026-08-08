@@ -211,6 +211,7 @@ namespace Multiplayer.Network.Sync
             private static bool Prefix(GeoVehicle __instance, List<GeoSite> path) => CaptureTravel(__instance, path);
         }
 
+
         private static readonly HashSet<string> _logged = new HashSet<string>(StringComparer.Ordinal);
 
         private static bool CaptureTravel(GeoVehicle vehicle, List<GeoSite> path)
@@ -543,5 +544,22 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex) { Reject(senderPeerId, vehicleRef, "loadout (throw) " + ex.Message); }
         }
+    }
+
+    /// <summary>THE DEPARTURE EDGE THE OPEN DEPLOYMENT WINDOWS HANG ON, and its OWN patch class — not a
+    /// postfix on the capture above, because a capture class that declares one ships a RESULT (L19, and
+    /// RailCheck L32 says so by name). This one mutates nothing and sends nothing: it is presentation.
+    ///
+    /// An aircraft leaving a site removes it — and its soldiers — from
+    /// <c>GeoMission.GetDeploymentSources</c>, which is the SET the squad screen and its brief are backed
+    /// by (<c>DeploymentWindowClose</c>). Nothing on the HOST marks the UI dirty for that: on a client the
+    /// order arrives as the <c>CurrentSite</c>/<c>Travelling</c>/<c>DestinationSites</c> leaves the rail
+    /// batch already repaints on (<c>GenericApplier.IsOrderLeaf</c>), while the host's own gesture rides
+    /// no batch at all. Postfix, so the native write has happened before anything reads it;
+    /// <c>MarkDirty</c> coalesces per frame, so a multi-leg route still costs one repaint.</summary>
+    [HarmonyPatch(typeof(GeoVehicle), nameof(GeoVehicle.StartTravel), new[] { typeof(List<GeoSite>) })]
+    internal static class TravelRepaintPatch
+    {
+        private static void Postfix() => OpenUiRepaint.MarkDirty();
     }
 }

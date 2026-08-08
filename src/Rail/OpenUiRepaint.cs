@@ -530,6 +530,11 @@ namespace Multiplayer.Network.Sync
             // FIRST, and outside the open-screen question entirely: the persistent HUD belongs to no view
             // state, so it must not be skipped by the `current == null` bail below.
             RefreshPersistentHud();
+            // ALSO outside the open-screen question: a window that is QUEUED is not `current`, so nothing
+            // below would ever look at it — and an unservable one served later opens EMPTY (four measured
+            // cases, 2026-08-08/09). Dropped here, once per flush, through the game's own pending list.
+            try { DeploymentWindowClose.DropUnservableQueued(); }
+            catch (Exception ex) { Debug.LogError("[MP][deploy] queued-window sweep threw: " + ex); }
             var view = GeoLevel()?.View;
             var current = view?.CurrentViewState;
             if (current == null) return;
