@@ -118,6 +118,28 @@ namespace Multiplayer.Tactical
             return (n & (n - 1)) == 0 ? n : 0;   // powers of two
         }
 
+        // A REPAINT THAT THREW IS RETRIED, and this is the ceiling on how long that stays true. ~2 s at
+        // 60 fps of CONSECUTIVE failures — the count is cleared by the next SUCCESS, so it reads "still
+        // throwing 120 frames running", not "has ever thrown 120 times this battle". Past it the mark is
+        // dropped on purpose: an Exit+Enter that throws every frame runs the state's ExitState teardown
+        // every frame, which is a worse outcome than a stale pixel — and the giving-up is audible.
+        private const int RepaintRetryCeiling = 120;
+
+        /// <summary>ONE FAILED REPAINT, COUNTED AND RE-ARMED. The counting half is <see cref="FailureBeat"/>;
+        /// the RE-ARM is the half this file was missing. Every catch below used to count the failure and let
+        /// the MARK die with it, so a single transient throw left the open screen stale for the rest of the
+        /// battle with one WARN as the only trace — law 11's own silent-swallow shape wearing a rate-limit
+        /// costume. Observed 2026-08-08: an Exit+Enter of <c>UIStateCharacterSelected</c> landed inside a
+        /// navmesh rebuild, <c>TiledNav.CalculatePath</c>:449 threw, and that peer's screen never repainted
+        /// again. Law 11 says the change reaches the open screen; it does not say "unless the first attempt
+        /// threw". Returns the occurrence number to print, or 0 to stay quiet.</summary>
+        private static int NoteRepaintFailure(string key)
+        {
+            int beat = FailureBeat(key);
+            if (_failureCounts[key] < RepaintRetryCeiling) _dirty = true;
+            return beat;
+        }
+
         // HOW LONG THE PAINTED ACTOR HAS BEEN BUSY, in frames. An Exit+Enter re-READS the model; it cannot
         // end an ability, so once an actor is wedged mid-execution every repaint of an ability-bar state is
         // the same six pointless Exit+Enters the 2026-08-05 client log shows against a stuck
@@ -131,6 +153,13 @@ namespace Multiplayer.Tactical
         // evidence for changing it arrives with the bug.
         private const int BusyCeilingFrames = 600;
 
+        // HOW LONG A REPAINT HAS BEEN WAITING FOR THE MAP TO SETTLE, in frames, with the same ~10 s ceiling
+        // and the same reason for having one: a deferral that can never end is a dropped batch wearing a
+        // "later" costume. Separate from _busyFrames on purpose — a wedged actor and a wedged navmesh are
+        // different bugs and either ceiling may want tuning without moving the other.
+        private static int _navWaitFrames;
+        private const int NavSettleCeilingFrames = 600;
+
         /// <summary>Something changed that the open tactical screen may be painting. Coalesced — the flush
         /// is once per frame at most, no matter how many marks land in it.</summary>
         internal static void MarkDirty() => _dirty = true;
@@ -143,6 +172,7 @@ namespace Multiplayer.Tactical
             _squadBarDirty = false;
             _painted = null;
             _busyFrames = 0;
+            _navWaitFrames = 0;
             _failureCounts.Clear();
         }
 
@@ -158,6 +188,35 @@ namespace Multiplayer.Tactical
         {
             var level = GameUtl.CurrentLevel();
             return level == null ? null : level.GetComponent<TacticalLevelController>();
+        }
+
+        /// <summary>
+        /// THE ENGINE'S OWN "THE MAP HAS NOT SETTLED YET" SIGNAL — the only correct thing to defer a repaint
+        /// on, and not our invention.
+        ///
+        /// <c>TiledNav.CalculatePath</c>:447-460 refuses OUTRIGHT while <c>IsUpdatingNavMesh()</c> holds: it
+        /// throws <c>InvalidOperationException("Map is updating, cannot calculate path!")</c> rather than
+        /// returning a stale path. And <c>IsUpdatingNavMesh</c> (<c>TiledNav</c>:604-607) is nothing but
+        /// <c>_buildNavCrt != null</c> — the handle of the <c>BuildNav</c> coroutine, taken at :553 and
+        /// nulled at :572 the moment the rebuild completes. So the condition is TRANSIENT BY CONSTRUCTION:
+        /// the identical repaint attempted a few frames later succeeds, which is exactly what makes
+        /// deferring the right answer and attempting-and-losing the wrong one.
+        ///
+        /// WAITING FRAME BY FRAME ON THAT FLAG IS THE GAME'S OWN IDIOM, twice over and verbatim:
+        /// <c>TacticalLevelController</c>:493-497 and <c>TacticalMap</c>:275-279 both run
+        /// <c>UpdateNavMesh(...)</c> and then <c>while (Map.INavMesh.IsUpdatingNavMesh()) yield return
+        /// NextUpdate.NextFrame;</c> before touching anything that paths. No pump of ours is added for it:
+        /// the flush already runs in <c>TacticalViewState.Update</c>, once per frame, so "wait" is just
+        /// leaving <c>_dirty</c> set and returning.
+        ///
+        /// Unity <c>==</c> is deliberate here, unlike the identity test in the flush (L113): the question is
+        /// LIVENESS, and a destroyed map must read as "no signal" rather than throw.
+        /// </summary>
+        private static bool NavMeshUpdating(TacticalLevelController tlc)
+        {
+            var map = tlc == null ? null : tlc.Map;
+            var nav = map == null ? null : map.INavMesh;
+            return nav != null && nav.IsUpdatingNavMesh();
         }
 
         /// <summary>
@@ -228,6 +287,37 @@ namespace Multiplayer.Tactical
                     : StateStackField.GetValue(__instance) as StateStack<TacticalViewContext>;
                 if (stack == null || !ReferenceEquals(stack.CurrentState, __instance)) return;  // keep _dirty:
                                                     // the REAL current state's own Update repaints next frame
+
+                // THE MAP IS STILL REBUILDING — DEFER, never attempt-and-lose. This sits above _dirty = false
+                // because it is a CLASS, not one screen: every arm below reaches the pathfinder. Repaint's
+                // Exit+Enter runs the state's own EnterState (UIStateCharacterSelected -> SelectCharacter ->
+                // its move/shoot target refresh), and RepaintModules' SetAbilities:130 asks IsEnabled() ->
+                // TacticalAbility.GetDisabledState:464 -> MoveAbility.HasValidTargets:26 -> GetTargetsData
+                // -> MoveAbilityTargets.CacheTargets:17-27 -> TacticalPathRequest.Calculate(). While the
+                // navmesh rebuilds that call THROWS (2026-08-08, client-2: six queued "Breakable ... exploded"
+                // requests, then "Map is updating, cannot calculate path!" out of a repaint of
+                // UIStateCharacterSelected), and a throw halfway through Exit+Enter leaves the screen
+                // half-entered with the mark already spent. Keeping _dirty IS the fix; NavMeshUpdating
+                // explains why the wait always ends and why it needs no pump of ours.
+                if (NavMeshUpdating(tlc))
+                {
+                    if (++_navWaitFrames < NavSettleCeilingFrames) return;   // keep _dirty: retry next frame
+                    // A rebuild that never ends must not hold the mark in silence — that is the same swallow
+                    // with a "deferred" costume on. Fall THROUGH and attempt the repaint: it either paints or
+                    // it throws into the catch below, which re-arms and reports. Either way the screen stops
+                    // going stale quietly, and the attempt is rate-limited to one per ceiling by the reset.
+                    int navBeat = FailureBeat("navsettle");
+                    if (navBeat > 0)
+                        Debug.LogError("[Multiplayer][tac] the navmesh has been rebuilding for " +
+                                       (_navWaitFrames / 60) + "s with a repaint of " +
+                                       __instance.GetType().Name + " still waiting on it (failure #" +
+                                       navBeat + ") — attempting it anyway rather than deferring forever. " +
+                                       "Every ability-bar repaint reaches TacticalPathRequest.Calculate, " +
+                                       "which throws while TiledNav.IsUpdatingNavMesh() holds, so expect " +
+                                       "\"Map is updating, cannot calculate path!\" next. A navmesh rebuild " +
+                                       "that does not end is the bug to chase; this only refuses to hide it.");
+                }
+                _navWaitFrames = 0;
                 _dirty = false;
                 if (IsAbilityBarState(__instance) && _busyFrames >= BusyCeilingFrames)
                 {
@@ -478,15 +568,18 @@ namespace Multiplayer.Tactical
                     var actionBar = modules.ActionBarModule;
                     if (actionBar != null && actionBar.gameObject.activeInHierarchy)
                         actionBar.SetActionBar(actor);
+                    _failureCounts.Remove("modules");   // consecutive, not cumulative — see Repaint
                 }
             }
             catch (Exception ex)
             {
-                // Same non-destructive posture as Repaint: a partial refresh, not a lost screen.
-                int beat = FailureBeat("modules");
+                // Same non-destructive posture as Repaint, and the same RE-ARM. This arm is in the navmesh
+                // class too, not just Repaint: SetAbilities:130 -> IsEnabled() -> GetDisabledState:464 ->
+                // MoveAbility.HasValidTargets:26 reaches TacticalPathRequest.Calculate exactly the same way.
+                int beat = NoteRepaintFailure("modules");
                 if (beat > 0)
-                    Debug.LogWarning("[Multiplayer][tac] module repaint threw — bottom bar may be stale " +
-                                     "(failure #" + beat + " this battle): " + ex);
+                    Debug.LogWarning("[Multiplayer][tac] module repaint threw — bottom bar may be stale, mark " +
+                                     "RE-ARMED for the next frame (failure #" + beat + " in a row): " + ex);
             }
         }
 
@@ -591,16 +684,19 @@ namespace Multiplayer.Tactical
                     // "the other peer sees nothing" was reported twice with no way to tell those two apart.
                     Debug.Log("[Multiplayer][tac] rebuilt the open inventory panels for " + primary.name +
                               (secondary == null ? " (no second soldier on screen)" : " and " + secondary.name));
+                    _failureCounts.Remove("containers");   // consecutive, not cumulative — see Repaint
                 }
             }
             catch (Exception ex)
             {
-                // Same non-destructive posture as the other two repaints: a partial refresh, not a lost
-                // screen — and never a demotion to Exit+Enter, which on THIS state would commit the batch.
-                int beat = FailureBeat("containers");
+                // Same non-destructive posture as the other two repaints — a partial refresh, not a lost
+                // screen, never a demotion to Exit+Enter (which on THIS state would commit the batch) — and
+                // the same RE-ARM, so a panel that threw once is not stale until the player reopens it.
+                int beat = NoteRepaintFailure("containers");
                 if (beat > 0)
                     Debug.LogWarning("[Multiplayer][tac] container-view repaint threw — an open inventory panel " +
-                                     "may be stale until it is reopened (failure #" + beat + " this battle): " + ex);
+                                     "may be stale, mark RE-ARMED for the next frame (failure #" + beat +
+                                     " in a row): " + ex);
             }
             return true;
         }
@@ -677,17 +773,24 @@ namespace Multiplayer.Tactical
                                              " threw — entering anyway (failure #" + exitBeat + "): " + exitEx);
                     }
                     state.Enter(stack);
+                    // The retry budget is CONSECUTIVE failures, so a clean pass clears it. Without this the
+                    // ceiling would accumulate a whole battle's unrelated transients and eventually stop
+                    // re-arming a screen that is still perfectly repaintable.
+                    _failureCounts.Remove(state.GetType().Name);
                 }
             }
             catch (Exception ex)
             {
-                // NON-DESTRUCTIVE, same posture as the geoscape seam: a throw inside EnterState is a PARTIAL
-                // repaint, not a lost screen, and law 11 outranks log tidiness — we keep repainting this
-                // screen on later marks and stay quiet after the first report.
-                int beat = FailureBeat(state.GetType().Name);
+                // NON-DESTRUCTIVE AND RETRIED. A throw inside EnterState is a PARTIAL repaint — the state is
+                // left half-entered, which is strictly worse than stale — so the mark is RE-ARMED and the
+                // next frame runs the whole Exit+Enter again. Dropping it here is what left one peer's
+                // UIStateCharacterSelected stale for the rest of the battle behind a single WARN.
+                int beat = NoteRepaintFailure(state.GetType().Name);
                 if (beat > 0)
                     Debug.LogWarning("[Multiplayer][tac] repaint of " + state.GetType().Name +
-                                     " threw — screen kept, part of it may be stale (failure #" + beat + "): " + ex);
+                                     " threw — screen kept and the mark RE-ARMED, so this repaints again next " +
+                                     "frame (failure #" + beat + " in a row; past " + RepaintRetryCeiling +
+                                     " consecutive the mark is dropped and said so): " + ex);
             }
         }
     }
