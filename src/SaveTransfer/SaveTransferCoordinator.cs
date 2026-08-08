@@ -2565,8 +2565,18 @@ namespace Multiplayer.Network
                     // ONLY at OnReachedPlaying (curtain-liftable), so the all-loaded reveal can never fire
                     // while a peer is still initializing (that early RevealAll opened the curtain gate
                     // before the slow peer was actually in — the barrier bug, live RCA 2026-07-11).
+                    // PUBLISH THE 100 FIRST. The bar above ships the native widget's EASED fillAmount, which
+                    // is always chasing lp.Progress from behind — so when LoadingProgress goes null the ease
+                    // is abandoned mid-flight and the last number the other peers ever saw was whatever it
+                    // had reached: measured 80 on every geoscape load and 94 on every tactical one, never
+                    // 100. The data load genuinely IS complete here (that is what null means), so this is
+                    // the true final sample, not a cosmetic round-up. 100 painted from tracker.IsDone
+                    // (LoadOverlayController.cs:204) does not cover it — that fires together with the
+                    // reveal, so the player never sees the bar fill.
+                    if (InPhase2) ReportLoadProgress(100);
+                    else PublishHostEntryLoad(100);
                     _lastReportedLoadPct = -1;
-                    Debug.Log("[Multiplayer] phase-2 pump: LoadingProgress null → data loaded, awaiting Playing");
+                    Debug.Log("[Multiplayer] phase-2 pump: LoadingProgress null → data loaded (published 100), awaiting Playing");
                 }
             }
 
