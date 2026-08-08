@@ -1341,6 +1341,56 @@ namespace Multiplayer.Network.Sync
             catch { return false; }
         }
 
+        /// <summary>Members already diagnosed for a keyless bind, keyed on the <see cref="RailField"/> the
+        /// walk is encoding — a CACHED reference, so the gate costs one hash and builds no string.
+        ///
+        /// The gate IS the damping. <see cref="WarnOnce"/> dedups by finished MESSAGE, so naming the member
+        /// (<see cref="EncodingWhere"/> — reflection on DeclaringType, then four concatenations) had to run on
+        /// EVERY walk just to discover it was a repeat: ×307944 for GeoSiteInstaceData.Motto, ×302022 for
+        /// .Name and ×7896 for GeoPhoenixBase.InstanceData.LocationDescription in ONE 3-instance session, the
+        /// largest single log and allocation cost of the run. Keyed per member rather than per session
+        /// because the member name is the whole diagnostic value. A null key is legal and correct: leaves
+        /// encoded outside the field walk cannot be told apart anyway, so they share one slot.</summary>
+        private static readonly HashSet<RailField> _keylessBindSeen = new HashSet<RailField>();
+
+        /// <summary>WHAT A KEYLESS BIND ACTUALLY MEANS — decided ONCE per member, instead of asserted on
+        /// every walk by the warning this replaces.
+        ///
+        /// That warning called a keyless bind "the ONE thing this codec cannot carry" and predicted a blank
+        /// client string. The prediction is right; the DEFECT it implies is not, and 610k lines said so.
+        /// This codec is LOSSLESS. <c>LocalizedTextBind</c> has exactly two members — <c>LocalizationKey</c>
+        /// and <c>_doNotLocalize</c> (decompile Base.UI/LocalizedTextBind.cs:11/:13) — this case writes both
+        /// and <see cref="DecodeLeaf"/> rebuilds them through the 2-arg ctor (:24-28). And an empty key
+        /// renders empty ON THE HOST TOO: <c>Localize()</c> guards on
+        /// <c>!_doNotLocalize &amp;&amp; !IsNullOrEmpty(LocalizationKey)</c> and otherwise returns the key
+        /// VERBATIM (:35-42), so NO bind can render non-empty text out of an empty key. The client's blank is
+        /// the host's blank, mirrored exactly.
+        ///
+        /// An empty bind is in fact the GAME'S OWN spelling of "this one has no text". GeoPhoenixBase
+        /// CONSTRUCTS one to mean it (GeoPhoenixBase.cs:1120-1122), and refuses to overwrite a name or motto
+        /// from a template whose key is empty (:145-151, :159-166); GeoSite does the same on load
+        /// (GeoSite.cs:1557-1558); UIModuleSelectionInfoBox HIDES the motto row when <c>Localize()</c> comes
+        /// back empty (:603-610). So the suppressed lines were reporting the mirror WORKING.
+        ///
+        /// Kept, not deleted — it is what surfaced all of this — but re-pointed at the OUTCOME instead of the
+        /// proxy: ask the bind what the HOST renders, and warn only when there is text about to be dropped.
+        /// That question reaches I2's LocalizationManager (:39), which is exactly why it may run only behind
+        /// the once-per-member gate and never on the walk.</summary>
+        private static void DiagnoseKeylessBind(Base.UI.LocalizedTextBind bind)
+        {
+            if (!_keylessBindSeen.Add(_encoding)) return;
+            var where = EncodingWhere();
+            string shown;
+            try { shown = bind.Localize(); } catch { shown = null; }
+            if (!string.IsNullOrEmpty(shown))
+                WarnOnce("EncodeLeaf: " + where + " renders \"" + shown + "\" on the host but carries no " +
+                         "LocalizationKey — it ships as an EMPTY bind and the client's text for it WILL be " +
+                         "blank. That member is the one to look at on screen.");
+            else
+                Debug.Log("[Multiplayer][rail] EncodeLeaf: " + where + " is a keyless LocalizedTextBind, and " +
+                          "the host renders nothing for it either — carried faithfully, not diagnosed again.");
+        }
+
         public static void EncodeLeaf(BinaryWriter w, Type declared, object v)
         {
             if (v == null) { w.Write((byte)LeafKind.Null); return; }
@@ -1378,15 +1428,16 @@ namespace Multiplayer.Network.Sync
                 {
                     var bind = (Base.UI.LocalizedTextBind)v;
                     var key = bind.LocalizationKey;
-                    // A bind with no key is the ONE thing this codec cannot carry usefully — it rebuilds as a
-                    // bind that localizes to nothing. Named here (the host is the only peer that can see the
-                    // live instance), never silent, and shipped as "" rather than null: a null format string
-                    // makes GeoscapeLogEntry.GenerateMessage throw ArgumentNullException, which its
+                    // The KEY rides, never the host's resolved string — so each peer's own
+                    // LocalizationManager renders it in ITS OWN language (Localize:35-42 passes the key
+                    // through with `language = null`). A literal bind carries its text in the same member
+                    // with `_doNotLocalize` set, and that flag rides too, so a runtime-composed name arrives
+                    // verbatim instead of as a failed lookup.
+                    //
+                    // Shipped as "" rather than null: a null format string makes
+                    // GeoscapeLogEntry.GenerateMessage throw ArgumentNullException, which its
                     // FormatException-only catch does NOT hold (decompile GeoscapeLogEntry.cs:20-31).
-                    if (string.IsNullOrEmpty(key))
-                        WarnOnce("EncodeLeaf: " + EncodingWhere() + " is a LocalizedTextBind with no " +
-                                 "LocalizationKey — it ships as an EMPTY bind and the client's text for it " +
-                                 "will be blank. That member is the one to look at on screen.");
+                    if (string.IsNullOrEmpty(key)) DiagnoseKeylessBind(bind);
                     w.Write(key ?? "");
                     w.Write(BindNoLocalize(bind));
                     break;
@@ -1676,7 +1727,9 @@ namespace Multiplayer.Network.Sync
                              " family(ies) repeated, " + repeats + " suppressed line(s):" + sb);
         }
 
-        internal static void ResetMissTally() { _tally.Clear(); _nextDigestAt = 0.0; }
+        // The keyless-bind gate resets with the tally for the same reason the tally does: a reload is a new
+        // run, and a member that went quiet must be able to speak again on the next one.
+        internal static void ResetMissTally() { _tally.Clear(); _keylessBindSeen.Clear(); _nextDigestAt = 0.0; }
 
         private static void WarnOnce(string msg)
         {

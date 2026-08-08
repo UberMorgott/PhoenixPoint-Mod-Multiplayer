@@ -26,6 +26,18 @@ namespace RailCheck
     /// yet, because "show me where he means" is exactly the feature a well-meaning fix would implement by
     /// flying the camera there — and it would be a defect, not a convenience, on a peer mid-shot.
     ///
+    /// SCOPED TO THE ARRIVAL CLOSURE, NOT THE WHOLE CLASS (narrowed 2026-08-08, and the narrowing is the
+    /// law getting SHARPER, not weaker). The rule this law states is about an ARRIVING packet — read its
+    /// title. The scan used to walk every method of <see cref="PingMarkers"/>, which stated something else
+    /// and something wrong: that nothing in the file may ever move a camera, including code the WATCHER
+    /// HIMSELF drives. The off-screen arrow now takes a click and centres the clicker's own camera on the
+    /// pinged spot (<c>PingMarkers.Focus</c>) — a peer who never clicks never moves, which is precisely the
+    /// property the rule protects. So the walk starts at the two arrival doors, <c>Show</c> and
+    /// <c>ShowLocal</c>, and follows calls only into this class's own methods; everything a packet can reach
+    /// is still banned, and code only a mouse can reach is not. L252 arm <c>click-moves-no-camera</c> holds
+    /// the other side: the click path must ACTUALLY reach a camera mover, so the two laws together pin the
+    /// camera move to exactly one caller.
+    ///
     /// THE ARMS, over <see cref="PingMarkers"/> and its compiler-generated nests:
     ///   (a) <c>ping-moves-a-camera</c> — no call reaches a camera mover. <c>GeoscapeView.ChaseTarget</c>
     ///       (:1102) is the named one; the rest of the set is the vocabulary L97 arm (d) already bans plus
@@ -112,7 +124,7 @@ namespace RailCheck
                 yield break;
             }
 
-            foreach (var v in Scan(seam, "PingMarkers")) yield return v;
+            foreach (var v in Scan(seam, "PingMarkers", "Show", "ShowLocal")) yield return v;
 
             // ── arm (d): the trigger still exists.
             if (!Reaches(poll, "Input", "GetKeyDown"))
@@ -124,7 +136,7 @@ namespace RailCheck
                              "press.";
 
             // ── arm (e): the scan must be able to SEE a violation.
-            var control = Scan(typeof(FakeSeam), "FakeSeam").ToList();
+            var control = Scan(typeof(FakeSeam), "FakeSeam", "Drive").ToList();
             foreach (var want in new[] { "ping-moves-a-camera", "ping-enters-a-state", "ping-changes-a-selection" })
                 if (!control.Any(c => c.Contains(want)))
                     yield return "L160 control-not-red: FakeSeam calls a banned member for " + want + " and the " +
@@ -133,10 +145,9 @@ namespace RailCheck
                                  "unfalsifiable law gets baselined and forgotten.";
         }
 
-        private static IEnumerable<string> Scan(Type seam, string label)
+        private static IEnumerable<string> Scan(Type seam, string label, params string[] entryPoints)
         {
-            foreach (var t in AllTypes(seam))
-                foreach (var m in AllMethodsOf(t))
+            foreach (var m in ArrivalClosure(seam, entryPoints))
                     foreach (var callee in CalleesOf(m))
                     {
                         var name = callee.Name;
@@ -162,6 +173,28 @@ namespace RailCheck
                                          "Picking is done with SelectAtCursor, which despite its name selects " +
                                          "nothing.";
                     }
+        }
+
+        /// <summary>Every method a PACKET can reach: the named entry points plus everything they call,
+        /// transitively, that is still declared inside the seam (nests included, so a lambda or an iterator
+        /// state machine cannot smuggle a call out of the walk). A callee outside the seam ends the walk —
+        /// this law is about what THIS code does, and what the game does with a marker is the game's.</summary>
+        private static IEnumerable<MethodBase> ArrivalClosure(Type seam, string[] entryPoints)
+        {
+            var mine = new HashSet<Type>(AllTypes(seam));
+            var seen = new HashSet<MethodBase>();
+            var queue = new Queue<MethodBase>();
+            foreach (var t in mine)
+                foreach (var m in AllMethodsOf(t))
+                    if (entryPoints.Contains(m.Name) && seen.Add(m)) queue.Enqueue(m);
+
+            while (queue.Count > 0)
+            {
+                var m = queue.Dequeue();
+                yield return m;
+                foreach (var c in CalleesOf(m))
+                    if (c.DeclaringType != null && mine.Contains(c.DeclaringType) && seen.Add(c)) queue.Enqueue(c);
+            }
         }
 
         /// <summary>GeoscapeView's public shortcuts over the state stack are all <c>To&lt;Something&gt;State</c>
