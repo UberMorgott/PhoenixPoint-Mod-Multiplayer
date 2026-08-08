@@ -322,6 +322,7 @@ namespace RailCheck
             Add(laws, () => L339_AMidBattleArrivalIsAddressableOnEveryPeer.Check());
             Add(laws, () => L340_AnAppearanceEditSettlesInsteadOfStreaming.Check());
             Add(laws, () => L341_TheConsoleIsTheHostsAlone.Check());
+            Add(laws, () => L342_TheCheatMenuIsTheHostsAlone.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
