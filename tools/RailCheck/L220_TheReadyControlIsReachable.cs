@@ -50,6 +50,20 @@ namespace RailCheck
     ///   (d) POSITIVE CONTROL, EXECUTED — <see cref="FakeSeam"/> below builds a child without adopting a
     ///       layer, presses with a warning only, and reports without reading a depth. (a), (b) and (c) must
     ///       all go red on it, or their green above is a scan that resolved nothing and passes forever.
+    ///   (f) <c>ready-widget-off-screen</c> — THE ONLY ARM HERE THAT ASSERTS A GEOMETRIC OUTCOME, AND THE
+    ///       ONLY ONE THAT INSPECTS NOTHING WE SET. Every other arm reads back a field this mod wrote, which
+    ///       is exactly how (a), (c) and L182 (d) stayed green over a button that took neither hover nor
+    ///       click. This one EXECUTES <c>TacticalReadyRowFollower.ShiftOntoScreen</c> and asserts the RESULT:
+    ///       the placed rect ends up inside the screen rect, and a rect already inside is not moved. A widget
+    ///       outside the canvas cannot be hovered or clicked no matter how correct every wire on it is — no
+    ///       pointer position maps to it — and that is the shape the placement had: three successive fixes
+    ///       each pushed this clone FURTHER below the End Turn button (a height, then the row's spacing, then
+    ///       the row's drawn overhang, live total 110 parent-local units off a button sitting near the bottom
+    ///       of the HUD) and not one of them checked that the place it landed still existed.
+    ///   (g) <c>ready-placement-skips-the-screen</c> — the wiring half, and named as such: a pure function
+    ///       nobody calls is decorative, so the method that writes <c>anchoredPosition</c> must be the one
+    ///       that asks. This arm asserts a CALL and is therefore the weak one; (f) is the arm that would have
+    ///       been red through the defect.
     ///
     /// NOT A GATE, STILL. Nothing here asserts that anything WAITS on the tally — it must not, and L119
     /// keeps it that way. This law is only about the control being hit-testable and the press being
@@ -57,7 +71,9 @@ namespace RailCheck
     ///
     /// Falsify: drop either <c>layer</c> assignment in <c>BuildGreenOverlay</c>/<c>TrimRaycast</c> → (a);
     /// delete the <c>Debug.Log</c> at the end of <c>Toggle</c> → (b); drop the <c>g.depth</c> read from
-    /// <c>ReportFootprint</c> → (c); empty <see cref="FakeSeam"/> → (d).
+    /// <c>ReportFootprint</c> → (c); empty <see cref="FakeSeam"/> → (d); make
+    /// <c>ShiftOntoScreen</c> return 0 → (f); drop the <c>ClampOntoScreen</c> call from
+    /// <c>TacticalReadyRowFollower.Apply</c> → (g).
     /// </summary>
     internal static class L220_TheReadyControlIsReachable
     {
@@ -99,15 +115,22 @@ namespace RailCheck
             foreach (var v in ScanPress(toggle, "TacticalReadySync.Toggle")) yield return v;
             foreach (var v in ScanProbe(typeof(TacticalReadyRowFollower), "TacticalReadyRowFollower")) yield return v;
             foreach (var v in ScanFace(typeof(TacticalReadyButton), "TacticalReadyButton")) yield return v;
+            foreach (var v in ScanScreen(TacticalReadyRowFollower.ShiftOntoScreen,
+                                         "TacticalReadyRowFollower.ShiftOntoScreen")) yield return v;
+            foreach (var v in ScanPlacement(typeof(TacticalReadyRowFollower), "TacticalReadyRowFollower"))
+                yield return v;
 
             // ── arm (d): the scan must be able to SEE each violation.
             var control = ScanLayers(typeof(FakeSeam), "FakeSeam")
                 .Concat(ScanPress(typeof(FakeSeam).GetMethod("Press", AllMembers), "FakeSeam.Press"))
                 .Concat(ScanProbe(typeof(FakeSeam), "FakeSeam"))
                 .Concat(ScanFace(typeof(FakeSeam), "FakeSeam"))
+                .Concat(ScanScreen(FakeSeam.NeverShift, "FakeSeam.NeverShift"))
+                .Concat(ScanPlacement(typeof(FakeSeam), "FakeSeam"))
                 .ToList();
             foreach (var want in new[] { "ready-widget-off-the-drawn-layer", "ready-press-is-silent",
-                                         "ready-reachability-unasked", "ready-face-disarmed" })
+                                         "ready-reachability-unasked", "ready-face-disarmed",
+                                         "ready-widget-off-screen", "ready-placement-skips-the-screen" })
                 if (!control.Any(c => c.Contains(want)))
                     yield return "L220 control-not-red: FakeSeam commits " + want + " and the scan did not " +
                                  "flag it. The arm cannot tell a reachable control from a dead one, so its " +
@@ -217,6 +240,82 @@ namespace RailCheck
                                      "under this widget, move the widget.";
         }
 
+        /// <summary>The shape of the placement's screen clamp, so arm (f) can run the real one and a
+        /// deliberately broken one through the same assertions.</summary>
+        private delegate float Shift(float myBottom, float myTop, float screenBottom, float screenTop);
+
+        /// <summary>
+        /// ARM (f). EXECUTED, ON THE OUTCOME.
+        ///
+        /// The clone's rect in the first column is LIVE — world y=[596.6661..616.6664], reported identically
+        /// by all three peers on 2026-08-08, 36.67 world units below the End Turn container it hangs from.
+        /// The screen edge is the fact the diagnostic never captured, which is the whole reason this arm
+        /// exists: whatever it is, the placement has to land inside it. So the cases put that edge on both
+        /// sides of the live rect and demand the same outcome each time — after the shift, the rect is
+        /// INSIDE the screen — plus the case that a rect already inside is not moved, because a clamp that
+        /// nudges a widget that was fine is a widget that drifts a little further every frame.
+        ///
+        /// Note what is NOT asserted: no field of ours, no call, no count. Only "does the rect this
+        /// arithmetic produces exist on the screen".
+        /// </summary>
+        private static IEnumerable<string> ScanScreen(Shift shift, string label)
+        {
+            var cases = new[]
+            {
+                // why, myBottom, myTop, screenBottom, screenTop
+                new Case("the live placement, on a canvas whose bottom edge falls in the 36.67-unit gap the " +
+                         "clone was pushed into", 596.6661f, 616.6664f, 600f, 960f),
+                new Case("the live placement, wholly below the canvas", 596.6661f, 616.6664f, 620f, 980f),
+                new Case("pushed off the TOP instead", 950f, 970f, 600f, 960f),
+                new Case("already inside — must not move", 700f, 720f, 600f, 960f),
+            };
+
+            foreach (var c in cases)
+            {
+                float s = shift(c.MyBottom, c.MyTop, c.ScreenBottom, c.ScreenTop);
+                bool inside = c.MyBottom + s >= c.ScreenBottom - 0.01f && c.MyTop + s <= c.ScreenTop + 0.01f;
+                bool wasInside = c.MyBottom >= c.ScreenBottom && c.MyTop <= c.ScreenTop;
+                if (!inside)
+                    yield return "L220 ready-widget-off-screen: " + label + " leaves the ready button at y=[" +
+                                 (c.MyBottom + s) + ".." + (c.MyTop + s) + "] on a screen spanning [" +
+                                 c.ScreenBottom + ".." + c.ScreenTop + "] (" + c.Why + "). A rect outside the " +
+                                 "canvas takes no hover and no click on any peer, ever, with every wire on the " +
+                                 "button correct — no pointer position maps to it, so the raycaster is never " +
+                                 "even asked. That is the symptom this button showed for four rounds while " +
+                                 "raycastTarget, layer and depth all read healthy.";
+                else if (wasInside && s != 0f)
+                    yield return "L220 ready-widget-off-screen: " + label + " moved a button that was already " +
+                                 "inside the screen by " + s + " (" + c.Why + "). The clamp is a last resort, " +
+                                 "not a placement: applied to a rect that was fine it fights the row follower " +
+                                 "and the button crawls up the HUD.";
+            }
+        }
+
+        private sealed class Case
+        {
+            internal Case(string why, float b, float t, float sb, float st)
+            { Why = why; MyBottom = b; MyTop = t; ScreenBottom = sb; ScreenTop = st; }
+            internal readonly string Why;
+            internal readonly float MyBottom, MyTop, ScreenBottom, ScreenTop;
+        }
+
+        /// <summary>ARM (g), and honestly labelled: this one asserts a CALL. It exists only so arm (f) cannot
+        /// pass over a pure function nothing invokes — the method that writes the clone's
+        /// <c>anchoredPosition</c> must also be the one that asks whether the result is on the screen.</summary>
+        private static IEnumerable<string> ScanPlacement(Type seam, string label)
+        {
+            foreach (var t in AllTypes(seam))
+                foreach (var m in AllMethodsOf(t))
+                    if (Reaches(m, "RectTransform", "set_anchoredPosition") &&
+                        !Reaches(m, null, "ClampOntoScreen") && !Reaches(m, null, "ShiftOntoScreen"))
+                        yield return "L220 ready-placement-skips-the-screen: " + label + "." + m.Name +
+                                     " writes RectTransform.anchoredPosition and never asks whether the " +
+                                     "result is on the screen. Every placement fix this button has had pushed " +
+                                     "it further down — a height, a spacing, then the row's drawn overhang — " +
+                                     "and the clamp is the only thing standing between the next one and a " +
+                                     "widget nobody can point at.";
+        }
+
         /// <summary>ARM (d). Never instantiated, never registered — it exists only to be walked. One
         /// violation per arm: a child built without a layer, a press that only warns, a type that never asks
         /// the raycaster anything (arm (c) needs no member here — its violation is the ABSENCE of a
@@ -238,6 +337,17 @@ namespace RailCheck
             {
                 foreach (var g in clone.GetComponentsInChildren<Graphic>(true))
                     g.raycastTarget = false;                        // (e): silences the clone's own face
+            }
+
+            /// <summary>(f): the placement that was live on 2026-08-08 — it drops the clone and never looks
+            /// at where it landed.</summary>
+            internal static float NeverShift(float myBottom, float myTop, float screenBottom, float screenTop)
+                => 0f;
+
+            /// <summary>(g): writes a position, never asks whether it is on the screen.</summary>
+            internal static void Place(RectTransform rt)
+            {
+                rt.anchoredPosition = new Vector2(0f, -110f);
             }
         }
 

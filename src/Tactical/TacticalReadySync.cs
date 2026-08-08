@@ -681,6 +681,18 @@ namespace Multiplayer.Tactical
             float extra = ExtraClearance(me, height, out clearanceFrom);
             me.anchoredPosition = Source.anchoredPosition - new Vector2(0f, height + gap + extra);
 
+            // AND THEN BACK ONTO THE SCREEN. Every fix so far pushed this clone FURTHER down — a height,
+            // then a spacing, then the row's drawn overhang — and nothing ever checked that the place it
+            // landed still exists. Nothing can hover or click a rect outside the canvas: it is not that the
+            // raycaster refuses it, it is that no pointer position maps to it. Same clamp the co-op player
+            // panel already applies for the same reason (PlayerPanel.ClampOnScreen), against the same bound
+            // — the canvas' own rect, not Screen.height, because a ScaleWithScreenSize canvas is denominated
+            // in scaled units and raw pixels would be wrong by the scale factor on every non-reference
+            // resolution. Recomputed from Source every frame BEFORE this line, so the correction can never
+            // accumulate.
+            float lift = ClampOntoScreen(me);
+            if (lift != 0f) me.anchoredPosition += new Vector2(0f, lift);
+
             if (_measured) return;
             _measured = true;
             Debug.Log("[Multiplayer][tac] ready row measured: EndTurn anchorMin=" + Source.anchorMin +
@@ -690,7 +702,7 @@ namespace Multiplayer.Tactical
                       (Source.parent == null ? 1f : Source.parent.lossyScale.y) +
                       " | worldHeight=" + WorldHeight(Source) + " -> parentLocalHeight=" + height +
                       " | gap=" + gap + " (" + spacingFrom + "), extraClearance=" + extra + " (" +
-                      clearanceFrom + "), offset=" + (height + gap + extra) +
+                      clearanceFrom + "), offset=" + (height + gap + extra) + ", onScreenLift=" + lift +
                       " | EndTurn anchoredPosition=" + Source.anchoredPosition + " ready anchoredPosition=" +
                       me.anchoredPosition + " ready worldHeight=" + WorldHeight(me) +
                       " (must equal EndTurn's worldHeight — a 0 here means the clone has no rect for the " +
@@ -734,6 +746,32 @@ namespace Multiplayer.Tactical
                     : "inside its HUD container";
             }
 
+            // THE CONTAINER THAT DECIDES WHETHER A POINTER CAN EVEN BE HERE. The line above measures the
+            // clone against the End Turn MODULE, whose rect is exactly one button tall — a second row is
+            // outside it by construction, and it is not a clipping parent (the native button's own glow
+            // draws past that same bottom edge and is not cut, and this clone renders where it stands), so
+            // "OVERHANGS" there is expected and is about drawing over the map, not about being hittable.
+            // The rect that CAN make a widget unhittable is the canvas: no pointer position maps to a rect
+            // outside it, so hover and click are impossible with every wire on the button correct — which is
+            // exactly the symptom, on every peer, always. This is the number four rounds of measuring our own
+            // fields never took.
+            string scr = "(no canvas)";
+            var canvas = me.GetComponentInParent<Canvas>();
+            var screen = canvas == null || canvas.rootCanvas == null
+                ? null
+                : canvas.rootCanvas.transform as RectTransform;
+            if (screen != null)
+            {
+                screen.GetWorldCorners(Corners);
+                float sBottom = Mathf.Min(Corners[0].y, Corners[3].y);
+                float sTop = Mathf.Max(Corners[1].y, Corners[2].y);
+                scr = screen.name + " world y=[" + sBottom + ".." + sTop + "] -> " +
+                      (myBottom >= sBottom && myTop <= sTop
+                          ? "ON SCREEN"
+                          : "OFF SCREEN by " + ShiftOntoScreen(myBottom, myTop, sBottom, sTop) +
+                            " world units — nothing can hover or click a rect the pointer cannot reach");
+            }
+
             // LAYER AND DEPTH, NOT JUST THE COUNT. A surface can be raycastTarget=true and still be hit by
             // NOTHING: GraphicRaycaster skips any graphic the canvas never drew (depth == -1), and a UI
             // object built at runtime lands on layer 0 where the HUD camera does not draw it. Reporting the
@@ -751,6 +789,7 @@ namespace Multiplayer.Tactical
 
             Debug.Log("[Multiplayer][tac] ready button footprint: world x=[" + myLeft + ".." + myRight +
                       "] y=[" + myBottom + ".." + myTop + "] vs HUD container " + hud + " -> " + verdict +
+                      " | vs canvas " + scr +
                       " | raycast-enabled graphics: " + live + " [" + string.Join(", ", names.ToArray()) +
                       "]. These are the clone's OWN native graphics and they are meant to be live — they are " +
                       "the button's face, exactly as the native End Turn button's are. A count of 0 means " +
@@ -812,7 +851,8 @@ namespace Multiplayer.Tactical
             }
 
             string where = "screen=" + screen + " canvas=" + (canvas == null ? "<none>" : canvas.name) +
-                           " hits=" + hits.Count + " [" + string.Join(", ", seen.ToArray()) + "]";
+                           " hits=" + hits.Count + " [" + string.Join(", ", seen.ToArray()) + "]" +
+                           (mine == 0 ? "" : " ancestors=" + Filters());
 
             if (mine == 0)
                 Debug.Log("[Multiplayer][tac] ready button IS REACHABLE: the EventSystem returns it on top at " +
@@ -827,6 +867,77 @@ namespace Multiplayer.Tactical
                                "targets. The graphic is set up and the raycaster still refuses it, so the cause " +
                                "is OUTSIDE the clone: an ancestor CanvasGroup/Mask/RectMask2D filtering the " +
                                "point, or a canvas whose raycaster does not serve this graphic. " + where);
+        }
+
+        /// <summary>NAME THE THING IN THE WAY. Built only when the probe comes back bad, because that is the
+        /// one moment the answer is worth a line: every ancestor up to the canvas, with the raycast filter it
+        /// carries. <c>Graphic.Raycast</c> walks exactly this chain and asks each
+        /// <c>ICanvasRaycastFilter</c> — a <c>CanvasGroup</c> with <c>blocksRaycasts</c> off, or a
+        /// <c>Mask</c>/<c>RectMask2D</c> whose rect this widget sits outside — so if one of them refuses the
+        /// point, it is in this list by name.</summary>
+        private string Filters()
+        {
+            var sb = new System.Text.StringBuilder();
+            for (var t = transform.parent; t != null; t = t.parent)
+            {
+                if (sb.Length > 0) sb.Append(" < ");
+                sb.Append(t.name);
+                var cg = t.GetComponent<CanvasGroup>();
+                if (cg != null) sb.Append("<CanvasGroup blocksRaycasts=").Append(cg.blocksRaycasts)
+                                  .Append(" alpha=").Append(cg.alpha).Append('>');
+                if (t.GetComponent<Mask>() != null) sb.Append("<Mask>");
+                if (t.GetComponent<RectMask2D>() != null) sb.Append("<RectMask2D>");
+                if (t.GetComponent<Canvas>() != null) sb.Append("<Canvas>");
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// HOW FAR THIS RECT HAS TO MOVE TO BE ON THE SCREEN AT ALL, in the parent's units (what
+        /// <c>anchoredPosition</c> is denominated in). 0 when it already is, and 0 is the common case — a
+        /// clamp that nudges a widget that was fine is a widget that drifts.
+        ///
+        /// The bound is the ROOT canvas' own rect. For a ScreenSpaceOverlay canvas that rect IS the screen in
+        /// pixels; for a ScreenSpaceCamera one it is the camera's frustum at the canvas plane, which is also
+        /// the screen. Either way it is the region a pointer position can land in, which is the only question
+        /// that matters here. A nested canvas would be a sub-rect of it, hence <c>rootCanvas</c>.
+        /// </summary>
+        private float ClampOntoScreen(RectTransform me)
+        {
+            var canvas = me.GetComponentInParent<Canvas>();
+            var screen = canvas == null || canvas.rootCanvas == null
+                ? null
+                : canvas.rootCanvas.transform as RectTransform;
+            if (screen == null) return 0f;
+
+            me.GetWorldCorners(Corners);
+            float myBottom = Mathf.Min(Corners[0].y, Corners[3].y);
+            float myTop = Mathf.Max(Corners[1].y, Corners[2].y);
+            screen.GetWorldCorners(Corners);
+            float screenBottom = Mathf.Min(Corners[0].y, Corners[3].y);
+            float screenTop = Mathf.Max(Corners[1].y, Corners[2].y);
+
+            float world = ShiftOntoScreen(myBottom, myTop, screenBottom, screenTop);
+            if (world == 0f) return 0f;
+            var parent = me.parent;
+            float scale = parent == null ? 1f : Mathf.Abs(parent.lossyScale.y);
+            return scale > 1e-5f ? world / scale : world;
+        }
+
+        /// <summary>
+        /// THE ARITHMETIC, ON ITS OWN, IN WORLD UNITS — pure, so RailCheck L220 arm (f) can EXECUTE it on
+        /// the numbers the live logs actually reported instead of scanning for a call that proves nothing.
+        ///
+        /// Returns the vertical shift that puts [<paramref name="myBottom"/>, <paramref name="myTop"/>]
+        /// inside [<paramref name="screenBottom"/>, <paramref name="screenTop"/>]: 0 if it already is, the
+        /// smallest move otherwise. A rect TALLER than the screen has no shift that satisfies both edges —
+        /// its top is pinned, because the top of this button is the half that carries the caption.
+        /// </summary>
+        internal static float ShiftOntoScreen(float myBottom, float myTop, float screenBottom, float screenTop)
+        {
+            if (myBottom >= screenBottom && myTop <= screenTop) return 0f;
+            if (myTop - myBottom > screenTop - screenBottom) return screenTop - myTop;
+            return myBottom < screenBottom ? screenBottom - myBottom : screenTop - myTop;
         }
 
         /// <summary>
