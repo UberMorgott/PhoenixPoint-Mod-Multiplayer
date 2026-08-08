@@ -47,9 +47,23 @@ namespace Multiplayer.UI
         {
             public GameObject Go;
             public Text Name;
-            public Image Fill;
-            public Text Label;     // "Downloading" / "Loading"
+            public RectTransform Fill;  // width driven by anchorMax.x — see SetFill
+            public Text Label;          // "Downloading" / "Loading"
             public Text Percent;
+        }
+
+        /// <summary>
+        /// THE FILL IS A RECT, NOT AN <c>Image.Type.Filled</c>. The row used to set <c>fillAmount</c> on a
+        /// spriteless Image and drew a flat full-width strip at every percent: UGUI's Image.OnPopulateMesh
+        /// early-returns to the plain Graphic quad when <c>activeSprite == null</c>, so <c>type</c>,
+        /// <c>fillMethod</c> and <c>fillAmount</c> are never read and the bar could only ever be empty or
+        /// whole. PlayerPanel's own signal bars are drawn the same way and for the same reason — flat
+        /// Images sized by their RectTransform, no sprite anywhere in either panel.
+        /// </summary>
+        private static void SetFill(RectTransform fill, float t)
+        {
+            var max = new Vector2(Mathf.Clamp01(t), 1f);
+            if (fill.anchorMax != max) fill.anchorMax = max;
         }
 
         private Canvas _canvas;
@@ -115,7 +129,7 @@ namespace Multiplayer.UI
             // Rows are pooled across sessions — clear the previous run's fill so a second load starts at 0.
             foreach (var row in _rows)
             {
-                row.Fill.fillAmount = 0f;
+                SetFill(row.Fill, 0f);
                 row.Percent.text = "0%";
             }
             _canvas.gameObject.SetActive(true);
@@ -151,7 +165,7 @@ namespace Multiplayer.UI
 
             bool shouldShow = LoadOverlayVisibility.ShouldShow(
                 coord.LoadPhaseStarted, coord.InPhase2, coord.IsDownloading, expectedPeers, donePeers,
-                coord.HostWaitingOnPeers); // host sees its clients' progress on tac-entry (2026-07-13)
+                coord.WaitingOnPeers); // EVERY peer sees the others' progress, on every load boundary
 
             if (shouldShow) Show(); else Hide();
             if (_visible) Refresh(engine);
@@ -192,7 +206,7 @@ namespace Multiplayer.UI
             // PHASE-AWARE fill: phase 0 (download) fills the bottom half, phase 1 (native load) the top,
             // so an instant loopback download shows a HALF bar and the bar only fills once the peer is
             // actually loaded. The raw percent still labels the current phase.
-            row.Fill.fillAmount = RosterProgressTracker.CombinedFill(phase, percent);
+            SetFill(row.Fill, RosterProgressTracker.CombinedFill(phase, percent));
             // Phase 0 is "downloading" for a CLIENT row only — the host (slot 0) never downloads anything,
             // it publishes its own geo→tactical level load under phase 0 (HostEntryPhase).
             row.Label.text = (phase == 0 && entry.SlotIndex != 0) ? "Downloading" : "Loading";
@@ -222,9 +236,9 @@ namespace Multiplayer.UI
             var name = UiToolkit.CreateText(go, "Name", Vector2.zero, new Vector2(nameW, rowH), "",
                 PlayerPanel.NameFont, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
 
-            // The bar cell, in the plaque's ping-cell position: a dim track with a horizontal Filled
-            // Image over it, the phase word left and the percent right — the plaque's Number-in-the-cell
-            // idiom, so there is no floating label to place or clip.
+            // The bar cell, in the plaque's ping-cell position: a dim track with a left-anchored fill rect
+            // over it, the phase word left and the percent right — the plaque's Number-in-the-cell idiom,
+            // so there is no floating label to place or clip.
             var trackGo = new GameObject("Bar");
             trackGo.transform.SetParent(go.transform, false);
             var track = trackGo.AddComponent<Image>();
@@ -237,13 +251,15 @@ namespace Multiplayer.UI
             var fillGo = new GameObject("Fill");
             fillGo.transform.SetParent(trackGo.transform, false);
             var fill = fillGo.AddComponent<Image>();
-            fill.color = Fade(LobbyTheme.Accent, 0.75f);
-            fill.type = Image.Type.Filled;
-            fill.fillMethod = Image.FillMethod.Horizontal;
-            fill.fillOrigin = (int)Image.OriginHorizontal.Left;
-            fill.fillAmount = 0f;
+            // NOT LobbyTheme.Accent: that is captured live from the game's WarningUIColor, so the bar came
+            // out RED — the colour the game uses to say something is wrong, on a bar that only ever says a
+            // peer is making progress. ReadyText is the plaque's own green, the one its ✓ and its best
+            // signal bar already wear.
+            fill.color = Fade(LobbyTheme.ReadyText, 0.75f);
             var frt = fill.rectTransform;
-            frt.anchorMin = Vector2.zero; frt.anchorMax = Vector2.one;
+            // Left-anchored, right edge driven by SetFill; zero offsets so it tracks the track's width.
+            frt.anchorMin = Vector2.zero; frt.anchorMax = new Vector2(0f, 1f);
+            frt.pivot = new Vector2(0f, 0.5f);
             frt.offsetMin = Vector2.zero; frt.offsetMax = Vector2.zero;
 
             var label = UiToolkit.CreateText(trackGo, "Phase", new Vector2(pad * 0.5f, 0f),
@@ -263,7 +279,7 @@ namespace Multiplayer.UI
             label.raycastTarget = false;
             percent.raycastTarget = false;
 
-            return new Row { Go = go, Name = name, Fill = fill, Label = label, Percent = percent };
+            return new Row { Go = go, Name = name, Fill = frt, Label = label, Percent = percent };
         }
     }
 }

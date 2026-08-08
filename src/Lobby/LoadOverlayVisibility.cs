@@ -43,21 +43,24 @@ namespace Multiplayer.UI
         ///   ~1 MB save download takes seconds→minutes and precedes BOTH loadStarted and inPhase2, so
         ///   without this signal the download was a blank screen. The host is never downloading and a
         ///   client is only downloading once chunks arrive, so this never re-introduces the lobby popup.</param>
-        /// <param name="hostWaitingOnPeers">SaveTransferCoordinator.HostWaitingOnPeers — the HOST's live
-        ///   mid-session load window (barrier open or phase-2 snapshots flowing, session already begun).
-        ///   Overlay fix 2026-07-13: on tac-entry the host holds behind its curtain with ALL local load
-        ///   signals false, so it never saw the clients' download/load progress. Gated on SessionStarted
-        ///   inside the coordinator — false in the lobby, so the early lobby-popup bug stays fixed.</param>
+        /// <param name="waitingOnPeers">SaveTransferCoordinator.WaitingOnPeers — THIS peer is behind a co-op
+        ///   load boundary (its curtain is down for an announced boundary, the barrier is open, or a reveal
+        ///   hold is armed and unreleased). The only STABLE term here: the other three are local load
+        ///   signals that go false the moment this peer's own bytes are in while the barrier still holds it,
+        ///   and loadStarted additionally drops on every curtain Loading→Playing hand-off — which is what
+        ///   blinked the panel in and out on a new-campaign start. Peer-agnostic since 2026-08-08 (it was
+        ///   host-only, which is why a client saw NOTHING on a geoscape→mission load); still gated on
+        ///   SessionStarted inside the coordinator for its barrier arms, so no lobby popup.</param>
         public static bool ShouldShow(bool loadStarted, bool inPhase2, bool downloading, int expectedPeers, int donePeers,
-                                      bool hostWaitingOnPeers = false)
+                                      bool waitingOnPeers = false)
         {
             // No genuine load window open → never show. Gate on the ACTUAL load-start (curtain Loading),
-            // phase-2 world-load, this client's active download (FIX-3), OR the host's mid-session wait on
-            // its peers (overlay fix 2026-07-13) — NOT on the command-time TransferActive: that prevents
-            // the overlay from appearing in the lobby the instant the host presses PLAY (the bug). The
-            // overlay appears when the download starts (client), the native loading curtain drops for the
-            // mission, or — host only — while its clients are still downloading/loading a sent save.
-            if (!loadStarted && !inPhase2 && !downloading && !hostWaitingOnPeers) return false;
+            // phase-2 world-load, this client's active download (FIX-3), OR this peer's own wait behind the
+            // co-op load boundary — NOT on the command-time TransferActive: that prevents the overlay from
+            // appearing in the lobby the instant the host presses PLAY (the bug). The overlay appears when
+            // the download starts, the native loading curtain drops for the mission, or the peer is held at
+            // the boundary while the OTHERS are still downloading/loading.
+            if (!loadStarted && !inPhase2 && !downloading && !waitingOnPeers) return false;
 
             // A load window is open: show until every participating peer has reported done.
             bool allPeersDone = expectedPeers <= 0 || donePeers >= expectedPeers;

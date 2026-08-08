@@ -420,15 +420,31 @@ namespace Multiplayer.Network
         public bool IsDownloading => !_engine.IsHost && _rxTotalBytes > 0;
 
         /// <summary>
-        /// Overlay fix (2026-07-13): true on the HOST while a MID-SESSION co-op load window is live — the
-        /// LOADED barrier is open (clients downloading/preparing) or phase-2 snapshots are flowing — even
-        /// though the host itself shows NO local load signal (on tac-entry it sits behind the held curtain
-        /// with LoadPhaseStarted/InPhase2/IsDownloading all false, so the overlay never showed and the host
-        /// saw none of the clients' progress). Gated on SessionStarted (_begun): the lobby PLAY window has
-        /// _begun false, so this can never resurrect the early lobby-popup bug ShouldShow's loadStarted gate
-        /// was introduced to fix. Ends when the barrier closes and the roster all-done stops phase-2.
+        /// THIS PEER IS BEHIND A CO-OP LOAD BOUNDARY — the display window for the per-peer load overlay,
+        /// and the ONE term that is stable for the whole wait. Every other signal ShouldShow reads is a
+        /// LOCAL load signal (<see cref="LoadPhaseStarted"/>, <see cref="InPhase2"/>,
+        /// <see cref="IsDownloading"/>): each one goes false the moment THIS peer's own bytes are in, while
+        /// the barrier still holds it behind the curtain waiting for everyone else. <c>LoadPhaseStarted</c>
+        /// in particular is set on curtain "Loading" and cleared on Playing/Loaded, so on a new-campaign
+        /// start (where the terms below were host-gated to false) the panel blinked out on every level
+        /// hand-off and back in on the next — the flicker.
+        ///
+        /// PEER-AGNOSTIC BY CONSTRUCTION (was <c>HostWaitingOnPeers</c>, <c>_engine.IsHost &amp;&amp; ...</c>):
+        /// each arm is set on exactly one side already, so no IsHost test is needed and the client now gets
+        /// the same window the host had. <c>_downloadCurtain</c> is the CLIENT's 0x48 curtain — the ~13 s
+        /// where the host is building the mission and the client has no bytes, no level and no local signal
+        /// at all, which is why a client saw NOTHING on a geoscape→mission load. <c>_loadBoundaryAnnounced</c>
+        /// and <c>_hostEntryHold</c> are the HOST's two announce seams. <c>_barrierOpen</c>/
+        /// <c>_loadPhaseActive</c> stay gated on SessionStarted (_begun) — that is the gate that keeps the
+        /// overlay out of the LOBBY on the PLAY press, the bug ShouldShow's loadStarted term was added for.
+        ///
+        /// EVERY ARM IS CLEARED AT THE REVEAL (PerformDeferredLift: _loadPhaseActive, _hostEntryHold,
+        /// _loadBoundaryAnnounced, _barrierOpen) or at the abort that takes the same curtain down, so the
+        /// window closes exactly when the players are let in. Display only — reading this decides nothing.
         /// </summary>
-        public bool HostWaitingOnPeers => _engine.IsHost && _begun && (_barrierOpen || _loadPhaseActive);
+        public bool WaitingOnPeers =>
+            _downloadCurtain || _loadBoundaryAnnounced || _hostEntryHold
+            || (_begun && (_barrierOpen || _loadPhaseActive));
 
         /// <summary>This peer's own download percent (0..100), or -1 when not downloading.</summary>
         public int LocalDownloadPercent
@@ -2497,7 +2513,7 @@ namespace Multiplayer.Network
             // the SendLoadComplete branch above) and which OpenBarrier clears two seconds into the mission
             // path. Deleted. The per-peer LoadOverlayController — named bar + percent for every OTHER peer,
             // repainted from this same tracker every frame — is the one display of this wait, and it keys
-            // on HostWaitingOnPeers, which is live-true across BOTH windows. The held-wait CAPTION is still
+            // on WaitingOnPeers, which is live-true across BOTH windows. The held-wait CAPTION is still
             // written once at OnReachedPlaying; the overlay carries everything that moves.
 
             // Phase-2 progress pump — runs on EVERY peer (host + clients) regardless of overlay visibility.
