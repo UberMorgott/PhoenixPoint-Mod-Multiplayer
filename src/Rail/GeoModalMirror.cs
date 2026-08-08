@@ -344,7 +344,7 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>How a window's kind reads in a log line: the ModalType for the modal family (43 windows
         /// wear one state, so the state's name would say nothing), the StateKind otherwise.</summary>
-        private static string NameOf(StateKind kind, ModalType modalType) =>
+        internal static string NameOf(StateKind kind, ModalType modalType) =>
             kind == StateKind.Modal ? modalType.ToString() : kind.ToString();
 
         /// <summary>THE NON-MODAL ARM'S HOST ENTRY, called from the coverage gate — i.e. from
@@ -528,9 +528,11 @@ namespace Multiplayer.Network.Sync
                 {
                     var evicted = Park.Park(seq, p);
                     if (evicted != null) Debug.LogError("[MP][modals] " + evicted);
-                    Debug.Log("[MP][modals] raise of '" + (ModalType)p.ModalType + "' seq=" + seq +
-                              " PARKED — waiting for '" + p.Ref + "' to reach this peer's graph (queue=" +
-                              Park.Count + ")");
+                    Debug.Log("[MP][modals] raise of '" + NameOf(p.Kind, (ModalType)p.ModalType) + "' seq=" + seq +
+                              " PARKED — waiting for " +
+                              (SwitchQuery() == null ? "a live GeoscapeView on this peer"
+                                                     : "'" + p.Ref + "' to reach this peer's graph") +
+                              " (queue=" + Park.Count + ")");
                     return true;
                 }
                 if (RaiseMirrored(p, seq)) Seq.Mark(SurfaceIds.GeoModalRaise, seq);
@@ -548,13 +550,52 @@ namespace Multiplayer.Network.Sync
         /// transport could lose: 0xB7 is ALWAYS on the wire first, and refusing it there is a reward window
         /// the player never sees (law 91). Generic on purpose — every present and future EntityRef window
         /// rides this, there is no soldier-join arm anywhere.
-        /// A raise this peer has no geoscape for is NOT parked: that is the existing loud drop in
-        /// <see cref="RaiseMirrored"/> (mid-load / tactical), and a window is never replayed after the fact.</summary>
+        /// SECOND EARLY CONDITION, same queue, since 2026-08-08: this peer has no live GeoscapeView at all
+        /// (tactical mission, or the mid-load on the way back from one). That used to be a hard DROP in
+        /// <see cref="RaiseMirrored"/> and it lost real player decisions — two 'AssetDeployment' prompts in one
+        /// session, gone with no way to get them back, because the raise landed while the returning peer's
+        /// geoscape was still loading. It is the SAME situation the queue already handles — "not yet" — and it
+        /// self-releases on the SAME event, an applied rail batch found with the view up: the view arrives by
+        /// itself when the level finishes loading, so no player has to act and nobody waits on anybody
+        /// (law 91 — never a quorum). Only kinds <see cref="NoViewRefusal"/> clears start that wait; the rest
+        /// keep the loud drop, with that same function's reason on it.</summary>
         private static bool NeedsPark(Raise p)
         {
+            if (SwitchQuery() == null) return NoViewRefusal(p) == null;   // no screen yet — wait for one, if it may still be shown
             if (!NamesEntity(p)) return false;   // only a NAME can be early; None/research resolve or never will
             var geo = GeoLevel();
             return geo != null && IdentityResolver.Resolve(geo, p.Ref, null) == null;
+        }
+
+        /// <summary>THE NO-VIEW VERDICT, PURE so RailCheck L337 executes it headless, and written as a REASON
+        /// STRING for the same discipline <see cref="DataRefusal"/> follows: null = "wait, this window may
+        /// still be shown"; non-null = "it will never be shown, and here is the sentence that says so".
+        /// <see cref="NeedsPark"/> and <see cref="RaiseMirrored"/> both read THIS, so the thing that decides
+        /// to wait and the thing that decides to drop can never disagree, and neither exit is ever silent.
+        ///
+        /// The split is by what the window IS, not by its data shape:
+        ///   • <see cref="StateKind.AssetDeployment"/> — REPLAYABLE (null). It is a standing PROMPT, not a
+        ///     notice: the asset is manufactured/recruited and sits UNPLACED until somebody answers, the
+        ///     answer rides back as <see cref="WindowQueueSync"/>'s 0xB9 deploy op, and all three native
+        ///     raise sites are an ACQUISITION completing (GeoPhoenixFaction.cs:708, VehicleItemDef.cs:47,
+        ///     GroundVehicleItemDef.cs:48 → GeoscapeView.PrepareDeployAsset:1308). Nothing re-asks. Dropping
+        ///     it destroys a player decision, which is exactly what happened twice in one session.
+        ///   • <see cref="StateKind.Modal"/> — NOT replayable. Every ModalType declared Mirrored is an
+        ///     acknowledgement-only PRESENTATION of a moment (base activated, research shared, a mission
+        ///     brief, a soldier-join offer), and the client's copy is non-authoritative BY CONSTRUCTION —
+        ///     <c>dialogHandler: null</c>, so no button on it runs game logic and no decision rides on it.
+        ///     Replaying one after a mission shows a brief for a mission the host may already have launched
+        ///     or cancelled: a WRONG window, which is worse than a missing one. Same verdict the repaint side
+        ///     already reached for one-shot presentations ("a one-shot presentation has no repaint, and
+        ///     Exit+Enter would replay it").</summary>
+        internal static string NoViewRefusal(Raise p)
+        {
+            if (p.Kind == StateKind.AssetDeployment) return null;
+            return "raise of '" + NameOf(p.Kind, (ModalType)p.ModalType) + "' DROPPED — this peer has no live " +
+                   "GeoscapeView to show it in, and this window is a one-shot PRESENTATION that is deliberately " +
+                   "NOT replayed late: its copy here carries no player decision (dialogHandler is null, so no " +
+                   "button on it runs anything), and showing it once this peer is back would describe a moment " +
+                   "that has passed. A window that DOES carry a decision parks and waits for the view instead";
         }
 
         /// <summary>Called once per applied GeoRail batch (<c>GenericApplier.HandleInbound</c>) — the one
@@ -563,12 +604,16 @@ namespace Multiplayer.Network.Sync
         /// advances the bounded expiry, so no parked raise can sit forever without saying so.</summary>
         public static void PumpParked()
         {
-            if (Park.Count == 0 || GeoLevel() == null) return;   // no geoscape = nothing to raise INTO; the wait does not count
+            // No live view = nothing to raise INTO, and the wait does not COUNT: the expiry below is there to
+            // catch an entity that never arrives, not to punish a peer for being in a tactical mission. The
+            // bound on THIS wait is the other kind the class doc names — the queue cap, which evicts loudly —
+            // plus Reset() at session teardown; and the release event (the view) arrives on its own.
+            if (Park.Count == 0 || SwitchQuery() == null) return;
             Park.Pump(
                 p => !NeedsPark(p),
                 (p, s) => { if (RaiseMirrored(p, s)) Seq.Mark(SurfaceIds.GeoModalRaise, s); },
                 (p, s, waited) => Debug.LogError(
-                    "[MP][modals] parked raise of '" + (ModalType)p.ModalType + "' seq=" + s + " EXPIRED after " +
+                    "[MP][modals] parked raise of '" + NameOf(p.Kind, (ModalType)p.ModalType) + "' seq=" + s + " EXPIRED after " +
                     waited + " rail batches — '" + p.Ref + "' never reached this peer's graph, so the window is " +
                     "DROPPED and this player never sees it. The entity is not on the rail (no structural create " +
                     "kind for it), or its create failed earlier and said so"));
@@ -583,13 +628,17 @@ namespace Multiplayer.Network.Sync
             var modalType = (ModalType)p.ModalType;
             string name = NameOf(p.Kind, modalType);
             var geo = GeoLevel();
-            var view = geo?.View;
-            if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery q))
+            var q = SwitchQuery();
+            if (q == null)
             {
-                // Not "later": this peer has no geoscape to put a window in (tactical mission, mid-load), and
-                // there is no history to replay it from. Dropped, loudly — same contract as a 0xB6 raise.
-                Debug.LogWarning("[MP][modals] raise of '" + name + "' DROPPED — this peer has no live " +
-                                 "GeoscapeView to show it in, and windows are not replayed after the fact");
+                // Reachable only by a kind NoViewRefusal() refuses — a replayable one was parked by NeedsPark
+                // and the pump only runs with the view up, so it never gets here. A DELIBERATE drop with a
+                // stated reason, not the old "no view, tough luck". The ?? arm is not decoration: if the two
+                // ever disagreed, the window would vanish with no line at all, and that is this repo's
+                // dominant bug class.
+                Debug.LogWarning("[MP][modals] " + (NoViewRefusal(p) ??
+                    "raise of '" + name + "' DROPPED although it is replayable — NeedsPark parked nothing and " +
+                    "the view is gone here, so the two disagreed or the view died between them"));
                 return false;
             }
             var rule = p.Kind == StateKind.Modal
@@ -740,12 +789,27 @@ namespace Multiplayer.Network.Sync
             try { return Base.Core.GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>(); }
             catch { return null; }
         }
+
+        /// <summary>THE ONE "is there a live geoscape view" probe, non-null exactly when a queued window can be
+        /// pushed — and it is the GAME's own marker, not an invented one: <c>_viewSwichQuery</c> is constructed
+        /// next to the states stack it wraps in the view's own init (GeoscapeView.cs:334-335) and is what every
+        /// native raiser calls through (:860/:880/:1320). A <c>GeoLevelController</c> can exist while this is
+        /// still null — that is precisely the mid-load window a returning peer's raise landed in. One probe,
+        /// three callers (<see cref="NeedsPark"/>, <see cref="PumpParked"/>, <see cref="RaiseMirrored"/>), so
+        /// "can it be shown" and "must it wait" can never answer differently.</summary>
+        private static GeoscapeViewSwitchQuery SwitchQuery()
+        {
+            var view = GeoLevel()?.View;
+            return view == null ? null : SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
+        }
     }
 
     /// <summary>
-    /// The deferral for a 0xB7 raise whose entity has not landed on this peer yet — PURE (no Unity, no game
-    /// types beyond the payload struct) so RailCheck L107 drives the REAL queue with a fake resolver instead
-    /// of asserting that some call exists.
+    /// The deferral for a 0xB7 raise this peer cannot show YET — its entity has not landed here, or (since
+    /// 2026-08-08) there is no live GeoscapeView to show it in at all. Both are the same situation, "not yet",
+    /// and both release on the same self-arriving event, so they share this one queue rather than growing a
+    /// second mechanism. PURE (no Unity, no game types beyond the payload struct) so RailCheck L107/L337 drive
+    /// the REAL queue with a fake resolver instead of asserting that some call exists.
     ///
     /// STRICT FIFO. Only the HEAD is ever tested: a raise behind a waiting one is not "ready", it is LATER.
     /// The game shows windows one at a time out of a priority-ordered queue that keeps arrival order between
@@ -783,8 +847,10 @@ namespace Multiplayer.Network.Sync
             var lost = _q[0];
             _q.RemoveAt(0);
             return "parked-raise queue is FULL (" + MaxParked + ") — the oldest waiting raise of '" +
-                   (ModalType)lost.P.ModalType + "' seq=" + lost.Seq + " ('" + lost.P.Ref + "') is DROPPED " +
-                   "unshown. Entities named by 0xB7 are not reaching this peer at all";
+                   GeoModalMirror.NameOf(lost.P.Kind, (ModalType)lost.P.ModalType) + "' seq=" + lost.Seq +
+                   " ('" + lost.P.Ref + "') is DROPPED unshown. Either the entities named by 0xB7 are not " +
+                   "reaching this peer at all, or this peer has been away from its geoscape long enough to " +
+                   "stack up more windows than the queue holds";
         }
 
         /// <summary>One batch of progress. <paramref name="resolved"/> asks whether the head's entity is

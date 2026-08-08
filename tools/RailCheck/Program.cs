@@ -317,6 +317,7 @@ namespace RailCheck
             Add(laws, () => L333_AVariableIntentLandsOrSaysWhyNot.Check());
             Add(laws, () => L335_AScopedResendLandsInTheMirror.Check());
             Add(laws, () => L336_TheReadyProbeMeasuresALiftedCurtain.Check());
+            Add(laws, () => L337_ADecisionWindowOutlivesAMissingView.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
