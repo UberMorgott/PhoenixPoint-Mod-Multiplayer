@@ -129,6 +129,26 @@ namespace Multiplayer.Network
         // only because that peer's RosterProgress happened to land in the same frame as the arm, ahead
         // of this Update — a frame-ordering race, not a real difference.) 0 = no window open.
         private long _loadWindowOpenedMs;
+
+        /// <summary>THE WINDOW STAMP, pure so law L324 can execute it. A window that is open keeps the stamp it
+        /// was opened with — it does NOT slide forward with <c>now</c>, or the deadline below could never be
+        /// reached and a genuinely dead peer would suspend the detectors forever. No window = 0.</summary>
+        internal static long LoadWindowStamp(bool loadInFlight, long windowOpenedMs, long now) =>
+            !loadInFlight ? 0L : (windowOpenedMs == 0 ? now : windowOpenedMs);
+
+        /// <summary>THE LIVENESS CLOCK of a load window: the LATER of "this window opened" and "the transfer
+        /// last moved". <c>lastProgressMs</c> alone is one session-wide field, so a fresh window inherits the
+        /// PREVIOUS window's staleness and is born past its own deadline.</summary>
+        internal static long LoadWindowLiveMs(long windowOpenedMs, long lastProgressMs) =>
+            Math.Max(windowOpenedMs, lastProgressMs);
+
+        /// <summary>THE DECISION, pure so law L324 can execute all four corners of it: has THIS window stopped
+        /// proving itself alive? A window only ever has to do so within its own span, and one that really has
+        /// stopped still re-arms the host-loss / client-reaper detectors after the full
+        /// <see cref="TransferStallMs"/> measured from its own start.</summary>
+        internal static bool LoadWindowIsStalled(long now, long windowOpenedMs, long lastProgressMs) =>
+            now - LoadWindowLiveMs(windowOpenedMs, lastProgressMs) > TransferStallMs;
+
         private long _lastHeartbeatSend;
         // FIX-2: client-side outbound-liveness clock — the last time the host ACKed one of our
         // heartbeats. Distinct from _lastHeartbeat[host] (inbound liveness): it detects a HALF-OPEN
@@ -198,11 +218,8 @@ namespace Multiplayer.Network
             // clock every tick and the suspension could never end. Every arm site is covered at once
             // (barrier open, self-load arm, download start, phase-2, host entry load): each one raises
             // one of the three flags, and this is the single place they are read.
-            if (loadInFlight)
-            {
-                if (_loadWindowOpenedMs == 0) { _loadWindowOpenedMs = now; _transferStallLogged = false; }
-            }
-            else { _loadWindowOpenedMs = 0; _transferStallLogged = false; }
+            long opened = LoadWindowStamp(loadInFlight, _loadWindowOpenedMs, now);
+            if (opened != _loadWindowOpenedMs) { _loadWindowOpenedMs = opened; _transferStallLogged = false; }
 
             // Suspension deadline: suspend only while the transfer shows PROGRESS. LastProgressMs is
             // bumped on every chunk / roster snapshot / barrier flag edge / phase-2 percent
@@ -212,12 +229,13 @@ namespace Multiplayer.Network
             // of "this window opened" and "the transfer last moved", so a load only ever has to prove
             // itself alive within its own window — a slow peer gets the full TransferStallMs from the
             // arm before anything reaps it, and a dead one still stops the clock exactly as before.
-            long liveMs = Math.Max(_loadWindowOpenedMs, st?.LastProgressMs ?? 0L);
-            if (loadInFlight && now - liveMs > TransferStallMs)
+            long progressMs = st?.LastProgressMs ?? 0L;
+            if (loadInFlight && LoadWindowIsStalled(now, _loadWindowOpenedMs, progressMs))
             {
                 if (!_transferStallLogged)
                 {
                     _transferStallLogged = true;
+                    long liveMs = LoadWindowLiveMs(_loadWindowOpenedMs, progressMs);
                     Debug.LogWarning($"[Multiplayer] transfer/load shows no progress for " +
                                      $"{(now - liveMs) / 1000}s (window open {(now - _loadWindowOpenedMs) / 1000}s) " +
                                      "— re-arming liveness detectors.");

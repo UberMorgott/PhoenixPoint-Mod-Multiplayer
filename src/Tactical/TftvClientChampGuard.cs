@@ -64,6 +64,13 @@ namespace Multiplayer.Tactical
         private static MethodBase TargetMethod() =>
             AccessTools.Method(AccessTools.TypeByName(TftvHumanEnemiesTypeName), "GiveRankAndNameToHumaoidEnemy");
 
+        /// <summary>TFTV'S OWN CANDIDATE LINE, pure so law L325 can execute both directions of it.
+        /// <c>GiveRankAndNameToHumaoidEnemy</c> (TFTVHumanEnemies.cs:1617) returns immediately unless
+        /// <c>actor.BaseDef.name == "Soldier_ActorDef"</c>, so this is the exact set TFTV would roll: anything
+        /// wider suppresses nothing and only makes noise, anything narrower lets a real champ be re-rolled on
+        /// this client and the peers disagree about which elite is on the field.</summary>
+        internal static bool TftvWouldRoll(string baseDefName) => baseDefName == "Soldier_ActorDef";
+
         private static bool Prefix(TacticalActorBase actor)
         {
             try
@@ -79,7 +86,7 @@ namespace Multiplayer.Tactical
                 // at all, so it still lands here. It is also the recorded lesson — narrow by the marker the
                 // owning code actually tests, not by the parameter type Harmony happens to hand you.
                 var baseDef = actor == null ? null : actor.BaseDef;
-                if (baseDef == null || baseDef.name != "Soldier_ActorDef") return true;
+                if (!TftvWouldRoll(baseDef == null ? null : baseDef.name)) return true;
                 Debug.Log("[Multiplayer][tac] TFTV rank/name roll SUPPRESSED on this client for " +
                           (actor == null ? "<null>" : actor.name) + " — the champ, its rank and its name are the " +
                           "host's roll. Running it here would mint a different elite on this screen than the one " +

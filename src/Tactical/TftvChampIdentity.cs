@@ -103,11 +103,19 @@ namespace Multiplayer.Tactical
         /// ON CHANGE ONLY, never per settle — <see cref="Collect"/> runs on every settle of every actor, and
         /// the identity is rolled once. The key is the identity itself, so a re-roll speaks again and a repeat
         /// says nothing.</summary>
+        /// <summary>The dedup key, pure so law L325 can execute it: it is the IDENTITY, not the actor, so a
+        /// re-roll of the same key speaks again and a repeat of the same roll says nothing. Keyed on the actor
+        /// alone, a second roll would be swallowed and the log could no longer tell "nothing to say" from
+        /// "already said something else".</summary>
+        internal static string AnnounceKey(int key, Identity id) =>
+            key + "|" + (id == null ? "" : id.Name) + "|" +
+            (id == null || id.Tags == null ? "" : string.Join(", ", id.Tags.ToArray()));
+
         private static void Announce(TacticalActorBase actor, Identity id)
         {
             int key = TacticalActorKey.Of(actor);
             string tags = string.Join(", ", id.Tags.ToArray());
-            if (!_announced.Add(key + "|" + id.Name + "|" + tags)) return;
+            if (!_announced.Add(AnnounceKey(key, id))) return;
             Debug.Log("[Multiplayer][tac] HOST champ identity for key " + key + " — " + id.Name + " (" + tags +
                       "). TFTV rolled this off a Stopwatch-seeded generator, so it rides every spawn record and " +
                       "every settle naming that key and the clients adopt it instead of rolling their own.");

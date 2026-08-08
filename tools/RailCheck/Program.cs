@@ -303,6 +303,8 @@ namespace RailCheck
             Add(laws, () => L321_AnEnqueuedMirrorIsNotAStallAndADroppedOneIsNamed.Check());
             Add(laws, () => L322_ADamagedItemIsDamagedOnEveryPeer.Check());
             Add(laws, () => L323_ATransientRepaintFailureIsRetried.Check(game));
+            Add(laws, () => L324_ALoadWindowIsMeasuredFromItsOwnStart.Check());
+            Add(laws, () => L325_OnlyAnEnemyTftvWouldNameIsSuppressed.Check(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
