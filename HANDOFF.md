@@ -1,147 +1,120 @@
-# Handoff — session 2026-08-07/08
+# Handoff — session 2026-08-08 (night, autonomous)
 
-Previous handoff is OBSOLETE. Sections 5c/5d/5e are folded in below with resolutions.
+Previous handoff is OBSOLETE. Nine one-shot agents. Commits on `main` in `Multiplayer2`, local, published as **v0.9.5-beta**. Final state: `dotnet build` 0 errors/0 warnings, `law-integrity OK — 134 file(s) + 60 inline = 194`, `RAILCHECK GREEN — laws-run=194/194 known-violations=1` (the one is the pre-existing baselined L62 ClockPhaseProbe).
 
 ## 1. What this session did
 
-### Join / lobby
+### Round 1 — campaign start (OWNER-CONFIRMED IN GAME)
 
 | sha | what |
 |---|---|
-| `94fb77b` | fix(join): stale Steam P2P session → half-open peer, phantom roster row, 54 s silent hang; register the peer from its own first packet (L180) |
-| `3161d33` | feat(lobby): ready gate — host cannot start until every LIVE peer has readied; owner ruling 2026-08-07: no-quorum mandate covers IN-GAME progress only, the lobby is exempt (reverses `afc111a`) |
-| `fd90105` | fix(lobby): unjoined row (`Guid.Empty`) reaped after a deadline, not PausePeer'd forever; both halves of the gate count the same peers (L180 L181) |
-| `061f422` | fix(lobby): on a fan-out miss, the host register from the packet that named it — the line already printed the whole diagnosis |
-| `aa1aeb3` | chore(lobby): drop a duplicate using |
+| `d0a97ae` | fix(campaign): window order inverted — host raised `IntroBetterGeo_0/1/2` behind its OWN curtain; all 4 view requests priority 0, native `GeoscapeViewSwitchQuery` FIFO → host got dialogs→cutscene, clients cutscene→dialogs. Harmony PREFIX parks the host's own raise while `SaveTransferCoordinator.Revealed` is false, re-invokes the game's own handler after reveal (`src/Rail/EventPopup.cs:86-165`, `:509`, `:1449-1463`). Prefix+postfix share `__state` because Harmony runs postfixes even when the prefix skips |
+| `64b170a` | laws L194-L197 |
+| (same round) | fix(campaign): cutscene skip silently dead on one client — `CanCarryWindow` only checked the event system had loaded, so 3 modals released 0-130 ms after intro started; a stale input override made `UIStateGeoCutscene.EnterState`'s `SetInputState("Cutscene")` be stored and discarded (documented at `RevealInputLock.cs:20-23`). One client sat 121.83 s, the other skipped in 5.26 s. Fix: one term in `CanCarryWindow` (`EventPopup.cs:577-579`) |
+| (same round) | fix(campaign): non-answering peer never reached the squad screen — opened ONLY from `MissionEncounterNav.Postfix` on `UIModuleSiteEncounters.FinishEncounter`, a local dialog funnel, bailing at one of four unlogged returns; the postfix also read `ev.Record` which on a mirroring peer can be the placeholder `RaiseMirrored:568` mints (now `EventPopup.LiveRecord`). Fix: new `MissionArrivalNav` (`src/Rail/MissionSync.cs:487-640`) opens on mission ARRIVAL, bounded by `ArrivalGivenUp` (60 s, drops loudly) |
 
-### Load boundary / transition
-
-| sha | what |
-|---|---|
-| `17bf9fe` | fix(transition): curtain hold arm reads `loadBoundaryAnnounced` — every peer held across the boundary the host crosses (L173) |
-| `9290193` | fix(transition): `CurtainTakedownGate.State()` names every input of `CurtainHoldArmed`, including the third term `17bf9fe` added |
-| `88fa596` | fix(transition): host skips the redundant second load on new-campaign — it already holds the live level it just built; CRC detection via `DiffEngine.HandleCrcReport` (L174) |
-
-### Windows / events
+### Round 2 — built + deployed, NOT confirmed in game
 
 | sha | what |
 |---|---|
-| `19af84c` | fix(windows): `HoldsForOpenScreen` queues a notification behind a player-opened screen; `ReplenishSync.ClientArrivalTick` re-asks the game's `GetMissingItems()` after state arrives; `HintMirror` relay is unconditional before the dedupe (L163 L164 L165) |
-| `0ecff8f` | fix(windows): `MayAnswerQueued` lets a client answer a HOST-raised window still in the queue; deployment-prep constructor calls deferred to open-time (`DeploymentRosterRefresh.Prefix`); window-drop counter (L175 L176) |
-| `b69198a` | fix(windows): `MissionEncounterNav.NoDeploymentReason` gives host and client different reasons — the host never tells itself "the host's mission has not arrived" (L191) |
+| `dc7e9d9` | fix(ui): countdown overlay Cancel dead — `MultiplayerUI.EnsureBarCanvas` (`src/Lobby/MultiplayerUI.cs:163-182`) builds the mod overlay root as `Canvas`+`CanvasScaler` with **no `GraphicRaycaster`** — every widget on it was decorative by construction; hidden for months because the bar and `PlayerPanel` set `raycastTarget=false` deliberately. Label overflow fixed with best-fit + Wrap + Truncate. DEBT: raycaster repair lives in `src/Lobby/CountdownPanel.cs`, its real home is `EnsureBarCanvas`; `UiToolkit.CreateButton` has the same null-`targetGraphic` gap for every from-code lobby button |
+| `8e62eac` | fix(tactical): client free-aim never fired — host called `ability.GetDisabledState()` UNFILTERED → `NoValidTarget` → `Validate` rejected → forced settle's `CancelActions` tore out the wind-up. Host's own clicks bypassed via the `RelayMirror` branch and never reached `Validate` — that asymmetry was the defect. Fix passes `IgnoredAbilityDisabledStatesFilter.IgnoreNoValidTargetsFilter` INTO the call, narrowed by `ability is ShootAbility`, mirroring `UIStateShoot.ConfirmShoot:1295` / `UIStateFreeCam.ConfirmShoot:466`. SEPARATE root from `7b75de9`: that commit pulled the sweep out of `TargetIsOffered` but left `GetDisabledState`, whose `NoValidTarget` arm IS `ShootAbility.HasValidTargets` = the same sweep. Grenade/cone hit the same arm and were probably broken the whole time |
+| `f9ecd0e` | fix(tactical): animation start desync — every peer plays from the host's mirror, including the actor. Seam = `TacticalViewState.ActivateAbility` (decompile `PhoenixPoint.Tactical.View/TacticalViewState.cs:259`), the game's ONE player-click funnel; `UIStateShoot:1385` is its only override and calls base. One layer down impossible: `TacticalAbility.Activate` is virtual and `ShootAbility.Activate:165-174` runs its own `PlayAction(Shoot)`. Acting peer activates nothing locally; host's own click serialised → `HandleActivate(engine, peer 0, …)`. Mirror `excludePeer` no longer skips the origin. Bound `EchoCeilingFrames = 720` (12 s), deliberately longer than host's `DeferCeilingSeconds = 10f`; on trip `ECHO LOST`, order NOT replayed locally (would be a second shot, L83). Generic via `OrderWaitsForTheEcho`, one exclusion by the game's marker interface `IMoveAbility` (not `typeof(MoveAbility)`) because `FollowupAbility` is in `TacAbilityTargetCodec.Dropped` — deferring a move would DELETE the follow-up attack |
+| `8e44c2e` | fix(tactical): broken-arm weapon resolution — host resolved by def guid alone and `ActorComponent.GetAbilityFiltered:211-221` returns the FIRST match, but `Overwatch_AbilityDef`/`Reload_AbilityDef` mint one instance PER WEAPON — host always took the primary rifle's, `PreSelectSourceEquipment` published that rifle on the 0x82 settle (L186). Fix: `ResolveAbility` prefers the instance whose source == `SelectedEquipment`, falling back to plain def match, at BOTH host-validate and mirror-replay sites (mirror half predicted, not observed). Separately per-turn use counter `TacticalActor._abilityUsesThisTurn` keyed by `TacticalAbilityDef` (one key for every weapon's overwatch, cleared only at turn edge) — client's speculative activate spent it while host kept 0; now carried on the 0x82 settle via the game's own `TacActorInstanceData.AbilityUsesThisTurn` |
+| `a2b61f2` | fix(geo): haven infiltration / steal aircraft from a client — `StealAircraftAbility.ActivateInternal` → `GeoHaven.PrepareHavenMission` (`GeoHaven.cs:1054`, `wireMission:true`) writes `Site.SetActiveMission` at `:1091`; nothing gated it → client minted mission on its own graph, host rejected launch (`GeoMission.IsRunnable` has ZERO overrides, `MissionRunnable=false` = null). Same funnel serves `HavenFacilityController.cs:110` and `HavenInteractionController.cs:219`. Fix gates the FUNNEL, host re-runs the game's own gates, zone rides as INDEX into `haven.Zones` (tag re-derivation unsafe — `GeoHavenZoneDef.AvailableMissionsTags` is a list, several zones share a tag). Widening L42 exposed two further client-local root mints, `GeoFaction.CreateScanner` / `CreateAncientSiteProbe`, now gated (`ClientSimGate.cs:407`) |
+| `4fbd250` | fix(geo): client exploration in a foreign epoch — see durable finding #1 below |
+| `2f29baf` | fix(tactical): move-overlay coroutine crash — withhold answered an EMPTY array from `MoveAbility.GetTargetsData`, and that empty array IS the null — `MoveAbility.cs:26 HasValidTargets => GetTargetsData().Any()` → `NoValidTarget` → `IsEnabled()` false → `MoveAbilitySceneViewElement.ValidMoves:69-79` returns null, which `UpdateMoveAreas` re-reads after yields (`:237/:243/:253/:259`) though it guards once at `:223`. Stopping impossible: `ValidMoves:73` evaluates `IsEnabled()` two instructions from the dereference. Fix FEEDS an empty list via a postfix on the getter; sited on the property so it covers every mid-sweep UI release |
+| `3224cfc` | fix(ui): ready button — see section below |
+| `6d38ff4` | feat(ui): ping colours + arrow |
+| `6e64842` | chore(diag): keyless-text-bind diagnostic damping |
 
-### Tactical
+### The ready button — three wrong diagnoses
 
-| sha | what |
-|---|---|
-| `f1eebab` | fix(tactical): `TacticalAutoEndTurn.CanStillAct` folds over the shared faction's AP; `CameraAbilityHintGate` survivorship + no `RemoveHint`/`RemoveHints`/`ForcedReset` patches (L161 L162) |
-| `dc976fc` | fix(tactical): `TacticalUiRepaint.VehicleSlot` strips null from `GetVehicleReadyItems`; `RepaintContainerView` routes through `UpdateVehicleData`/`UpdateVehicleSecondaryData` (L170) |
-| `eec73ed` | fix(tactical): `TacticalContainerOpen.InventoryWindowMayOpen` — a loot crate's window opens only where the holding peer's soldier stands; `LocalAbilities` declares `OpenCrateAbility` local (L178 L179) |
-| `7b75de9` | fix(tactical): `GroundTargetingExemptsTheOrder` reproduces `TacticalViewState.IsTargetingGround:200-219` — free-aim ground throw/cone/free-aim not held to the grid sweep (L169) |
-| `7260b25` | fix(tactical): `MovePollMustBeWithheld` is a STANDING gate on `MoveAbility.GetTargetsData` — re-selecting a mirrored actor cannot restart the sweep (L168) |
-| `552a331` | fix(tactical): `LootMirror` keys by item def guid not queue position; weapon selection rides the 0x82 settle; `Bleed_StatusDef` source resolved before apply (L185 L186) |
+Symptom: no hover frame, no click, host AND clients. It WORKED several major updates ago.
 
-### Rail / clock / market / scrapcart / replenish
+- `82e039c` layer theory (`new GameObject` starts on layer 0, undrawn, `depth == -1`): REFUTED — live log `MP_ReadyHit(layer=5 depth=258)`, and its `LogError` never fired.
+- `10dfda8` archaeology blamed `30a64e3` ("stop the ready button eating the map"), which silenced the clone's twelve NATIVE graphics and substituted one hand-built face; the clone is `Object.Instantiate` of the native End Turn button so its own graphics ARE its clickable face. `TrimRaycast` deleted (-107 lines) — correct hygiene, KEEP it deleted, but not why the button was dead. **Two laws MANDATED that defect**: `L127` arm (d) and `L182` arm (d) both REQUIRED a tactical clone to silence its raycast and name a built face; both withdrawn in place with the reason recorded.
+- Container-overhang theory: also refuted — module has no `Mask`/`RectMask2D` (proof: native button's own glow draws 6.67 world units past the same edge, uncut).
+- `3224cfc` **ACTUAL fix**: the drop compounds to 110 parent-local units (60 height + 30 gap + 20 glow clearance) below a button already near the bottom of the HUD, putting the rect OFF SCREEN — no pointer position maps to it, on any peer, with every wire correct. Clamp onto `canvas.rootCanvas`, same bound/reason as `src/Lobby/PlayerPanel.cs:305`. No reparent: `UIModuleBehavior.SetStateID` (`Base.UI/UIModuleBehavior.cs:21-56`) hides the module through its Animator, so leaving it strips visibility inheritance. STILL UNOBSERVED — grep `ready button footprint` for `-> ON SCREEN`, then `ready button IS REACHABLE`; `ON SCREEN` + `UNREACHABLE` means the new `ancestors=` text names the blocker.
 
-| sha | what |
-|---|---|
-| `7b6f350` | fix(rail): `EquipSync.JudgeHostFlush` blocks a stale open-screen from undoing a peer's loadout; `DiffEngine.EscalateAt` escalates a permanent exclusion; `MarketplaceSync` holds a dropped push (L187 L188 L189) |
-| `08eb214` | fix(clock): `TimeAnchor.Drifted` reads the anchor's own `Paused`/`Scale` — a speed click is not drift; `ApplyIfTouched` writes a log line on the jerked peer (L190) |
-| `a5a62e3` | fix(market): offer addressed by content key, not positional row (L171) |
-| `db4dc8f` | fix(market): refused purchase answered in the panel, not via `IntentRail.Reject`'s notify |
-| `70097b8` | fix(scrapcart): `ManufactureSync.ScrappableCount` reproduces `StripPartialMagsFromScrapStorage:1081-1082`; cart staged against the pool not the raw stack (L172) |
-| `a1c11dd` | fix(replenish): instrumentation — `[MP][replenish] … the game's own gate saw N short soldier(s)` |
+### Ping paint — REFUSED with reasons (do not retry)
 
-### UI / features
+The owner asked for the full-body ability flash (the white stamina-restore / heal paint) to mark pinged actors. It is `IHighlightable.Highlight(highlight, friendly, ability: true)`. Its branch clones per-actor materials (`HighlightControllerComponent.cs:179-181`) and skips the global shader colour, BUT the entry is the same latched `if (_isHighlighted == highlight) return false;` (`:144-153`), one bool per body part, driven by the game's own targeting with `ability: true` (`UIStateShoot.cs:1445`, cleared `:1463`) — so a ping on an actor being aimed at is swallowed, and the ping's expiry lowers the latch under the game, leaving paint nobody removes. Independently fatal: the ability look is one scene-wide shader asset (`LightingSettingsCharacters.cs:42`) with NO per-call colour, so green/blue is impossible. Actor pings keep the beacon shaft, which follows the actor and IS tintable per instance.
 
-| sha | what |
-|---|---|
-| `ced9412` | feat(net): per-peer RTT on the existing heartbeat — echo the stamp, not restamp; client acks the host too; SRTT alpha=1/4, cadence 1 s (L158 L159) |
-| `3f8d595` | feat(ui): player panel — name/ping-bars/status, tactical only (L158 L159) |
-| `b8a41d7` | feat(ui): ping markers — hotkey **H**, `GeoscapeGlobeMarkers.AddMarker` / `LocatedBeaconPrefab`, `MessageBoxPromptController.WindowShowEvent` for sound (L160 L182) |
-| `1dc2701` | fix(ui): ping hotkey moved to `MultiplayerConfig.PingMarkerKey`, a key the game and TFTV leave free |
-| `04bd013` | fix(ui): player panel removed from geoscape, tactical only |
-| `f277459` | feat(ui): native sound on ping arrival |
-| `30a64e3` | fix(ui): `SetActive(true)` on fresh-instantiated markers; `TacticalReadyButton.TrimRaycast` sets `raycastTarget` + `targetGraphic` (L182) |
+Shipped instead: own-green/others-blue decided at the VIEWER (`PingMarkers.cs:276` vs `:290`, nothing on the wire carries a sender); arrow half-extent `max(30, height*0.05)` = 2.5x; click → `CameraDirector.Hint(CameraHint.ChaseTarget, …)` per `TacticalActorViewBase.cs:491-501` and `GeoscapeView.cs:1109-1113`, with `ChaseTransform` deliberately null and `GeoscapeView.ChaseTarget` deliberately NOT called (a transform-named chase never self-ends, `PlanarScrollCamera:747/:838`; `ChaseTarget` installs the globe's sticky snap — would glue a watcher's camera to someone else's soldier, the L162 defect).
 
-### Harness
+---
 
-| sha | what |
-|---|---|
-| `e827eae` | chore(laws): snapshot split (baseline vs contract), twin pairing frozen |
-| `bf72ecc` | docs(laws): P4c ruled an uncovered hole; rows-vs-registrations explained |
-| `f6d86b5` | chore(laws): L156 — in-inventory reorder repaints the open equip screen |
-| `b73ce0a` | fix(tactical): L157 — mirrored tactical inventory repaint does not re-commit on the watcher |
-| `0713d8f` | fix(laws): L163 updated to three-argument hold + L175 carve-out |
-| `57b49aa` | chore(laws): renumber the move-sweep law to its assigned number |
-| `332d519` | docs(laws): L185/L186 falsification evidence recorded |
-| `9174362` | fix(harness): per-law exception containment, staleness guard, `laws-run=N/N` (L193) |
-| `0ab99df` | chore(tactical): 0x80 refusal logs seq/op/cursor |
+## 2. Law-quality crisis
+
+NINE laws caught this week asserting a CALL rather than an OUTCOME, or actively obstructing a fix: **L169, L177, L182, L175 (inert), L220 (twice), L117, L42, L80, L168, L186, L115, L127**.
+
+- **L127**(d) and **L182**(d) — MANDATED the ready-button defect and were withdrawn.
+- **L80** and **L168** — demanded a shape a correct fix had to change; amended in place.
+- **L42** — receiver filter `c.DeclaringType == vehicle` WAS its declaration despite its own doc claiming the set is "DISCOVERED, never declared" — widened to `RailCoveredRoots()` and shared with L270 via `Program.AbilityGestures` so the two cannot drift.
+
+Also: **a law can be unfalsifiable by accident.** `L210` as first written called `AbilityDisabledState.ToString()`, a CLASS whose `ToString()` resolves a loc key via `GameUtl.Game()` and throws `SecurityException` outside a running game — the throw sat on the FAILING branch of two arms, so the law was green while the waiver worked and turned the run into `GameUtl HARNESS-CRASH` the moment it regressed. Keep every state/reason name a STRING LITERAL in laws.
+
+Standing rule: falsify every ARM for real (defect edit → that arm's RED string → restore → green), include an executed positive control (`FakeSeam`), and report any arm that cannot be turned red as DECORATIVE.
+
+Anti-quorum law **L119** fired correctly on this session's own work — a ready-button press log that merely read `ReadyCount`/`TotalCount` turned RailCheck RED. Counters dropped, press log kept.
 
 ### Law count at HEAD
 
-- `tools/law-count.txt`: `files=108`, `inline=60` = **168 registrations**
-- New file-backed laws this session: L155-L193 (not all numbers used; L166/L167 absent)
+- `tools/law-count.txt`: `files=134`, `inline=60` = **194 registrations**
+- Known violations: 1 (baselined L62 ClockPhaseProbe)
 
 ---
 
-## 2. Features added
+## 3. Still open / not verified in game
 
-- **Per-peer RTT** on the existing `Heartbeat 0x06` / `HeartbeatAck 0x07` — no new packet type, no new surface id. `HeartbeatAck` echoes the received stamp (was restamping); client now acks the host (was one-way). SRTT: RFC 6298 alpha=1/4, cadence lowered 5000->1000 ms. Sample guards: dedup by stamp (StunUDP sends reliable twice), discard across a main-thread stall. Host piggybacks the full ping table on the broadcast heartbeat. `SessionManager.cs:810-824`, `PingTable.cs`.
-- **Player panel** — tactical only (removed from geoscape in `04bd013`). Name | ping bars (<60/<120/<250/else ms, tooltip = numeric) | status (ready/not-ready/dropped). Fed by `PingTable.GetPingMs` (negative = unmeasured/stale = em-dash). `PlayerPanel.cs`.
-- **Ping markers** — hotkey **H**, rebindable via `MultiplayerConfig.PingMarkerKey`. Geoscape: `GeoscapeGlobeMarkers.AddMarker` (native expiry timer). Tactical: `LocatedBeaconPrefab` + `GroundMarker`. Sound: `MessageBoxPromptController.WindowShowEvent` (native). Per-peer colour via `PeerTint`. Five-second lifetime, no state persisted. `PingMarkers.cs`.
-- **Deployment countdown** — five-second overlay on Deploy press; one peer's cancel stops it for everyone. Proceeds by default, no action needed (NOT a quorum — L177 pins this). Rides mod-state root `M#deploy` on 0xAC, veto is op 2 on 0xB8. `DeployCountdown.cs`, `CountdownPanel.cs`.
-- **Lobby ready gate** — owner ruling 2026-08-07: the no-quorum mandate covers IN-GAME progress only; the lobby is EXEMPT and a gate is wanted there. `LobbyController.IsLivePeer` is the ONE definition (not host, not `Paused`, `PlayerGuid != Guid.Empty`). L84 arm (c) retargeted. This REVERSES commit `afc111a` ("start on the host's own readiness, never on a peer quorum").
+NOTHING from tonight is confirmed in game except the round-1 campaign-start fixes and item transfer. Animation timing changes the path of EVERY combat action — test it first; it is a single-argument revert if it misbehaves.
 
----
+### Greps
 
-## 3. Harness changes — READ BEFORE TRUSTING ANY GREEN
+- `ECHO wait` / `ECHO host` / `ECHO LOST` / `ECHO busy` — animation echo lifecycle
+- `ready button footprint` + `IS REACHABLE` — ready-button position proof
+- `[MP][windows] queue DROPS` and `window-queue restore: … Kept:` — window queue lifecycle
+- `[MP][mission] CLIENT haven mission BLOCKED at S#` then `HOST intent APPLIED op=prepare-haven` — haven infiltration gate
+- `exploration NOT re-seeded` / `a STALE start` — should trend to zero after the epoch fix
+- `Broken coroutine call chain` in every `Player.log` (Unity-only)
+- `[Multiplayer] ping arrow CLICKED`
+- `CRC backstop:` — serious variant is `STILL diverged … after a forced re-emit`
 
-Three ways a "proof" was fiction in this session:
+### CRC
 
-**(a) Stale DLL.** A plain `dotnet run --no-build` (or running `RailCheck.exe` directly) reflects over whatever `Multiplayer.dll` is on disk. One run reported thirteen violations that were pure artefact; another gave an agent GREEN with the asserted call DELETED. **Now:** `StaleBuild` (L193 arm c) is a hard stop with exit 2 (`RAILCHECK REFUSED`) when `Multiplayer.dll` is older than any `src/**/*.cs`. The procedure is `dotnet build` then `dotnet run --no-build` (or just `dotnet run`, which rebuilds via ProjectReference). `.githooks/pre-commit` was already safe (plain `dotnet run`).
+Fired exactly ONCE all session, `root 'S#79' DIVERGED on peer 1`, explained by the haven bug. The serious variant did not appear, but the session ended 6 s later — weak evidence, not a clearance of the accepted host-keeps-its-own-graph risk.
 
-**(b) One throwing law aborted the run.** `laws.AddRange(X.Check())` let `RailMeta.CountMiss` (reading `UnityEngine.Time.realtimeSinceStartup`, an ECall outside the player) die at law #31 of 153, and `L98_ApAuthority` `Invoke`ing a production method by a hardcoded 7-argument array crashed on a signature change. Laws #32-153 never ran. **Now:** every registration goes through `Program.Add(laws, () => ...)` which `catch`es each law's exception and reports it AS that law's violation. The GREEN line prints `laws-run=N/N`. L193 arm (d) forbids `laws.AddRange(...)` by IL scan. `law-integrity.ps1` updated to match the new registration shape.
+### Untouched backlog from the log sweep
 
-**(c) Falsification edit that did not apply.** A `perl -0pi` pattern failed silently on a CRLF working copy. The agent got GREEN with the very method his new law asserted still intact. **Lesson:** verify the falsification edit landed (`git diff` the target file) before trusting a falsification run.
+- **Destructible guid collisions** — 60 collisions + 119 objects within 0.1 unit, all peers; damage to one of a colliding pair can be silently dropped.
+- **Two mirrored abilities never played on one client** — `RecoverWill`, `StandBy`, queued 10 s behind `IdleAbility`, law L78. Plus 27 deferred mirrors — re-measure after the animation change.
+- **Host publishes tactical one-shots before any client has a map at mission entry** — self-heals via settle.
+- **60 s liveness alarm is a false positive** — timer is not reset when a new barrier arms.
+- **`GeoMissionGenerator`** — the session's only PERMANENT `DiffEngine` exclusion.
+- **`TacticalItem`-target activation with no shared address** — cannot ride (1 occurrence).
 
----
+### Environment
 
-## 4. Still open / not verified in game
-
-Everything below is BUILT + DEPLOYED but UNVERIFIED in a live session.
-
-- **Geoscape-return hang** — the host's own world was loaded twice; `88fa596` skips the redundant second load. Check: one progress bar, not two, on a new campaign.
-- **False out-of-AP turn end** — `f1eebab` gates on `CanStillAct` over the shared faction. Check: the "everyone is done" prompt never fires while an ally has AP.
-- **Grenade / cone / free-aim from a client** — `7b75de9` exempts ground-targeting from the `TargetIsOffered` grid sweep. Check: a client can throw a grenade where the arc draws green.
-- **Kaos shop** — `a5a62e3` + `db4dc8f` address offers by content key and answer refusals in the panel. Check: buy a soldier, other goods stay; the sold item vanishes on both peers.
-- **Vehicle inventory in a mission** — `dc976fc` handles the null weapon slot a bare vehicle produces. Check: open a vehicle's inventory mid-battle without an NRE.
-- **Post-mission replenish** — `19af84c` re-asks `GetMissingItems()` after returning state arrives. Check: the button APPEARS AND works. Grep: `[MP][replenish] … the game's own gate saw N short soldier(s)`.
-- **Player panel** — `3f8d595` + `04bd013`. Check: visible in tactical, absent on geoscape, bars update.
-- **Ping markers** — `b8a41d7` + `30a64e3`. Check: visual appears (was audible-only before the fix), per-peer colour, beam vertical shaft. The off-screen arrow idea (one `UIObjectTracker` with `KeepOnScreen=true`) is NOT shipped — only the on-globe marker and the beacon.
-- **Lobby ready gate** — `3161d33` + `fd90105`. Check: PLAY blocked until peer readies; a phantom never blocks it.
-- **Double load gone** — `88fa596`. Check: the host sees one 0-100 progress bar, not two, on a new campaign.
-- **Phantom peer** — `94fb77b` + `fd90105` + `061f422`. Check: a retry join does not leave an `Unknown` seat.
-- **Log strings worth grepping:**
-  - `[MP][replenish] … the game's own gate saw N short soldier(s)`
-  - `[MP][windows] queue HELD while <screen> is open`
-  - `[Multiplayer][tac] rebuilt the open inventory panels`
-  - CRC divergence: `DiffEngine.HandleCrcReport`
+Session ran with mismatched mod sets (`Mod missing on client: com.kumarin.Resource_Replacer v2.0.0.0` on the join soft-gate), and two equipment-parity failures followed. Install the same mods on every instance.
 
 ---
 
-## 5. Superseded from the previous handoff
+## 4. Superseded from the previous handoff
 
-**5d — inventory cell position: CLOSED.** Vanilla has no coordinate field (`GeoItem.cs:12-23`); a cell IS a list index. `UIInventoryList.ItemChangedHandler:855-859` clamps with `Insert(Math.Min(...))`, so even the mover loses his hole on re-open. v1 shipped exact-cell only for the TACTICAL in-mission screen and only visually (commit `83ae20b`, `dstUiCell:i16`), never durable. L156 now holds the in-inventory reorder repainting the open equip screen; L157 holds the tactical inventory repaint not re-committing on the watcher.
+**Shot-animation desync: CLOSED by `f9ecd0e`.** The owner chose: every peer plays from the host's mirror, including the acting peer. The three decompile questions from the previous handoff were already answered; this session shipped the implementation. `AccumulationClientGate` untouched (TFTV replaces the DamageResult factory). The root — one event going two channels (`TacticalCommandSync.cs:750-753`, native `Activate` inside `SyncApplyScope` + host resolution on the rail) — is resolved by deferring the local activation and waiting for the echo.
 
-**5c — shot-animation desync: still OPEN** but the culling premise is REFUTED. `AnimatorCullingMode` is `CullUpdateTransforms`, not `CullCompletely`, so offscreen actors DO advance their state machines — the camera-dependency observed is not explained by culling alone. Option (C) ("remove the second channel") is supported only in the narrow form where the wire carries the CONFIRMATION, not a second activation; deleting `AccumulationClientGate` is off the table because TFTV replaces the DamageResult factory. The root — one event going two channels (`TacticalCommandSync.cs:750-753`, native `Activate` inside `SyncApplyScope` + host resolution on the rail) — is documented but no code was written. The three decompile questions from the previous handoff are answered: (1) culling mode = `CullUpdateTransforms`; (2) `AnimatorStateCheckpoint` does poll `GetCurrentAnimatorStateInfo` in a loop; (3) the mirror's `Activate` produces effects inside `SyncApplyScope`, and the suppression mechanism must be identified before (C) is attempted.
+**Ready button: CLOSED by `3224cfc`.** Was OFF SCREEN, not a wiring/layer/raycast problem. `TrimRaycast` deletion kept as correct hygiene. Two laws that mandated the defect withdrawn.
+
+**Lobby ready gate, phantom peer, geoscape-return hang, vehicle inventory, Kaos shop, post-mission replenish, player panel, ping markers, deployment countdown**: all from the previous handoff, all re-shipped or extended this session. Verification status per item in section 3.
 
 ---
 
-## 6. Rules that bit us, for the next session
+## 5. Rules that bit us, for the next session
 
-- **Shared-tree discipline with N agents.** A `git add -A` swept another agent's scratch dir and half-written files into a commit. Explicit pathspecs only — never `git add -A` in a multi-agent tree.
-- **Law numbers must be ASSIGNED, not max+1.** Three collisions in one minute when two agents each took the next number. Coordinate via `tools/law-count.txt` and the existing `docs/laws.md` index.
-- **A commit that registers a law must include the law FILE.** Five orphan registrations broke a clean checkout of HEAD — the `Add(laws, () => L<n>...Check(...))` line compiled against a file another commit (or another agent) had not pushed yet.
-- **A law that `Invoke`s a production method by a hardcoded argument array is a tripwire on that method's signature.** `L98_ApAuthority` crashed with `TargetParameterCountException` when another agent changed the target's parameter list — and it crashed as a HARNESS-CRASH (L193 arm a now contains it), not as a red line for L98. Contained now, but any Invoke-by-array law is inherently fragile.
-- **A `perl -0pi` falsification on a CRLF working copy fails silently.** Always `git diff` the target after a falsification edit, before trusting the result.
+- **Laws that assert shape, not outcome, are actively harmful.** L127(d)/L182(d) MANDATED the ready-button defect. L80/L168 had to be amended to allow a correct fix. Falsify every arm before trusting it; report unfalsifiable arms as DECORATIVE.
+- **`AbilityDisabledState.ToString()` (or any game type's `ToString`) in a law** → `GameUtl.Game()` → `SecurityException` outside a running game. The throw landed on the failing branch of two arms, so the law was green while valid and crashed the harness when it regressed. Use STRING LITERALS for state/reason names.
+- **Shared-tree discipline with N agents** — still applies. Explicit pathspecs only, never `git add -A`.
+- **Law numbers must be ASSIGNED, not max+1** — still applies. Coordinate via `tools/law-count.txt` and `docs/laws.md`.
+- **A commit that registers a law must include the law FILE** — still applies.
+- **Mismatched mod sets between instances** produce equipment-parity failures that look like sync bugs. Install the same mods on every test instance.
