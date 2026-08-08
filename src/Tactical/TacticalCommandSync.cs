@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -1238,6 +1238,32 @@ namespace Multiplayer.Tactical
             /// turn-edge sweep is the only host→all path that covers those actors, and it re-asserts rather
             /// than retries.</summary>
             public TftvChampIdentity.Identity Champ;
+
+            /// <summary>The host's KNOWN-STATE for that actor — one <see cref="VisionRow"/> per LOOKING faction
+            /// that knows it, carrying that faction's <c>Located</c> and <c>Revealed</c> counters verbatim
+            /// (<see cref="CollectVision"/>). The sixth field to ride the settle, and the first that replaces a
+            /// local computation rather than filling a hole: until 2026-08-08 nothing about vision crossed the
+            /// wire at all and each peer re-ran its own line-of-sight test over the settled position. That could
+            /// only ever ADD a reveal (<c>KnownCounters.IncrementCounterTo</c>:55-67 is a maximum), so a reveal
+            /// the host did NOT hold could never be taken away — and the two peers were not even testing the
+            /// same geometry, because a destructible whose combined guid collides is re-minted RANDOM per peer
+            /// (<c>SceneObjectIdsComponent.MergeWith</c>:29-34; 63 collisions over 126 objects in one measured
+            /// mission). Different cover, different line of sight, no possible agreement. A faction ABSENT from
+            /// the list means the host holds nothing for it, which is a real instruction and not a gap: the
+            /// client lowers to zero. Rows are skipped for a faction the game refuses to write anyway
+            /// (<c>IsAlwaysRevealedForThisFaction</c>), so the ordinary settle carries 0-2 rows.</summary>
+            public List<VisionRow> Vision;
+        }
+
+        /// <summary>What ONE looking faction knows about ONE actor, as the host holds it. Bytes, not ints: the
+        /// game raises these counters to 1 (player faction) or 2 (an AI one, <c>UpdateVisibilityForImpl</c>:584)
+        /// and decays them by 1 per faction-turn edge, so the whole range is single digits and this rides every
+        /// settle of every keyed actor at every turn edge.</summary>
+        internal struct VisionRow
+        {
+            public string FactionGuid;
+            public byte Located;
+            public byte Revealed;
         }
 
         /// <summary>HOST: which peer's order started the ability an actor is currently executing — 0 = the
@@ -2075,12 +2101,13 @@ namespace Multiplayer.Tactical
             string selGuid = selected == null || selected.ItemDef == null ? "" : selected.ItemDef.Guid;
             var uses = CollectAbilityUses(tacActor);
             var champ = TftvChampIdentity.Collect(tacActor);
+            var vision = CollectVision(tacActor);
             Send(OpSettle, "settle " + tacActor.name + " @ " + Fmt(pos) + " ap=" + ap.ToString("0.##") +
                  " wp=" + wp.ToString("0.##") + (forced ? " FORCED" : ""), 0,
                  w => { w.Write(key); w.Write(pos.x); w.Write(pos.y); w.Write(pos.z); w.Write(ap); w.Write(wp);
                         w.Write(forced); TacticalStatusSet.Write(w, statuses); WriteTraits(w, traits);
                         w.Write(hasEquip); if (hasEquip) w.Write(selGuid); WriteUses(w, uses);
-                        TftvChampIdentity.Write(w, champ); });
+                        TftvChampIdentity.Write(w, champ); WriteVision(w, vision); });
         }
 
         /// <summary>THE PER-TURN USE COUNTER, WHICH NOTHING REPLICATED (2026-08-08 RCA, symptom 2).
@@ -3018,7 +3045,7 @@ namespace Multiplayer.Tactical
                                                         r.ReadSingle(), r.ReadSingle(), r.ReadBoolean(),
                                                         TacticalStatusSet.Read(r), ReadTraits(r),
                                                         r.ReadBoolean() ? r.ReadString() : null,
-                                                        ReadUses(r), TftvChampIdentity.Read(r));
+                                                        ReadUses(r), TftvChampIdentity.Read(r), ReadVision(r));
                     else if (op == OpSelectEquipment) ApplySelectEquipment(r.ReadInt32(), r.ReadString());
                     else
                     {
@@ -3638,7 +3665,8 @@ namespace Multiplayer.Tactical
 
         private static void QueueSettle(int key, Vector3 pos, float ap, float wp, bool forced,
                                         List<string> statuses, List<string> traits, string selected,
-                                        Dictionary<string, int> uses, TftvChampIdentity.Identity champ)
+                                        Dictionary<string, int> uses, TftvChampIdentity.Identity champ,
+                                        List<VisionRow> vision)
         {
             // THE DISARM IS NOT HERE, AND THAT WAS THE LOCK-UP. A settle is the other half of "the host has
             // answered" — a REFUSED order produces no 0x82 mirror at all — but disarming the echo wait at
@@ -3648,7 +3676,7 @@ namespace Multiplayer.Tactical
             // IS, so the two cannot come apart again.
             _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced,
                                                 Statuses = statuses, Traits = traits, Selected = selected,
-                                                Uses = uses, Champ = champ,
+                                                Uses = uses, Champ = champ, Vision = vision,
                                                 Epoch = TacticalDamageSync.StatEpoch };
         }
 
@@ -3864,155 +3892,227 @@ namespace Multiplayer.Tactical
                 // arrives nowhere, because ActorSpawner:17 regenerates it per peer. Silent when the two
                 // already agree, which is every settle after the first.
                 TftvChampIdentity.Apply(actor, s.Champ, "the host's settle");
-                RefreshVisionTowards(actor);
+                // AND WHAT EVERY FACTION KNOWS ABOUT HIM — the host's answer, not this peer's. LAST on purpose:
+                // SetTransform above raises the native ActorMoved that re-runs this peer's own vision, and the
+                // status reconcile above can add or drop a Stealth/cloak status that changes the same answer, so
+                // the authoritative write has to be the one that lands after both.
+                ApplyVision(actor, s.Vision);
             }
             Debug.Log("[Multiplayer][tac] CLIENT settled " + actor.name + " @ " + Fmt(s.Pos) +
                       " ap=" + s.Ap.ToString("0.##") + " wp=" + s.Wp.ToString("0.##"));
         }
 
         /// <summary>
-        /// RE-RUN THIS PEER'S OWN NATIVE VISION over the settled actor. NOT a vision transfer — no known-state
-        /// crosses the wire in either direction; this calls the game's own LOS test
-        /// (<c>TacticalFactionVision.UpdateVisibilityOfAllTowardsActor</c>:546-560 →
-        /// <c>ReUpdateVisibilityTowardsActorImpl</c>:651-662 → the physics cast) on the replicated board, at the
-        /// authoritative position the settle just wrote, with the SAME base range the native movement path uses
-        /// (<c>OnActorMoved</c>:298 passes <c>TacticalLevelControllerDef.DetectionRange</c>). It can therefore
-        /// never reveal anything this peer's own line of sight does not already support.
+        /// THE HOST'S KNOWN-STATE FOR ONE ACTOR, COLLECTED. Every faction that knows <paramref name="actor"/>
+        /// contributes its <c>Located</c> and <c>Revealed</c> counters verbatim, read out of the game's own
+        /// <c>TacticalFactionVision.KnownActors</c> — the single dictionary <c>TacticalView</c>:486-516 turns
+        /// into <c>SetShownMode</c> for every actor on the board, and therefore the single fact that decides
+        /// whether a client can see an enemy at all.
         ///
-        /// THE INPUT IT REPAIRS. Native vision is sampled ONLY on <c>ActorMovedEvent</c>, which
-        /// <c>TacticalActorBase.SetTransform</c>:665-673 raises once per navigation sample
-        /// (<c>TacticalNavigationComponent.UpdateActorTransformFromPathSample</c>:679 →
-        /// <c>SetPositionIfDelta</c>:521) — and only when the position actually CHANGED
-        /// (<c>TacticalLevelController.ActorMoved</c>:1157-1163 tests <c>Utl.Equals(actor.Pos, prevPos)</c>
-        /// first). Two things make that sampling thinner on a peer than on the host, both of them one-sided:
-        ///  • an actor this peer has not revealed carries <c>TimingScale 4f</c>
-        ///    (<c>TacticalActorViewBase.RefreshTimeScale</c>:423-437, added for every non-Revealed/non-Located
-        ///    actor), so its mirrored walk consumes ~4x fewer frames and its path is LOS-tested ~4x more
-        ///    coarsely — the reveal window the host caught mid-walk can fall entirely between two samples here;
-        ///  • a settle that lands on the position this peer already computed raises NO event at all, so the
-        ///    host's final word for that actor was never put to a vision test.
-        /// Once a mid-walk reveal is missed nothing re-tests it until the next faction-turn edge
-        /// (<c>OnFactionStartTurn</c>:154-175 is the only full recompute), so a peer stays dark for a whole
-        /// turn — and every peer misses it the same way, which is why the two clients agree with each other and
-        /// not with the host. Being dark is not cosmetic: <c>SetShownModeInternal</c>:363 disables every
-        /// renderer of a non-Revealed actor (<c>RefreshAddonRenderers</c>:453-472) and the health bar shares the
-        /// gate (<c>ShouldRenderUI</c>:395-403), so the same miss is the invisible enemy and the missing HP bar.
+        /// WHY IT IS ON THE WIRE NOW, AFTER A YEAR OF DELIBERATELY KEEPING IT OFF. Until 2026-08-08 the settle
+        /// carried no vision at all and each peer RE-RAN its own native line-of-sight test over the settled
+        /// position. Four reasons that could not converge, and the fourth is fatal on its own:
+        ///  • it was MONOTONE. <c>KnownCounters.IncrementCounterTo</c>:55-67 is <c>if (num &lt; counter)</c> — a
+        ///    maximum, never a sum and never a decrease — so the repair could ADD a reveal the host had and
+        ///    could NEVER remove one the host did not. Half of "the same soldier sees an enemy on one peer and
+        ///    not on the other, in BOTH directions" was structurally unreachable.
+        ///  • a settle landing on the position this peer already computed raises no <c>ActorMoved</c>
+        ///    (<c>TacticalLevelController</c>:1157-1163 tests <c>Utl.Equals(actor.Pos, prevPos)</c> first), so
+        ///    the host's final word was never put to a test at all.
+        ///  • a non-Revealed actor carries <c>TimingScale 4f</c> (<c>TacticalActorViewBase.RefreshTimeScale</c>
+        ///    :423-437), so its mirrored walk is LOS-sampled ~4x coarser and a mid-walk reveal falls between
+        ///    two samples — one-sided against exactly the peer that cannot see it yet.
+        ///  • AND THE PEERS DO NOT SHARE THE GEOMETRY. <c>SceneObjectIdsComponent.MergeWith</c>:29-34 mints a
+        ///    FRESH RANDOM guid when a combined destructible guid collides, and a random guid differs on every
+        ///    peer; measured 26 collisions over 52 objects in one mission and 63 over 126 in another, each of
+        ///    them then addressed by POSITION instead. Different cover is different line of sight. Two peers
+        ///    recomputing vision from divergent geometry cannot agree in principle, however good the repair.
+        /// So visibility stops being computed per peer and becomes what every other field on this settle
+        /// already is: the host's value, mirrored.
         ///
-        /// Idempotent by construction: <c>KnownCounters.IncrementCounterTo</c>:55-67 only ever raises a counter
-        /// to a maximum, so re-running this over an already-revealed actor changes nothing. Every faction but
-        /// the actor's own, in the shape <c>ShootAbility.Activate</c>:157-163 uses — the reveal is a property of
-        /// the board, not of who is currently playing.
-        ///
-        /// BOTH DIRECTIONS, AND THE FIRST VERSION ONLY HAD ONE (2026-08-04). Native vision is a RELATION and
-        /// <c>TacticalFactionVision.OnActorMoved</c>:273-306 recomputes it from BOTH ends: an actor of MY OWN
-        /// faction takes :279-286 → <c>UpdateVisibilityForImpl</c> ("what this actor now SEES", a sweep out
-        /// over every actor on the map), and a FOREIGN one takes :294-301 →
-        /// <c>ReUpdateVisibilityTowardsActorImpl</c> ("who now sees IT"). The repair shipped only the second,
-        /// because that is the only one the game exposes publicly — so a settle for one of THIS peer's own
-        /// soldiers re-tested who could see him and never re-tested what HE could see. That is the whole
-        /// report: a sniper walked on the acting client, spotted a bandit through its own native
-        /// <c>ActorMovedEvent</c>, and every mirroring peer — whose only word on that walk is the settle —
-        /// kept the bandit in fog for rounds (measured: <c>MIRROR play Scab Move_AbilityDef
-        /// shownMode=Hidden</c> on both clients, 22:23).
-        ///
-        /// The missing half is assembled from the SAME native method rather than a new one, by inverting the
-        /// loop: "my faction re-tests toward each foreign actor" covers "my settled soldier now sees them",
-        /// with the game's own LOS cast, the game's own counter arithmetic and the same monotone
-        /// idempotence — nothing here can reveal what this peer's line of sight does not support, which is
-        /// what law L81 bans.
-        /// ponytail: the inverted sweep re-tests the WHOLE faction per foreign actor, not just the one that
-        /// moved, because no public per-actor entry exists (<c>UpdateVisibilityForImpl</c> is private). Cost is
-        /// |ownActors| x |foreignActors| LOS casts per settle, off the frame hot path; if that ever shows up in
-        /// the rail cost line, narrow it to the settled actor with the public
-        /// <c>CheckVisibleLineBetweenActors</c> + <c>IncrementKnownCounter</c> pair.
-        ///
-        /// THE CEILING THIS USED TO DECLARE IS RAISED. <c>KnownState.Located</c> — in detection range, no
-        /// line of sight, the orange "something is there" beacon — really is unreachable through
-        /// <c>UpdateVisibilityOfAllTowardsActor</c>:546, whose whole body is
-        /// <c>ReUpdateVisibilityTowardsActorImpl</c>:651-662 and which raises <c>Revealed</c> and nothing
-        /// else. So the beacon was simply LOST between settles: a mirroring peer knew an enemy was there
-        /// only once it could SEE it. <see cref="LocateByDistance"/> adds the missing half, transcribed from
-        /// the game's own rule rather than invented — <c>GatherKnowableActors</c>:640-647 locates an actor
-        /// when it is a live, uncloaked <c>TacticalActor</c> within
-        /// <c>TacticalLevelControllerDef.DetectionRange</c>, and the raise is the same public
-        /// <c>IncrementKnownCounter(actor, Located, 1, notify)</c>:444 that
-        /// <c>UpdateVisibilityForImpl</c>:576-579 uses for exactly that list. Hearing
-        /// (<c>ReUpdateHearingImpl</c>:664-684, per-soldier <c>HearingRange</c>) stays out: it is a second,
-        /// independent rule and this repair is not the place to grow one.
-        ///
-        /// THE REVERSE RISK — a beacon that outlives its enemy — IS BOUNDED, AND THE BOUND IS THE GAME'S OWN,
-        /// not a hope. Two facts make it so. (1) The counter is a MAX, not a tally:
-        /// <c>KnownCounters.IncrementCounterTo</c>:55-67 is <c>if (num &lt; counter) _counters[type] =
-        /// counter</c>, so raising Located to 1 twice leaves 1, and a mirrored raise landing on top of this
-        /// peer's own native one adds nothing to decay. (2) The decay is the faction-turn edge —
-        /// <c>OnFactionStartTurn</c>:154-165 runs <c>DecrementMyCountersForFaction</c> then a full
-        /// <c>UpdateVisibilityAll</c> — and EVERY peer runs it. Vanilla's own beacon is raised by precisely
-        /// the same monotone call on <c>OnActorMoved</c>:281 and cannot be lowered mid-turn either. So this
-        /// arm does not make a peer's beacon staler than a single-player one; it makes it exist.
-        /// ponytail: the LOS re-test that would make the raise strictly "located INSTEAD of revealed"
-        /// (<c>GatherKnowableActors</c>'s else-if chain) is skipped — it is a second full visibility cast per
-        /// pair, and Located+Revealed together is a state vanilla reaches all the time (one soldier in range
-        /// without sight, another with it).
-        /// </summary>
-        /// <summary>THE toActor MUST BE A PERCEIVABLE ONE, AND THE GAME DOES NOT CHECK (2026-08-04 RCA — this is what
-        /// killed the whole settle path). <c>UpdateVisibilityOfAllTowardsActor</c>:549-554 guards only the
-        /// LOOKER (<c>if (!(actor.TacticalPerceptionBase == null))</c>); the actor being looked AT is passed
-        /// straight through to <c>CheckVisibleLineBetweenActors</c>:755 →
-        /// <c>GetSizeAndStealthVisibilityMultiplier</c>:842, whose first line dereferences
-        /// <c>actor.TacticalPerceptionBase.TacticalPerceptionBaseDef</c> with no test at all. Natively that is
-        /// safe because the only caller is <c>OnActorMoved</c>, which can only ever name an actor that walked.
-        /// The inverted sweep below names EVERY member of a foreign faction, and <c>TacticalActorBase</c> is
-        /// also what crates, ground piles and destructibles are (A6) — none of which carry a perception
-        /// component. So it threw a plain NRE on the first such entry of the first settle, and kept throwing:
-        /// measured 15305 identical NREs and ZERO applied settles across a whole battle on both clients, while
-        /// the host shipped 94. Same guard as the game's own, on the side the game forgot.</summary>
-        private static bool CanBeSeen(TacticalActorBase actor) =>
-            !ReferenceEquals(actor, null) && actor.TacticalPerceptionBase != null;
-
-        private static void RefreshVisionTowards(TacticalActorBase actor)
+        /// WHAT IS DELIBERATELY NOT SHIPPED. A faction for which the game refuses to write this actor's
+        /// counters at all — <c>IsAlwaysRevealedForThisFaction</c>, i.e. the actor's OWN faction and anything
+        /// flagged <c>AlwaysVisible</c> — is skipped on BOTH ends: <c>IncrementKnownCounterImpl</c>:388-391 and
+        /// <c>ResetKnownCounterImpl</c>:456-459 both return early for it, so a row would be an instruction
+        /// nothing can carry out, and the entry those actors do have is minted identically on every peer by
+        /// <c>OnActorEnteredPlay</c>:336-348. A faction that knows NOTHING contributes no row either — its
+        /// ABSENCE is the instruction (<see cref="ApplyVision"/> lowers an absent faction to zero), which is
+        /// what keeps an ordinary settle at 0-2 rows instead of one per faction.</summary>
+        internal static List<VisionRow> CollectVision(TacticalActorBase actor)
         {
+            var rows = new List<VisionRow>();
             var tlc = actor == null ? null : actor.TacticalLevel;
-            if (tlc == null || tlc.TacticalLevelControllerDef == null || !CanBeSeen(actor)) return;
-            float range = tlc.TacticalLevelControllerDef.DetectionRange;
-            var own = actor.TacticalFaction;
+            if (tlc == null || tlc.Factions == null) return rows;
             foreach (var faction in tlc.Factions)
             {
-                if (faction == own || faction.Vision == null) continue;
-                faction.Vision.UpdateVisibilityOfAllTowardsActor(actor, range, notifyChange: true);
-                LocateByDistance(faction, actor, range);
-                if (own == null || own.Vision == null) continue;
-                foreach (var foreign in faction.Actors)
-                    if (CanBeSeen(foreign))
-                    {
-                        own.Vision.UpdateVisibilityOfAllTowardsActor(foreign, range, notifyChange: true);
-                        LocateByDistance(own, foreign, range);
-                    }
+                var vision = faction == null ? null : faction.Vision;
+                if (vision == null || vision.IsAlwaysRevealedForThisFaction(actor)) continue;
+                TacticalFactionVision.KnownCounters counters;
+                if (!vision.KnownActors.TryGetValue(actor, out counters)) continue;
+                int located = counters[KnownState.Located], revealed = counters[KnownState.Revealed];
+                if (located <= 0 && revealed <= 0) continue;
+                string guid = faction.TacticalFactionDef == null ? null : faction.TacticalFactionDef.Guid;
+                if (string.IsNullOrEmpty(guid))
+                {
+                    Debug.LogWarning("[Multiplayer][tac] the host holds known-state for " + SafeActorName(actor) +
+                                     " (located=" + located + " revealed=" + revealed + ") under a faction with " +
+                                     "NO TacticalFactionDef guid, so that faction cannot be named on the wire — " +
+                                     "every client keeps whatever it decided for itself about that one faction, " +
+                                     "which is precisely the divergence this block exists to end.");
+                    continue;
+                }
+                rows.Add(new VisionRow { FactionGuid = guid,
+                                         Located = ClampCounter(located), Revealed = ClampCounter(revealed) });
+            }
+            return rows;
+        }
+
+        private static byte ClampCounter(int n) => n <= 0 ? (byte)0 : n >= 255 ? (byte)255 : (byte)n;
+
+        internal static void WriteVision(BinaryWriter w, List<VisionRow> rows)
+        {
+            w.Write(rows == null ? 0 : rows.Count);
+            if (rows == null) return;
+            foreach (var row in rows)
+            {
+                w.Write(row.FactionGuid ?? "");
+                w.Write(row.Located);
+                w.Write(row.Revealed);
             }
         }
 
-        /// <summary>The DISTANCE half of knowing where somebody is, transcribed from
-        /// <c>TacticalFactionVision.GatherKnowableActors</c>:640-647: a live, uncloaked, non-evacuated
-        /// <c>TacticalActor</c> within <c>DetectionRange</c> of ANY of the looking faction's actors is
-        /// LOCATED by that faction. The raise is the game's own public counter call, at the same value
-        /// <c>UpdateVisibilityForImpl</c>:576-579 uses.
-        ///
-        /// It returns on the FIRST locator on purpose: <c>IncrementCounterTo</c>:55-67 takes a maximum, not
-        /// a sum, so a second locator would change nothing — and walking the rest of the faction per foreign
-        /// actor is the cost this settle path is already careful about.</summary>
-        private static void LocateByDistance(TacticalFaction looking, TacticalActorBase target, float range)
+        internal static List<VisionRow> ReadVision(BinaryReader r)
         {
-            if (looking == null || looking.Vision == null || !CanBeSeen(target)) return;
-            var ta = target as TacticalActor;
-            if (ta == null || !ta.IsAlive || ta.IsCloaked) return;
-            if (ta.Status != null && ta.Status.HasStatus<EvacuatedStatus>()) return;
-            foreach (var looker in looking.Actors)
+            int n = r.ReadInt32();
+            var rows = new List<VisionRow>(n < 0 ? 0 : n);
+            for (int i = 0; i < n; i++)
+                rows.Add(new VisionRow { FactionGuid = r.ReadString(),
+                                         Located = r.ReadByte(), Revealed = r.ReadByte() });
+            return rows;
+        }
+
+        /// <summary>HOW MANY TIMES THE ACTOR MUST BE DECREMENTED before the host's numbers can be raised onto
+        /// it. Pure, and separated out for exactly one reason: it is the arithmetic that makes a reveal go
+        /// AWAY, which is the half no previous version of this repair could reach, so RailCheck L338 EXECUTES
+        /// it against the game's own <c>KnownCounters</c> rather than reading the call graph.
+        ///
+        /// The game gives no "set this counter to N". It gives a monotone raise
+        /// (<c>IncrementKnownCounter</c>:444 → <c>IncrementCounterTo</c>:55-67, a maximum) and ONE lowering
+        /// mechanism, the same one the faction-turn edge uses to decay knowledge:
+        /// <c>DecrementKnownCounters</c>:494-505 → <c>DecrementAllCounters</c>:89-95, which lowers EVERY
+        /// counter by one with a floor of zero and drops the actor from <c>KnownActors</c> once they are all
+        /// zero. So an exact assignment is: decrement until no counter is above its target — that is
+        /// <c>max</c> over the per-counter surpluses, because one decrement lowers them all — then raise each
+        /// one back to its target. Every counter is then at or below its target before the raise, and the
+        /// raise is a maximum, so the result is the target exactly, in both directions.</summary>
+        internal static int PlanVisionDrops(int curLocated, int curRevealed, int tgtLocated, int tgtRevealed)
+        {
+            int surplus = Math.Max(curLocated - tgtLocated, curRevealed - tgtRevealed);
+            return surplus < 0 ? 0 : surplus;
+        }
+
+        /// <summary>THE CLIENT STOPS DECIDING. Nothing here casts a ray, reads a cover direction or consults
+        /// this peer's own line of sight: the host's rows are assigned onto the game's own counters through the
+        /// game's own public entries, so after a settle this peer's visibility for that actor EQUALS the
+        /// host's — a reveal the host holds appears, and a reveal the host does not hold is REMOVED.
+        ///
+        /// AND BOTH DIRECTIONS COME FROM ONE LIST, which is why this replaces a sweep and not just a call. The
+        /// old repair had to assemble "who sees him" and "what he sees" from two different native methods (one
+        /// of them private, hence an inverted |own| x |foreign| sweep). A per-(faction, actor) counter is
+        /// already the relation itself: the settle for a soldier carries what the ALIEN faction knows about
+        /// HIM, and the settle for the alien carries what the PLAYER faction knows about IT. Both settles are
+        /// sent — <see cref="HostSettle"/> is called for the acting actor and the turn-edge sweep covers every
+        /// keyed live actor — so the relation is closed from both ends without either peer testing anything.
+        ///
+        /// IT REPAINTS AN OPEN BATTLE BY CONSTRUCTION, on both edges. <c>IncrementKnownCounter</c>:444-452 and
+        /// <c>DecrementKnownCounters</c>:494-505 each end in <c>TacticalLevelController.FactionKnowledgeChanged</c>
+        /// :815-818, whose subscriber <c>TacticalView.OnFactionKnowledgeChanged</c>:486-516 re-runs
+        /// <c>SetShownMode</c> over every actor on the map from that very dictionary — so the renderers
+        /// (<c>SetShownModeInternal</c>:363 → <c>RefreshAddonRenderers</c>:453-472) and the health bar
+        /// (<c>ShouldRenderUI</c>:395-403, polled every frame at <c>Update</c>:416) follow the write with no
+        /// repaint call of this mod's own. The LOWER edge notifies nothing per actor
+        /// (<c>DecrementKnownCounters</c> never reaches <c>NotifyActorVisibilityChanged</c>) — deliberately,
+        /// because the game's own decay does not either: <c>OnFactionStartTurn</c>:154-175 runs
+        /// <c>DecrementMyCountersForFaction</c> and then <c>UpdateVisibilityAll(notifyChange: false)</c>, and
+        /// leans on the same knowledge-changed sweep to repaint.
+        ///
+        /// A faction the game refuses to write is skipped and NOT a swallow: <c>IncrementKnownCounterImpl</c>
+        /// :388-391 and <c>ResetKnownCounterImpl</c>:456-459 both return early on
+        /// <c>IsAlwaysRevealedForThisFaction</c>, the host does not ship a row for one either
+        /// (<see cref="CollectVision"/>), and its entry is minted identically on every peer at
+        /// <c>OnActorEnteredPlay</c>:336-348. There is no state being dropped, so there is nothing to name —
+        /// and a log line there would fire per faction per settle per actor for the rest of the battle.
+        /// Everything that IS a refusal — no level, no payload, a faction guid this peer does not have — says
+        /// so out loud.</summary>
+        private static void ApplyVision(TacticalActorBase actor, List<VisionRow> rows)
+        {
+            var tlc = actor == null ? null : actor.TacticalLevel;
+            if (tlc == null || tlc.Factions == null)
             {
-                if (!CanBeSeen(looker) || looker.IsDead || ReferenceEquals(looker, ta)) continue;
-                if (!Utl.LesserThanOrEqualTo((looker.Pos - ta.Pos).magnitude, range)) continue;
-                looking.Vision.IncrementKnownCounter(ta, KnownState.Located, 1, notifyChange: true);
+                Debug.LogWarning("[Multiplayer][tac] the host's known-state for " + SafeActorName(actor) +
+                                 " cannot be applied — that actor has no TacticalLevel on this peer, so there " +
+                                 "is no faction whose vision could be written. It keeps whatever this peer " +
+                                 "decided for itself and stays divergent until the next settle.");
                 return;
             }
+            if (rows == null)
+            {
+                Debug.LogWarning("[Multiplayer][tac] the settle for " + SafeActorName(actor) + " carried NO " +
+                                 "vision block at all. That is a host older than this build or a truncated " +
+                                 "payload; this peer keeps its own answer about who can see that actor, which " +
+                                 "is the pre-2026-08-08 behaviour and is not host-authoritative.");
+                return;
+            }
+            string changed = null;
+            foreach (var faction in tlc.Factions)
+            {
+                var vision = faction == null ? null : faction.Vision;
+                if (vision == null || vision.IsAlwaysRevealedForThisFaction(actor)) continue;
+                string guid = faction.TacticalFactionDef == null ? null : faction.TacticalFactionDef.Guid;
+                int tgtLocated = 0, tgtRevealed = 0;
+                foreach (var row in rows)
+                    if (string.Equals(row.FactionGuid, guid, StringComparison.Ordinal))
+                    { tgtLocated = row.Located; tgtRevealed = row.Revealed; break; }
+                int curLocated = 0, curRevealed = 0;
+                TacticalFactionVision.KnownCounters counters;
+                if (vision.KnownActors.TryGetValue(actor, out counters))
+                { curLocated = counters[KnownState.Located]; curRevealed = counters[KnownState.Revealed]; }
+                if (curLocated == tgtLocated && curRevealed == tgtRevealed) continue;
+
+                int drops = PlanVisionDrops(curLocated, curRevealed, tgtLocated, tgtRevealed);
+                for (int i = 0; i < drops; i++) vision.DecrementKnownCounters(actor);
+                if (tgtLocated > 0)
+                    vision.IncrementKnownCounter(actor, KnownState.Located, tgtLocated, notifyChange: true);
+                if (tgtRevealed > 0)
+                    vision.IncrementKnownCounter(actor, KnownState.Revealed, tgtRevealed, notifyChange: true);
+
+                changed = (changed == null ? "" : changed + ", ") + FactionName(faction) + " (" + curLocated +
+                          "," + curRevealed + ")→(" + tgtLocated + "," + tgtRevealed + ")";
+            }
+            foreach (var row in rows)
+            {
+                bool known = false;
+                foreach (var faction in tlc.Factions)
+                    if (faction != null && faction.TacticalFactionDef != null &&
+                        string.Equals(faction.TacticalFactionDef.Guid, row.FactionGuid, StringComparison.Ordinal))
+                    { known = true; break; }
+                if (!known)
+                    Debug.LogWarning("[Multiplayer][tac] the host's settle for " + SafeActorName(actor) +
+                                     " says the faction with guid '" + row.FactionGuid + "' knows it (located=" +
+                                     row.Located + " revealed=" + row.Revealed + ") and THIS PEER HAS NO SUCH " +
+                                     "FACTION. That reveal cannot be mirrored here in any form — the two peers " +
+                                     "are not holding the same set of factions.");
+            }
+            if (changed != null)
+                Debug.Log("[Multiplayer][tac] vision for " + SafeActorName(actor) + " set to the HOST's: " +
+                          changed + " (located,revealed per looking faction). A pair that went DOWN is a " +
+                          "reveal this peer held and the host does not — the direction a local re-run of this " +
+                          "peer's own line of sight could never reach, because the counters only ever rise.");
         }
+
+        private static string FactionName(TacticalFaction faction) =>
+            faction == null || faction.TacticalFactionDef == null
+                ? "<unnamed faction>" : faction.TacticalFactionDef.name;
     }
 
     /// <summary>
