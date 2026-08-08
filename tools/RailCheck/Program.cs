@@ -335,6 +335,10 @@ namespace RailCheck
             Add(laws, () => L352_ThePerPeerAnswerStaysHomeAndStillLands.Check());
             Add(laws, () => L354_AnEmptySquadScreenIsNotServed.Check());
             Add(laws, () => L355_ALaunchedMissionDoesNotArmASecondCountdown.Check());
+            Add(laws, () => L365_AClassSwapIsRecreatedNotFieldPatched.Check());
+            Add(laws, () => L366_ACapacityShapedLoadoutFitsACompactVehicle.Check());
+            Add(laws, () => L369_ABaseRenameReachesTheMirror.Check());
+            Add(laws, () => L371_AMidSessionParityDiffIsSaidOutLoud.Check());
             Add(laws, () => L372_OneDeploymentCapForTheScreenAndTheValidator.Check());
             laws.Sort(StringComparer.Ordinal);
 
