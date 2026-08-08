@@ -280,6 +280,19 @@ namespace Multiplayer.Network.Sync
         //     construction site in the game is a fresh `new GeoSquad(...)` built for that one mission
         //     (GeoSite.cs:1170, GeoscapeView.cs:1045, UIStateRosterDeployment.cs:324). Its `Units` ride as
         //     EntityRefs, so the client's copy points at the client's OWN GeoCharacters.
+        //   • MapPlotInstanceData (GeoSite.MapPlotInstanceData, carried under the GeoSiteInstaceData bridge
+        //     at S#<id>.SerializationData.MapPlotInstanceData) — the mission's generated map plot. Plain
+        //     [SerializeType(Embedded = true)] class with an implicit parameterless ctor and two members
+        //     (MapPlotInstanceData.cs:9-14); the game itself only ever allocates a FRESH one
+        //     (MapPlotDef.GenerateInstanceData:101-103, PhoenixBasePlotGenerationDef:103), so it holds no
+        //     identity a second object owns — TacticalGameParams.MapPlotInstanceData is the same reference
+        //     read straight back (GeoMission.cs:763,766). Client wiring is the game's OWN load path, the
+        //     same method that already restores the enabled ActiveMission row nine lines earlier
+        //     (GeoSite.ProcessInstanceData:1551 vs :1560). Embedded is not a blocker: UnityDateTime above
+        //     is Embedded too and its create ships.
+        //     BOTH directions were dead, not just one: without the row the null→obj create never emitted
+        //     (every entry under the path died at GenericApplier "entity not found", both clients, mission
+        //     entry) and GeoSite.cs:782's `MapPlotInstanceData = null` could never reach a client either.
         // DELIBERATELY ABSENT — GeoHavenZone (GeoStealAircraftMission._zone, GeoFaction.BuildingZone):
         // constructing one would hand the client a phantom instead of the haven's own zone. It was a KEYING
         // gap, and it is closed as one: the zone is named by the path its haven addresses it by
@@ -290,6 +303,7 @@ namespace Multiplayer.Network.Sync
             typeof(PhoenixPoint.Geoscape.Entities.GeoMission),
             typeof(Base.Utils.UnityDateTime),
             typeof(PhoenixPoint.Geoscape.Entities.GeoSquad),
+            typeof(PhoenixPoint.Common.Levels.MapGeneration.MapPlotInstanceData),
         };
         private static readonly HashSet<Type> StructuralDescendTypes = new HashSet<Type>(StructuralDescendKindTable);
 
