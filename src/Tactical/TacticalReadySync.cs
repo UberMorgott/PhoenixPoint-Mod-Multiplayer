@@ -229,14 +229,22 @@ namespace Multiplayer.Tactical
     /// the original slid away. Upgrade path is one line — parent the clone to the native button itself
     /// instead of beside it — but that costs a rect-mask risk today for a hazard nothing exhibits.
     ///
-    /// THE GREEN IS OURS, DELIBERATELY, and the reason is in the game's own code. PP's colour mechanism is
-    /// <c>UIInteractableColorController.GetColor</c> — a def-driven palette (idle/hover/pressed/disabled)
-    /// with no "toggled on" concept reachable without a <c>ToggleButton</c> plus a new
-    /// <c>UIInteractableColorsDef</c>, and none of its six colours is green. Worse, it RE-ASSERTS its
-    /// colour on every visual-state change (<c>PhoenixGeneralButton.Update</c> → <c>UpdateColorElements</c>),
-    /// so a tint written onto the button's own Image is reverted by the next hover. So the ready state is
-    /// a child Image at sibling index 0 — above the frame, under the label, raycast off — which nothing
-    /// native touches and which leaves every native hover/press animation intact.
+    /// THE GREEN IS THE GAME'S OWN LATCHED TINT, plus one overlay of ours behind it. The first half of that
+    /// sentence is new (2026-08-08) and it is the half that is load-bearing — see <see cref="Latch"/>. PP's
+    /// colour mechanism is <c>UIInteractableColorController.GetColor</c>, a def-driven palette
+    /// (idle/hover/pressed/disabled) that asks <c>IsSelectedTab</c> FIRST: a <c>ToggleButton</c> with
+    /// <c>IsOn</c> on the button's own GameObject paints <c>PressedColor</c> onto every controlled element
+    /// and NO hover or press can revert it. That is the native "this one is ON" state, and it lands on the
+    /// clone's own frame/background graphics — the ones the settled log proves the canvas draws. None of the
+    /// palette's six colours is green, so each controller gets a clone-private copy of the def whose
+    /// PressedColor we own; the shared asset is never written.
+    ///
+    /// The <c>MP_ReadyGreen</c> child Image stays as a second layer — stretched over the button, raycast
+    /// off, DEPTH-PLACED FROM THE REAL SUBTREE (<see cref="BuildGreenOverlay"/> derives its sibling index
+    /// from the shallowest label child; index 0 is the BOTTOM of the draw order and would have been hidden
+    /// by any opaque frame child). It has never been observed painting in any build, which is why
+    /// <see cref="ReportGreen"/> now prints its enabled/colour/depth/cull on change: the native tint is what
+    /// makes the state visible, and that log is what will finally say whether the overlay contributes at all.
     /// </summary>
     internal static class TacticalReadyButton
     {
@@ -246,6 +254,25 @@ namespace Multiplayer.Tactical
         private static readonly List<Action<string>> _setters = new List<Action<string>>();
         private static Image _green;
         private static bool _loggedBuildFailure;
+
+        /// <summary>The clone's own <c>PhoenixGeneralButton</c> — the thing that repaints the native tint on
+        /// demand (<c>UpdateColorElements</c>), and the seam that makes an already-open HUD go green the
+        /// instant a tally lands. Unity-null between battles.</summary>
+        private static PhoenixGeneralButton _button;
+
+        /// <summary>The <c>ToggleButton</c> we add to the clone purely so its <c>IsOn</c> can latch the tint.
+        /// Nothing else uses it: its click listener is removed and <c>SetIsOn</c> is never called.</summary>
+        private static ToggleButton _latch;
+
+        /// <summary>The clone-private colour defs (one per colour-controlled Image on the clone) whose
+        /// <c>PressedColor</c> this class owns, and the shade each of them shipped with — restored whenever
+        /// the latch is off, so a plain press on a not-ready button does not flash the ready green.</summary>
+        private static readonly List<Base.UI.UIInteractableColorsDef> _tintDefs =
+            new List<Base.UI.UIInteractableColorsDef>();
+        private static readonly List<Color> _tintPressed = new List<Color>();
+
+        /// <summary>Last state <see cref="ReportGreen"/> printed. The log speaks on CHANGE only.</summary>
+        private static string _lastGreenState;
 
         /// <summary>The clone's own rect, READ-ONLY to everyone outside this class, and the anchor the
         /// co-op player panel hangs itself under (<c>Multiplayer.UI.PlayerPanel</c>). Exposed rather than
@@ -264,6 +291,14 @@ namespace Multiplayer.Tactical
         {
             _setters.Clear();
             _green = null;
+            _button = null;
+            _latch = null;
+            // The defs are runtime ScriptableObject copies owned by nobody else. Dropping the last reference
+            // is the whole teardown: Unity collects them with the scene's unused assets, and RailCheck L67
+            // bans Object.Destroy from this namespace outright.
+            _tintDefs.Clear();
+            _tintPressed.Clear();
+            _lastGreenState = null;
             _labelDepth = -1;
             Rect = null;   // the panel stops finding a tactical anchor and falls back to its geoscape one
         }
@@ -500,6 +535,66 @@ namespace Multiplayer.Tactical
             btn.onClick.AddListener(TacticalReadySync.Toggle);
             btn.interactable = true;
             if (pgb != null) pgb.SetInteractable(true);
+            // AFTER the prune, always: the latch's own Awake calls UpdateColorElements, and running that over
+            // an unpruned list would let a controller OUTSIDE the clone cache our button as its controller.
+            Latch(go, pgb, btn);
+        }
+
+        /// <summary>
+        /// THE NATIVE "THIS ONE IS LATCHED ON" TINT — the one green path the canvas is PROVED to draw.
+        ///
+        /// <c>UIInteractableColorController.GetColor</c> (Base.UI/UIInteractableColorController.cs:83-110)
+        /// asks <c>IsSelectedTab</c> (:112-135) FIRST, before hover and before press, and that method answers
+        /// true for a <c>ToggleButton</c> on the button's own GameObject with <c>IsOn</c> set. So a latched
+        /// button paints <c>ColorSetupDef.PressedColor</c> onto every <c>ControlledElement</c> and no hover
+        /// or press can revert it. Those elements are the clone's NATIVE graphics — live at depths
+        /// 257/258/259 in the settled footprint log — which is exactly the guarantee our own overlay Image
+        /// could never give: it is raycast-off by design, so both of this file's diagnostics filtered it out
+        /// and "the green painted" has never been asserted by anything in any build.
+        ///
+        /// THE DEF IS COPIED, NEVER MUTATED IN PLACE. <c>UIInteractableColorsDef</c> is a shared
+        /// <c>BaseDef</c> asset read by every button in the game and none of its six colours is green, so
+        /// each controller gets a PRIVATE copy (<c>Object.Instantiate</c> of a ScriptableObject copies all
+        /// six fields) whose PressedColor <see cref="Repaint"/> owns. Writing green into the shared def would
+        /// turn every pressed button in Phoenix Point green.
+        ///
+        /// IMAGES ONLY. <c>SetColor</c> (:58-81) also writes the <c>Text</c> on the controller's own
+        /// GameObject, so handing the CAPTION's controller a green def would print green letters on a green
+        /// plate. The caption keeps the prefab's colours; the frame and the background carry the state.
+        ///
+        /// THE COMPONENT IS ADDED WHILE THE CLONE IS INACTIVE, deliberately: <c>ToggleButton.Awake</c>
+        /// (ToggleButton.cs:22-30) dereferences <c>BaseButton</c>, so adding it to a live object throws
+        /// before the field can be set. That same Awake re-adds its own <c>Toggle</c> to the click, which
+        /// would invert <c>IsOn</c> behind our back on every press — removed again on the next line. Nothing
+        /// ever calls <c>SetIsOn</c> (it dereferences <c>ShowHideGraphic</c>, which this clone has none of);
+        /// <see cref="Repaint"/> writes the public <c>IsOn</c> field, which is all <c>IsSelectedTab</c> reads.
+        /// </summary>
+        private static void Latch(GameObject go, PhoenixGeneralButton pgb, Button btn)
+        {
+            _button = pgb;
+            if (pgb == null || btn == null) return;
+            if (pgb.ControlledElements != null)
+                foreach (var c in pgb.ControlledElements)
+                {
+                    if (c == null || c.ColorSetupDef == null || c.GetComponent<Image>() == null) continue;
+                    var copy = UnityEngine.Object.Instantiate(c.ColorSetupDef);
+                    _tintPressed.Add(copy.PressedColor);
+                    c.ColorSetupDef = copy;
+                    _tintDefs.Add(copy);
+                }
+
+            go.SetActive(false);
+            _latch = go.AddComponent<ToggleButton>();
+            _latch.BaseButton = btn;
+            go.SetActive(true);                       // ToggleButton.Awake runs HERE, with BaseButton set
+            btn.onClick.RemoveListener(_latch.Toggle);
+
+            if (_tintDefs.Count == 0)
+                Debug.LogWarning("[Multiplayer][tac] ready button has NO colour-controlled Image to tint — the " +
+                                 "ready state now rests on the MP_ReadyGreen overlay alone, which is the half " +
+                                 "of this feature that has never been observed painting. Either the clone's " +
+                                 "PhoenixGeneralButton.ControlledElements came across empty, or the prune in " +
+                                 "WireClick removed every entry.");
         }
 
         /// <summary>The ready tint, stretched over the whole button and DEPTH-PLACED FROM THE REAL SUBTREE
@@ -524,8 +619,12 @@ namespace Multiplayer.Tactical
             _green.enabled = false;
         }
 
-        /// <summary>"I have pressed it" — the muted shade the button has always shown for this peer's own
-        /// flag.</summary>
+        /// <summary>"I have pressed it" — the muted shade for this peer's own flag. NOT "the shade the button
+        /// has always shown", which this comment used to claim: the button was unclickable in every build
+        /// between the overlay's introduction (<c>03a8ccc</c>) and 2026-08-08, so neither shade has ever been
+        /// seen by anyone. The alpha belongs to the OVERLAY; the native tint takes the same RGB at alpha 1
+        /// (see <see cref="Repaint"/>), because there it multiplies the prefab's own sprites and a fractional
+        /// alpha would make the button's frame translucent rather than green.</summary>
         private static readonly Color MineGreen = new Color(0.16f, 0.70f, 0.24f, 0.55f);
 
         /// <summary>"EVERYBODY has pressed it" — the loud shade, because that is the state the developer
@@ -538,10 +637,12 @@ namespace Multiplayer.Tactical
         /// the build fails the moment a second one does, which is precisely the moment a colour could
         /// become a gate.
         ///
-        /// A PLAIN <c>Image.color</c> WRITE IS SAFE HERE, unlike on the button's own graphics: PP re-asserts
-        /// colour through <c>UIInteractableColorController.SetColor</c>, which only ever writes the Image on
-        /// the CONTROLLER'S OWN GameObject (UIInteractableColorController.cs:72-79). Nothing native carries a
-        /// controller on this overlay, so no hover or press reverts it.</summary>
+        /// A PLAIN <c>Image.color</c> WRITE IS SAFE ON THE OVERLAY, unlike on the button's own graphics: PP
+        /// re-asserts colour through <c>UIInteractableColorController.SetColor</c>, which only ever writes the
+        /// Image on the CONTROLLER'S OWN GameObject (UIInteractableColorController.cs:72-79). Nothing native
+        /// carries a controller on this overlay, so no hover or press reverts it. On the button's own
+        /// graphics the same shade arrives the game's own way instead — as the clone-private def's
+        /// PressedColor, latched by <see cref="Latch"/>.</summary>
         private static readonly Color AllGreen = new Color(0.20f, 0.95f, 0.30f, 0.90f);
 
         /// <summary>Every text component on the clone, by SHAPE (a settable public <c>string text</c>), plus
@@ -646,11 +747,60 @@ namespace Multiplayer.Tactical
             bool all = total > 0 && ready >= total;
             string label = (mine ? "READY " : "READY? ") + ready + "/" + total;
             for (int i = 0; i < _setters.Count; i++) _setters[i](label);
+
+            bool latched = mine || all;
+            var shade = all ? AllGreen : MineGreen;
             if (_green != null)
             {
-                _green.enabled = mine || all;
-                _green.color = all ? AllGreen : MineGreen;
+                _green.enabled = latched;
+                _green.color = shade;
             }
+            // THE NATIVE HALF. Same two shades at full alpha — here they MULTIPLY the prefab's own sprites,
+            // so a fractional alpha would read as a see-through button rather than a green one. Restored to
+            // the shade the prefab shipped with whenever the latch is off, so pressing a not-ready button
+            // flashes its own colour and not this feature's.
+            var tint = new Color(shade.r, shade.g, shade.b, 1f);
+            for (int i = 0; i < _tintDefs.Count; i++)
+                _tintDefs[i].PressedColor = latched ? tint : _tintPressed[i];
+            if (_latch != null) _latch.IsOn = latched;
+            // THE REPAINT SEAM, AND THE REASON IT IS AN EXPLICIT CALL. PhoenixGeneralButton.Update repaints
+            // only when a VISUAL state changed (PhoenixGeneralButton.cs:147-156) — a tally arriving off the
+            // rail is not one, so the open HUD would keep last frame's colour until the player happened to
+            // hover. Calling the game's own UpdateColorElements (:158-164 -> every controller's UpdateColor
+            // -> GetColor -> IsSelectedTab -> PressedColor) is what makes an ALREADY-OPEN screen go green on
+            // the beat the tally lands, which is this mod's first postulate.
+            if (_button != null) _button.UpdateColorElements();
+            ReportGreen(latched, all);
+        }
+
+        /// <summary>
+        /// THE OVERLAY HAS NEVER BEEN OBSERVED PAINTING, AND BY CONSTRUCTION IT COULD NOT BE. Both of this
+        /// file's diagnostics filtered on <c>raycastTarget</c> and the overlay's is deliberately off; and
+        /// <see cref="Describe"/> prints a sprite name and a fill type, never <c>enabled</c>, colour, depth
+        /// or cull. So the single fact the original green rested on — that an enabled, coloured Image at that
+        /// depth is actually drawn — has never appeared in a log, in any build, and the first time a human
+        /// could press the button it did not appear on screen either.
+        ///
+        /// <c>Graphic.depth</c> is -1 until the canvas batches the graphic and <c>CanvasRenderer.cull</c> is
+        /// uGUI's own "clipped away" flag: between them they separate "never enabled" from "enabled and not
+        /// drawn", which is the whole remaining question. ON CHANGE ONLY — <see cref="Repaint"/> runs on a
+        /// press, a tally or a round edge, never per frame, and this line speaks only when what it would
+        /// print differs from what it printed last.
+        /// </summary>
+        private static void ReportGreen(bool latched, bool all)
+        {
+            string state = _green == null
+                ? "overlay=<none built>"
+                : "overlay enabled=" + _green.enabled + " color=" + _green.color + " depth=" + _green.depth +
+                  " cull=" + _green.canvasRenderer.cull + " sibling=" + _green.transform.GetSiblingIndex();
+            state += " | native latch IsOn=" + (_latch == null ? "<no ToggleButton>" : _latch.IsOn.ToString()) +
+                     " over " + _tintDefs.Count + " tinted def(s), state=" +
+                     (latched ? (all ? "ALL-READY" : "mine") : "off");
+            if (state == _lastGreenState) return;
+            _lastGreenState = state;
+            Debug.Log("[Multiplayer][tac] ready button green: " + state +
+                      ". The native latch is what colours the button's own frame; the overlay is the second " +
+                      "layer whose paint this line exists to witness.");
         }
     }
 
@@ -711,11 +861,17 @@ namespace Multiplayer.Tactical
         /// own marker — -1 until the canvas batches the graphic, and the exact value GraphicRaycaster skips
         /// on. ACTIVE graphics only, and deliberately: <c>GetComponentsInChildren&lt;Graphic&gt;(true)</c>
         /// also returns the hotkey subtree this mod switched OFF, which is permanently depth=-1 by our own
-        /// hand and is not a hit surface anybody wanted.</summary>
+        /// hand and is not a surface anybody wanted.
+        ///
+        /// NO <c>raycastTarget</c> FILTER (removed 2026-08-08). The question here is "has the canvas drawn
+        /// anything of ours", which raycastTarget has nothing to do with — and the same predicate, written
+        /// twice, was what struck <c>MP_ReadyGreen</c> (raycast-off by design) out of BOTH of this class's
+        /// diagnostics, so the one graphic the ready state depended on had no witness anywhere. The active
+        /// filter already excludes the switched-off hotkey subtree this clause was really guarding against.</summary>
         private bool Drawn()
         {
             foreach (var g in GetComponentsInChildren<Graphic>(false))
-                if (g != null && g.raycastTarget && g.depth >= 0) return true;
+                if (g != null && g.depth >= 0) return true;
             return false;
         }
 
@@ -889,22 +1045,35 @@ namespace Multiplayer.Tactical
             // Build, which is depth=-1 permanently, by our own hand, and is not a hit surface anyone wanted —
             // six of the twelve surfaces in the live "NOT HIT-TESTABLE" report were exactly that. A graphic
             // nobody can hit because it is switched off is not a defect; a DRAWN one at depth=-1 is.
-            int live = 0, undrawn = 0;
+            int live = 0, undrawn = 0, seen = 0;
             var names = new List<string>();
             foreach (var g in GetComponentsInChildren<Graphic>(false))
             {
-                if (g == null || !g.raycastTarget) continue;
-                live++;
-                if (g.depth == -1) undrawn++;
-                if (names.Count < 8)
-                    names.Add(g.gameObject.name + "(layer=" + g.gameObject.layer + " depth=" + g.depth + ")");
+                if (g == null) continue;
+                seen++;
+                if (g.raycastTarget)
+                {
+                    live++;
+                    if (g.depth == -1) undrawn++;
+                }
+                // LISTED EVEN WHEN IT CANNOT BE HIT (2026-08-08). The counts stay raycast-only because they
+                // are about the CLICK surface — but the list is the only per-graphic evidence this button
+                // ever produces, and that same filter used to strike MP_ReadyGreen, which is raycast-off by
+                // design, out of it. A feature whose one graphic is excluded from every diagnostic is a
+                // feature that can be dead for its whole life without a single log line saying so.
+                if (names.Count < 16)
+                    names.Add(g.gameObject.name + "(layer=" + g.gameObject.layer + " depth=" + g.depth +
+                              (g.raycastTarget ? "" : " raycast-off") + (g.enabled ? "" : " component-off") +
+                              (g.canvasRenderer != null && g.canvasRenderer.cull ? " culled" : "") + ")");
             }
 
             Debug.Log("[Multiplayer][tac] ready button footprint: world x=[" + myLeft + ".." + myRight +
                       "] y=[" + myBottom + ".." + myTop + "] vs HUD container " + hud + " -> " + verdict +
                       " | vs canvas " + scr +
-                      " | raycast-enabled graphics: " + live + " [" + string.Join(", ", names.ToArray()) +
-                      "]. These are the clone's OWN native graphics and they are meant to be live — they are " +
+                      " | raycast-enabled graphics: " + live + " of " + seen + " active [" +
+                      string.Join(", ", names.ToArray()) +
+                      "]. The raycast-enabled ones are the clone's OWN native graphics and they are meant to " +
+                      "be live — they are " +
                       "the button's face, exactly as the native End Turn button's are. A count of 0 means " +
                       "something disarmed them and the button is dead.");
             // ALL OF THEM, NOT ANY OF THEM. `undrawn > 0` was the wrong test and the live settled log proves
