@@ -196,6 +196,13 @@ namespace Multiplayer.Tactical
             catch (Exception) { return null; }
         }
 
+        /// <summary>The destructible's own key AS THE CAPTURE MEASURES IT — <c>""</c> both for "no readable
+        /// <c>GuidInScene</c>" and for "collided, so it names nothing", NEVER null. Kept pure so RailCheck L345
+        /// can execute it case by case: the caller reads <c>guid.Length</c>, and a null reaching that line is an
+        /// NRE raised inside a native effect coroutine, which is unrecoverable (see the seam's own comment).</summary>
+        internal static string EnvGuidKey(string rawGuid, bool knownToIndex)
+            => string.IsNullOrEmpty(rawGuid) || !knownToIndex ? "" : rawGuid;
+
         /// <summary>Build the index the way the game's own savegame enumerates destructibles
         /// (<c>TacLevelSavegame</c>:49), so both peers index the same objects in the same way. Returns false
         /// when there is no map to walk yet.</summary>
@@ -324,8 +331,10 @@ namespace Multiplayer.Tactical
             var destructable = receiver.Destructable();
             if (destructable == null) return;
             Index();                                       // the collided guids must be dropped before one is read
-            string guid = GuidOf(destructable);
-            if (!string.IsNullOrEmpty(guid) && !_byGuid.ContainsKey(guid)) guid = "";   // collided: it names nothing
+            // NEVER the bare GuidOf: it answers NULL for a destructible whose GuidInScene will not read (59 of
+            // 2768 on the 2026-08-08 map), and the length test below dereferences it.
+            string raw = GuidOf(destructable);
+            string guid = EnvGuidKey(raw, raw != null && _byGuid.ContainsKey(raw));   // collided ⇒ it names nothing
             // THE TAG THE INDEX MINTED, never a second one derived here: the index is what knows how many
             // objects share this cell, and an address computed without that count could not be checked.
             string posTag = TagOf(destructable) ?? "";
@@ -437,7 +446,21 @@ namespace Multiplayer.Tactical
     [HarmonyPatch(typeof(DestructableDamageReceiver), nameof(DestructableDamageReceiver.ApplyDamage))]
     internal static class EnvironmentDamageSeam
     {
+        // THE ONE SEAM WE OWN THAT RUNS INSIDE A NATIVE EFFECT COROUTINE — ExplosionEffect.ApplicationComplete
+        // ← MultiTargetEffect.OnApply ← ApplyDamageEffectAbility+<ApplyDamageEffectCrt>. A throw here does not
+        // just lose the capture: it breaks the coroutine chain, so PlayingAction+<CompleteAction> never runs,
+        // the acting soldier stays mid-action forever and the HUD is never re-shown — the host is finished for
+        // that mission. So this capture is contained, and ONLY this one (law L346); the other seams we own are
+        // not coroutine-resident and stay bare, where a throw is visible instead of silently swallowed.
         private static void Postfix(DestructableDamageReceiver __instance, DamageResult damageResult)
-            => TacticalDestruction.OnEnvironmentDamage(__instance, damageResult);
+        {
+            try { TacticalDestruction.OnEnvironmentDamage(__instance, damageResult); }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multiplayer][tac] the environment-damage capture threw and was contained so the " +
+                               "native effect coroutine survives — that hit is NOT relayed, so the piece of cover " +
+                               "it broke stays solid on every other peer: " + e);
+            }
+        }
     }
 }

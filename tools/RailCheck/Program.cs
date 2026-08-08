@@ -325,6 +325,8 @@ namespace RailCheck
             Add(laws, () => L341_TheConsoleIsTheHostsAlone.Check());
             Add(laws, () => L342_TheCheatMenuIsTheHostsAlone.Check());
             Add(laws, () => L343_TheCheatlessPathsAreTheHostsAlone.Check());
+            Add(laws, () => L345_AnUnnameableDestructibleIsRefusedNotThrownOn.Check());
+            Add(laws, () => L346_TheCoroutineResidentSeamContainsItsOwnThrow.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
