@@ -29,12 +29,21 @@ namespace RailCheck
     /// is deleted one level up at <c>DamageAccumulation.ApplyAddedDamage</c>:550, could not even recompute it.
     /// Host-only state with no carrier: permanent for the rest of the mission.
     ///
-    /// THE ADDRESS IS THE OTHER HALF, AND IT IS WHY THIS IS NOT A ONE-LINE PATCH. A <c>TacticalItem</c> reports
-    /// the SAME <c>GetSlotName()</c> as the slot it hangs in (<c>DamageReceiverImplementation</c>:71-74 forwards
-    /// to <c>_itemSlot</c>), so the rail's existing (actor key, slot name) address — law L66c — names the SLOT,
-    /// and a record shipped under it would subtract a damaged rifle's hit points from the ARM holding it. The
-    /// item therefore carries one more field, its def GUID, and the far side resolves the pair with the game's
-    /// own two-part lookup <c>CharacterBodyState.GetItem(slotName, itemDef)</c>:177-180.
+    /// THE ADDRESS IS THE OTHER HALF, AND THIS LAW'S ORIGINAL READING OF IT WAS WRONG — which is why it stayed
+    /// GREEN while the arc delivered 0%. It said a <c>TacticalItem</c> "reports the SAME GetSlotName() as the
+    /// slot it hangs in", citing <c>DamageReceiverImplementation</c>:71-74. That method does forward to
+    /// <c>_itemSlot</c>; <c>TacticalItem</c> DOES NOT DELEGATE TO IT. <c>TacticalItem.GetSlotName</c>:634-637 is
+    /// <c>return "";</c>, hardcoded. So the address was not "the slot instead of the item" — it was EMPTY, the
+    /// wire's word for the whole actor, and <c>ItemGuidOf</c> refused every record before it was ever sent. The
+    /// four refusal lines in the capture were four DEFS collapsed by one <c>SayOnce</c>, not four events.
+    ///
+    /// (actor key, slot name, def guid) remains the right address — the slot name now comes from
+    /// <c>TacticalActorKey.SlotOf</c>, which reaches through <c>TacticalItem.ParentItemSlot</c>:121, and the far
+    /// side still resolves the pair with the game's own <c>CharacterBodyState.GetItem(slotName, itemDef)</c>
+    /// :177-180. What changed is that arm (f) below now EXECUTES the address on a real item instead of
+    /// asserting that the code that mints it is called. L356 owns that fixture and the rule behind it; every
+    /// mechanism arm here was green throughout the outage and is kept for what it does catch, not trusted for
+    /// what it does not.
     ///
     /// AND THE CAPTURE MUST BE CONDITIONAL. <c>TacticalItem.ApplyDamage</c> ROUTES before it applies (:301-313):
     /// a <c>Slot</c> handler hands the result to <c>ItemSlot.ApplyDamage</c> and a <c>ParentItem</c> handler to
@@ -166,6 +175,45 @@ namespace RailCheck
                 yield return "L322 resnap-applies-no-items: ApplyResnap reads the host's item health and does " +
                              "nothing with it. The recovery path then repairs every field of that soldier except " +
                              "the one the lost record was about.";
+
+            // ── (f) THE OUTCOME: A REAL ITEM PRODUCES A SHIPPABLE ADDRESS ────────────
+            // The arms above all passed for the entire life of this arc while not one item-damage record
+            // crossed. They ask whether ItemGuidOf is CALLED; this one asks what it ANSWERS.
+            var guidOf = sync.GetMethod("ItemGuidOf", All);
+            var slotOf = typeof(TacticalActorKey).GetMethod("SlotOf", All);
+            if (guidOf == null || slotOf == null)
+                yield return "L322 address-rule-gone: TacticalDamageSync.ItemGuidOf or TacticalActorKey.SlotOf no " +
+                             "longer resolves, so the address a damaged item ships under cannot be executed here.";
+            else
+            {
+                TacticalItem limb; PhoenixPoint.Tactical.Entities.Equipments.ItemSlot slot; string built;
+                L356_ACarriedItemKnowsWhichSlotItHangsIn.Limb(out limb, out slot, out built);
+                if (built != null)
+                    yield return "L322 fixture-unbuildable: the harness could not stand up an item in a slot (" +
+                                 built + "), so the delivered address is UNCHECKED rather than proven. See L356.";
+                else
+                {
+                    string answered = null, why = null;
+                    try
+                    {
+                        var name = (string)slotOf.Invoke(null, new object[] { limb });
+                        answered = (string)guidOf.Invoke(null, new object[] { limb, name ?? "" });
+                    }
+                    catch (Exception ex) { why = (ex.InnerException ?? ex).GetType().Name; }
+                    if (answered == null)
+                        yield return "L322 nothing-ships: the address for an ordinary weapon in an AttachedItem slot " +
+                                     "came back " + (why == null ? "NULL — ItemGuidOf refused to ship it" :
+                                     "unavailable (" + why + " — the refusal path itself threw)") + ". That refusal " +
+                                     "is the whole outage: every arm above stayed green while ZERO item-damage " +
+                                     "records reached the wire, because they check that the address is minted and " +
+                                     "never what it comes out as.";
+                    else if (answered != L356_ACarriedItemKnowsWhichSlotItHangsIn.ItemGuid)
+                        yield return "L322 wrong-item-shipped: the address named def guid '" + answered + "' for an " +
+                                     "item whose def guid is '" + L356_ACarriedItemKnowsWhichSlotItHangsIn.ItemGuid +
+                                     "'. The far side's CharacterBodyState.GetItem then finds a different item, or " +
+                                     "none, and subtracts the hit points somewhere else.";
+                }
+            }
 
             // ── (e) POSITIVE CONTROL ─────────────────────────────────────────────────
             if (!Corners((s, h) => true, "CONTROL").Any())

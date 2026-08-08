@@ -335,6 +335,16 @@ namespace RailCheck
             Add(laws, () => L352_ThePerPeerAnswerStaysHomeAndStillLands.Check());
             Add(laws, () => L354_AnEmptySquadScreenIsNotServed.Check());
             Add(laws, () => L355_ALaunchedMissionDoesNotArmASecondCountdown.Check());
+            Add(laws, () => L356_ACarriedItemKnowsWhichSlotItHangsIn.Check());
+            Add(laws, () => L357_TheResnapshotRepairsItemsOrSaysWhyNot.Check());
+            Add(laws, () => L358_ABodyPartRidesWithTheOrderThatAimedAtIt.Check());
+            Add(laws, () => L359_AnOwnerlessReceiverIsStillNamed.Check());
+            Add(laws, () => L360_TwoLookalikeActorsGetTwoKeys.Check());
+            Add(laws, () => L361_ASecondGapStillAsksForARescue.Check());
+            Add(laws, () => L362_AnUndecodableEnvelopeIsNeverDroppedSilently.Check());
+            Add(laws, () => L363_AResnapshotNeverRewindsANewerSettle.Check());
+            Add(laws, () => L364_ADeathCorrectsHealthBeforeItBuries.Check());
+            Add(laws, () => L367_NoMessageBlamesParityWithoutTestingIt.Check());
             Add(laws, () => L365_AClassSwapIsRecreatedNotFieldPatched.Check());
             Add(laws, () => L366_ACapacityShapedLoadoutFitsACompactVehicle.Check());
             Add(laws, () => L368_AnUnansweredFullResendSaysSo.Check());
@@ -4867,6 +4877,39 @@ namespace RailCheck
                     FieldInfo f = null;
                     try { f = m.Module.ResolveField(BitConverter.ToInt32(il, i), typeArgs, null); } catch { }
                     if (f != null) yield return f;
+                }
+                i += size;
+            }
+        }
+
+        /// <summary>String literals an IL body loads (<c>ldstr</c> operands, resolved through the declaring
+        /// module) — the same guarded walk <see cref="FieldRefs"/> does, abandoning the method the same way
+        /// rather than guessing. Exists because a cross-mod dependency in THIS assembly is a STRING and
+        /// nothing else: the mod holds no reference to TFTV, so every TFTV-gated patch class names its target
+        /// by <c>AccessTools.TypeByName("TFTV.…")</c>, and "does this class depend on TFTV" is answerable
+        /// only from the literals it carries (L373).</summary>
+        internal static IEnumerable<string> StringRefs(MethodBase m)
+        {
+            byte[] il = null;
+            try { il = m?.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) yield break;
+            int i = 0;
+            while (i < il.Length)
+            {
+                short code = il[i++];
+                if (code == 0xFE)
+                {
+                    if (i >= il.Length) yield break;
+                    code = (short)(0xFE00 | il[i++]);
+                }
+                if (!OpCodeByValue.TryGetValue(code, out var op)) yield break;
+                int size = OperandSize(op.OperandType, il, i);
+                if (size < 0 || i + size > il.Length) yield break;
+                if (op.OperandType == OperandType.InlineString)
+                {
+                    string s = null;
+                    try { s = m.Module.ResolveString(BitConverter.ToInt32(il, i)); } catch { }
+                    if (s != null) yield return s;
                 }
                 i += size;
             }
