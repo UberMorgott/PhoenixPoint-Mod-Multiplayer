@@ -205,6 +205,13 @@ namespace Multiplayer.Tactical
                     "The spawn record still ships so the other peers say so too, but they cannot rebuild it and " +
                     "this actor will exist on the host alone.");
 
+            // A MID-BATTLE SPAWN CARRIES ITS IDENTITY OR IT HAS NONE. TFTV rolls a human enemy's rank and name
+            // in FinalizeEnterPlay (TacticalActorBase:550 -> TacticalLevel.ActorEnteredPlay -> its postfix,
+            // TFTVHarmonyTactical:411), which is the LAST call inside ActorComponent.DoEnterPlay — so by the
+            // time this postfix runs the roll has already happened and there is nothing to wait for. It cannot
+            // ride the instance data the way a battle-start actor's tags do, because ApplySpawn passes a null
+            // template on purpose. See TftvChampIdentity.
+            var champ = TftvChampIdentity.Collect(actor);
             TacticalDamageSync.Send(TacticalDamageSync.OpSpawn,
                 "spawn " + SafeName(actor) + " key=" + key,
                 w =>
@@ -219,6 +226,7 @@ namespace Multiplayer.Tactical
                     w.Write(p.x); w.Write(p.y); w.Write(p.z);
                     w.Write(r.x); w.Write(r.y); w.Write(r.z); w.Write(r.w);
                     w.Write(zone == null ? "" : zone.name);
+                    TftvChampIdentity.Write(w, champ);
                 });
         }
 
@@ -261,6 +269,9 @@ namespace Multiplayer.Tactical
             var pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
             var rot = new Quaternion(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
             string zoneName = r.ReadString();
+            // Read BEFORE the refusals below, never inside the success branch: the bytes are consumed whether
+            // or not this peer can rebuild the actor, exactly as TacticalStatusSet.Read is.
+            var champ = TftvChampIdentity.Read(r);
 
             var repo = GameUtl.GameComponent<DefRepository>();
             var setDef = RebuildSetDef(repo, templateGuid, setGuid);
@@ -318,6 +329,10 @@ namespace Multiplayer.Tactical
                 return;
             }
             TacticalActorKey.Adopt(spawned, key);
+            // INSIDE the apply scope for the same reason the spawn itself is: TftvChampIdentity.Apply writes
+            // through the game's own GameTagsList, and law 8 forbids a mirrored write echoing back out.
+            using (SyncApplyScope.Enter())
+                TftvChampIdentity.Apply(spawned, champ, "the host's spawn record");
             Debug.Log("[Multiplayer][tac] CLIENT spawned the host's " + setDef.name + " key=" + key + " @ " + pos);
         }
 

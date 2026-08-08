@@ -45,10 +45,11 @@ namespace Multiplayer.Tactical
     /// through <see cref="Multiplayer.Harmony.TftvLateBinder"/>, because TFTV loads AFTER us and a patch class
     /// whose <c>Prepare()</c> ran at PatchAll time would report false and die silently.
     ///
-    /// WHAT THIS DOES NOT DO: it does not carry the host's roll to the clients. See the class remarks in
-    /// <see cref="TacticalActorLifecycle"/> — the 0x84 spawn record carries key/defs/faction/transform/zone and
-    /// nothing about identity, so a gated client shows the enemy under its engine name with no rank tag.
-    /// That is strictly better than three peers disagreeing, and strictly worse than a relay.
+    /// WHAT CARRIES THE HOST'S ROLL INSTEAD: <see cref="TftvChampIdentity"/>. Suppressing the re-roll only
+    /// stopped three peers disagreeing; it left the client with no name and no rank at all, because the 0x84
+    /// spawn record carried key/defs/faction/transform/zone and nothing about identity. The rolled name and
+    /// the rolled tags now ride that same record, and the client applies them directly — it never calls the
+    /// roll this class suppresses.
     /// </summary>
     [HarmonyPatch]
     internal static class TftvClientChampGuard
