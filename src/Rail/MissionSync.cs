@@ -324,10 +324,23 @@ namespace Multiplayer.Network.Sync
                                                   " on the host, not Functioning");
                     return;
                 }
-                if (site.HasActiveEncounter)
+                // WIDENED 2026-08-09 to `|| site.ActiveMission != null`, and it is cosmetic on purpose. If the
+                // host's site already HOLDS a mission of another def, PrepareHavenMission runs past its own
+                // early-out (:1056 matches on def) and ends in Site.SetActiveMission — and the site's own
+                // Create*Mission guards THROW "Site already has a mission!" (GeoSite.cs:496/508/…). The client
+                // then got a "(throw)" reject with an engine exception in it instead of a sentence, which is
+                // what hid this whole area for a session. Vanilla throws at the same click, so nothing is
+                // widened or narrowed for the player — only the refusal is now readable.
+                if (site.HasActiveEncounter || site.ActiveMission != null)
                 {
-                    Reject(senderPeerId, siteRef, "prepare-haven: the haven already has an active encounter on " +
-                                                  "the host — the game refuses an infiltration there too");
+                    Reject(senderPeerId, siteRef, "prepare-haven: the haven already has " +
+                                                  (site.HasActiveEncounter ? "an active encounter"
+                                                                           : "a DIFFERENT mission (" +
+                                                                             (site.ActiveMission.MissionDef == null
+                                                                                  ? "?" : site.ActiveMission.MissionDef.name) +
+                                                                             ")") +
+                                                  " on the host — one site holds one mission, and single-player " +
+                                                  "throws at this same click");
                     return;
                 }
 
@@ -1079,6 +1092,56 @@ namespace Multiplayer.Network.Sync
                           "campaign state (Site.ActiveMission/DestroySite) the host owns; backing out of the " +
                           "deployment screen is navigation, not a cancellation for every peer");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// A MISSION WITH NO BRIEF ON THIS PEER SAYS SO.
+    ///
+    /// <c>GeoscapeView.ShowMissionBriefing</c>:1883-1905 ends in <c>if (missionBriefModal != ModalType.None)
+    /// OpenModalPersistent(...)</c> — and the <c>None</c> arm is SILENT for a null mission and for a
+    /// <c>GeoCustomMission</c> that took the <c>KeepEncounterID</c> exit at :1890. In the captured session one
+    /// peer never received a brief at all while the others did, which is what a MOD-PARITY mismatch looks
+    /// like from the outside: <c>GetMissionBriefModal</c>:1724 is a type chain other mods patch (TFTV does),
+    /// so two peers running different mod sets can disagree about whether a mission has a brief — and the
+    /// peer that says "no" opens nothing, ships nothing on 0xB7, and prints nothing.
+    ///
+    /// A postfix, not a gate: this changes NOTHING (P4c). It only ends the silence, which is this repo's
+    /// dominant bug class.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoscapeView), nameof(GeoscapeView.ShowMissionBriefing))]
+    internal static class BriefFallthroughIsNamed
+    {
+        private static readonly MethodInfo BriefModal =
+            AccessTools.Method(typeof(GeoscapeView), "GetMissionBriefModal", new[] { typeof(GeoMission) });
+
+        private static readonly HashSet<string> _logged = new HashSet<string>(StringComparer.Ordinal);
+
+        private static void Postfix(GeoscapeView __instance, GeoMission mission)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || BriefModal == null) return;
+            try
+            {
+                if (mission != null && (ModalType)BriefModal.Invoke(__instance, new object[] { mission })
+                                       != ModalType.None) return;
+                string what = mission == null ? "<null mission>" : mission.GetType().Name;
+                if (!_logged.Add(what)) return;
+                Debug.LogWarning("[MP][mission] NO BRIEF WINDOW on this peer for " + what + " at " +
+                                 (IdentityResolver.RootRef(mission?.Site) ?? "S#?") + " — GetMissionBriefModal " +
+                                 "answered None, so ShowMissionBriefing:1905 opened nothing, 0x" +
+                                 SurfaceIds.GeoModalRaise.ToString("X2") + " shipped nothing, and this player " +
+                                 "sees no mission brief while other peers may. Either the mission legitimately " +
+                                 "has none (a GeoCustomMission that took the KeepEncounterID exit at :1890), or " +
+                                 "the peers are running DIFFERENT MODS — that method is a type chain TFTV and " +
+                                 "others patch. Logged once per mission type");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MP][mission] could not tell whether " +
+                               (mission == null ? "<null>" : mission.GetType().Name) +
+                               " has a brief window on this peer: " + ex);
+            }
         }
     }
 

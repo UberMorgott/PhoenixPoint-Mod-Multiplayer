@@ -71,6 +71,14 @@ namespace RailCheck
     /// on, including the AccessTools binding — an unbound handle here fails SILENTLY (memory
     /// harmony-accesstools-exact-param-match) and would restore the exact bug.
     ///
+    /// PREMISE AMENDED 2026-08-09, OUTCOME UNCHANGED. This law was written about a squad screen queued by
+    /// ANOTHER peer's answer crossing the rail (EventSync's native tail). Since L351/L352 a mission brief is
+    /// answered by each peer for itself, so the squad screen now arrives from THIS peer's own Confirm as
+    /// well — and the outcome asserted here is exactly as load-bearing either way, because the thing that
+    /// stalls it is unchanged: <c>ProcessQueriedStateSwitch</c> serves nothing while this peer's own window
+    /// holds <c>_currentStateSwitchRequest</c>, whoever queued what is behind it. L354 adds the other half
+    /// this law does not claim — that a screen which IS served has something in it.
+    ///
     /// Falsify: <c>MustFinishOwnEncounterWindow</c> → false → <c>L144 squad-screen-queued-behind-our-own-
     /// window</c>; → true → <c>L144 pops-a-window-we-do-not-own</c>; delete the
     /// <c>FinishOwnEncounterWindow</c> call from <c>HandleAnswer</c> → <c>L144 native-tail-half-copied</c>.

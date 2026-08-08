@@ -50,6 +50,23 @@ namespace RailCheck
     /// is the re-ask, and it asserts the same property L164 does: the gate asks the GAME'S OWN question, not
     /// a local re-implementation of what "who can deploy" means.
     ///
+    /// RE-SCOPED 2026-08-09, AND THE MOTIVATING EXAMPLE ABOVE IS NO LONGER IN SCOPE. L351/L352 took the
+    /// mission BRIEF / OUTCOME family out of the 0xB9 answer path entirely: a brief is now answered by each
+    /// peer for itself, its mirrored copy carries the game's OWN <c>DialogCallback</c>, and
+    /// <c>WindowQueueSync.SendAdvance</c> sends nothing for it. So "the client answered its copy and the
+    /// answer crossed as 0xB9" — the ambush brief in ROOT ONE — is a description of how it USED to work, and
+    /// the reason it had to change is that the host's <c>ModalResultCallback</c>:825-826 answers a brief's
+    /// Cancel with <c>geoMission.Cancel()</c>, deleting the mission for the whole team when ONE player
+    /// declined.
+    ///
+    /// EVERY ARM BELOW STILL HOLDS, over a smaller set: the windows that genuinely still cross are
+    /// <c>FactionSoldierJoin</c> (whose Confirm is <c>reward.Apply</c> — host-authoritative, one grant for
+    /// everybody, so it may NOT be per-peer) and <c>UIStateAssetDeployment</c> (op 2, <c>DeployAtSite</c>).
+    /// The outcome L176 owns is unchanged and still load-bearing for those: a window the host holds in
+    /// <c>_viewStateSwitchRequests</c> must be answerable by the peer that has it on screen, and answering it
+    /// must not pop a state the host's stack never pushed. ROOT TWO (arm (d), the EnterState re-ask) is
+    /// untouched by any of this and is now also the seam L354 refuses an EMPTY squad screen at.
+    ///
     /// Falsify (each verified RED, then restored): delete the <c>AnswerQueued</c> call from
     /// <c>HandleAdvance</c> → <c>queued-window-unanswerable</c>; make <c>MayAnswerQueued</c> ignore the
     /// current window → <c>current-window-race</c>; make it accept an empty or mismatched identity →
