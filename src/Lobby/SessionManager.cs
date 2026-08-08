@@ -121,6 +121,14 @@ namespace Multiplayer.Network
         // every host-loss detector off.
         private const long TransferStallMs = 60_000;
         private bool _transferStallLogged;
+        // A load window's liveness clock starts when the WINDOW opens, not at whatever the previous
+        // window last touched. SaveTransferCoordinator.LastProgressMs is ONE field for the whole
+        // session: on 2026-08-08 the tac→geo return armed at 15:11:03.136 and this stall fired 1 ms
+        // later, because the previous progress was at 15:01:41 — 562 s of another era's staleness. The
+        // suspension was therefore off for exactly the load it exists to cover. (It missed client-2
+        // only because that peer's RosterProgress happened to land in the same frame as the arm, ahead
+        // of this Update — a frame-ordering race, not a real difference.) 0 = no window open.
+        private long _loadWindowOpenedMs;
         private long _lastHeartbeatSend;
         // FIX-2: client-side outbound-liveness clock — the last time the host ACKed one of our
         // heartbeats. Distinct from _lastHeartbeat[host] (inbound liveness): it detects a HALF-OPEN
@@ -185,18 +193,34 @@ namespace Multiplayer.Network
             var st = _engine.SaveTransfer;
             bool loadInFlight = st != null && (st.TransferActive || st.InPhase2 || st.LoadPhaseStarted);
 
+            // THE WINDOW EDGE (see _loadWindowOpenedMs). Stamped from the RAW flags, before the stall
+            // override below clears loadInFlight — otherwise a stalled window would re-open its own
+            // clock every tick and the suspension could never end. Every arm site is covered at once
+            // (barrier open, self-load arm, download start, phase-2, host entry load): each one raises
+            // one of the three flags, and this is the single place they are read.
+            if (loadInFlight)
+            {
+                if (_loadWindowOpenedMs == 0) { _loadWindowOpenedMs = now; _transferStallLogged = false; }
+            }
+            else { _loadWindowOpenedMs = 0; _transferStallLogged = false; }
+
             // Suspension deadline: suspend only while the transfer shows PROGRESS. LastProgressMs is
             // bumped on every chunk / roster snapshot / barrier flag edge / phase-2 percent
             // (SaveTransferCoordinator.NoteProgress); a dead peer stops all of those, so after
             // TransferStallMs the normal detectors below resume and fire the standard host-loss /
-            // client-reaper teardown. Engine-level — no per-scenario branches.
-            if (loadInFlight && now - st.LastProgressMs > TransferStallMs)
+            // client-reaper teardown. Engine-level — no per-scenario branches. The clock is the LATER
+            // of "this window opened" and "the transfer last moved", so a load only ever has to prove
+            // itself alive within its own window — a slow peer gets the full TransferStallMs from the
+            // arm before anything reaps it, and a dead one still stops the clock exactly as before.
+            long liveMs = Math.Max(_loadWindowOpenedMs, st?.LastProgressMs ?? 0L);
+            if (loadInFlight && now - liveMs > TransferStallMs)
             {
                 if (!_transferStallLogged)
                 {
                     _transferStallLogged = true;
                     Debug.LogWarning($"[Multiplayer] transfer/load shows no progress for " +
-                                     $"{TransferStallMs / 1000}s — re-arming liveness detectors.");
+                                     $"{(now - liveMs) / 1000}s (window open {(now - _loadWindowOpenedMs) / 1000}s) " +
+                                     "— re-arming liveness detectors.");
                 }
                 loadInFlight = false;
             }
