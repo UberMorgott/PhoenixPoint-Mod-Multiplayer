@@ -278,6 +278,18 @@ namespace RailCheck
             Add(laws, () => L210_ClientFreeAimShotActuallyFires.Check());
             Add(laws, () => L220_TheReadyControlIsReachable.Check());
             Add(laws, () => L230_EveryPeerStartsTheAnimationFromTheHostsRecord.Check());
+            Add(laws, () => L240_AbilitySourceMatchesSelection.Check());
+            Add(laws, () => L241_ReloadLandsOnTheSelectedWeapon.Check());
+            Add(laws, () => L242_RefusedOrderSpendsNoTurnUse.Check());
+            Add(laws, () => L243_RefusalDoesNotMoveTheSelection.Check());
+            Add(laws, () => L260_AResolvedSubjectsWindowIsNeverServed.Check());
+            Add(laws, () => L261_PeersConvergeOnTheSameServedWindows.Check());
+            Add(laws, () => L250_PingPaintStaysOffTheSharedHighlight.Check());
+            Add(laws, () => L251_PingColourAnswersWhoPinged.Check());
+            Add(laws, () => L252_TheOffScreenArrowTakesAClickToTheTarget.Check());
+            Add(laws, () => L290_TheClientsExplorationCannotFinishFirst.Check(game));
+            Add(laws, () => L291_AMirroredActorClockDecidesNothingLocally.Check(game));
+            Add(laws, () => L300_RenderedTextSurvivesTheWire.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
