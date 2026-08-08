@@ -356,6 +356,84 @@ namespace Multiplayer.Network.Sync
         /// to a callee walk — an inline write would leave half this split unprovable.</summary>
         private static void MarkHudDirty() { _hudDirty = true; }
 
+        /// <summary>
+        /// A DESTROYED SOLDIER MUST NOT STAY UNDER SOMEBODY'S CURSOR. Reported 2026-08-08: a client
+        /// dismissed a soldier, every peer's model converged (host `intent APPLIED op=fire`, both clients
+        /// `structural destroy 'U#4' applied`) — and the acting client's edit screen kept painting the dead
+        /// unit, then threw 220 times before the game was closed. A repaint alone cannot fix that, because
+        /// the screen's binding is a FIELD, not a read: <c>UIStateEditSoldier._currentCharacter</c> is
+        /// snapshotted from the actor cycle (:159/:336) and <c>UpdateState</c>:470 hands it to
+        /// <c>UpdateSoldierEquipment</c> → <c>UpdatePreferredLoadout</c>:551 →
+        /// <c>GeoPhoenixFaction</c>:1233 → <c>PostmissionReplenishManager</c>:131-133, which throws
+        /// `… who is not listed!` for a character the (mirrored) preferred-loadout table no longer knows.
+        /// The throw lands INSIDE <c>UpdateState</c>, so every later line — including the rebuild this
+        /// screen repaints through — is unreachable FOREVER: the screen cannot repaint itself out of it.
+        ///
+        /// AND THE NATIVE TAIL CANNOT SAVE IT ON A CLIENT. Vanilla's own dismissal rebinds
+        /// (<c>UIStateEditSoldier.OnDismissSoldierDialogCallback</c>:443-451) by rotating through
+        /// <c>_characters</c> — the list captured in the constructor (:83). On a client the model kill is
+        /// blocked (<c>PersonnelSync.DismissCapturePatch</c> returns false, the host owns the kill), so that
+        /// list still holds the dismissed unit and every list built after it does too. Which is why this
+        /// runs off the STRUCTURAL DESTROY — the one event that means "gone on every peer" — and not off
+        /// the gesture: it is equally right for the peer that did not press anything.
+        ///
+        /// NATIVE DOORS ONLY, the same two the game's own dismissal uses:
+        /// <c>GeoscapeView.ToEditUnitState(GeoCharacter, IEnumerable&lt;GeoCharacter&gt;, StateStackAction)</c>
+        /// (GeoscapeView.cs:506; it routes vehicles/mutogs to their own screens by TemplateDef, so this stays
+        /// generic over the three edit screens) and <c>GeoscapeView.ResetViewState()</c> (:413) when nothing
+        /// survives. The surviving roster is passed EXPLICITLY rather than letting the overload default to
+        /// <c>GetFactionCharacters(null)</c>: <c>DestroyTacUnit</c> only removes the unit from
+        /// <c>_tacUnits</c> (GeoLevelController.cs:1560-1563), the faction's own character list is a
+        /// separately-mirrored container, so the default would be free to list the corpse straight back.
+        /// </summary>
+        public static void ReleaseScreenBoundTo(GeoLevelController geo, GeoCharacter destroyed)
+        {
+            var view = geo?.View;
+            var screen = view?.CurrentViewState;
+            if (destroyed == null || screen == null) return;
+            // One field name, three screens (UIStateEditSoldier:43, UIStateEditVehicle:38,
+            // UIStateViewVehicle:31 — all `_currentCharacter` + `_characters`). A screen that keeps no
+            // character binding simply resolves neither and is left alone.
+            var boundField = AccessTools.Field(screen.GetType(), "_currentCharacter");
+            var rosterField = AccessTools.Field(screen.GetType(), "_characters");
+            if (boundField == null || rosterField == null) return;
+            var roster = rosterField.GetValue(screen) as System.Collections.Generic.List<GeoCharacter>;
+            GeoCharacter next;
+            if (!ReleaseBinding(roster, destroyed, boundField.GetValue(screen) as GeoCharacter, out next))
+                return;
+            Debug.Log("[MP][uirepaint] released " + screen.GetType().Name + " from destroyed U#" +
+                      (int)destroyed.Id + " → " + (next == null ? "no unit left, back to the geoscape"
+                                                                : "U#" + (int)next.Id));
+            // law 8: a state transition fires native UI events an intent-capture seam listens to.
+            using (SyncApplyScope.Enter())
+            {
+                if (next == null) view.ResetViewState();
+                else view.ToEditUnitState(next, roster, StateStackAction.ReplaceTop);
+            }
+        }
+
+        /// <summary>THE EDGE, kept pure so RailCheck L326 can execute it: prune <paramref name="destroyed"/>
+        /// out of the screen's own roster and answer whether the screen itself has to be rebound, and to
+        /// what. False = this screen was showing somebody else, so no transition — but the roster is pruned
+        /// ANYWAY, which is what stops a unit already dead on every peer from being cycled back onto the
+        /// screen later. True + null = nothing survived → the caller resets to the geoscape. The successor
+        /// is the game's own choice: <c>IndexOf(current).IncRotate(Count)</c>
+        /// (UIStateEditSoldier.cs:443-444) is exactly the element that slides into the removed slot, or the
+        /// first one when the removed slot was last. Reference identity throughout (L113).</summary>
+        internal static bool ReleaseBinding(System.Collections.Generic.IList<GeoCharacter> roster,
+                                            GeoCharacter destroyed, GeoCharacter bound, out GeoCharacter next)
+        {
+            next = null;
+            int at = -1;
+            if (roster != null)
+                for (int i = roster.Count - 1; i >= 0; i--)
+                    if (ReferenceEquals(roster[i], destroyed)) { at = i; roster.RemoveAt(i); }
+            if (!ReferenceEquals(bound, destroyed)) return false;
+            if (roster == null || roster.Count == 0) return true; // next stays null → ResetViewState
+            next = roster[at < 0 || at >= roster.Count ? 0 : at];
+            return true;
+        }
+
         /// <summary>Session teardown: drop the pending repaint so the NEXT session's first Tick does not
         /// inherit a dirty flag from the dead one, and re-arm the one-shot diagnostics.</summary>
         public static void Reset()

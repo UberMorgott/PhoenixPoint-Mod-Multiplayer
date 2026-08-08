@@ -344,6 +344,17 @@ namespace Multiplayer.Network.Sync
                             else if (existing is PhoenixPoint.Geoscape.Entities.Missions.IGeoTacUnit unit)
                             {
                                 geo.DestroyTacUnit(unit); // native removal (GeoLevelController.cs:1560-1563)
+                                // …which is a one-line dictionary erase and NOTHING else: no event, no view
+                                // notification. So an edit screen open on this exact unit is still bound to
+                                // it, and stays bound until something says otherwise — measured as a screen
+                                // that painted a dismissed soldier and then threw out of its own UpdateState
+                                // every frame. Release it through the game's own doors before we walk away.
+                                OpenUiRepaint.ReleaseScreenBoundTo(geo, unit as PhoenixPoint.Geoscape.Entities.GeoCharacter);
+                                // Repaint like every other structural arm does (:517, :536, :624, :652, :717).
+                                // NOT via `touched` + UiEventMap.Fire: the GeoCharacter arm there runs a
+                                // native derived-stat recompute and an identity reseed ON the entity, and the
+                                // entity in hand has just been erased from the level.
+                                OpenUiRepaint.MarkDirty();
                                 Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied");
                             }
                             else LogMissOnce("structural destroy for '" + rootKey + "' not enabled — skipped");
