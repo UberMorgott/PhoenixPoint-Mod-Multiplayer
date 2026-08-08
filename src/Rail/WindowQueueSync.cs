@@ -613,6 +613,27 @@ namespace Multiplayer.Network.Sync
             // filter only spoke when it dropped. A restore that says how many entries it saw and how many
             // it kept is the difference between reading this bug off the log and re-deriving it from
             // timestamps.
+            // NAME WHAT SURVIVED. The counts alone cost a session: on 2026-08-08 the host logged "1 entries
+            // in the save, 1 kept" and nothing anywhere said WHICH of the five restorable kinds it was, so
+            // the stale window the player was looking at could not be identified from the log at all — it
+            // had to be re-derived from the coverage table. A kept entry names its state and its subject.
+            string kept = "";
+            try
+            {
+                for (int i = 0; i < data.Count; i++)
+                {
+                    var ctx = data[i].State;
+                    var kind = ctx == null ? null : (ctx.GetType().DeclaringType ?? ctx.GetType());
+                    var subject = SubjectMission(ctx);
+                    kept += (i == 0 ? " Kept: " : ", ") + (kind == null ? "?" : kind.Name) +
+                            (subject == null
+                                ? ""
+                                : "(mission '" + (subject.MissionDef == null ? "?" : subject.MissionDef.name) +
+                                  "', completed=" + subject.IsCompleted + ")");
+                }
+                if (data.Count > 0) kept += ".";
+            }
+            catch (Exception ex) { kept = " Kept: <naming failed: " + ex.Message + ">"; }
             Debug.Log("[MP][windows] window-queue restore: " + seen + " entries in the save, " + data.Count +
                       " kept — " + deadSubject + " dropped (subject already resolved), " + notMine +
                       " dropped (Mirrored kind, produced by another peer" +
@@ -622,7 +643,7 @@ namespace Multiplayer.Network.Sync
                             "own live raises (0xB6/0xB7/0xBA) and re-carries its unanswered ones through " +
                             "EventPopup.RequeueUnanswered, which is why the two peers' KEPT COUNTS legitimately " +
                             "differ — the host holds one copy, this peer holds the other."
-                          : ""));
+                          : "") + kept);
         }
 
         /// <summary>PURE (RailCheck L191). Does this restored entry go?
@@ -717,11 +738,46 @@ namespace Multiplayer.Network.Sync
             return rule != null && rule.Sync == WindowSync.Mirrored;
         }
 
+        /// <summary>NON-NULL = the thing handed in is a window whose SUBJECT MISSION has already resolved,
+        /// and the string is that mission's name for the log line. The one verdict, shared by the two moments
+        /// a window can be found stale, because a window is only ever stale for one reason:
+        ///
+        ///   • RESTORE (<see cref="Prefix"/>) — the save's queue, filtered as it is rebuilt.
+        ///   • SERVE (<see cref="WindowOrder.DropResolvedSubjects"/>) — the live queue, filtered every frame
+        ///     the game pumps its own drain.
+        ///
+        /// THE SECOND ONE IS WHY THIS EXISTS. Restore is a ONE-SHOT check and it runs TOO EARLY: measured
+        /// 2026-08-08, host multiplayer.log:3378, the restore reported "1 entries in the save, 1 kept — 0
+        /// dropped (subject already resolved)" at 02:49:11.734, and the mission it was about only resolved at
+        /// 02:49:12.015 (`[MP][outcome] … activeMission=none`, structural destroy of
+        /// `S#213.SerializationData.ActiveMission` at :12.254) — 281 ms LATER. The filter asked the right
+        /// question at a moment when the honest answer was still "no". <c>RestoreData</c> only REBUILDS
+        /// <c>_viewStateSwitchRequests</c>; the entries are popped one at a time later by
+        /// <c>ProcessQueriedStateSwitch</c>, so validity has to be a property of SERVING a window, not of
+        /// restoring one. The restore-time call stays: it is free and it drops a window one frame earlier
+        /// when the subject is already dead by then.
+        ///
+        /// IT TAKES <c>object</c> ON PURPOSE. At restore the holder is an
+        /// <c>IGeoscapeRestorableViewStateContext</c>; at serve it is the live
+        /// <c>IState&lt;GeoscapeViewContext&gt;</c> itself. Neither shares an interface with the other and
+        /// neither needs to: the subject is read by walking fields for a <c>GeoMission</c>, so the same
+        /// verdict covers both without a type table. That is also what makes the serve-time filter reach
+        /// windows the restore-time one CANNOT see at all — <c>UIStateRosterDeployment</c> (the "start
+        /// mission" squad screen, <c>_mission</c>:29) is queued at <c>ToDeploymentState</c>:596 and is NOT an
+        /// <c>IGeoscapeRestorableViewState</c>, so it never appears in a save's queue and was outside every
+        /// restore-time filter ever written here.</summary>
+        internal static string ResolvedSubjectName(object holder)
+        {
+            var mission = SubjectMission(holder);
+            if (mission == null || !HasResolved(mission)) return null;
+            return mission.MissionDef == null ? "?" : mission.MissionDef.name;
+        }
+
         /// <summary>The game's OWN verdict that a mission is over (<c>UIStateInitial.EnterState</c>:102),
         /// not a second opinion. <c>GetMissionOutcomeState</c>:556 dereferences
         /// <c>Site.GeoLevel.ViewerFaction</c> whenever <c>Result</c> is set, so the site is checked first —
         /// a restored context can name a mission whose site is already gone.</summary>
-        private static bool HasResolved(GeoMission mission)
+        internal static bool HasResolved(GeoMission mission)
         {
             if (mission.IsCompleted) return true;
             if (mission.Site == null) return true;
@@ -733,8 +789,16 @@ namespace Multiplayer.Network.Sync
         /// and holds a different class per <c>ModalType</c>, so there is no static table to key on — the
         /// object in hand is the only honest answer (the same argument <c>GeoModalMirror.DataShape</c> makes
         /// for deriving a shape from the runtime type). A context with no mission in it returns null and is
-        /// restored exactly as before.</summary>
-        private static GeoMission SubjectMission(IGeoscapeRestorableViewStateContext context)
+        /// restored exactly as before.
+        ///
+        /// MEASURED REACH, not assumed: of the five <c>IGeoscapeRestorableViewState</c> implementors only
+        /// <c>UIStateGeoModal</c> can hold a mission at all (<c>UIStateGeoscapeEvent</c>,
+        /// <c>UIStateBaseGeoscapeEvent</c>, <c>UIStateMarketplaceGeoscapeEvent</c> and
+        /// <c>UIStateAssetDeployment</c> name no <c>GeoMission</c> anywhere in their decompiled source), so
+        /// the post-mission event window — <c>PROG_AN0_WIN</c> and every sibling — CANNOT be reached by this
+        /// filter even though it is raised seconds after the mission it celebrates. That is not luck and it
+        /// is not a carve-out: it falls out of keying on the subject the window actually carries.</summary>
+        internal static GeoMission SubjectMission(object context)
         {
             if (context == null) return null;
             for (var t = context.GetType(); t != null && t != typeof(object); t = t.BaseType)

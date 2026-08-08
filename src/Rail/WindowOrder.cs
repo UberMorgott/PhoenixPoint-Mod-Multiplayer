@@ -264,12 +264,93 @@ namespace Multiplayer.Network.Sync
             return changed;
         }
 
+        /// <summary>
+        /// A QUEUED WINDOW WHOSE SUBJECT HAS ALREADY RESOLVED IS NEVER SERVED. Pure, and RailCheck L260
+        /// executes it over a REAL <c>IList&lt;GeoscapeViewStateSwitchRequest&gt;</c>.
+        ///
+        /// THE REPORT (2026-08-08): returning from a battle, the host was met by the START-MISSION window for
+        /// the mission it had just finished, and the clients by a different set. Both halves are ONE cause.
+        /// The mod already filtered resolved subjects — but only inside
+        /// <c>RestoreDropsResolvedSubjects</c>, i.e. ONCE, while <c>RestoreData</c> rebuilds the list. The
+        /// list is not consumed there: <c>GeoscapeViewSwitchQuery</c>:110-118 pops entries one at a time out
+        /// of <c>ProcessQueriedStateSwitch</c>, whenever the previous switch finishes. Measured on the host,
+        /// one clock: restore said "1 kept — 0 dropped (subject already resolved)" at 02:49:11.734
+        /// (multiplayer.log:3378) and the mission resolved at 02:49:12.015 (`activeMission=none`) — the check
+        /// ran 281 ms before the fact it was checking. So the window was VALID when asked and STALE when
+        /// shown, and no second question was ever put to it.
+        ///
+        /// THE FIX IS THE MOMENT, NOT THE WINDOW. Validity is asked at SERVE time, on every entry, every
+        /// frame the game pumps its own drain — so a subject that resolves at ANY point between queueing and
+        /// showing is caught, whatever queued the window and whenever. This is deliberately not
+        /// `if (mission-brief && completed) drop`: nothing here names a <c>ModalType</c>, a window kind or a
+        /// mission family. It reads the SUBJECT the request's own state carries
+        /// (<c>RestoreDropsResolvedSubjects.ResolvedSubjectName</c> field-walks for a <c>GeoMission</c>) and asks the
+        /// GAME's verdict on it (<c>UIStateInitial.EnterState</c>:102's own predicate).
+        ///
+        /// WHAT IT REACHES THAT THE RESTORE FILTER NEVER COULD. Every window in the game is queued through
+        /// <c>QueryStateSwitch</c> and served through this one drain, so live raises ride it as well as
+        /// restored ones — including <c>UIStateRosterDeployment</c>, the "start mission" squad screen, which
+        /// is NOT an <c>IGeoscapeRestorableViewState</c> and therefore never appears in a save's queue at
+        /// all. It also closes the REPLAY shape of the same bug at the other boundary: a held one-shot
+        /// (<see cref="EventPopup"/>'s <c>_held</c>, L189) is drained back into this queue, and the
+        /// `PROG_NJ0_MISS 'REPLAYED'` of 2026-08-08 01:11:25.70 was a held entry replayed blindly. Held is
+        /// correct; released-without-revalidating is not, and release lands here.
+        ///
+        /// IT DROPS NOTHING IT CANNOT NAME. A request whose state carries no mission returns null and is left
+        /// exactly as it was — which is why the post-mission REWARD windows are untouched and not by
+        /// exemption: none of the event states holds a <c>GeoMission</c> (see
+        /// <c>RestoreDropsResolvedSubjects.SubjectMission</c>), and the outcome modal is not in this queue at all, it is
+        /// opened by <c>UIStateInitial.EnterState</c>:112 after the queue is rebuilt (L117).
+        ///
+        /// NO QUORUM AND NO PEER. Every value read is this peer's own heap: the request list, the state
+        /// object, the mission on it. No roster, no message, no acknowledgement — each peer decides that a
+        /// window is dead from state it already holds, which is exactly why host and clients converge instead
+        /// of negotiating.
+        ///
+        /// Returns one description per dropped entry so the CALLER logs — a dropped window must never be
+        /// silent, and this stays free of <c>UnityEngine.Debug</c> so the law can execute it outside a
+        /// player.</summary>
+        internal static List<string> DropResolvedSubjects(IList<GeoscapeViewStateSwitchRequest> pending,
+                                                          Func<object, string> resolvedSubjectName)
+        {
+            var dropped = new List<string>();
+            if (pending == null || resolvedSubjectName == null) return dropped;
+            for (int i = pending.Count - 1; i >= 0; i--)
+            {
+                var request = pending[i];
+                var subject = resolvedSubjectName(request == null ? null : request.State);
+                if (subject == null) continue;
+                pending.RemoveAt(i);
+                dropped.Add((request.State == null ? "a window" : request.State.GetType().Name) +
+                            " (mission '" + subject + "')");
+            }
+            return dropped;
+        }
+
         /// <summary>The drain gate: false = HOLD this frame (the game's own <c>Update</c> retries next
         /// frame), true = the game pops its head as it always did. Everything this reads is local.</summary>
         internal static bool ReadyToDequeue(GeoscapeViewSwitchQuery query)
         {
             try
             {
+                var queued = query == null || RequestsField == null
+                    ? null
+                    : RequestsField.GetValue(query) as IList<GeoscapeViewStateSwitchRequest>;
+
+                // THE STALENESS PRUNE, BEFORE EVERY OTHER GATE AND IN SOLO TOO. Not co-op-gated, because
+                // the restore-time half it completes is not either: a window for a finished mission is dead
+                // for the same reason with or without a session, and gating one moment and not the other is
+                // how the two answers drift apart. It also has to run while a switch is IN FLIGHT (below
+                // returns early on that) — the entry behind the open window is exactly the one that goes
+                // stale while the player reads.
+                if (queued != null && queued.Count > 0)
+                    foreach (var gone in DropResolvedSubjects(queued, RestoreDropsResolvedSubjects.ResolvedSubjectName))
+                        Debug.Log("[MP][windows] queue DROPS " + gone + " on its way to the screen — that " +
+                                  "mission has already resolved, so the offer this window carried is dead. " +
+                                  "It is not being shown for a battle that is already over. (The restore " +
+                                  "filter cannot catch this one: it runs while the queue is rebuilt, which " +
+                                  "on a mission return is before the mission is marked resolved.)");
+
                 // Co-op only, same argument as the rank prefix: a solo player has nobody to agree with, and
                 // holding their windows for 150 ms would be an unrequested change to vanilla.
                 var engine = NetworkEngine.Instance;

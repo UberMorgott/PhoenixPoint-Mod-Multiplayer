@@ -4,17 +4,14 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using Base;
-using Base.Cameras;
 using Base.Core;
 using Base.Eventus;
 using Base.UI.MessageBox.PromptControllers;
 using Base.Utils;
-using HarmonyLib;
 using Multiplayer.Network;
 using Multiplayer.Network.MessageLayer;
 using Multiplayer.Network.Sync;
 using Multiplayer.Tactical;
-using PhoenixPoint.Geoscape.Cameras;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
@@ -86,29 +83,6 @@ namespace Multiplayer.UI
     /// <c>EnableVisuals(false)</c> on it — a tracked point that is off screen is HIDDEN, which is precisely
     /// the case the arrow exists for. So the clamp is not native after all, and OnGUI draws it here.
     /// ponytail: ~40 lines of IMGUI; if it ever needs to sit under the game's canvas, port it then.
-    /// IT NOW TAKES A CLICK — see <see cref="Focus"/> — and the click is blocked from reaching the world by
-    /// the GAME'S OWN cursor-over-UI guard rather than by anything of ours; see
-    /// <see cref="PingArrowIsGuiInBattle"/>.
-    ///
-    /// WHY THE PINGED ACTOR IS NOT PAINTED WITH THE GAME'S FULL-BODY ABILITY FLASH (asked for 2026-08-08,
-    /// REJECTED after reading it — the finding, so nobody re-opens it). The white/coloured full-body paint an
-    /// ability's target wears IS <c>IHighlightable.Highlight(highlight, friendly, ability: true)</c> — the
-    /// very mechanism this class already refused. The ability branch is genuinely nicer than the selection
-    /// one: it swaps in PER-ACTOR cloned materials (<c>HighlightControllerComponent.cs:179-181</c>) and skips
-    /// the global <c>Shader.SetGlobalColor("BodypartHighlightColor")</c> the selection branch writes (:166-170).
-    /// But the ENTRY IS SHARED AND SO IS ITS LATCH: <c>Highlight</c> opens with
-    /// <c>if (_isHighlighted == highlight) return false;</c> (:144-153) over ONE bool per body part, and the
-    /// game's own ability targeting rides that same bool — <c>UIStateShoot.cs:1445</c> sets it with
-    /// <c>ability: true</c> and clears it at <c>:1463</c>. So a ping on an actor the local player is already
-    /// aiming at is SWALLOWED (returns false, nothing drawn), and the ping's expiry clears a paint the game
-    /// still wants — after which the game's own clear at :1463 no-ops and the actor is left wrong. Exactly
-    /// the two failures this class was built to avoid.
-    /// AND IT COULD NOT CARRY THE COLOUR ANYWAY: the ability paint's look is one scene-wide shader asset,
-    /// <c>LightingSettingsCharacters.AbilityHighlightShader</c> (:42, applied at
-    /// <c>HighlightControllerComponent.cs:245-249</c>), with no per-call colour anywhere on that branch — the
-    /// only colour the component takes per call is the GLOBAL one on the branch we must not use. Green-mine /
-    /// blue-yours is structurally impossible there. So the actor ping keeps the beacon shaft, which already
-    /// follows the actor, already expires on our clock, and IS tintable per instance (<see cref="Tint"/>).
     /// </summary>
     public sealed class PingMarkers : MonoBehaviour
     {
@@ -125,14 +99,6 @@ namespace Multiplayer.UI
         /// <summary>The arrow fades over its last second. The native markers animate themselves; only what
         /// this class draws is faded here.</summary>
         private const float FadeSeconds = 1f;
-
-        /// <summary>HOW BIG THE ARROW IS, as its half-extent in pixels — <c>max(30, height/20)</c>, which is
-        /// 2.5x the <c>max(12, height/50)</c> it shipped at. It was too small to notice, which for the one
-        /// widget whose entire job is "somebody is pointing at something you cannot see" is the whole feature
-        /// missing. Named constants and not literals because L252 reads them: a shrink back has to be a
-        /// deliberate edit to a number a law is watching, not a tweak inside a draw call.</summary>
-        internal const float ArrowHalfMin = 30f;
-        internal const float ArrowHalfFraction = 0.05f;
 
         private const byte SceneGeo = 0;
         private const byte SceneTac = 1;
@@ -156,10 +122,6 @@ namespace Multiplayer.UI
             /// <summary>The marker this class instantiated and must destroy — the geoscape POI marker or
             /// the tactical beacon shaft. Never a pooled object: nothing here is the game's to reclaim.</summary>
             public GameObject Beacon;
-            /// <summary>Whose ping this is, from the VIEWER's side — true only on the peer that pressed the
-            /// key. The marker's tint is written once at birth, but the arrow is redrawn every frame, so it
-            /// needs the answer kept.</summary>
-            public bool Mine;
         }
 
         // ─── lifecycle ───────────────────────────────────────────────────────
@@ -393,7 +355,7 @@ namespace Multiplayer.UI
             // ever visible. The game writes it by hand at every one of its own instantiate sites.
             go.SetActive(true);
             Tint(go, mine);
-            _instance.Track(new Live { Geo = true, Follow = follow, Local = local, Beacon = go, Mine = mine });
+            _instance.Track(new Live { Geo = true, Follow = follow, Local = local, Beacon = go });
         }
 
         private static void ShowTac(byte kind, Vector3 pos, int actorKey, bool mine)
@@ -424,7 +386,7 @@ namespace Multiplayer.UI
                 // instantiated native prefab is assumed to arrive switched on.
                 beacon.SetActive(true);
                 Tint(beacon, mine);
-                _instance.Track(new Live { Follow = actor.transform, Beacon = beacon, Mine = mine });
+                _instance.Track(new Live { Follow = actor.transform, Beacon = beacon });
                 return;
             }
 
@@ -436,7 +398,7 @@ namespace Multiplayer.UI
             stand.transform.position = pos;
             stand.SetActive(true);
             Tint(stand, mine);
-            _instance.Track(new Live { Local = pos, Beacon = stand, Mine = mine });
+            _instance.Track(new Live { Local = pos, Beacon = stand });
         }
 
         private void Track(Live p)
@@ -478,8 +440,8 @@ namespace Multiplayer.UI
             {
                 if (r == null) continue;
                 r.GetPropertyBlock(block);
-                block.SetColor("_Color", colour);
-                block.SetColor("_TintColor", colour);
+                block.SetColor(ColorId, colour);
+                block.SetColor(TintColorId, colour);
                 r.SetPropertyBlock(block);
                 var mat = r.sharedMaterial;
                 if (seen != null)
@@ -494,13 +456,8 @@ namespace Multiplayer.UI
                       "declare either property — the shader names above are what to write instead.");
         }
 
-        /// <summary>THE SHADER IDS ARE NOT CACHED, AND MUST NOT BE. They used to be two
-        /// <c>static readonly int</c>s initialised with <c>Shader.PropertyToID</c>, which put a UNITY ECALL
-        /// INTO THIS TYPE'S STATIC CONSTRUCTOR — so merely READING any static field of this class ran engine
-        /// code. RailCheck reflects over <c>Own</c>/<c>Peer</c> (law L251) outside a Unity runtime and the
-        /// whole harness aborted on the type initializer: 1 law crashed, 179 of 180 ran, no verdict. The
-        /// name-taking <c>SetColor</c> overload interns the same id internally and a ping is a handful per
-        /// minute, so the cache bought nothing and cost a harness.</summary>
+        private static readonly int ColorId = Shader.PropertyToID("_Color");
+        private static readonly int TintColorId = Shader.PropertyToID("_TintColor");
         private static bool _loggedTint;
 
         // ─── the audible half ────────────────────────────────────────────────
@@ -548,34 +505,18 @@ namespace Multiplayer.UI
 
         // ─── the off-screen arrow ────────────────────────────────────────────
 
-        /// <summary>Is the cursor sitting on an arrow this frame. Read by the two patches below and by
-        /// nothing else — it is what lets the GAME'S OWN guard treat the arrow as the UI it is.</summary>
-        internal static bool CursorOverArrow { get; private set; }
-
         private void OnGUI()
         {
-            // Two events, one geometry pass. IMGUI calls OnGUI several times a frame with different events;
-            // the arrow's placement is a handful of floats, so it is cheaper to recompute than to cache and
-            // risk a click tested against last frame's rect.
-            var ev = Event.current;
-            var repaint = ev.type == EventType.Repaint;
-            var click = ev.type == EventType.MouseDown && ev.button == 0;
-            if (!repaint && !click) return;
-
+            if (_live.Count == 0 || Event.current.type != EventType.Repaint) return;
             var cam = MainCamera.Instance;
-            if (_live.Count == 0 || cam == null)
-            {
-                if (repaint) CursorOverArrow = false;
-                return;
-            }
+            if (cam == null) return;
 
             var centre = new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
-            var half = Mathf.Max(ArrowHalfMin, Screen.height * ArrowHalfFraction);
+            var half = Mathf.Max(12f, Screen.height * 0.02f);
             var limitX = centre.x - half - 8f;
             var limitY = centre.y - half - 8f;
             var old = GUI.matrix;
             var oldColor = GUI.color;
-            var over = false;
 
             foreach (var p in _live)
             {
@@ -593,111 +534,15 @@ namespace Multiplayer.UI
                 if (!behind && scale >= 1f && Faces(p, cam, world.Value)) continue;  // visible: the marker speaks
 
                 var at = centre + d * Mathf.Min(scale, 1f);
-                // The unrotated square the glyph is drawn inside. Hit-testing it rather than the triangle is
-                // deliberate: a 60px arrow is already a small target and the corners cost nothing.
-                var rect = new Rect(at.x - half, at.y - half, half * 2f, half * 2f);
-                if (rect.Contains(ev.mousePosition))
-                {
-                    over = true;
-                    if (click) { Focus(p); break; }
-                }
-                if (!repaint) continue;
-
                 var left = p.Until - Time.unscaledTime;
-                var colour = p.Mine ? Own : Peer;
-                colour.a = Mathf.Clamp01(left / FadeSeconds);
-                GUI.color = colour;
+                GUI.color = new Color(1f, 1f, 1f, Mathf.Clamp01(left / FadeSeconds));
                 GUIUtility.RotateAroundPivot(Mathf.Atan2(d.x, -d.y) * Mathf.Rad2Deg, at);
-                GUI.DrawTexture(rect, Arrow());
+                GUI.DrawTexture(new Rect(at.x - half, at.y - half, half * 2f, half * 2f), Arrow());
                 GUI.matrix = old;
             }
 
-            if (repaint) CursorOverArrow = over;
             GUI.color = oldColor;
             GUI.matrix = old;
-        }
-
-        /// <summary>
-        /// THE CLICK — "take me to what he is pointing at", and the ONE place in this class allowed to move
-        /// a camera. Law L160 bans a camera move on the ARRIVING side and still does; this is the opposite
-        /// side of the same rule. The watcher pressed his own mouse button on a widget that exists only to
-        /// say "there is something off screen": nothing here is remote-driven, and a peer who ignores the
-        /// arrow keeps his camera exactly where he left it. That is also why nothing STICKS — see below.
-        ///
-        /// BOTH RECIPES ARE THE GAME'S OWN, copied off the call the game makes for the same intent:
-        ///  · battle — <c>CameraDirector.Hint(CameraHint.ChaseTarget, new CameraChaseParams { … })</c>, which
-        ///    is <c>TacticalActorViewBase.DoCameraChaseParam</c> (TacticalActorViewBase.cs:491-501) — the
-        ///    method behind <c>DoCameraChase()</c>, i.e. what a portrait click already does
-        ///    (<c>UIStateCharacterSelected.cs:249</c>). <c>EaseInOut</c> and <c>Instant = false</c> are its
-        ///    values, so the pan is the game's own smooth one, not a lerp of ours.
-        ///  · globe — <c>Hint(CameraDirectorHint.GeoscapeFocus, new GeoCamDirectorParams { … })</c> with
-        ///    <c>InstantChase = false</c>, verbatim <c>GeoscapeView.ChaseTarget</c> (GeoscapeView.cs:1109-1113).
-        ///
-        /// <c>ChaseTransform</c> IS DELIBERATELY LEFT NULL, and <c>GeoscapeView.ChaseTarget</c> deliberately
-        /// not called. Both are the same refusal: a chase that names a TRANSFORM never ends by itself
-        /// (<c>PlanarScrollCamera</c>:747 can only self-end a chase whose <c>ChaseTransform</c> is null, and
-        /// :838 refuses to stop a locked one), and <c>ChaseTarget</c> additionally installs the globe's sticky
-        /// snap (<c>_currentChaseTarget</c>, GeoscapeView.cs:1104-1106). Either would leave the watcher's
-        /// camera glued to somebody else's soldier — a camera that stops obeying its player, which is the
-        /// exact defect the camera policy's closing note records from a live 3-peer session. A position is a
-        /// one-shot: it arrives and it is over.
-        ///
-        /// NEITHER HINT IS FILTERED BY THIS MOD. The tactical one rides <c>CameraDirector.Hint(CameraHint,
-        /// object)</c>:167, an unrelated overload from the patched <c>Hint(CameraDirectorHint,
-        /// CameraDirectorParams)</c>:123; the geoscape one rides the patched overload but
-        /// <c>TacticalCameraPolicy</c> narrows to the four action hints and lets <c>Geoscape*</c> through
-        /// untouched (its own note, TacticalCameraPolicy.cs:46).
-        /// </summary>
-        private static void Focus(Live p)
-        {
-            var world = WorldOf(p);
-            if (!world.HasValue)
-            {
-                Debug.LogWarning("[Multiplayer] ping arrow clicked but NOT followed — the ping has no world " +
-                                 "position on this peer any more (the object it named is gone, or the screen " +
-                                 "it was drawn for has been unloaded under it). The arrow will expire on its " +
-                                 "own; nothing else is affected.");
-                return;
-            }
-
-            if (p.Geo)
-            {
-                var director = GeoLevel()?.View?.CameraDirector;
-                if (director == null)
-                {
-                    Debug.LogWarning("[Multiplayer] ping arrow clicked but NOT followed — the geoscape view " +
-                                     "has no CameraDirector, so there is nothing to hint. This is the globe " +
-                                     "being torn down mid-click.");
-                    return;
-                }
-                director.Hint(CameraDirectorHint.GeoscapeFocus, new GeoCamDirectorParams
-                {
-                    TargetPosition = world.Value,
-                    Unmanaged = true,
-                    InstantChase = false,
-                });
-            }
-            else
-            {
-                var director = Tlc()?.View?.CameraDirector;
-                if (director == null)
-                {
-                    Debug.LogWarning("[Multiplayer] ping arrow clicked but NOT followed — the tactical view " +
-                                     "has no CameraDirector, so there is nothing to hint. This is the battle " +
-                                     "being torn down mid-click.");
-                    return;
-                }
-                director.Hint(CameraHint.ChaseTarget, new CameraChaseParams
-                {
-                    ChaseVector = world.Value,
-                    ChaseCurve = AnimationCurve.EaseInOut(0f, 0f, 1f, 1f),
-                });
-            }
-
-            Debug.Log("[Multiplayer] ping arrow CLICKED — centring this peer's own camera on the " +
-                      (p.Follow != null ? "pinged object" : "pinged point") + " at " + world.Value + " on the " +
-                      (p.Geo ? "geoscape" : "battlefield") + " (" + (p.Mine ? "own" : "peer") + " ping). " +
-                      "Nobody else's camera moves.");
         }
 
         /// <summary>The ping's world position this frame, or null when its screen is not the live one (a
@@ -728,10 +573,7 @@ namespace Multiplayer.UI
             const int n = 32;
             var tex = new Texture2D(n, n, TextureFormat.ARGB32, false) { hideFlags = HideFlags.HideAndDontSave };
             var px = new Color32[n * n];
-            // WHITE, not the amber it used to be: the glyph is now tinted per ping through GUI.color, and
-            // GUI.color MULTIPLIES. Amber times the peer blue is olive, not blue — a white glyph is the only
-            // one that renders the two owner colours as themselves.
-            var solid = new Color32(255, 255, 255, 255);
+            var solid = new Color32(255, 208, 64, 255);
             var clear = new Color32(0, 0, 0, 0);
             for (var y = 0; y < n; y++)
             {
@@ -762,49 +604,5 @@ namespace Multiplayer.UI
         }
 
         private static Transform GlobeRoot(GeoLevelController geo) => geo?.SceneReferences?.GeoscapeYRotation;
-    }
-
-    /// <summary>
-    /// THE ARROW IS UI, AND THE GAME HAS TO KNOW IT — battle half.
-    ///
-    /// An IMGUI rect is invisible to <c>EventSystem.IsPointerOverGameObject</c>, because it is not a
-    /// GameObject. Without this the click that follows a ping ALSO reaches the world underneath it: the
-    /// tactical states take their world clicks in <c>TacticalViewState.Update</c> (:47-70) behind exactly one
-    /// gate, <c>if (!Context.View.IsCursorOverGUI())</c>, so a click on an arrow at the screen edge would
-    /// also order the selected soldier to walk there. Losing a move because you looked at a ping is a worse
-    /// bug than the one the arrow fixes.
-    ///
-    /// SO THE GAME'S OWN GATE IS TOLD THE TRUTH rather than a gate of ours being invented: the arrow IS
-    /// cursor-over-GUI while the cursor is on it, and every caller of that method — states, cameras, the
-    /// square-selection drag — inherits the answer for free. <c>Event.current.Use()</c> would NOT have done
-    /// it: the game reads the mouse through Rewired, which never sees an IMGUI event as consumed.
-    ///
-    /// ONE FRAME OF LAG, ON PURPOSE. <c>CursorOverArrow</c> is written in OnGUI, which runs after Update, so
-    /// the gate reads a flag computed at the end of the previous frame. Hovering precedes clicking by many
-    /// frames in every real input, and the alternative — guessing this component's Update order against the
-    /// view's — is the kind of ordering assumption that breaks silently.
-    /// </summary>
-    [HarmonyPatch(typeof(TacticalView), nameof(TacticalView.IsCursorOverGUI))]
-    internal static class PingArrowIsGuiInBattle
-    {
-        private static void Postfix(ref bool __result)
-        {
-            if (PingMarkers.CursorOverArrow) __result = true;
-        }
-    }
-
-    /// <summary>The globe half of <see cref="PingArrowIsGuiInBattle"/>, over the geoscape's own spelling of
-    /// the same method (<c>GeoscapeView.IsCursorOverGui</c>, GeoscapeView.cs:905 — lower-case "ui", a
-    /// different member from the tactical one, not an override). It gates the globe's own picking
-    /// (<c>SelectActorAtCursor</c>:909-915) and the geoscape camera's drag/edge-scroll
-    /// (<c>GeoscapeCamera.cs:187,268-286</c>), so without it a click on an arrow both follows the ping AND
-    /// starts spinning the globe under it.</summary>
-    [HarmonyPatch(typeof(GeoscapeView), nameof(GeoscapeView.IsCursorOverGui))]
-    internal static class PingArrowIsGuiOnTheGlobe
-    {
-        private static void Postfix(ref bool __result)
-        {
-            if (PingMarkers.CursorOverArrow) __result = true;
-        }
     }
 }
