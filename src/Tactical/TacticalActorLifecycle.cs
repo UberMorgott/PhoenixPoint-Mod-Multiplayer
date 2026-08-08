@@ -665,9 +665,9 @@ namespace Multiplayer.Tactical
     {
         private static bool Prefix(ActorComponent __instance, out IDisposable __state)
         {
-            // BEFORE the containment decision, and it survives it: a contained spawn still runs its
-            // components' OnEnterPlay on the way to being refused, and those raises are exactly as
-            // un-announceable as an accepted spawn's. See HoldMidBattleEnterPlay.
+            // The hold and the containment below never interact, and deliberately so: containment is a
+            // CLIENT decision and the hold is taken on the HOST alone, so a contained spawn's __state is
+            // always null. Ordering here is only the language's. See HoldMidBattleEnterPlay.
             __state = TacticalActorLifecycle.HoldMidBattleEnterPlay(__instance);
             return TacticalActorLifecycle.OnActorEnteringPlay(__instance);
         }
