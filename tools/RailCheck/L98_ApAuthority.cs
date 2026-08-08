@@ -59,8 +59,9 @@ namespace RailCheck
     /// one that survives, and the bar must be painted rather than requested.
     ///
     /// Falsify: delete the try/catch around <c>ApplySettle</c> → <c>settle-not-fault-isolated</c>; widen it
-    /// over the <c>done</c> bookkeeping → <c>settle-drop-not-recorded</c>; drop either <c>CanBeSeen</c> guard
-    /// in <c>RefreshVisionTowards</c> → <c>vision-sweep-unguarded</c>; make <c>QueueSettle</c> keep the first
+    /// over the <c>done</c> bookkeeping → <c>settle-drop-not-recorded</c>; put a native
+    /// <c>UpdateVisibilityOfAllTowardsActor</c> sweep back into <c>ApplyVision</c> →
+    /// <c>vision-sweep-unguarded</c>; make <c>QueueSettle</c> keep the first
     /// entry instead of the newest → <c>stale-settle-wins</c>; put the native armer back in
     /// <c>TacticalUiRepaint</c> → <c>squad-bar-uses-resettable-countdown</c>; delete
     /// <c>PaintSquadBar</c>'s <c>UpdateActorStats</c> loop → <c>squad-bar-not-painted</c>; patch the game so
@@ -119,28 +120,38 @@ namespace RailCheck
                 }
             }
 
-            // ─── HALF 2: every actor fed to the native sweep must be guarded the way the game guards its own ─
-
-            var refresh = cmd.GetMethod("RefreshVisionTowards", AllMembers);
-            if (refresh == null)
+            // ─── HALF 2: the settle path hands NOTHING to the native line-of-sight sweep ─────────────────────
+            //
+            // NARROWED 2026-08-08, and the hazard is now absent instead of guarded. The 15305-NRE storm came
+            // from the settle's own vision REPAIR feeding a whole faction's Actors — crates, ground piles,
+            // destructibles (A6) — to UpdateVisibilityOfAllTowardsActor, whose target argument reaches
+            // GetSizeAndStealthVisibilityMultiplier:842 and is dereferenced with no test at all (the game
+            // guards only the LOOKER, at :549-554). That repair is gone: visibility is now the host's value
+            // assigned onto the counters, and the client runs no line-of-sight test at the settle. So the arm
+            // that counted CanBeSeen guards against sweeps is replaced by the stronger claim it was
+            // approximating — NO settle-path method calls into the native cast at all — which stays falsifiable
+            // (put a sweep back and it goes red) and cannot rot into a guard count that happens to balance.
+            var hazards = new[] { "UpdateVisibilityOfAllTowardsActor", "UpdateVisibilityAll",
+                                  "CheckVisibleLineBetweenActors", "CheckVisibleLine" };
+            foreach (var name in new[] { "ApplySettle", "ApplyVision", "CollectVision" })
             {
-                yield return "L98 settle-repair-gone: TacticalCommandSync.RefreshVisionTowards no longer exists.";
-            }
-            else
-            {
-                var callees = Calls(refresh).Select(c => c.Name).ToList();
-                int sweeps = callees.Count(n => n == "UpdateVisibilityOfAllTowardsActor");
-                int guards = callees.Count(n => n == "CanBeSeen");
-                if (sweeps > guards)
-                    yield return "L98 vision-sweep-unguarded: RefreshVisionTowards makes " + sweeps +
-                                 " UpdateVisibilityOfAllTowardsActor call(s) behind only " + guards +
-                                 " CanBeSeen guard(s). The game guards the LOOKER at :549-554 and NOTHING guards " +
-                                 "the actor being looked at — GetSizeAndStealthVisibilityMultiplier:842 " +
-                                 "dereferences its TacticalPerceptionBase blind. The inverted sweep enumerates a " +
-                                 "whole faction, and a faction's Actors include crates, ground piles and " +
-                                 "destructibles (A6), none of which have one. Every argument this method hands to " +
-                                 "the native sweep needs its own guard, not just the ones the current shape " +
-                                 "happens to reach.";
+                var m = cmd.GetMethod(name, AllMembers);
+                if (m == null)
+                {
+                    yield return "L98 settle-repair-gone: TacticalCommandSync." + name + " no longer exists, so " +
+                                 "the settle path this arm scans for unguarded native vision calls cannot be found.";
+                    continue;
+                }
+                var callees = Calls(m).Select(c => c.Name).ToList();
+                foreach (var hazard in hazards)
+                    if (callees.Contains(hazard))
+                        yield return "L98 vision-sweep-unguarded: TacticalCommandSync." + name + " calls " +
+                                     hazard + ". The native cast dereferences its TARGET's " +
+                                     "TacticalPerceptionBase blind (GetSizeAndStealthVisibilityMultiplier:842) " +
+                                     "while guarding only the looker, and a faction's Actors include crates, " +
+                                     "ground piles and destructibles that have none — measured 2026-08-04 as " +
+                                     "15305 identical NREs, 94 settles shipped and 0 applied. The settle path " +
+                                     "must not call it at all; visibility is the host's value, not a local test.";
             }
 
             var vision = game.GetType("PhoenixPoint.Tactical.Levels.TacticalFactionVision");
@@ -149,9 +160,9 @@ namespace RailCheck
                 !Calls(multiplier).Any(c => c.Name == "get_TacticalPerceptionBase"))
                 yield return "L98 premise-visibility-deref-guarded: " +
                              "TacticalFactionVision.GetSizeAndStealthVisibilityMultiplier no longer dereferences " +
-                             "TacticalPerceptionBase. That blind dereference IS the reason CanBeSeen exists — if " +
-                             "the engine now tests it, the guard is dead weight and the arm above is asserting a " +
-                             "hazard the game no longer has.";
+                             "TacticalPerceptionBase. That blind dereference IS why the settle path may not reach " +
+                             "the native cast — if the engine now tests it, the arm above is banning a call over " +
+                             "a hazard the game no longer has.";
 
             // ─── HALF 3: the newest queued settle is the one that must survive ───
 

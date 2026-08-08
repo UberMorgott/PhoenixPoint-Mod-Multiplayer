@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
@@ -7,7 +8,7 @@ using System.Reflection.Emit;
 namespace RailCheck
 {
     /// <summary>
-    /// L96 — A SETTLE RE-TESTS VISION IN BOTH DIRECTIONS, AND A DROP LIST MAY NOT SWALLOW AN ORDER.
+    /// L96 — A SETTLE CARRIES THE HOST'S VISION IN BOTH DIRECTIONS, AND A DROP LIST MAY NOT SWALLOW AN ORDER.
     ///
     /// THE REPORT (3 instances, 2026-08-04, build 843264 B @ 22:09:44). Two failures, one shape: something
     /// that is true on the ACTING peer and on no other. (1) A sniper ran on a client and saw a bandit; on
@@ -27,11 +28,20 @@ namespace RailCheck
     /// second. A settle for this peer's own soldier therefore re-tested who could see him and never re-tested
     /// what he could see. L81 asked "is the call there"; the call was there and covered half the graph.
     ///
-    /// HALF 1 — the settle's repair must run BOTH directions. The own-faction half has no public native
-    /// entry (<c>UpdateVisibilityForImpl</c> is private), so it is assembled by INVERTING the same public
-    /// method over the foreign actors, which is why the arms look for a second call site and for the foreign
-    /// enumeration that only that half needs. A premise arm guards the reasoning: if the engine ever stops
-    /// recomputing vision from two different methods, the second half is theatre and the law says so.
+    /// HALF 1 — REWRITTEN 2026-08-08, SAME OUTCOME, DIFFERENT MECHANISM. The old wording asserted that the
+    /// settle's repair must RE-TEST vision in both directions, and the arms looked for a second call site and
+    /// for the inverted foreign sweep the own-faction half needed (<c>UpdateVisibilityForImpl</c> being
+    /// private). That whole construction is retired: the client no longer tests anything. The host's
+    /// per-(looking faction, actor) <c>KnownState</c> now RIDES the settle and is assigned onto the client's
+    /// counters, so both directions fall out of the payload instead of out of two native methods — the settle
+    /// for a soldier carries what the ALIEN faction knows about HIM, the settle for the alien carries what the
+    /// PLAYER faction knows about IT, and the turn-edge sweep sends both for every keyed live actor. The
+    /// re-test could not have converged anyway: it was monotone (<c>IncrementCounterTo</c>:55-67 is a maximum,
+    /// so a reveal the host lacked could never be removed) and the peers do not share the geometry it was
+    /// computed from (<c>SceneObjectIdsComponent.MergeWith</c>:29-34 re-mints a colliding destructible guid at
+    /// RANDOM per peer). So the arms below assert the CARRY: the codec round-trips the rows without loss and
+    /// the settle payload really has a slot for them. L81 asserts the applier is reached and stops deciding;
+    /// L338 asserts the direction that used to be unreachable.
     ///
     /// HALF 2 — <c>LocalAbilities</c> is a per-CLASS answer to a per-ACTIVATION question. "Ambient" is a
     /// property of the ACTIVATION, exactly as A5 already established for <c>AttackType</c>: the
@@ -45,11 +55,11 @@ namespace RailCheck
     /// crosses is the failure mode this whole arc exists to prevent — it fires for the row that caused this
     /// report and for the next one anybody adds.
     ///
-    /// Falsify: delete the own-faction half of <c>RefreshVisionTowards</c> → <c>settle-vision-one-way</c> +
-    /// <c>settle-vision-no-foreign-sweep</c>; revert <c>LocalReason</c> to the unconditional lookup →
+    /// Falsify: drop the <c>Revealed</c> byte from <c>WriteVision</c>/<c>ReadVision</c> →
+    /// <c>settle-vision-codec-lossy</c>; delete the <c>Vision</c> field from <c>PendingSettle</c> →
+    /// <c>settle-vision-not-carried</c>; revert <c>LocalReason</c> to the unconditional lookup →
     /// <c>drop-list-unconditional</c> and <c>drop-list-swallows-movement</c>; add <c>MoveAbility</c> to
-    /// <c>LocalAbilities</c> → <c>drop-list-swallows-movement</c>; patch the engine so <c>OnActorMoved</c>
-    /// recomputes through one method → <c>premise-vision-one-directional</c>; make
+    /// <c>LocalAbilities</c> → <c>drop-list-swallows-movement</c>; make
     /// <c>TacticalHurtReactionAbility.Activate</c> stop reading <c>TriggerOnDamage</c> →
     /// <c>premise-hurt-reaction-undiscriminated</c>.
     /// </summary>
@@ -68,105 +78,41 @@ namespace RailCheck
         {
             var cmd = typeof(Multiplayer.Tactical.TacticalCommandSync);
 
-            // ─── HALF 1: the settle re-tests vision in BOTH directions ───
+            // ─── HALF 1: the settle CARRIES the host's vision, losslessly, in both directions ───
 
-            var refresh = cmd.GetMethod("RefreshVisionTowards", AllMembers);
-            if (refresh == null)
-            {
-                yield return "L96 settle-repair-gone: TacticalCommandSync.RefreshVisionTowards no longer exists — " +
-                             "the settle's vision repair is not there to be checked in either direction.";
-            }
-            else
-            {
-                var callees = Calls(refresh);
-                int towards = callees.Count(c => c.Name == "UpdateVisibilityOfAllTowardsActor");
-                if (towards < 2)
-                    yield return "L96 settle-vision-one-way: RefreshVisionTowards reaches " +
-                                 "UpdateVisibilityOfAllTowardsActor " + towards + " time(s). Native vision is a " +
-                                 "RELATION (TacticalFactionVision.OnActorMoved:279-286 vs :294-301) and the settle " +
-                                 "is the ONLY word a mirroring peer gets about the authoritative position, so it " +
-                                 "must re-test BOTH 'who sees this actor' and 'what this actor sees'. One call site " +
-                                 "is the half that leaves a spotted enemy in fog on every peer but the one that " +
-                                 "walked (the 2026-08-04 sniper report), and L81 stays green through it.";
-                if (!callees.Any(c => c.Name == "get_Actors"))
-                    yield return "L96 settle-vision-no-foreign-sweep: RefreshVisionTowards no longer enumerates a " +
-                                 "faction's Actors. The own-faction half has no public native entry " +
-                                 "(UpdateVisibilityForImpl is private), so it exists ONLY as the inverted sweep over " +
-                                 "the foreign actors — without that enumeration whatever is left cannot be it.";
-
-                // ─── the LOCATED half: distance, not sight ───
-                // UpdateVisibilityOfAllTowardsActor raises Revealed and ONLY Revealed
-                // (ReUpdateVisibilityTowardsActorImpl:651-662), so without a second arm a mirroring peer knows
-                // an enemy is there only once it can SEE it — the orange beacon is lost between settles.
-                var locate = cmd.GetMethod("LocateByDistance", AllMembers);
-                if (locate == null || !callees.Any(c => c.Name == "LocateByDistance"))
-                    yield return "L96 settle-located-gone: the settle repair no longer reaches LocateByDistance, so " +
-                                 "it raises Revealed and nothing else. KnownState.Located — in DetectionRange, no " +
-                                 "line of sight — is then unreachable on every peer whose only word about the " +
-                                 "authoritative position is this settle, and the 'something is there' beacon simply " +
-                                 "does not appear until the next faction turn edge recomputes it.";
-                else
-                {
-                    var lc = Calls(locate);
-                    if (!lc.Any(c => c.Name == "IncrementKnownCounter"))
-                        yield return "L96 located-not-raised: LocateByDistance never calls " +
-                                     "TacticalFactionVision.IncrementKnownCounter. It is the ONLY public entry that " +
-                                     "can raise Located (UpdateVisibilityForImpl, which the game uses for exactly " +
-                                     "this list, is private) — without it the method computes a distance and " +
-                                     "throws the answer away.";
-                    else if (!LoadsInt(locate, (int)16 /* KnownState.Located */))
-                        yield return "L96 located-wrong-state: LocateByDistance calls IncrementKnownCounter but " +
-                                     "never loads KnownState.Located (16). Raising Revealed by distance alone would " +
-                                     "show an enemy through walls, which is precisely what law L81 bans; raising " +
-                                     "Hidden would do nothing at all.";
-                    if (!lc.Any(c => c.Name == "LesserThanOrEqualTo") || !lc.Any(c => c.Name == "get_magnitude"))
-                        yield return "L96 located-ungated: LocateByDistance no longer compares a MAGNITUDE with " +
-                                     "Utl.LesserThanOrEqualTo, so the Located raise is not gated on range at all. " +
-                                     "The game's own rule is GatherKnowableActors:640-647 — within " +
-                                     "TacticalLevelControllerDef.DetectionRange — and an ungated raise beacons every " +
-                                     "enemy on the map to every peer, which is a worse lie than the missing beacon " +
-                                     "this arm was added to fix.";
-                }
-                if (!ReadsField(refresh, "DetectionRange") && !callees.Any(c => c.Name == "get_DetectionRange"))
-                    yield return "L96 settle-range-not-native: RefreshVisionTowards no longer reads " +
-                                 "TacticalLevelControllerDef.DetectionRange, so whatever range it now hands to the " +
-                                 "native vision calls and to LocateByDistance is this mod's number rather than the " +
-                                 "game's — two peers on different numbers see different boards.";
-            }
+            foreach (var v in VisionCarriedArm(cmd)) yield return v;
 
             var vision = game.GetType("PhoenixPoint.Tactical.Levels.TacticalFactionVision");
             if (vision == null)
             {
                 yield return "L96 premise-vision-type-gone: PhoenixPoint.Tactical.Levels.TacticalFactionVision did " +
-                             "not resolve — nothing about the settle's vision repair can be checked.";
+                             "not resolve — nothing about the settle's vision carry can be checked.";
             }
             else
             {
-                var onMoved = vision.GetMethods(AllMembers)
-                                    .FirstOrDefault(m => m.Name == "OnActorMoved" && m.GetParameters().Length == 1);
-                var reached = onMoved == null
-                    ? new List<string>()
-                    : Calls(onMoved).Select(c => c.Name).ToList();
-                if (onMoved == null ||
-                    !reached.Contains("UpdateVisibilityForImpl") ||
-                    !reached.Contains("ReUpdateVisibilityTowardsActorImpl"))
-                    yield return "L96 premise-vision-one-directional: TacticalFactionVision.OnActorMoved no longer " +
-                                 "recomputes through BOTH UpdateVisibilityForImpl and " +
-                                 "ReUpdateVisibilityTowardsActorImpl. The settle repair's whole shape — one native " +
-                                 "call per direction — is derived from that split; if the engine collapsed it, the " +
-                                 "second half is copying a distinction the game no longer makes.";
-
-                var pub = vision.GetMethod("UpdateVisibilityOfAllTowardsActor", AllMembers);
-                if (pub == null || !pub.IsPublic)
-                    yield return "L96 premise-towards-entry-gone: " +
-                                 "TacticalFactionVision.UpdateVisibilityOfAllTowardsActor is no longer a public " +
-                                 "method. It is the ONLY native entry the repair is built from, in both directions.";
-
-                var impl = vision.GetMethod("UpdateVisibilityForImpl", AllMembers);
-                if (impl != null && impl.IsPublic)
-                    yield return "L96 premise-own-half-now-public: TacticalFactionVision.UpdateVisibilityForImpl " +
-                                 "became public. The inverted sweep exists only because it was not — replace it " +
-                                 "with this one call per settled actor and drop the |own| x |foreign| cost.";
+                // PREMISE: the ONE faction the two ends deliberately agree to skip is still the one the game
+                // itself refuses to write. Both CollectVision and ApplyVision skip a faction for which
+                // IsAlwaysRevealedForThisFaction is true, because IncrementKnownCounterImpl:388-391 and
+                // ResetKnownCounterImpl:456-459 both return early there and the entry is minted identically on
+                // every peer by OnActorEnteredPlay:336-348. If the engine ever started honouring writes for
+                // those, the symmetric skip would silently exclude real, divergeable state.
+                var always = vision.GetMethod("IsAlwaysRevealedForThisFaction", AllMembers);
+                if (always == null || !always.IsPublic || always.ReturnType != typeof(bool))
+                    yield return "L96 premise-always-revealed-gone: " +
+                                 "TacticalFactionVision.IsAlwaysRevealedForThisFaction is no longer a public bool " +
+                                 "method. Both ends of the settle's vision carry skip exactly the factions it " +
+                                 "names, so without it the host and the client can no longer agree on WHAT is " +
+                                 "being carried.";
+                foreach (var name in new[] { "IncrementKnownCounterImpl", "ResetKnownCounterImpl" })
+                {
+                    var impl = vision.GetMethod(name, AllMembers);
+                    if (impl == null || !Calls(impl).Any(c => c.Name == "IsAlwaysRevealedForThisFaction"))
+                        yield return "L96 premise-always-revealed-writable: TacticalFactionVision." + name +
+                                     " no longer returns early on IsAlwaysRevealedForThisFaction. The settle's " +
+                                     "vision carry skips those factions on BOTH ends precisely because the game " +
+                                     "refuses to write them — if it now accepts the write, that skip is silently " +
+                                     "dropping state two peers can disagree about.";
+                }
             }
 
             // ─── HALF 2: a per-class drop may not swallow a per-activation order ───
@@ -224,6 +170,58 @@ namespace RailCheck
                              "relies on — false takes PlayAction(HurtReaction_Implementation, parameter), i.e. the " +
                              "caller's own target, and true ignores the parameter for GetHurtReactionTarget(). " +
                              "Without it there is no sound way to tell an ordered reposition from an ambient one.";
+        }
+
+        /// <summary>HALF 1's arms, and the codec one EXECUTES the shipped writer and reader rather than reading
+        /// their call graph. Two claims. (1) The settle payload has a SLOT for the host's known-state — a
+        /// <c>PendingSettle.Vision</c> of the row type — because an applier that is reached and correct is
+        /// worth nothing if the value never reached the queue. (2) The codec is LOSSLESS over a two-faction
+        /// board: guid, <c>Located</c> and <c>Revealed</c> all survive the round trip. That second one is the
+        /// arm the old shape could not have: dropping the <c>Revealed</c> byte would leave every client's
+        /// enemies at <c>Located</c> — the orange beacon and no model — while every structural arm in this file
+        /// and in L81 stayed green.</summary>
+        private static IEnumerable<string> VisionCarriedArm(Type cmd)
+        {
+            var pending = cmd.GetNestedType("PendingSettle", AllMembers);
+            var slot = pending == null ? null : pending.GetField("Vision", AllMembers);
+            if (slot == null ||
+                slot.FieldType != typeof(List<Multiplayer.Tactical.TacticalCommandSync.VisionRow>))
+                yield return "L96 settle-vision-not-carried: TacticalCommandSync.PendingSettle has no " +
+                             "List<VisionRow> Vision field, so the host's per-faction KnownState does not ride " +
+                             "the settle at all. Whatever the applier does, it is applying something this peer " +
+                             "decided for itself — which is the pre-2026-08-08 contract that could only ever ADD " +
+                             "a reveal and never remove one.";
+
+            var sent = new List<Multiplayer.Tactical.TacticalCommandSync.VisionRow>
+            {
+                new Multiplayer.Tactical.TacticalCommandSync.VisionRow
+                    { FactionGuid = "Px_TacticalFactionDef_guid", Located = 1, Revealed = 0 },
+                new Multiplayer.Tactical.TacticalCommandSync.VisionRow
+                    { FactionGuid = "Alien_TacticalFactionDef_guid", Located = 0, Revealed = 2 },
+            };
+            var ms = new MemoryStream();
+            var w = new BinaryWriter(ms);
+            Multiplayer.Tactical.TacticalCommandSync.WriteVision(w, sent);
+            w.Flush();
+            ms.Position = 0;
+            var back = Multiplayer.Tactical.TacticalCommandSync.ReadVision(new BinaryReader(ms));
+
+            string lost = null;
+            if (back == null || back.Count != sent.Count) lost = "row count " + (back == null ? "null" : back.Count.ToString());
+            else
+                for (int i = 0; i < sent.Count && lost == null; i++)
+                    if (back[i].FactionGuid != sent[i].FactionGuid ||
+                        back[i].Located != sent[i].Located || back[i].Revealed != sent[i].Revealed)
+                        lost = "row " + i + " came back as '" + back[i].FactionGuid + "' (" + back[i].Located +
+                               "," + back[i].Revealed + ") instead of '" + sent[i].FactionGuid + "' (" +
+                               sent[i].Located + "," + sent[i].Revealed + ")";
+            if (lost != null)
+                yield return "L96 settle-vision-codec-lossy: WriteVision/ReadVision did not round-trip the host's " +
+                             "known-state — " + lost + ". Every peer's visibility is assigned from exactly these " +
+                             "bytes, so a lost Revealed leaves an enemy at Located (an orange beacon and no " +
+                             "model), a lost Located loses the beacon, and a mangled guid addresses the wrong " +
+                             "faction or none at all — silently, since the applier cannot tell a dropped field " +
+                             "from a host that genuinely knows nothing.";
         }
 
         /// <summary>
@@ -339,27 +337,6 @@ namespace RailCheck
                 try { f = m.Module.ResolveField(BitConverter.ToInt32(step.Key, step.Value.Pos),
                                                 typeArgs, methodArgs); } catch { }
                 if (f != null && f.Name == name) return true;
-            }
-            return false;
-        }
-
-        /// <summary>Does this method ever push <paramref name="value"/> as an int constant? Enum arguments
-        /// are invisible to a callee list — <c>IncrementKnownCounter(actor, Located, 1, true)</c> and
-        /// <c>(actor, Revealed, 1, true)</c> are the same edge — so the constant is the only place the
-        /// STATE being raised is written down.</summary>
-        private static bool LoadsInt(MethodBase m, int value)
-        {
-            foreach (var step in Walk(m))
-            {
-                var op = step.Value.Op;
-                int got;
-                if (op == OpCodes.Ldc_I4) got = BitConverter.ToInt32(step.Key, step.Value.Pos);
-                else if (op == OpCodes.Ldc_I4_S) got = (sbyte)step.Key[step.Value.Pos];
-                else if (op == OpCodes.Ldc_I4_M1) got = -1;
-                else if (op.Value >= OpCodes.Ldc_I4_0.Value && op.Value <= OpCodes.Ldc_I4_8.Value)
-                    got = op.Value - OpCodes.Ldc_I4_0.Value;
-                else continue;
-                if (got == value) return true;
             }
             return false;
         }

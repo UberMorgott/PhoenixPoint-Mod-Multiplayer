@@ -318,6 +318,7 @@ namespace RailCheck
             Add(laws, () => L335_AScopedResendLandsInTheMirror.Check());
             Add(laws, () => L336_TheReadyProbeMeasuresALiftedCurtain.Check());
             Add(laws, () => L337_ADecisionWindowOutlivesAMissingView.Check());
+            Add(laws, () => L338_AHostlessRevealIsRemoved.Check(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -6609,23 +6610,29 @@ namespace RailCheck
         /// turns that into its own "the arm checked nothing" violation rather than passing silently.</summary>
         private static MethodBase ModMethod(Type owner, string name) => owner?.GetMethod(name, AllMembers);
 
-        /// <summary>L81 — A PEER RE-RUNS ITS OWN VISION AT THE HOST'S SETTLE, AND A MIRRORED STAT WRITE FIRES
-        /// THE GAME'S OWN STAT EVENT. The two halves of ONE symptom: an enemy that is invisible on a client
-        /// and an enemy with no health bar are the same miss, because both derive from the same local
+        /// <summary>L81 — AFTER A SETTLE, A PEER'S VISIBILITY FOR THAT ACTOR IS THE HOST'S, AND A MIRRORED STAT
+        /// WRITE FIRES THE GAME'S OWN STAT EVENT. The two halves of ONE symptom: an enemy that is invisible on
+        /// a client and an enemy with no health bar are the same miss, because both derive from the same local
         /// dictionary. <c>TacticalView.OnFactionKnowledgeChanged</c>:486-516 is the ONLY writer of
         /// <c>TacticalActorViewBase.SetShownMode</c> for ordinary actors, it reads
         /// <c>ViewerFaction.Vision.KnownActors</c>, and <c>ShouldRenderUI</c>:395-403 gates the health bar on
         /// the result (<c>Update</c>:416 calls <c>UIActorElement.SetHidden(!ShouldRenderUI())</c> every frame,
         /// so the bar is POLLED off ShownMode and never needs an event of its own).
         ///
-        /// WHY IT NEEDS A LAW AT ALL. <c>0c54378</c> shipped the repair and named this law in its subject, but
-        /// touched ONE file and added NO arm — so nothing has ever proved the seam is reached, and the repo's
-        /// dominant bug class is exactly the fix that stops being wired without a log line. Native fills
-        /// KnownActors by sampling LOS only on <c>ActorMovedEvent</c>, and both halves of that sampling are
-        /// one-sided against a mirroring peer (an unrevealed actor carries <c>TimingScale 4f</c>, so its walk
-        /// is LOS-tested ~4x more coarsely; and a settle landing where this peer already stood raises no event
-        /// at all). The repair re-runs the GAME'S own test at the settle — the one universal moment the host
-        /// has closed an order and this peer holds the authoritative position.
+        /// THE SUBJECT CHANGED ON 2026-08-08, AND THIS LAW CHANGED WITH IT. Until then the claim was "a peer
+        /// RE-RUNS ITS OWN VISION at the settle" — the client computed visibility from its own line of sight
+        /// over the host's position, and nothing about vision crossed the wire in either direction. That
+        /// contract is now false BY CONSTRUCTION and this law asserts its replacement: the host's per-faction
+        /// <c>KnownState</c> rides the settle and is ASSIGNED onto the client's counters. The old claim could
+        /// not converge and no arm could have caught it, because every arm it had was about a call that really
+        /// was being made. It was monotone — <c>KnownCounters.IncrementCounterTo</c>:55-67 is a maximum — so it
+        /// could add a reveal the host had and never remove one the host did not, which is half of the
+        /// user's "in BOTH directions" report and was structurally unreachable; and the peers were not even
+        /// testing the same geometry, because <c>SceneObjectIdsComponent.MergeWith</c>:29-34 re-mints a
+        /// COLLIDING destructible guid at random per peer (measured 63 collisions over 126 objects), so
+        /// different cover gave different line of sight. The arms below therefore assert the OUTCOME's two
+        /// mechanical halves — the host's value arrives, and the client stops deciding — and L338 asserts the
+        /// direction that used to be impossible.
         ///
         /// THE STAT HALF is the arm the 2026-08-01 handoff named as missing outright: nothing asserted that a
         /// mirrored stat write goes through <c>BaseStat.Set</c> instead of poking the raw value.
@@ -6637,8 +6644,10 @@ namespace RailCheck
         /// indistinguishable from the change never having crossed. Universal on purpose: the ban is on the
         /// WHOLE mod assembly, not on the tactical mirror, because any future stat write has the same hazard.
         ///
-        /// Falsify: delete the <c>RefreshVisionTowards</c> call in <c>ApplySettle</c> → <c>settle-blind</c>;
-        /// swap it for a hand-rolled reveal → <c>vision-hand-rolled</c>; unhook <c>ClientTick</c> →
+        /// Falsify: delete the <c>ApplyVision</c> call in <c>ApplySettle</c> → <c>settle-blind</c>; drop the
+        /// <c>DecrementKnownCounters</c> call from <c>ApplyVision</c> → <c>vision-raise-only</c>; put a native
+        /// line-of-sight call back into <c>ApplyVision</c> → <c>vision-decided-locally</c>; stop calling
+        /// <c>CollectVision</c> in <c>HostSettle</c> → <c>vision-not-shipped</c>; unhook <c>ClientTick</c> →
         /// <c>settle-unreachable</c>; replace <c>stat.Set(v)</c> with <c>stat.Value.EndValue = v</c> →
         /// <c>stat-write-silent</c> + <c>correction-inert</c>.</summary>
         private static IEnumerable<string> SettleVisionLaw(Assembly game)
@@ -6649,44 +6658,93 @@ namespace RailCheck
 
             // ─── (a) THE SEAM IS WIRED, AND IT IS REACHED ───
             var applySettle = ModMethod(sync, "ApplySettle");
-            var refresh = ModMethod(sync, "RefreshVisionTowards");
+            var applyVision = ModMethod(sync, "ApplyVision");
             var clientTick = ModMethod(sync, "ClientTick");
-            if (applySettle == null || refresh == null)
+            if (applySettle == null || applyVision == null)
             {
-                yield return "L81 seam-missing: TacticalCommandSync.ApplySettle / RefreshVisionTowards no longer " +
+                yield return "L81 seam-missing: TacticalCommandSync.ApplySettle / ApplyVision no longer " +
                              "exist, so NOTHING about enemy visibility on a client was checked — the invisible " +
                              "enemy and the missing health bar are both back and unguarded";
                 yield break;
             }
-            if (!Reaches(applySettle, "TacticalCommandSync", "RefreshVisionTowards"))
-                yield return "L81 settle-blind: the settle applier no longer re-runs this peer's vision. The host's " +
-                             "authoritative position is written and never put to a line-of-sight test, so an enemy " +
-                             "that walked into view during a mirrored move stays Hidden/Located until the next " +
-                             "faction-turn edge — renderers disabled, health bar hidden, action played at 4x unseen";
+            if (!Reaches(applySettle, "TacticalCommandSync", "ApplyVision"))
+                yield return "L81 settle-blind: the settle applier no longer applies the host's known-state. The " +
+                             "host's authoritative position is written and its answer about who can SEE that actor " +
+                             "is thrown away, so this peer keeps whatever its own line of sight happened to decide " +
+                             "— renderers disabled, health bar hidden, action played at 4x unseen";
             if (clientTick == null || !Reaches(clientTick, "TacticalCommandSync", "ApplySettle"))
                 yield return "L81 settle-unreachable: TacticalCommandSync.ClientTick no longer reaches ApplySettle, " +
                              "so the standing settle applier is dead code — every arm above is about a repair " +
                              "nothing runs, and no correction the host sends ever lands on a client";
 
-            // ─── (b) IT IS THE GAME'S OWN VISION, NOT A SECOND VISIBILITY SYSTEM ───
-            if (!Reaches(refresh, "TacticalFactionVision", "UpdateVisibilityOfAllTowardsActor"))
-                yield return "L81 vision-hand-rolled: RefreshVisionTowards no longer calls the native " +
-                             "TacticalFactionVision.UpdateVisibilityOfAllTowardsActor. Anything else is a parallel " +
-                             "visibility system on the client — it can reveal what this peer's own line of sight " +
-                             "does not support, which is a peer seeing through walls the host cannot";
+            // ─── (b) THE CLIENT STOPS DECIDING, AND IT CAN GO DOWN AS WELL AS UP ───
+            // Both halves of "equals the host's". A raise-only applier is the pre-2026-08-08 defect wearing a
+            // new name: it converges from below and never from above, and the user's report is explicitly
+            // symmetric. A native LOS call inside the applier is the same defect from the other side — the
+            // client deciding again, on geometry the peers demonstrably do not share.
+            if (!Reaches(applyVision, "TacticalFactionVision", "IncrementKnownCounter"))
+                yield return "L81 vision-not-raised: ApplyVision never calls " +
+                             "TacticalFactionVision.IncrementKnownCounter — the only public entry that can put a " +
+                             "reveal ON this peer. Whatever it now does, the host saying 'this faction sees that " +
+                             "actor' does not reach the dictionary TacticalView:486-516 paints from";
+            if (!Reaches(applyVision, "TacticalFactionVision", "DecrementKnownCounters"))
+                yield return "L81 vision-raise-only: ApplyVision never calls " +
+                             "TacticalFactionVision.DecrementKnownCounters, so it can only ever ADD knowledge. " +
+                             "IncrementCounterTo:55-67 is a MAXIMUM — a reveal this peer holds and the host does " +
+                             "NOT can then never be taken away, which is exactly the half the old local re-run " +
+                             "could not reach and half of the 2026-08-08 report ('in BOTH directions'). It is also " +
+                             "the game's own lowering mechanism: OnFactionStartTurn:154-175 decays knowledge " +
+                             "through the same DecrementAllCounters";
+            foreach (var native in new[] { "UpdateVisibilityOfAllTowardsActor", "UpdateVisibilityAll",
+                                           "CheckVisibleLineBetweenActors", "CheckVisibleLine" })
+                if (Reaches(applyVision, "TacticalFactionVision", native))
+                    yield return "L81 vision-decided-locally: ApplyVision calls TacticalFactionVision." + native +
+                                 ". The applier's whole point is that the CLIENT STOPS DECIDING: a line-of-sight " +
+                                 "test here re-introduces a second, local opinion on top of the host's — and the " +
+                                 "peers do not share the geometry it would be computed from " +
+                                 "(SceneObjectIdsComponent.MergeWith:29-34 re-mints a colliding destructible guid " +
+                                 "at RANDOM per peer, 63 collisions over 126 objects measured), so the two answers " +
+                                 "cannot agree in principle";
 
-            // ─── (c) PREMISE: the native entry still has the shape the repair calls ───
+            // ─── (c) THE HOST ACTUALLY SHIPS IT, AND THE CLIENT ACTUALLY READS IT ───
+            // HostSettle's writeBody is a LAMBDA — the compiler lifts it into a display class, so WriteVision is
+            // not in HostSettle's own IL and asking for it here would be an arm that is red on correct code.
+            // The collect is in the method body, and the codec round-trip is L96's executable arm.
+            var hostSettle = ModMethod(sync, "HostSettle");
+            if (hostSettle == null || !Reaches(hostSettle, "TacticalCommandSync", "CollectVision"))
+                yield return "L81 vision-not-shipped: TacticalCommandSync.HostSettle no longer collects and writes " +
+                             "the host's known-state onto the settle. The applier on the other end is then " +
+                             "assigning an EMPTY list — which reads as 'the host knows nothing about this actor' " +
+                             "and blinds every client to it, a worse failure than the one this replaced";
+            var applyInbound = ModMethod(sync, "ApplyInbound");
+            if (applyInbound == null || !Reaches(applyInbound, "TacticalCommandSync", "ReadVision"))
+                yield return "L81 vision-not-read: TacticalCommandSync.ApplyInbound no longer reads the settle's " +
+                             "vision block. Every field after it on the same frame is then read at the wrong " +
+                             "offset, so this is not only a lost reveal — it desynchronises the whole 0x82 codec";
+
+            // ─── (d) PREMISE: the native counter API still has the shape the applier assigns through ───
             var visionType = game.GetType("PhoenixPoint.Tactical.Levels.TacticalFactionVision");
             var actorBase = game.GetType("PhoenixPoint.Tactical.Entities.TacticalActorBase");
-            var upd = visionType == null ? null : visionType.GetMethod("UpdateVisibilityOfAllTowardsActor", AllMembers);
-            var updPs = upd == null ? null : upd.GetParameters();
-            if (upd == null || updPs.Length != 3 || actorBase == null ||
-                updPs[0].ParameterType != actorBase || updPs[1].ParameterType != typeof(float) ||
-                updPs[2].ParameterType != typeof(bool))
-                yield return "L81 premise-changed: TacticalFactionVision.UpdateVisibilityOfAllTowardsActor" +
-                             "(TacticalActorBase, float, bool) no longer resolves with that shape. The settle " +
-                             "repair is written against it verbatim; a changed signature means it either stopped " +
-                             "compiling against the real game or is now calling something else";
+            var knownState = game.GetType("PhoenixPoint.Tactical.Levels.KnownState");
+            var inc = visionType == null ? null : visionType.GetMethod("IncrementKnownCounter", AllMembers);
+            var incPs = inc == null ? null : inc.GetParameters();
+            if (inc == null || !inc.IsPublic || incPs.Length != 4 || actorBase == null || knownState == null ||
+                incPs[0].ParameterType != actorBase || incPs[1].ParameterType != knownState ||
+                incPs[2].ParameterType != typeof(int) || incPs[3].ParameterType != typeof(bool))
+                yield return "L81 premise-changed: TacticalFactionVision.IncrementKnownCounter(TacticalActorBase, " +
+                             "KnownState, int, bool) is no longer a public method with that shape. The settle's " +
+                             "vision assignment is written against it verbatim";
+            var dec = visionType == null ? null : visionType.GetMethod("DecrementKnownCounters", AllMembers);
+            if (dec == null || !dec.IsPublic || dec.GetParameters().Length != 1)
+                yield return "L81 premise-changed: TacticalFactionVision.DecrementKnownCounters(TacticalActorBase) " +
+                             "is no longer a public one-argument method. It is the ONLY lowering entry the game " +
+                             "exposes — ResetKnownCounterImpl is private — so without it there is no way to make a " +
+                             "client's visibility match a host that knows LESS";
+            var known = visionType == null ? null : visionType.GetField("KnownActors", AllMembers);
+            if (known == null || !known.IsPublic)
+                yield return "L81 premise-changed: TacticalFactionVision.KnownActors is no longer a public field, " +
+                             "so neither the host's collect nor the client's compare can read the counters they " +
+                             "are supposed to be making equal";
 
             // ─── (d) PREMISE: renderers and the health bar still gate on ShownMode ───
             var viewBase = game.GetType("PhoenixPoint.Tactical.Entities.TacticalActorViewBase");
