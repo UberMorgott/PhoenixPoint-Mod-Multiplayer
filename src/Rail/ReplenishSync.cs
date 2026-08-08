@@ -183,7 +183,29 @@ namespace Multiplayer.Network.Sync
         private const int RecheckFrames = 600;
 
         /// <summary>Session/level teardown — a live count-down must not survive into the next geoscape.</summary>
-        internal static void Reset() { _recheckFrames = 0; }
+        internal static void Reset() { _recheckFrames = 0; _armedAtSeq = 0; }
+
+        /// <summary>IS THE RESUPPLY VERDICT STILL OUT? Read by <c>EventPopup.CanCarryWindow</c>, which is why
+        /// it is a property and not a private test: the popup-history drain starts replaying about a second
+        /// before this verdict can be reached, and rank 20 cannot preempt a window that is already CURRENT
+        /// (<c>GeoscapeViewSwitchQuery.ProcessQueriedStateSwitch</c>:58-63 dequeues only while
+        /// <c>_currentStateSwitchRequest == null</c>). So the order has to be kept BEFORE the queue, not in it.
+        ///
+        /// NOT A QUORUM, and the distinction is the mod's hardest rule. <see cref="_recheckFrames"/> is a
+        /// monotone LOCAL countdown with a 600-frame ceiling that reads no other peer and waits on no human
+        /// action; it HOLDS rather than drops (the drain retries every tick), and it ends by itself whatever
+        /// anyone else does. A peer that went AFK changes nothing about when this clears.</summary>
+        internal static bool ResupplyVerdictPending => _recheckFrames > 0;
+
+        /// <summary>The rail seq this peer had when the window was armed, so the tick can tell "nothing is
+        /// missing" from "nothing has ARRIVED yet" — see <see cref="ClientArrivalTick"/>.</summary>
+        private static uint _armedAtSeq;
+
+        /// <summary>Frames of geoscape that must pass before an empty verdict is believed, on top of a batch
+        /// having landed. A batch alone is not proof: the host's clock ships Timing/Wallet every geo hour, and
+        /// one of those landing 100 ms after arrival would otherwise disarm the window before the post-mission
+        /// writes it is waiting for. One second of arrived state and still nothing short = really whole.</summary>
+        private const int SettleFrames = 60;
 
         /// <summary>
         /// THE RESUPPLY SCREEN WAS RESTORED IN 76980f2 AND STILL DID NOT APPEAR, and this is the half that
@@ -246,6 +268,7 @@ namespace Multiplayer.Network.Sync
                         return;
 
                     _recheckFrames = RecheckFrames;
+                    _armedAtSeq = GenericApplier.LastSeq;
                     // THE GATE'S OWN ANSWER, at the instant UIStateInitial:125 asked it. Absence of the
                     // screen is not evidence of WHICH clause was false, and a whole session was spent
                     // arguing that from an empty log: 0 here proves the race (the host's post-mission
@@ -293,6 +316,17 @@ namespace Multiplayer.Network.Sync
                     if (lastFrame)
                         Debug.Log("[MP][replenish] post-mission re-ask expired with nothing missing — this " +
                                   "squad really did come back whole, so there is no resupply screen to show.");
+                    // GIVE UP EARLY WHEN THE ANSWER IS IN. The window now HOLDS the popup history
+                    // (EventPopup.CanCarryWindow reads ResupplyVerdictPending), so a genuinely whole squad
+                    // would otherwise sit on every mirrored window for the full 10 s ceiling for nothing.
+                    // Two conditions, and the second is what makes the first safe — see SettleFrames.
+                    else if (GenericApplier.LastSeq != _armedAtSeq && RecheckFrames - _recheckFrames >= SettleFrames)
+                    {
+                        _recheckFrames = 0;
+                        Debug.Log("[MP][replenish] post-mission re-ask disarmed early — the host's state has " +
+                                  "landed (rail seq moved past " + _armedAtSeq + ") and a second of it says " +
+                                  "nothing is short. Any window this was holding can go through now.");
+                    }
                     return;
                 }
                 _recheckFrames = 0;

@@ -101,6 +101,11 @@ namespace Multiplayer.Network.Sync
             // seq + kind registry persist (rca-3 contract: host counters keep increasing across reloads)
         }
 
+        /// <summary>The last GeoRail seq this peer actually APPLIED. Read by ReplenishSync to tell "nothing
+        /// is missing" from "nothing has arrived yet" — the two are indistinguishable on a returning peer,
+        /// whose squad is still the host's pre-battle save until a batch lands.</summary>
+        internal static uint LastSeq => _lastSeq;
+
         private static GeoLevelController GeoLevel()
         {
             var level = GameUtl.CurrentLevel();

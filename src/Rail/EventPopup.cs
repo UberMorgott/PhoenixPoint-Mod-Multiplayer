@@ -603,6 +603,16 @@ namespace Multiplayer.Network.Sync
         /// and the host's arrival order is the only ordering these windows have).</summary>
         private static bool CanCarryWindow(GeoLevelController geo)
         {
+            // THE RESUPPLY VERDICT IS STILL OUT — THE THIRD TERM (2026-08-09). Same shape as the cutscene
+            // above and the same remedy: HOLD. A returning client reaches UIStateInitial before the host's
+            // post-mission writes land, so its resupply screen can only be queued a beat later — and the
+            // held-window drain starts replaying about a second BEFORE that beat. Rank 20 cannot rescue the
+            // order once a window is CURRENT: ProcessQueriedStateSwitch:58-63 dequeues only while
+            // _currentStateSwitchRequest is null, so a mirrored event that got in first owns the screen and
+            // the resupply screen queues behind it. Keeping the order therefore has to happen before the
+            // queue, which is here. Not a quorum — see ReplenishSync.ResupplyVerdictPending for why (a
+            // monotone local countdown with a 600-frame ceiling that reads no peer and waits on no human).
+            if (ReplenishSync.ResupplyVerdictPending) return false;
             var view = geo?.View;
             if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery)) return false;
             var current = view.CurrentViewState;

@@ -329,6 +329,7 @@ namespace RailCheck
             Add(laws, () => L346_TheCoroutineResidentSeamContainsItsOwnThrow.Check());
             Add(laws, () => L347_AForeignAircraftIsAsVisibleHereAsOnItsOwner.Check());
             Add(laws, () => L348_ADiscardedBatchIsAskedForBack.Check());
+            Add(laws, () => L349_AHeldWindowWaitsForTheResupplyVerdict.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
