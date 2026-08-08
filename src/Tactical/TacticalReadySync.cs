@@ -908,6 +908,53 @@ namespace Multiplayer.Tactical
             return false;
         }
 
+        /// <summary>
+        /// THE GATE ON THE ONE-SHOT, PURE SO IT CAN BE EXECUTED — RailCheck L336 runs it on the exact live
+        /// inputs of the four false reports instead of scanning for a call, which is the shape that let L220
+        /// stay green over this same diagnostic lying four battles in a row.
+        ///
+        /// Curtain first and unconditionally: under a full-screen overlay the raycaster's honest answer is
+        /// "the overlay", so a probe fired there measures the curtain, not the button. Then the old pair —
+        /// drawn, or the frame bound spent — unchanged, because "the canvas never drew this clone" is a true
+        /// finding that must still be able to land.
+        /// </summary>
+        internal static bool ProbeNow(bool curtainLifted, bool drawn, int waited)
+            => curtainLifted && (drawn || waited >= DrawWaitFrames);
+
+        /// <summary>IS THE INK CURTAIN OFF THE SCREEN — asked of the game, not inferred from our own state.
+        /// <c>LevelSwitchCurtainController.IsCurtainLifted</c> is set by the game's own
+        /// <c>LiftCurtainCrt</c>:113, i.e. after the lift this mod PARKS on the reveal barrier
+        /// (<c>CurtainLiftGatePatch.Gated</c>) has actually run — which is the beat the log calls "curtain
+        /// lift RELEASED". Reached the way every native caller reaches it
+        /// (<c>GameUtl.GameComponent&lt;LevelSwitchCurtainController&gt;()</c>, as GeoscapeView.cs:259 and
+        /// UIStateInitView.cs:57 do); fully qualified rather than imported because this file has no other
+        /// business in those namespaces.
+        ///
+        /// TRUE when the controller does not resolve. A diagnostic that switches ITSELF off because an
+        /// accessor moved is the silent-swallow bug class this repo keeps paying for; better a curtain-era
+        /// false alarm than no measurement at all.</summary>
+        private static bool CurtainLifted()
+        {
+            var curtain = Base.Core.GameUtl.GameComponent<Base.Utils.LevelSwitchCurtainController>();
+            return curtain == null || curtain.IsCurtainLifted;
+        }
+
+        /// <summary>SAY THAT THE MEASUREMENT IS WAITING, ONCE. Without this a battle whose curtain never
+        /// lifts produces "ready button built" and then nothing at all, which reads exactly like a probe that
+        /// crashed — and "no line" is how this repo loses defects.</summary>
+        private void ReportDeferred()
+        {
+            if (_deferred) return;
+            _deferred = true;
+            Debug.Log("[Multiplayer][tac] ready button reachability DEFERRED — the loading curtain is still " +
+                      "down, so the EventSystem would answer with the curtain rather than with this button. " +
+                      "The measurement runs on the frame the curtain lifts; the button is placed and " +
+                      "following the native End Turn row meanwhile.");
+        }
+
+        /// <summary>One-shot guard for <see cref="ReportDeferred"/>.</summary>
+        private bool _deferred;
+
         private void LateUpdate() => Apply();
 
         internal void Apply()
@@ -968,15 +1015,24 @@ namespace Multiplayer.Tactical
             if (lift != 0f) me.anchoredPosition += new Vector2(0f, lift);
 
             if (_measured) return;
-            // MEASURE A DRAWN CANVAS, NOT A PLACED RECT. The report below reads Graphic.depth and fires a
-            // synthetic raycast; both are meaningless until the canvas has actually drawn this clone, and the
-            // first frame the LAYOUT settles is not that frame — the battle opens behind the loading curtain,
-            // where every graphic still reads depth=-1 and a full-screen vignette is on top of everything.
-            // Firing there is what put "NOT HIT-TESTABLE" and "BURIED" into all three peers' logs as ERROR in
-            // a battle where the host then pressed the button five times: two false alarms per battle, which
-            // is how a real ERROR gets lost. Waiting costs nothing — this is a one-shot, and the answer it
-            // gives once the canvas is up is the answer anyone actually wants.
-            if (!Drawn() && ++_waited < DrawWaitFrames) return;
+            // MEASURE A LIFTED CURTAIN, NOT MERELY A DRAWN ONE. The report below reads Graphic.depth and
+            // fires a synthetic raycast; both are meaningless until the canvas has drawn this clone AND the
+            // loading curtain is off the screen. The comment this replaces already named the hazard — "the
+            // battle opens behind the loading curtain ... a full-screen vignette is on top of everything" —
+            // and then gated on the wrong half of it: `Drawn()` alone. Drawn is TRUE behind the curtain (live:
+            // our graphics at depth 261-267 while the ink curtain sat on top), so the probe kept firing under
+            // it and kept coming back BURIED — four battles out of four, ERROR, on a button the host then
+            // clicked seventeen times in the same logs. Every one of those reports precedes this session's own
+            // "curtain lift RELEASED" by 14-21 seconds.
+            //
+            // NO DEADLINE ON THE CURTAIN, deliberately: the reveal barrier it is parked on has none either
+            // (a peer still downloading holds it, and law L84 says nobody is dropped for being slow), so a
+            // frame budget here would just re-file the same false alarm a few seconds later. DrawWaitFrames
+            // stays a bound on the OTHER question — "the canvas never drew this clone" — which is a real
+            // finding and must still land, so it is only counted, and only spent, once the curtain is gone.
+            bool drawn = Drawn();
+            if (!drawn) _waited++;
+            if (!ProbeNow(CurtainLifted(), drawn, _waited)) { ReportDeferred(); return; }
             _measured = true;
             Debug.Log("[Multiplayer][tac] ready row measured: EndTurn anchorMin=" + Source.anchorMin +
                       " anchorMax=" + Source.anchorMax + " pivot=" + Source.pivot +
