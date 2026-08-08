@@ -33,6 +33,7 @@ namespace Multiplayer.Network
             // outside the big try so a failure here cannot cost the DLC/mod halves; "" then means "unknown"
             // and ParityComparer skips the arm rather than blocking a peer over a value we failed to read.
             var gameVersion = "";
+            int seen = 0;   // mods the ModManager knows about, enabled or not — see the audit line below
             try { gameVersion = Base.Build.RuntimeBuildInfo.BuildVersion ?? ""; }
             catch (Exception e) { Debug.LogWarning("[Multiplayer] parity: game build version unreadable: " + e.Message); }
 
@@ -58,6 +59,7 @@ namespace Multiplayer.Network
                 {
                     foreach (var mod in mm.Mods)
                     {
+                        if (mod != null) seen++;
                         if (mod == null || !mod.Enabled) continue;
                         var version = mod.MetaData?.Version?.ToString() ?? "0.0";
                         mods.Add((mod.ID, version));
@@ -99,6 +101,17 @@ namespace Multiplayer.Network
                 }
             }
             catch (Exception e) { Debug.LogError("[Multiplayer] parity manifest collect failed: " + e.Message); }
+
+            // THE AUDIT LINE, on both peers. What it settles, and what nothing else could: a client machine
+            // reported 41 installed mods against a host's 10 and produced ZERO mod diffs, which is either
+            // "38 of them are disabled" or "mod.Enabled under-reports at collect time" — and no existing log
+            // told the two apart, because the collected manifest was never printed at all. enabled/seen
+            // answers it directly; the crc makes two peers' lines comparable at a glance without pasting
+            // 41 ids. Sorted so the hash does not depend on ModManager's enumeration order.
+            var ids = mods.ConvertAll(m => m.id);
+            ids.Sort(StringComparer.Ordinal);
+            Debug.Log("[Multiplayer] parity manifest: mods=" + mods.Count + "/" + seen + " enabled dlc=" + dlc.Count +
+                      " game='" + gameVersion + "' crc=" + ParityManifest.HashEntries(ids).ToString("X8", CultureInfo.InvariantCulture));
 
             return ParityManifest.Build(dlc, mods, settings, gameVersion);
         }

@@ -796,6 +796,20 @@ namespace Multiplayer.Network
             // connected peers are untouched. A lobby (pre-start) join is handled by the normal start path.
             if (sessionStarted)
             {
+                // SAY THE DIFF OUT LOUD. The only carrier of a parity mismatch is the badge on the lobby
+                // roster row — and a mid-session joiner never sees a lobby: it goes from the accept straight
+                // into the save transfer, so its diff was computed, stored, logged host-side and shown to
+                // NOBODY. SystemNotice is the existing client-facing channel (chat line + native toast on
+                // every peer's screen, the departure-notice precedent), which is the same service
+                // ParityComparer.VersionNoticeForClient:121 performs at the door for a version gap.
+                // Deliberately SOFT and deliberately silent about the details: the peer joins, plays and
+                // readies exactly as before, nothing new enters the hashed manifest, and the diff TEXT stays
+                // in the host log rather than spamming everyone's chat — refusing a join, or shouting a
+                // cosmetic mod list at four players, is worse than the diff.
+                var parityNotice = JoinParityNotice(true, parityDiffs.Count,
+                    string.IsNullOrEmpty(join.Nickname) ? "a player" : join.Nickname);
+                if (parityNotice.Length > 0) SystemNotice(parityNotice);
+
                 if (deferOnboard)
                 {
                     Debug.Log($"[Multiplayer] JOIN from {clientId} accepted; save transfer DEFERRED (host is " +
@@ -807,6 +821,17 @@ namespace Multiplayer.Network
                 else _engine.SaveTransfer?.HostOnDemandJoin(clientId);
             }
         }
+
+        /// <summary>The mid-session-join parity notice, as a PURE decision so the outcome can be asserted
+        /// headless (RailCheck L371) instead of only observed in a live session — the same shape
+        /// <see cref="VehicleSync"/>'s Validate/Facts pair gives L32. "" = say nothing. A lobby (pre-start)
+        /// join says nothing here on purpose: its diff is already on the roster badge the joiner will see.
+        /// Never a refusal and never a gate (L84: nobody is thrown out over parity).</summary>
+        internal static string JoinParityNotice(bool sessionStarted, int diffCount, string nick) =>
+            !sessionStarted || diffCount <= 0 ? ""
+            : "— " + (string.IsNullOrEmpty(nick) ? "a player" : nick) + " joined with an install that differs " +
+              "from the host's (" + diffCount + " difference" + (diffCount == 1 ? "" : "s") +
+              ") — co-op may desync; the host log names them —";
 
         /// <summary>CLIENT-only, set on the accept: the pending "your Multiplayer version differs from the
         /// host's" notice ("" / null = versions match or unknown). MultiplayerUI drains it exactly once, on
