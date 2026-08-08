@@ -335,6 +335,7 @@ namespace RailCheck
             Add(laws, () => L352_ThePerPeerAnswerStaysHomeAndStillLands.Check());
             Add(laws, () => L354_AnEmptySquadScreenIsNotServed.Check());
             Add(laws, () => L355_ALaunchedMissionDoesNotArmASecondCountdown.Check());
+            Add(laws, () => L372_OneDeploymentCapForTheScreenAndTheValidator.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -4836,7 +4837,7 @@ namespace RailCheck
         /// rather than guessing. Exists because "the type has the field" is compile-checked and therefore
         /// worthless as a law, while "this seam actually fills it in / reads it back" is checked by nothing
         /// else; the opcode filter is what stops a mere log line from satisfying a law about the wire.</summary>
-        private static IEnumerable<FieldInfo> FieldRefs(MethodBase m, params OpCode[] only)
+        internal static IEnumerable<FieldInfo> FieldRefs(MethodBase m, params OpCode[] only)
         {
             byte[] il = null;
             try { il = m?.GetMethodBody()?.GetILAsByteArray(); } catch { }

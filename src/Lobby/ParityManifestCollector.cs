@@ -62,21 +62,27 @@ namespace Multiplayer.Network
                         var version = mod.MetaData?.Version?.ToString() ?? "0.0";
                         mods.Add((mod.ID, version));
 
-                        // THIS mod's own settings are deliberately NOT part of parity. Parity exists to
-                        // catch CONTENT divergence between peers; our only setting is a keybind (the ping
-                        // hotkey), which is a local preference. Left in, it would diff on every peer that
-                        // rebound it — and ParityConfigSync would then AUTO-APPLY the host's key over the
-                        // client's, silently, because KeyCode is an enum and ParityAutoApply.IsScalar says
-                        // yes. Our VERSION still rides Mods (L114 compares it); only Settings is skipped.
-                        if (mod.HasConfig && mod.Instance?.Config != null &&
-                            !string.Equals(mod.ID, ParityManifest.MultiplayerModId, StringComparison.Ordinal))
+                        // THIS mod's own settings are PER FIELD, not all-or-nothing. Parity exists to catch
+                        // CONTENT divergence between peers, and most of what we ship is a local preference —
+                        // a keybind (the ping hotkey), a convenience toggle. Left in, they would diff on
+                        // every peer that changed one, and ParityConfigSync would then AUTO-APPLY the host's
+                        // key over the client's, silently, because KeyCode is an enum and
+                        // ParityAutoApply.IsScalar says yes. The deployment cap is the exception and is
+                        // named by ParityManifest.IsSyncedOwnSetting: it is enforced in the deployment UI
+                        // AND in the host's launch validator, so peers holding different numbers means every
+                        // client launch is refused — that one is meant to converge on the host's value.
+                        // Our VERSION still rides Mods (L114 compares it) regardless.
+                        if (mod.HasConfig && mod.Instance?.Config != null)
                         {
+                            bool ours = string.Equals(mod.ID, ParityManifest.MultiplayerModId,
+                                                      StringComparison.Ordinal);
                             var kv = new List<(string key, string value)>();
                             try
                             {
                                 foreach (var f in mod.Instance.Config.GetConfigFields())
                                 {
                                     if (f == null || !f.CanRead) continue;
+                                    if (ours && !ParityManifest.IsSyncedOwnSetting(f.ID)) continue;
                                     string val;
                                     try { val = SerializeValue(f.GetValue()); }
                                     catch { val = "<unreadable>"; }

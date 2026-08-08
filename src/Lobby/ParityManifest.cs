@@ -33,6 +33,22 @@ namespace Multiplayer.Network.Parity
         /// the one the mod actually ships.</summary>
         public const string MultiplayerModId = "Morgott.Multiplayer";
 
+        /// <summary>THE ONE SETTING OF OUR OWN THAT IS PART OF PARITY. Everything else in
+        /// <c>MultiplayerConfig</c> is a local preference and is deliberately kept out of the manifest (a
+        /// keybind, a convenience toggle) — left in, the host's ping key would silently overwrite the
+        /// client's. The deployment cap is different in kind: it is enforced TWICE, in the deployment UI on
+        /// whichever peer opens the screen and in the host's launch validator (<c>MissionSync.Validate</c>),
+        /// so two peers holding different numbers means every client launch is refused. It rides the
+        /// ordinary settings rail, which means the ordinary auto-apply (<c>ParityConfigSync</c>) converges it
+        /// to the HOST's value at join and restores the client's own at teardown. Field NAME, exactly as
+        /// <c>ModConfigField.ID</c> reports it (<c>ModConfigField.cs</c>:38 <c>ID = info.Name</c>).</summary>
+        public const string DeployCapSettingId = "MaxDeployUnits";
+
+        /// <summary>Does THIS mod's own config field belong in the parity manifest? Everything not named
+        /// here is a local preference and is skipped by <c>ParityManifestCollector</c>.</summary>
+        public static bool IsSyncedOwnSetting(string fieldId) =>
+            string.Equals(fieldId, DeployCapSettingId, StringComparison.Ordinal);
+
         /// <summary>Sorted DLC def-names the peer owns/has enabled.</summary>
         public List<string> Dlc = new List<string>();
 

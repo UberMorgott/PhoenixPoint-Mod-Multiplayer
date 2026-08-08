@@ -119,7 +119,7 @@ namespace Multiplayer.Network.Sync
             internal bool AllOwnedByPlayer;  // every resolved unit belongs to the shared player faction
             internal bool HasStandalone;     // at least one IsTacticalStandaloneActor (LaunchMissionAbility:38)
             internal int Volume;             // sum of OccupingSpace (UIStateRosterDeployment.CheckForDeployment:372)
-            internal int MaxUnits;           // MissionDef.MaxPlayerUnits (:374-375)
+            internal int MaxUnits;           // DeployCap.For(MissionDef) — the SAME value the UI enforces (:374-375)
             internal int VehicleCount;       // vehicles + mutogs in the squad (:373, refused at 2+ by :376)
         }
 
@@ -247,7 +247,11 @@ namespace Multiplayer.Network.Sync
                     AllOwnedByPlayer = units.All(c => ReferenceEquals(c.Faction, geo.PhoenixFaction)),
                     HasStandalone = units.Any(c => c.TemplateDef != null && c.TemplateDef.IsTacticalStandaloneActor),
                     Volume = units.Sum(c => c.OccupingSpace),
-                    MaxUnits = mission?.MissionDef == null ? 0 : mission.MissionDef.MaxPlayerUnits,
+                    // THE SAME cap the deployment UI enforces, from the ONE function both call (L372). Read
+                    // straight off MissionDef.MaxPlayerUnits, this refused every client launch the moment
+                    // the optional cap lift was switched on: the client's screen allowed 12, the host's
+                    // validator still said 8.
+                    MaxUnits = DeployCap.For(mission?.MissionDef),
                     VehicleCount = units.Count(c => c.TemplateDef != null &&
                                                     (c.TemplateDef.IsVehicle || c.TemplateDef.IsMutog)),
                 });

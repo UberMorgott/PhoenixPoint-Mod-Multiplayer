@@ -51,5 +51,26 @@ namespace Multiplayer
         ///
         /// Off = today's behaviour, byte for byte.</summary>
         public bool AutoEndTurnWhenAllReady = true;
+
+        /// <summary>OPTIONAL LIFT OF THE 8-SOLDIER DEPLOYMENT CAP. 0 = OFF, the vanilla cap
+        /// (<c>TacMissionTypeDef.MaxPlayerUnits</c>, 8 for nearly every mission) stands untouched. Any other
+        /// value is the cap, clamped to <see cref="Multiplayer.Network.Sync.DeployCap.Ceiling"/> = 16 from
+        /// above and to the mission's own cap from below — this can never make a squad SMALLER than vanilla.
+        ///
+        /// THE ONE SETTING OF OURS THAT IS PART OF CO-OP PARITY (<c>ParityManifest.DeployCapSettingId</c>),
+        /// because it is not a preference: it is enforced twice, once in the deployment UI and once in the
+        /// host's launch validator (<c>MissionSync.Validate</c>), and a client whose number differs from the
+        /// host's gets its launches refused. The host's value is auto-applied on every client at join.
+        ///
+        /// WHY 16 AND NOT 99. Deployment positions are not a slot list — they are the walkable cells inside
+        /// a box collider, and an actor with no free cell is silently NOT SPAWNED
+        /// (<c>TacticalDeployZone.cs</c>:204-218). Nothing guarantees a zone fits a big squad, so every
+        /// refusal is logged (<c>[MP][deploy] DEPLOY ZONE REFUSED AN ACTOR</c>) and the ceiling stays
+        /// modest.</summary>
+        [ConfigField("Max deployed soldiers (0 = game default)",
+                     "0 keeps the game's own 8-soldier deployment limit. Any other value raises it, up to 16. " +
+                     "Host and client must agree — the host's value is applied to everyone on join. " +
+                     "Big squads can outgrow a map's deploy zone; a soldier with no free cell does not spawn.")]
+        public int MaxDeployUnits = 0;
     }
 }
