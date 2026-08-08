@@ -116,6 +116,24 @@ namespace Multiplayer.Network.Sync
             internal bool AlreadyExploring;         // exploreSite: ExploreSiteAbility.ActivateInternal:12 (!IsExploringSite)
         }
 
+        /// <summary>THE docking predicate, and the only copy of it. <c>UIModuleVehicleCycle.InPhoenixBase</c>
+        /// (UIModuleVehicleCycle.cs:135-149) verbatim, but read off the LIVE entity instead of the screen's
+        /// <c>VehicleDisplayData</c> snapshot. The host's <see cref="Facts.Docked"/> and the client's capture
+        /// seam both call THIS, so the gate a peer's screen obeys and the gate the host validates with cannot
+        /// drift apart — the drift IS the bug (live session 2026-08-08 12:22:20: peer3 shipped a loadout for
+        /// an aircraft parked at a mission site, the host refused it, and the player's only feedback was the
+        /// slot snapping back).</summary>
+        internal static bool IsDocked(GeoVehicle vehicle)
+        {
+            var site = vehicle == null ? null : vehicle.CurrentSite;   // null = in transit
+            return site != null && site.Type == GeoSiteType.PhoenixBase && site.State == GeoSiteState.Functioning;
+        }
+
+        /// <summary>One wording for one refusal: <see cref="Validate"/> returns it to the host's reject and
+        /// the client's own pre-send guard shows it, so the player and the log read the same sentence.</summary>
+        internal const string NotDockedReason =
+            "aircraft is not docked at a functioning Phoenix base — its loadout cannot be changed";
+
         /// <summary>null = accept, otherwise the human reason the gesture was refused. A reason is never
         /// blank — a silently eaten click is the bug class this family exists to kill. The default arm
         /// refuses, so an op REGISTERED without a validator case here cannot slip through unchecked
@@ -134,7 +152,7 @@ namespace Multiplayer.Network.Sync
                     if (f.TargetIsIdleCurrentSite) return "already parked at that site with no route — nothing to order";
                     return null;
                 case OpSetEquipment:
-                    if (!f.Docked) return "aircraft is not docked at a functioning Phoenix base — its loadout cannot be changed";
+                    if (!f.Docked) return NotDockedReason;
                     if (f.SlotCountDelta != 0)
                         return "slot count off by " + f.SlotCountDelta + " — stale mirror or def/mod mismatch";
                     return null;
@@ -264,6 +282,26 @@ namespace Multiplayer.Network.Sync
                 byte[] body = EncodeSlots(weapons, modules);
                 byte[] canon = EncodeSlots(vehicle.Weapons, vehicle.Modules);
                 if (RailMeta.BytesEqual(body, canon)) return false; // this flush changes nothing — zero traffic
+                // THE GATE, taken one round trip early and from the SAME predicate the host validates with.
+                // It has to live HERE and not on the screen because the screen is not the only caller:
+                // UIStateVehicleRoster.ExitState:128-131 flushes UpdateVehicleEquipmentAndStorage on EVERY
+                // exit, ungated by its own _inPhoenixBase, and ItemScrappedHandler:183 flushes too — so a
+                // guard on the roster widgets would still ship an intent the host must refuse. One guard at
+                // the funnel covers every caller, this mod's and any other's.
+                // Refusing AFTER the byte-equal check is what keeps it quiet: the no-op exit flush of an
+                // aircraft nobody edited is byte-equal and returns above, so the notice fires only for an
+                // edit that really was refused.
+                if (!IsDocked(vehicle))
+                {
+                    Debug.Log("[MP][vehicle] CLIENT loadout write on " + vehicleRef +
+                              " REFUSED locally — " + NotDockedReason);
+                    SessionNotifier.ShowToast(NotDockedReason);   // native NotificationController toast
+                    // Nothing was written (law 3: the native op never ran) and nothing was sent, so no delta
+                    // will ever repaint the slot the UI already drew. Reconverging from the un-mutated model
+                    // puts it back AND makes the next flush byte-equal, so the notice cannot repeat itself.
+                    OpenUiRepaint.MarkDirty();
+                    return false;
+                }
                 if (AlreadySent(vehicleRef, body, canon)) return false;
                 IntentRail.Send(SurfaceIds.GeoVehicleIntent, OpSetEquipment,
                     "loadout " + vehicleRef + " bytes=" + body.Length,
@@ -459,13 +497,12 @@ namespace Multiplayer.Network.Sync
                 if (geo == null) { Reject(senderPeerId, vehicleRef, "no geoscape"); return; }
 
                 var vehicle = IdentityResolver.Resolve(geo, vehicleRef, null) as GeoVehicle;
-                var site = vehicle?.CurrentSite;
                 string why = Validate(OpSetEquipment, new Facts
                 {
                     Resolved = vehicle != null,
                     OwnedByPlayer = vehicle != null && ReferenceEquals(vehicle.Owner, geo.PhoenixFaction),
-                    // UIModuleVehicleCycle.InPhoenixBase:135-149 — the gate the screen itself uses.
-                    Docked = site != null && site.Type == GeoSiteType.PhoenixBase && site.State == GeoSiteState.Functioning,
+                    // The SAME predicate the sending client gated itself with (CaptureEquip) — one copy.
+                    Docked = IsDocked(vehicle),
                     SlotCountDelta = vehicle == null ? 0
                         : (wantWeapons.Count + wantModules.Count) - (vehicle.Weapons.Count() + vehicle.Modules.Count()),
                 });

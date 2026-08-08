@@ -471,6 +471,20 @@ namespace Multiplayer.Network.Sync
                 {
                     var cycle = v.GeoscapeModules.VehicleCycleModule;
                     if (cycle?.CurrentVehicle == null) return false; // empty vehicle bay → fallback re-enter
+                    // THE DOCKED GATE READS A SNAPSHOT, NOT THE MIRROR. VehicleDisplayData.CurrentSite is
+                    // copied ONCE, in the UIStateVehicleRoster ctor (:52 → VehicleDisplayData.cs:36), and no
+                    // delta ever touches that copy — so UIModuleVehicleCycle.InPhoenixBase:135-149, the very
+                    // predicate :226 hands to UIModuleVehicleEquip.UpdateData as `inPhoenixBase` (which is
+                    // what sets EnableEventHandlers on the weapon/module/storage lists, :271-280), kept
+                    // answering "docked" after a mirrored take-off. The slot lists stayed live for an
+                    // aircraft the host knew was at a mission site, and the loadout the player then dragged
+                    // was refused (VehicleSync.IsDocked). GeoVehicle.CurrentSite IS covered rail state
+                    // (rail-baseline.txt:712) — the mirror was right all along, only the copy was stale.
+                    // Re-copy it here and the native rebuild below re-derives the gate from live state, on
+                    // the ALREADY-OPEN screen; the location label (RefreshVehicleInfo:256 → GetSiteLabel)
+                    // reads the same field and stops lying for free.
+                    var liveVehicle = cycle.CurrentVehicle.GetBaseObject<GeoVehicle>();
+                    if (liveVehicle != null) cycle.CurrentVehicle.CurrentSite = liveVehicle.CurrentSite;
                     if (!Call(VrCycled, s, null, cycle.CurrentVehicle, false)) return false;
                     cycle.UpdateAircraftInfoController();                                // header/info panel (:330)
                     v.GeoscapeModules.VehicleRoster?.UpdateSelectedVehicleEquipments();  // roster slot (:112)
