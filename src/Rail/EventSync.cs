@@ -174,6 +174,57 @@ namespace Multiplayer.Network.Sync
             es.SetVariable(name, value);   // GeoscapeEventSystem.cs:251 — the game's own setter
             Debug.Log("[MP][events] HOST variable '" + name + "'=" + value + " nonce=" + nonce + " peer=" + senderPeerId);
         }
+
+        // ─── LOCAL PREFERENCE: an event variable that is a VIEW SETTING, not campaign state ─────
+
+        /// <summary>Event variables that name what THIS player is looking at rather than what the campaign
+        /// is. They are excluded from the rail on EVERY peer — host, client and apply alike — because the
+        /// exclusion only works if the key never enters <c>_customVariables</c> ANYWHERE: the rail carries
+        /// the whole dictionary as <c>CustomVariables</c> (docs/rail-baseline.txt:473) and the apply writes
+        /// it RAW, so a key present on the host is a delta no per-peer filter downstream could undo.
+        ///
+        /// <c>TFTV_HelmetsOff</c> is TFTV's helmet toggle (ShowWithoutHelmet.cs:33 <c>HelmetsOff</c>,
+        /// persisted :116, read :98). It is CAMPAIGN-GLOBAL by TFTV's own design — there is no per-character
+        /// helmet state to sync instead — so replicating it meant one peer's click restyled every soldier on
+        /// every screen, including the soldier another peer had open. <c>UiEventMap</c>:242-250 already
+        /// declared that which helmet a player looks at is that player's own view; this seam is what makes
+        /// the declaration true. The mixed appearance that remains is TFTV forcing helmets ON for
+        /// mutoid/augmented-head characters (:221-236, :296-310), not a sync artefact.
+        ///
+        /// AND IT KILLS THE FLIP-FLOP, which was not a second bug: <see cref="EventVariableCapture"/>'s
+        /// equality early-out reads the LIVE dictionary, which a blocked write never updates, so TFTV
+        /// re-read the stale value (:88-105), re-applied it (:138) and its own postfix (:264) wrote again —
+        /// forever. The shadow below is the value TFTV now reads back, so the second write is equal and
+        /// stops.</summary>
+        internal static readonly HashSet<string> LocalPreferenceVariables =
+            new HashSet<string>(StringComparer.Ordinal) { "TFTV_HelmetsOff" };
+
+        /// <summary>Per-process, deliberately NOT saved: a view setting that survived into a save file would
+        /// be shipped with it on the next transfer, which is the thing this seam exists to prevent.</summary>
+        private static readonly Dictionary<string, int> _localPreferences = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        /// <summary>TRUE = handled locally, the caller must ship NOTHING and run NO native write.</summary>
+        internal static bool TrySetLocalPreference(string variable, int value)
+        {
+            if (variable == null || !LocalPreferenceVariables.Contains(variable)) return false;
+            int had;
+            bool changed = !_localPreferences.TryGetValue(variable, out had) || had != value;
+            _localPreferences[variable] = value;
+            if (changed)
+                Debug.Log("[MP][events] local preference '" + variable + "'=" + value +
+                          " kept off the rail — this is a per-player view setting, not campaign state");
+            return true;
+        }
+
+        /// <summary>TRUE = answer with <paramref name="value"/> instead of the replicated dictionary. A
+        /// listed name this process has never written falls through to native, which returns the caller's
+        /// own default — the same answer an untouched campaign would give.</summary>
+        internal static bool TryGetLocalPreference(string variable, out int value)
+        {
+            value = 0;
+            return variable != null && LocalPreferenceVariables.Contains(variable) &&
+                   _localPreferences.TryGetValue(variable, out value);
+        }
     }
 
     /// <summary>
@@ -223,11 +274,42 @@ namespace Multiplayer.Network.Sync
     {
         private static bool Prefix(GeoscapeEventSystem __instance, string variable, int value)
         {
+            // BEFORE the peer-role decision, deliberately: a view setting is not campaign state on ANY peer,
+            // and letting the host (or a solo run that later hosts) write it into _customVariables is exactly
+            // what puts it on the wire. See EventSync.LocalPreferenceVariables.
+            if (EventSync.TrySetLocalPreference(variable, value)) return false;
             if (IntentRail.ShouldRunNative()) return true;
             if (__instance.GetVariable(variable, int.MinValue) != value)
                 IntentRail.Send(SurfaceIds.GeoEventIntent, EventSync.OpSetVariable,
                     "variable '" + variable + "'=" + value,
                     w => { w.Write(variable); w.Write(value); });
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// THE READ SIDE of the local-preference seam (<see cref="EventSync.LocalPreferenceVariables"/>): a
+    /// listed name answers this process's OWN value, never the replicated dictionary.
+    ///
+    /// The 2-ARG overload is the only one patched, and it is the whole funnel:
+    /// <c>GeoscapeEventSystem.GetVariable(string)</c>:265-268 is <c>return GetVariable(variable, 0);</c>,
+    /// so every read in the game and in every mod lands here. Patching the 1-arg one as well would be the
+    /// AccessTools exact-parameter-match trap wearing a second hat — two patches, one of them redundant,
+    /// and the redundant one is the one that goes stale.
+    ///
+    /// Falling THROUGH for a listed name this process never wrote is deliberate: native returns the
+    /// caller's default (:270-277), which is what an untouched campaign answers, so a fresh session shows
+    /// the game's default rather than another peer's preference.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoscapeEventSystem), nameof(GeoscapeEventSystem.GetVariable),
+                  new[] { typeof(string), typeof(int) })]
+    internal static class EventVariableLocalRead
+    {
+        private static bool Prefix(string variable, ref int __result)
+        {
+            int local;
+            if (!EventSync.TryGetLocalPreference(variable, out local)) return true;
+            __result = local;
             return false;
         }
     }
