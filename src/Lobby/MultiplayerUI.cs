@@ -185,18 +185,18 @@ namespace Multiplayer.UI
         //  Co-op loading overlay (own ScreenSpaceOverlay canvas, sortingOrder 7000)
         // ═══════════════════════════════════════════════════════════════════
 
-        // Lazily created on first SHOW (Tasks 11/12 wire the curtain-driven activation).
+        // The overlay is OWNED by MultiplayerMain (added to the same ModGO at mod enable) and is fully
+        // state-driven: its own Update decides Show/Hide from LoadOverlayVisibility.ShouldShow. So there
+        // is no Show side here at all — only this immediate Hide, which the teardown paths call to drop
+        // it in the same frame instead of waiting for the next Update tick. Resolved by lookup, never by
+        // AddComponent: a second instance would draw a second set of rows.
         private LoadOverlayController _loadOverlay;
 
-        private LoadOverlayController EnsureLoadOverlay()
+        public void HideLoadOverlay()
         {
-            if (_loadOverlay == null)
-                _loadOverlay = gameObject.AddComponent<LoadOverlayController>();
-            return _loadOverlay;
+            if (_loadOverlay == null) _loadOverlay = GetComponent<LoadOverlayController>();
+            if (_loadOverlay != null) _loadOverlay.Hide();
         }
-
-        public void ShowLoadOverlay() => EnsureLoadOverlay().Show();
-        public void HideLoadOverlay() => _loadOverlay?.Hide();
 
         /// <summary>
         /// CLIENT: on the first received save chunk, enter the game's NATIVE loading screen for the
@@ -485,12 +485,12 @@ namespace Multiplayer.UI
                 // byte lands. Broadcast-and-go: no ack, no quorum, the very next statement is our own load.
                 engine.SaveTransfer?.BroadcastLoadBoundaryBegin("lobby-play");
                 DropCurtainEarly();           // phase-1 looks like one seamless vanilla load
-                // NOTE: do NOT ShowLoadOverlay() here. The overlay visibility is fully state-driven
-                // (LoadOverlayController.Update → LoadOverlayVisibility.ShouldShow) and now gates on the
-                // NATIVE load-start (LoadPhaseStarted = curtain entered "Loading"), NOT on the command-time
-                // TransferActive. An eager show here would only flash the overlay in the LOBBY one frame
-                // before any mission load began (the reported bug). It appears on its own at real load-start
-                // via CurtainShowPatch.Postfix (state=="Loading"). Curtain drop stays — phase-1 seamlessness.
+                // NOTE: do NOT show the load overlay here — there is deliberately no show entry point.
+                // Its visibility is fully state-driven (LoadOverlayController.Update →
+                // LoadOverlayVisibility.ShouldShow) and gates on the NATIVE load-start (LoadPhaseStarted =
+                // curtain entered "Loading"), NOT on the command-time TransferActive. An eager show here
+                // would only flash the overlay in the LOBBY one frame before any mission load began (the
+                // reported bug). Curtain drop stays — phase-1 seamlessness.
                 bool started;
                 try
                 {
@@ -1138,7 +1138,7 @@ namespace Multiplayer.UI
                 return;
             }
 
-            // Do NOT ShowLoadOverlay() here. As with OnLobbyPlay, overlay visibility is state-driven and
+            // Do NOT show the load overlay here. As with OnLobbyPlay, its visibility is state-driven and
             // gates on the NATIVE load-start (LoadPhaseStarted, curtain "Loading") via CurtainShowPatch —
             // showing it on the F2 pick would pop it mid-game before the load curtain dropped. HideLoadOverlay
             // on the failure path stays (idempotent: clears any overlay if the in-game start never began).

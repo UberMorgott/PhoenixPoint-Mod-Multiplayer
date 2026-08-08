@@ -52,28 +52,11 @@ namespace Multiplayer.Network
             return true;
         }
 
-        /// <summary>
-        /// Average 0..1 fill across every expected slot EXCEPT <paramref name="excludeSlot"/> (self) —
-        /// what a peer HELD at the reveal barrier is actually waiting on. A slot that reported
-        /// LoadComplete counts as a full 1.0: done is event-driven, so its last progress row can sit
-        /// below 100 forever. Empty set (everyone else left) returns 1f, so a shrinking roster ends the
-        /// bar FULL instead of parking it — the barrier releases on the same shrink, never on a vote.
-        /// 9 of 10 done and the tenth at 50% → 0.95, the user's own example.
-        /// </summary>
-        public float AverageFill(IEnumerable<byte> expectedSlots, byte excludeSlot)
-        {
-            float sum = 0f;
-            int n = 0;
-            foreach (var s in expectedSlots)
-            {
-                if (s == excludeSlot) continue;
-                n++;
-                if (_done.Contains(s)) { sum += 1f; continue; }
-                var st = Get(s);
-                sum += CombinedFill(st.phase, st.percent);
-            }
-            return n == 0 ? 1f : sum / n;
-        }
+        // AverageFill (one aggregate number for the whole roster) is GONE with its only caller: the held-
+        // wait bottom-bar block in SaveTransferCoordinator.Update. The wait is displayed PER PEER instead
+        // (LoadOverlayController: one named bar + percent per other slot), which is what the aggregate was
+        // hiding — an average cannot say WHO the barrier is still holding for. Its "done counts as 1.0"
+        // rule survives where it matters, in LoadOverlayController.Refresh.
 
         /// <summary>Convert a native 0..1 load progress to a clamped, floored 0..100 byte.</summary>
         public static byte ProgressByte(float progress)

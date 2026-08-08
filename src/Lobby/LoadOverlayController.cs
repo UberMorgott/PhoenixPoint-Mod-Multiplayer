@@ -22,8 +22,9 @@ namespace Multiplayer.UI
         // Cached clone template of the native loading bar (Base.Utils.ProgressBarController's
         // gameObject), captured lazily on first Show — by then DropCurtainEarly() has run and the
         // curtain (hence the bar) exists. Null after a failed capture → rows fall back to from-code.
+        // The capture is RETRIED until it succeeds: the first Show can land before the curtain exists,
+        // and a one-shot "tried" latch would pin every row to the from-code fallback for the session.
         private GameObject _barTemplate;
-        private bool _barTemplateTried;
 
         private sealed class Row
         {
@@ -44,6 +45,9 @@ namespace Multiplayer.UI
 
         private void EnsureCanvas()
         {
+            // Retried every call (not latched) — see _barTemplate. Cheap: EnsureCanvas runs once per
+            // show window plus once per newly built row, never per frame.
+            if (_barTemplate == null) _barTemplate = NativeWidgetFactory.CaptureLoadingBarTemplate();
             if (_canvas != null) return;
             var go = new GameObject("MultiplayerLoadOverlay");
             go.transform.SetParent(transform, false); // under ModGO (persistent root)
@@ -51,7 +55,7 @@ namespace Multiplayer.UI
             _canvas = go.AddComponent<Canvas>();
             _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             _canvas.overrideSorting = true;
-            _canvas.sortingOrder = 7000; // above the native curtain (confirm in-game, open item #1)
+            _canvas.sortingOrder = 7000; // floor; EnsureAboveCurtain() raises it to the measured curtain+1
 
             var scaler = go.AddComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
@@ -80,16 +84,19 @@ namespace Multiplayer.UI
             bg.color = new Color(0f, 0f, 0f, 0.55f);
 
             _root = panel.transform;
+        }
 
-            // Capture the native loading-bar clone template ONCE, now that the canvas/panel exist.
-            // By the time the overlay first shows, MultiplayerUI.DropCurtainEarly() has run, so the
-            // curtain (and its ProgressBarController bar) is present. A null result (capture failed)
-            // makes every BuildRow fall back to the from-code row.
-            if (!_barTemplateTried)
-            {
-                _barTemplateTried = true;
-                _barTemplate = NativeWidgetFactory.CaptureLoadingBarTemplate();
-            }
+        // The curtain's sorting order is SERIALIZED PREFAB DATA — it appears nowhere in the decompiled
+        // code (Base.Utils.SceneFadeController / LevelSwitchCurtainController set no sortingOrder), so a
+        // hard-coded 7000 was a guess that could silently render the whole overlay behind the loading
+        // screen. Measure it instead: sit one above the canvas the native loading bar actually draws on,
+        // never below our own 7000 floor. Re-measured on each show (the curtain is a scene object).
+        private void EnsureAboveCurtain()
+        {
+            if (_canvas == null) return;
+            var order = NativeWidgetFactory.CurtainCanvasOrder();
+            if (order.HasValue && order.Value >= _canvas.sortingOrder)
+                _canvas.sortingOrder = order.Value + 1;
         }
 
         // Stretch a RectTransform to fully fill its parent (anchors span, zero offsets).
@@ -272,6 +279,7 @@ namespace Multiplayer.UI
             // rising edge (not already visible). Re-entrant calls while visible are a no-op.
             if (_visible) return;
             EnsureCanvas();
+            EnsureAboveCurtain();
             // Rows persist across sessions (_rows is never cleared; Hide() only deactivates the canvas).
             // Reset each row's visible bar/text to 0 so a 2nd co-op load starts from 0 instead of the
             // prior run's filled state.
@@ -351,6 +359,11 @@ namespace Multiplayer.UI
                 }
                 row.Name.text = label;
                 var (phase, percent) = tracker.Get(p.SlotIndex);
+                // A peer that reported LoadComplete is DONE even when its last progress row sat below
+                // 100: done is event-driven and the row stops arriving (RosterProgressTracker.AverageFill
+                // states the same rule for the aggregate). Without this its bar freezes at e.g. 97% for
+                // the whole held-at-the-barrier wait and reads as a stuck peer.
+                if (tracker.IsDone(p.SlotIndex)) { phase = 1; percent = 100; }
 
                 // PHASE-AWARE fill: phase 0 (download) fills the bottom half, phase 1 (native load) the top,
                 // so the instant loopback download (phase 0, 100%) shows a HALF bar and the bar only fills

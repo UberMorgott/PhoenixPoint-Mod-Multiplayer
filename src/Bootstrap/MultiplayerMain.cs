@@ -26,6 +26,7 @@ namespace Multiplayer
 
         private MultiplayerUI _ui;
         private PingMarkers _pings;
+        private LoadOverlayController _loadOverlay;
 
         /// <summary>Patch classes that did NOT bind this run, "&lt;class&gt;: &lt;reason&gt;". Empty is the
         /// only good answer — anything in here is a feature silently missing from the running game.</summary>
@@ -62,6 +63,14 @@ namespace Multiplayer
             // and the arrival seam NetworkEngine relays into. Presentation only — see PingMarkers.
             _pings = ModGO.AddComponent<PingMarkers>();
             NetworkEngine.PingMarkerShow = PingMarkers.Show;
+
+            // Co-op load overlay: one named bar per OTHER peer while anyone is still loading. It is a
+            // MonoBehaviour whose OWN Update drives visibility (LoadOverlayVisibility.ShouldShow) and
+            // repaint, so creating it is the whole wiring — there is no show call site by design. It
+            // never existed at runtime before: the only construction site was a MultiplayerUI helper
+            // whose caller was dropped in the v2 port, so the component sat dead in the tree while the
+            // host looked at a frozen native bar with no idea who it was waiting for.
+            _loadOverlay = ModGO.AddComponent<LoadOverlayController>();
 
             // Parity auto-apply: wire the teardown restore hook (delegate field — NetworkEngine must not
             // reference ParityConfigSync's game types directly, same JIT-safety rule as SteamLobbyCleanup).
@@ -116,6 +125,12 @@ namespace Multiplayer
             {
                 Object.Destroy(_pings);
                 _pings = null;
+            }
+
+            if (_loadOverlay != null)
+            {
+                Object.Destroy(_loadOverlay);
+                _loadOverlay = null;
             }
 
             Instance = null;

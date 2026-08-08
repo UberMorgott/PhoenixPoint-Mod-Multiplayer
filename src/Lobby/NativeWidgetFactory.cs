@@ -305,6 +305,30 @@ namespace Multiplayer.UI
             return result;
         }
 
+        /// <summary>
+        /// The sorting order of the canvas the native loading curtain draws on, or null if it cannot be
+        /// resolved. The curtain's order is SERIALIZED PREFAB DATA — nothing in the decompiled code
+        /// (SceneFadeController / LevelSwitchCurtainController) ever assigns a sortingOrder — so it can
+        /// only be read at runtime. Reached from the same anchor as the bar itself
+        /// (SceneFadeController.ProgressBar → its root Canvas).
+        /// </summary>
+        public static int? CurtainCanvasOrder()
+        {
+            try
+            {
+                var pbc = CaptureLiveProgressBar();
+                var c = pbc != null ? pbc.GetComponentInParent<Canvas>() : null;
+                if (c == null) return null;
+                var root = c.rootCanvas != null ? c.rootCanvas : c;
+                return root.sortingOrder;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multiplayer] CurtainCanvasOrder failed: " + e.Message);
+                return null;
+            }
+        }
+
         /// <summary>Clone a captured loading-bar template under <paramref name="parent"/> and activate it.</summary>
         public static GameObject CloneLoadingBar(GameObject template, Transform parent)
         {
@@ -362,6 +386,13 @@ namespace Multiplayer.UI
         // Base.Core.LoadingProgress.cs (public UpdateProgress). ProgressBarController is Base.Utils
         // (reflection-only for the private field); Base.Core.LoadingProgress is referenceable directly.
         private static Base.Core.LoadingProgress _downloadProgress;
+        // The live ProgressBarController we hijacked, plus the ILoadingProgress it was reading BEFORE.
+        // BeginDownloadBar overwrites a PRIVATE field of a live game component; until this pair existed
+        // nothing ever put it back, so once our window closed the game's bar was permanently wired to an
+        // abandoned LoadingProgress pinned at its last value and the native controller could never move
+        // it again. Restored by RestoreBarSource (only when the bar is still ours — see there).
+        private static Component _barOwner;
+        private static object _barSourceBefore;
         // ONE curtain-label mechanism for every co-op phase ("Downloading save…" during transfer,
         // "Waiting for players…" at the held all-loaded barrier): the cached live
         // SceneFadeController.LoadingText + its pre-mod text. Unity-null-aware cache (a destroyed Text
@@ -382,11 +413,18 @@ namespace Multiplayer.UI
             {
                 var pbc = CaptureLiveProgressBar(); // SceneFadeController.ProgressBar component
                 if (pbc == null) return false;
-                _downloadProgress = new Base.Core.LoadingProgress();
                 // Private ILoadingProgress field — set via reflection (same field-access style as
                 // GetProgressFill). The live controller's Update() eases fillAmount toward .Progress.
-                HarmonyLib.AccessTools.Field(pbc.GetType(), "_currentLoadingProgress")
-                    ?.SetValue(pbc, _downloadProgress);
+                var field = HarmonyLib.AccessTools.Field(pbc.GetType(), "_currentLoadingProgress");
+                // Remember what the bar was reading before the FIRST hijack of this window, so
+                // EndDownloadBar can hand it back. Re-entrant Begin must not record our own object.
+                if (_barOwner == null)
+                {
+                    _barOwner = pbc;
+                    _barSourceBefore = field?.GetValue(pbc);
+                }
+                _downloadProgress = new Base.Core.LoadingProgress();
+                field?.SetValue(pbc, _downloadProgress);
                 _downloadProgress.UpdateProgress(0f);
 
                 SetCurtainLabel(label); // phase label (restored at hand-off / reveal / abort)
@@ -449,14 +487,39 @@ namespace Multiplayer.UI
         }
 
         /// <summary>
-        /// Stop driving the download bar and restore the native loading label. Does NOT lift the curtain
-        /// (the level load continues under it) and does NOT null the bar's source — the native level-load
-        /// path reassigns it via SetLoadingLevel. Only clears OUR references + restores the label text.
+        /// Stop driving the download bar, restore the native loading label AND hand the bar's source back
+        /// to whatever the game had it on. Does NOT lift the curtain (the level load continues under it).
         /// </summary>
         public static void EndDownloadBar()
         {
             RestoreCurtainLabel();
+            RestoreBarSource();
             _downloadProgress = null;
+        }
+
+        /// <summary>
+        /// Put the hijacked ProgressBarController back on its original ILoadingProgress — but ONLY while
+        /// the field still holds OUR object. The native level-load path (SceneFadeController
+        /// .DropCurtainInstant(level) → ProgressBar.SetLoadingLevel) reassigns that same field and runs
+        /// BEFORE our download→level-load hand-off, so an unconditional restore would clobber the live
+        /// level's progress with a stale source and freeze the real load's bar. Idempotent; Unity-null
+        /// aware (a destroyed controller simply re-arms on the next BeginDownloadBar).
+        /// </summary>
+        private static void RestoreBarSource()
+        {
+            if (_barOwner == null) { _barSourceBefore = null; return; }
+            try
+            {
+                var f = HarmonyLib.AccessTools.Field(_barOwner.GetType(), "_currentLoadingProgress");
+                if (f != null && ReferenceEquals(f.GetValue(_barOwner), _downloadProgress))
+                    f.SetValue(_barOwner, _barSourceBefore);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multiplayer] RestoreBarSource failed: " + e.Message);
+            }
+            _barOwner = null;
+            _barSourceBefore = null;
         }
 
         // The live SceneFadeController.LoadingText (native loading-screen label), or null. Resolved by
