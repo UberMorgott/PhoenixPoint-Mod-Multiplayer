@@ -71,6 +71,7 @@ namespace Multiplayer.Network.Sync
             _kinds.Clear();
             _brokenKinds.Clear();
             _lastSeq = 0;
+            _missedNoLevel = false;   // full teardown only: a reload boundary is exactly when this is PENDING
         }
 
         public static void ResetForReloadBoundary()
@@ -184,7 +185,7 @@ namespace Multiplayer.Network.Sync
         private static void ApplyDelta(NetworkEngine engine, byte[] payload)
         {
             var geo = GeoLevel();
-            if (geo == null) return; // mid-load: the reload boundary + save transfer own this window
+            if (geo == null) { MissedNoLevel(); return; } // mid-load — see MissedNoLevel for what that costs
 
             using (var ms = new MemoryStream(payload))
             using (var r = new BinaryReader(ms, Encoding.UTF8))
@@ -294,7 +295,7 @@ namespace Multiplayer.Network.Sync
         private static void ApplyStructural(NetworkEngine engine, byte[] payload)
         {
             var geo = GeoLevel();
-            if (geo == null) return; // mid-load: reload boundary + save transfer own this window
+            if (geo == null) { MissedNoLevel(); return; } // mid-load — see MissedNoLevel for what that costs
 
             using (var ms = new MemoryStream(payload))
             using (var r = new BinaryReader(ms, Encoding.UTF8))
@@ -1854,6 +1855,52 @@ namespace Multiplayer.Network.Sync
                 return n < 1 ? 1f : n;
             }
             catch { return 1f; }
+        }
+
+        /// <summary>A batch arrived while this peer had NO GEOSCAPE LEVEL, so it was thrown away. Set at the
+        /// two <c>geo == null</c> returns, cleared by <see cref="ClientMissedBatchTick"/> once the level is
+        /// live.
+        ///
+        /// WHY IT HAS TO EXIST AT ALL. Those two returns used to be a SILENT swallow: no line, no counter,
+        /// and — because <c>_lastSeq</c> is marked only AFTER the guard — no seq movement either, so the loss
+        /// stayed invisible until some unrelated later batch tripped the gap check and named a range nobody
+        /// could explain. Both mission returns of the 2026-08-08 session measured the same shape: the host
+        /// was back on the geoscape 50-77 s before the client finished loading, and EVERY batch of that
+        /// window died here — <c>seq gap (200→249)</c> = 49 batches, then <c>seq gap (579→629)</c> = 50. The
+        /// host's own log agrees from the other side: 13 CRC DIVERGED for that client, all clustered right
+        /// after the first tac→geo return.
+        ///
+        /// AND NOTHING WOULD EVER HAVE ASKED FOR THEM BACK. Every other <c>RequestResync</c> call site is
+        /// REACTIVE — it needs an inbound message to notice anything — and the peer's problem here is
+        /// precisely that it received nothing it could keep. The level going live is the one edge that is not
+        /// a message, so it is the one thing that can close this. No wire byte is added: the request is the
+        /// existing law-7 one and the host answers it with the existing <c>DiffEngine.RequestFullResend</c>.
+        ///
+        /// One flag, not a count: the answer to one lost batch and to fifty is the same full resend.</summary>
+        private static bool _missedNoLevel;
+
+        private static void MissedNoLevel()
+        {
+            if (_missedNoLevel) return;   // one line per window, not one per discarded batch
+            _missedNoLevel = true;
+            Debug.LogWarning("[Multiplayer][rail] GenericApplier: a host batch was DISCARDED — this peer has " +
+                             "no geoscape level yet (mid-load). It will ask for the whole state back the " +
+                             "moment the level is live; until then every further batch is dropped silently.");
+        }
+
+        /// <summary>The one non-reactive resync trigger: THE LEVEL BECAME LIVE. Driven from SyncEngine.Tick
+        /// just BEFORE <c>ReplenishSync.ClientArrivalTick</c> on purpose — the resend has to be in flight
+        /// before the resupply re-ask starts polling <c>GetMissingItems()</c>, or the poll spends its whole
+        /// bounded window asking about state that is still sitting on the host.</summary>
+        internal static void ClientMissedBatchTick(NetworkEngine engine)
+        {
+            if (!_missedNoLevel) return;
+            if (engine == null || engine.IsHost || !engine.IsActiveSession) { _missedNoLevel = false; return; }
+            if (GeoLevel() == null) return;
+            // Cleared even when the throttle eats the request: a full resend that went out in the last 5 s
+            // carries this peer's missing state too, which is the same reason the full window is global.
+            _missedNoLevel = false;
+            RequestResync(engine, "state arrived while this peer had no geoscape level");
         }
 
         public static void ClientCrcTick(NetworkEngine engine)

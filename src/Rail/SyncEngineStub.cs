@@ -183,6 +183,11 @@ namespace Multiplayer.Network.Sync
             // client-only inside, and the same shape of problem one screen over: the post-mission resupply
             // gate is asked at UIStateInitial.EnterState, a frame or two before the host's own post-mission
             // writes land on 0xAC. Re-asks the GAME'S own GetMissingItems() over a bounded window.
+            // client-only inside, and it must stay AHEAD of the line below: a peer whose level went live
+            // after the host's post-mission batches already flew has none of that state, and this is the one
+            // resync trigger that does not need an inbound message to fire. The resupply re-ask polls
+            // GetMissingItems() over a bounded window, so the resend has to be requested before it starts.
+            GenericApplier.ClientMissedBatchTick(_engine);
             ReplenishSync.ClientArrivalTick(_engine);
             GenericApplier.ClientCrcTick(_engine); // client-only inside: law-7 drift backstop, one root per second
             // (it charges itself per ROOT — the name in the log says which root cost the frame)
