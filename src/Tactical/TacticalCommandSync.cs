@@ -1156,6 +1156,21 @@ namespace Multiplayer.Tactical
             /// clear it by design. An ABSENT entry means ZERO, not "leave it alone" — see
             /// <see cref="HostUsesFor"/>.</summary>
             public Dictionary<string, int> Uses;
+
+            /// <summary>The host's TFTV human-enemy IDENTITY for that actor — its rolled name and its
+            /// <c>HumanEnemy*</c> game tags (<see cref="TftvChampIdentity"/>), null for every actor that has
+            /// none, which is all of them outside TFTV. The fifth field to ride the settle for the reason the
+            /// other four do, and the one that reaches actors NO spawn record ever named: TFTV rolls rank and
+            /// name off a <c>Stopwatch</c>-seeded generator at enter-play, so it is host-authoritative content
+            /// by the same argument as a reinforcement wave, and the 0x84 spawn record can only carry it for
+            /// an actor that was spawned mid-battle. A BATTLE-START human enemy is in nobody's spawn record —
+            /// its tags reach the client through the entry save
+            /// (<c>TacActorBaseInstanceData.AdditionalGameTags</c>) and its NAME reaches it through nothing at
+            /// all, because the name is not instance data in any form and <c>ActorSpawner</c>:17 regenerates
+            /// it per peer as <c>&lt;prefab&gt;_&lt;NextSpawnedActorID&gt;</c> off a local counter. The
+            /// turn-edge sweep is the only host→all path that covers those actors, and it re-asserts rather
+            /// than retries.</summary>
+            public TftvChampIdentity.Identity Champ;
         }
 
         /// <summary>HOST: which peer's order started the ability an actor is currently executing — 0 = the
@@ -1955,11 +1970,13 @@ namespace Multiplayer.Tactical
             var selected = hasEquip ? equips.SelectedEquipment : null;
             string selGuid = selected == null || selected.ItemDef == null ? "" : selected.ItemDef.Guid;
             var uses = CollectAbilityUses(tacActor);
+            var champ = TftvChampIdentity.Collect(tacActor);
             Send(OpSettle, "settle " + tacActor.name + " @ " + Fmt(pos) + " ap=" + ap.ToString("0.##") +
                  " wp=" + wp.ToString("0.##") + (forced ? " FORCED" : ""), 0,
                  w => { w.Write(key); w.Write(pos.x); w.Write(pos.y); w.Write(pos.z); w.Write(ap); w.Write(wp);
                         w.Write(forced); TacticalStatusSet.Write(w, statuses); WriteTraits(w, traits);
-                        w.Write(hasEquip); if (hasEquip) w.Write(selGuid); WriteUses(w, uses); });
+                        w.Write(hasEquip); if (hasEquip) w.Write(selGuid); WriteUses(w, uses);
+                        TftvChampIdentity.Write(w, champ); });
         }
 
         /// <summary>THE PER-TURN USE COUNTER, WHICH NOTHING REPLICATED (2026-08-08 RCA, symptom 2).
@@ -2897,7 +2914,7 @@ namespace Multiplayer.Tactical
                                                         r.ReadSingle(), r.ReadSingle(), r.ReadBoolean(),
                                                         TacticalStatusSet.Read(r), ReadTraits(r),
                                                         r.ReadBoolean() ? r.ReadString() : null,
-                                                        ReadUses(r));
+                                                        ReadUses(r), TftvChampIdentity.Read(r));
                     else if (op == OpSelectEquipment) ApplySelectEquipment(r.ReadInt32(), r.ReadString());
                     else
                     {
@@ -3491,7 +3508,7 @@ namespace Multiplayer.Tactical
 
         private static void QueueSettle(int key, Vector3 pos, float ap, float wp, bool forced,
                                         List<string> statuses, List<string> traits, string selected,
-                                        Dictionary<string, int> uses)
+                                        Dictionary<string, int> uses, TftvChampIdentity.Identity champ)
         {
             // THE DISARM IS NOT HERE, AND THAT WAS THE LOCK-UP. A settle is the other half of "the host has
             // answered" — a REFUSED order produces no 0x82 mirror at all — but disarming the echo wait at
@@ -3501,7 +3518,8 @@ namespace Multiplayer.Tactical
             // IS, so the two cannot come apart again.
             _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced,
                                                 Statuses = statuses, Traits = traits, Selected = selected,
-                                                Uses = uses, Epoch = TacticalDamageSync.StatEpoch };
+                                                Uses = uses, Champ = champ,
+                                                Epoch = TacticalDamageSync.StatEpoch };
         }
 
         /// <summary>The standing settle applier (driven from <c>SyncEngine.Tick</c>, client-only inside). A
@@ -3707,6 +3725,15 @@ namespace Multiplayer.Tactical
                 // def-keyed and cleared only at the turn edge, so without this the ability stays dead on
                 // every weapon for the rest of the turn with no way for the player to clear it.
                 ReconcileAbilityUses(actor, s.Uses);
+                // AND WHO HE IS, which is the one field here that a peer cannot merely have LOST — it never
+                // had it. TFTV rolls a human enemy's rank and name at enter-play off a Stopwatch-seeded
+                // generator, so every peer used to mint a different elite on the same battlefield; suppressing
+                // that (TftvClientChampGuard) made them agree to have nothing. The 0x84 spawn record carries
+                // the roll for a mid-battle spawn, and this carries it for the actors no spawn record ever
+                // named — a BATTLE-START human enemy, whose tags arrive in the entry save and whose NAME
+                // arrives nowhere, because ActorSpawner:17 regenerates it per peer. Silent when the two
+                // already agree, which is every settle after the first.
+                TftvChampIdentity.Apply(actor, s.Champ, "the host's settle");
                 RefreshVisionTowards(actor);
             }
             Debug.Log("[Multiplayer][tac] CLIENT settled " + actor.name + " @ " + Fmt(s.Pos) +

@@ -286,6 +286,7 @@ namespace RailCheck
             Add(laws, () => L243_RefusalDoesNotMoveTheSelection.Check());
             Add(laws, () => L260_AResolvedSubjectsWindowIsNeverServed.Check());
             Add(laws, () => L261_PeersConvergeOnTheSameServedWindows.Check());
+            Add(laws, () => L262_ChampIdentityIsTheHostsOnEveryPeer.Check());
             Add(laws, () => L250_PingPaintStaysOffTheSharedHighlight.Check());
             Add(laws, () => L251_PingColourAnswersWhoPinged.Check());
             Add(laws, () => L252_TheOffScreenArrowTakesAClickToTheTarget.Check());

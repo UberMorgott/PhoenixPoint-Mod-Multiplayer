@@ -195,12 +195,18 @@ namespace Multiplayer.Tactical
 
         /// <summary>REACTIVITY (postulate 1), and the rank half of it needs a call because NOTHING listens.
         ///
-        /// The NAME repaints itself: every surface that shows it resolves <c>DisplayName</c> at paint time —
-        /// <c>FreeAimTargetHealthbarUIActorElement</c>:66, <c>UIModuleDamagePrediction</c>:57,
-        /// <c>UIModuleTacticalContextualMenu</c>, <c>UIStateShoot</c> — so a name that lands while the player
-        /// is aiming is on the next read, and <see cref="TacticalUiRepaint.MarkDirty"/> below forces that read
-        /// for the one persistent tactical surface this repo repaints (the open ability-bar state's own
-        /// Exit+Enter). There is no baked always-on enemy name label to go stale.
+        /// THE NAME HAS EXACTLY ONE PERSISTENT LABEL AND NOTHING REPAINTS IT, said plainly rather than assumed.
+        /// The enemy's name is baked into the aim HUD at <c>UIStateShoot</c>:253
+        /// (<c>_shootTargetHealthBarModule.TargetNameText.text = _abilityTargetActor.DisplayName.ToUpper()</c>),
+        /// written ONLY from <c>SetShootTarget</c>:219/:224 — whose callers are all target-CHANGE edges
+        /// (:485-486 init, :677 pick, :1207 ground-target update, :1271 clear), never an Update. So a client
+        /// already holding aim on the very enemy whose identity lands keeps the old label until it re-targets,
+        /// and <see cref="TacticalUiRepaint"/> cannot help: it EXCLUDES <c>UIStateShoot</c> on purpose, because
+        /// that state's <c>EnterState</c> moves the state stack and an Exit+Enter there double-exits it (L63).
+        /// A stale label in that one window is the price this repo already decided to pay there; every OTHER
+        /// surface resolves <c>DisplayName</c> at paint time and is right on its next read
+        /// (<c>FreeAimTargetHealthbarUIActorElement</c>:66, <c>UIModuleDamagePrediction</c>:57), which
+        /// <see cref="TacticalUiRepaint.MarkDirty"/> forces for the open ability-bar state.
         ///
         /// The RANK ICON does not: TFTV sets the healthbar's class icon ONCE, from its postfix on
         /// <c>HealthbarUIActorElement.InitHealthbar</c> (TFTVUI/Tactical/TargetIcons.cs:815-823) and from the
