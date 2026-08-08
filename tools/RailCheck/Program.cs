@@ -279,6 +279,7 @@ namespace RailCheck
             Add(laws, () => L220_TheReadyControlIsReachable.Check());
             Add(laws, () => L230_EveryPeerStartsTheAnimationFromTheHostsRecord.Check());
             Add(laws, () => L231_TheOutcomeLandsAtTheEndOfTheLocalAnimation.Check());
+            Add(laws, () => L232_ASuppressedClickAlwaysLeavesTheTargetingState.Check());
             Add(laws, () => L240_AbilitySourceMatchesSelection.Check());
             Add(laws, () => L241_ReloadLandsOnTheSelectedWeapon.Check());
             Add(laws, () => L242_RefusedOrderSpendsNoTurnUse.Check());

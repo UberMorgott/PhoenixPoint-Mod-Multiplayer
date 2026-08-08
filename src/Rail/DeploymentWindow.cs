@@ -188,6 +188,38 @@ namespace Multiplayer.Network.Sync
         private static GeoSquad _pendingSquad;
         private static float _nextDecrementAt;
         private static bool _committed;
+        private static int _hostSecondsLeft;
+
+        // ─── PEER-LOCAL display clock (never replicated, never read by the launch) ───
+        private static int _shownArm;
+        private static float _shownZeroAt;
+
+        /// <summary>What the overlay shows on THIS peer, derived from local realtime.
+        ///
+        /// THE COUNT MAY NOT RIDE THE RAIL. <see cref="State"/> is replicated mod-state and
+        /// <c>UIStateRosterDeployment</c> has no <c>UiNativeRepaint.Table</c> entry, so every rail batch that
+        /// touched it fell to the last-resort lifecycle Exit+Enter (<c>OpenUiRepaint</c>:515-527) — which
+        /// re-runs <see cref="DeploymentRosterRefresh"/> and RE-SEEDS EVERY SOLDIER'S POSE. A value that
+        /// changed once a second therefore reset every client's deployment lineup once a second. The rail now
+        /// carries the ARM and the CLEAR and nothing in between (2 writes per countdown, not 6), and each peer
+        /// counts down its own copy from the arm it received.
+        ///
+        /// It is not a shared clock and does not need to be: the LAUNCH is still the host's alone
+        /// (<see cref="HostTick"/>), so a peer whose display drifts by a frame shows a number, never a
+        /// decision. It holds at 1 rather than reaching 0 by itself — zero is the host's word, and it arrives
+        /// as the CLEAR.</summary>
+        internal static int DisplaySecondsLeft()
+        {
+            int armed = State.SecondsLeft;
+            if (armed <= 0) { _shownArm = 0; return 0; }
+            if (armed != _shownArm)
+            {
+                _shownArm = armed;
+                _shownZeroAt = Time.realtimeSinceStartup + armed;
+            }
+            int left = Mathf.CeilToInt(_shownZeroAt - Time.realtimeSinceStartup);
+            return left < 1 ? 1 : left;
+        }
 
         /// <summary>PURE (RailCheck L177). Does the native <c>GeoMission.Launch</c> run this call, or is it
         /// held for the countdown? The whole decision, with no clock and no model in it:
@@ -226,8 +258,9 @@ namespace Multiplayer.Network.Sync
                 _pending = mission;
                 _pendingSquad = squad ?? mission?.Squad;
                 _nextDecrementAt = Time.realtimeSinceStartup + 1f;
+                _hostSecondsLeft = CountdownSeconds;
                 State.SiteRef = IdentityResolver.RootRef(mission?.Site) ?? "";
-                State.SecondsLeft = CountdownSeconds;
+                State.SecondsLeft = CountdownSeconds;   // the ARM — one rail write, then nothing until the CLEAR
                 Debug.Log("[MP][deploy] launch HELD for " + CountdownSeconds + " s at " +
                           (string.IsNullOrEmpty(State.SiteRef) ? "S#?" : State.SiteRef) + " — every peer is " +
                           "shown the countdown and ANY ONE of them may cancel it for everyone. Nobody has to " +
@@ -255,9 +288,11 @@ namespace Multiplayer.Network.Sync
                 if (!DecrementDue(Time.realtimeSinceStartup, _nextDecrementAt)) return;
                 _nextDecrementAt = Time.realtimeSinceStartup + 1f;
 
-                if (State.SecondsLeft > 1)
+                // HOST-LOCAL, and that is the whole of symptom 2's fix: the count no longer touches the
+                // replicated State, so it ships no delta and re-enters no client's deployment screen.
+                if (_hostSecondsLeft > 1)
                 {
-                    State.SecondsLeft--;
+                    _hostSecondsLeft--;
                     return;
                 }
 
@@ -340,8 +375,10 @@ namespace Multiplayer.Network.Sync
         {
             _pending = null;
             _pendingSquad = null;
+            _hostSecondsLeft = 0;
+            _shownArm = 0;
             State.SiteRef = "";
-            State.SecondsLeft = 0;
+            State.SecondsLeft = 0;   // the CLEAR — the second and last rail write of a countdown
         }
 
         /// <summary>Mod-root contract (IdentityResolver.cs:205-206): mod state must be EMPTY at every reload
@@ -361,9 +398,12 @@ namespace Multiplayer.Network.Sync
     /// <summary>
     /// The deployment countdown as mod-state (root <c>"M#deploy"</c>, contract at
     /// <see cref="IdentityResolver.RegisterModRoot"/>). Two fields and no more: WHERE the drop is going, so
-    /// a peer can tell one countdown from the next, and HOW MANY SECONDS ARE LEFT, which is the host's own
-    /// counter rather than a deadline (the game clock is paused behind the deployment screen). Nothing here
-    /// is a decision — the launch is <see cref="DeployCountdown"/>'s, host-side, off host objects.
+    /// a peer can tell one countdown from the next, and HOW LONG THE COUNTDOWN IS — written exactly twice per
+    /// countdown, the ARM and the CLEAR, with <see cref="DeployCountdown.DisplaySecondsLeft"/> counting down
+    /// from it on each peer locally. It is deliberately NOT ticked here: this is replicated mod-state, and
+    /// <c>UIStateRosterDeployment</c> has no native-repaint entry, so a value that changed once a second
+    /// re-entered every client's deployment screen once a second and re-seeded every soldier's pose. Nothing
+    /// here is a decision — the launch is <see cref="DeployCountdown"/>'s, host-side, off host objects.
     /// </summary>
     [SerializeType(SerializeMembersByDefault = SerializeMembersType.SerializeAll)]
     public sealed class DeployCountdownState

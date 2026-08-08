@@ -144,7 +144,7 @@ namespace Multiplayer.UI
         {
             Debug.Log("[MP][deploy] CANCEL pressed on this peer at " +
                       (string.IsNullOrEmpty(DeployCountdown.State.SiteRef) ? "S#?" : DeployCountdown.State.SiteRef) +
-                      " with " + DeployCountdown.State.SecondsLeft + " s left — one peer's veto stops the drop " +
+                      " with " + DeployCountdown.DisplaySecondsLeft() + " s left — one peer's veto stops the drop " +
                       "for everyone (no vote, nobody else has to agree).");
             DeployCountdown.RequestCancel();
         }
@@ -223,7 +223,9 @@ namespace Multiplayer.UI
             if (_root == null) return;
 
             var engine = NetworkEngine.Instance;
-            int left = DeployCountdown.State.SecondsLeft;
+            // The peer-LOCAL count, not the replicated field: the rail carries only the arm and the clear now,
+            // because a value that changed once a second re-entered this very screen once a second.
+            int left = DeployCountdown.DisplaySecondsLeft();
             bool show = engine != null && engine.IsActiveSession && left > 0;
 
             if (!show)

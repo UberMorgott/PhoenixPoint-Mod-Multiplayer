@@ -46,10 +46,15 @@ namespace RailCheck
     /// EndTurn, idle, the overwatch shot — passes through it. Gating <c>Activate</c> instead would refuse the
     /// engine's own ambient abilities on a busy actor, which is a wedge, not a guard. Arm (d) pins the seam.
     ///
-    /// WHAT THIS LAW CANNOT ASSERT: that the refused click leaves no trace on the refusing peer's screen.
-    /// Returning false from the prefix also skips :274-275's <c>SwitchToState(new UIStateWaiting())</c>, which
-    /// is what keeps that peer where it was — but proving it needs a live state stack, which a console host
-    /// does not have. Arm (d) asserts the seam; the frame is the game's.
+    /// AND THE REFUSED PEER GETS ITS SCREEN BACK, which is the opposite of what this law was written with.
+    /// Returning false from the prefix skips :274-275's <c>SwitchToState(new UIStateWaiting())</c> too, and
+    /// while the click still played locally that was the RIGHT outcome (nothing changed, so nothing repaints).
+    /// A9/L230 suppresses the native body for every clicked rider, so it became the lock-up instead: the
+    /// refused player stood in the targeting state his click never left, holding a toast about a button that
+    /// no longer did anything. The refusal now shares
+    /// <c>TacticalCommandSync.ReleaseLocalUiHolding</c> with every other suppressed click (L232). WHAT THIS
+    /// LAW STILL CANNOT ASSERT is the frame itself — proving it needs a live state stack, which a console host
+    /// does not have. Arm (d) asserts the seam; L232 asserts the outcome; the frame is the game's.
     ///
     /// Falsify: make <c>PeerMayCommand</c> return true always → <c>L146 second-command-lands</c>; make it
     /// return false always → <c>L146 idle-actor-is-locked</c> and <c>L146 own-soldier-is-locked</c>; ignore the
@@ -68,13 +73,19 @@ namespace RailCheck
             var drive = typeof(TacticalActorDrive);
             var mayCommand = drive.GetMethod("PeerMayCommand", All);
             var refuse = drive.GetMethod("RefuseLocalCommand", All);
-            var gate = drive.Assembly.GetType("Multiplayer.Tactical.BusyActorBelongsToThePeerThatStartedIt");
-            var prefix = gate?.GetMethod("Prefix", All);
+            // ONE PREFIX, NOT TWO. The gate used to be its own patch class on the same method as
+            // ClickedOrderWaitsForTheEcho, both unprioritised — Harmony stops at the first prefix that returns
+            // false and the order between two unprioritised patch classes is undeclared, so on any given load
+            // one of them silently did not run. The verdict now lives at the top of PublishClickedOrder, which
+            // IS that one prefix's body, so arm (c) asks it there and arm (d) pins the surviving patch class.
+            var gate = drive.Assembly.GetType("Multiplayer.Tactical.ClickedOrderWaitsForTheEcho");
+            var prefix = typeof(TacticalCommandSync).GetMethod("PublishClickedOrder", All);
             var handle = typeof(TacticalCommandSync).GetMethod("HandleActivate", All);
-            if (mayCommand == null || refuse == null || prefix == null || handle == null)
+            if (mayCommand == null || refuse == null || prefix == null || gate == null || handle == null)
             {
                 yield return "L146 premise-changed: TacticalActorDrive.{PeerMayCommand,RefuseLocalCommand}, the " +
-                             "ActivateAbility gate or TacticalCommandSync.HandleActivate no longer resolves. " +
+                             "ActivateAbility gate or TacticalCommandSync.{PublishClickedOrder,HandleActivate} " +
+                             "no longer resolves. " +
                              "Nothing else stops two peers commanding one soldier — re-read this law before " +
                              "assuming first-to-act-wins still holds in both directions.";
                 yield break;

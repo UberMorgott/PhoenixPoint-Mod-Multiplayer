@@ -243,29 +243,12 @@ namespace Multiplayer.Tactical
             => __result = TacticalActorDrive.ViewMustWaitFor(__instance, __result);
     }
 
-    /// <summary>DEFECT 2's ONE SEAM: the local input path. <c>TacticalViewState.ActivateAbility</c>:259-277 is
-    /// where every UI state turns a click into <c>ability.Activate</c>, it has no overrides anywhere in the
-    /// assembly, and nothing the ENGINE raises for itself passes through it — so refusing here refuses a
-    /// PLAYER's second command and nothing else. Returning false also skips :274-275's
-    /// <c>SwitchToState(new UIStateWaiting())</c>, which is what keeps the refused peer's own screen exactly
-    /// where it was (postulate 1: nothing changed, so nothing repaints — but the player is told).</summary>
-    [HarmonyPatch]
-    internal static class BusyActorBelongsToThePeerThatStartedIt
-    {
-        private static System.Reflection.MethodBase TargetMethod() =>
-            AccessTools.Method(typeof(TacticalViewState), "ActivateAbility",
-                               new[] { typeof(TacticalAbility), typeof(TacticalAbilityTarget),
-                                       typeof(StateStackAction), typeof(System.Func<TacticalAbility, bool>) });
-
-        private static bool Prefix(TacticalAbility ability)
-        {
-            string why = TacticalActorDrive.RefuseLocalCommand(ability);
-            if (why == null) return true;
-            Debug.Log("[Multiplayer][tac] this peer's command was REFUSED locally — " + why +
-                      ". First-to-act-wins: that soldier is released the moment its own action ends, which " +
-                      "no human has to do (postulate 2). Every other soldier stays commandable.");
-            SessionNotifier.ShowToast(why, modalFallback: true);
-            return false;
-        }
-    }
+    // DEFECT 2's SEAM IS STILL TacticalViewState.ActivateAbility — but it is ONE prefix now, not two.
+    // BusyActorBelongsToThePeerThatStartedIt used to patch that method a SECOND time, unprioritised, alongside
+    // ClickedOrderWaitsForTheEcho: Harmony stops at the first prefix that returns false and the order between
+    // two unprioritised patch classes is undeclared, so on any given load exactly one of the local-drive gate
+    // and the echo publish silently did not run. RefuseLocalCommand above is now consulted at the top of
+    // TacticalCommandSync.PublishClickedOrder, which is that one prefix — same seam, same verdict, same toast,
+    // and the refusal now shares the single ReleaseLocalUiHolding seam so the refused player's screen comes
+    // back (L231) instead of staying in the targeting state his suppressed click never left.
 }

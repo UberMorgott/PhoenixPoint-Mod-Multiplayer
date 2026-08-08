@@ -1502,6 +1502,28 @@ namespace Multiplayer.Tactical
             if (SyncApplyScope.Active) return false;          // law 8: a mirror is driving this, not a click
             var actor = ability == null ? null : ability.TacticalActorBase;
             if (actor == null) return false;
+
+            // ONE PREFIX, ONE DECISION (L146's gate, folded in). This used to be a SECOND, unprioritised
+            // Harmony prefix on this same TacticalViewState.ActivateAbility (BusyActorBelongsToThePeerThatStartedIt).
+            // Harmony stops at the first prefix that returns false and the order between two unprioritised patch
+            // classes is undeclared — so on any given load one of the two silently did not run, and the two
+            // "your click was suppressed" stories were indistinguishable on screen. Asked BEFORE the rider test
+            // on purpose: the refusal is about WHO is driving this soldier, which is true of a move and of a
+            // non-rider too, and asked AFTER the SyncApplyScope test because a mirror is never refused (law 8).
+            string refusal = TacticalActorDrive.RefuseLocalCommand(ability);
+            if (refusal != null)
+            {
+                Debug.Log("[Multiplayer][tac] this peer's command was REFUSED locally — " + refusal +
+                          ". First-to-act-wins: that soldier is released the moment its own action ends, which " +
+                          "no human has to do (postulate 2). Every other soldier stays commandable.");
+                SessionNotifier.ShowToast(refusal, modalFallback: true);
+                // AND THE SCREEN COMES BACK (L231). Returning true suppresses the native body's state switch as
+                // well, so a refusal that did not release left the player standing in the targeting state his
+                // click never left, with a toast telling him about a button that no longer did anything.
+                ReleaseLocalUiHolding(actor, "a command this peer is not the one driving");
+                return true;
+            }
+
             if (!OrderWaitsForTheEcho(true, IsRider(ability), ability is IMoveAbility)) return false;
 
             int key = TacticalActorKey.Of(actor);
@@ -1541,6 +1563,12 @@ namespace Multiplayer.Tactical
                 using (var ms = new MemoryStream(body))
                 using (var r = new BinaryReader(ms, Encoding.UTF8))
                     HandleActivate(engine, 0, 0, OpIntentActivate, r);
+                // AND THE HOST GETS ITS OWN SCREEN BACK. Every other release in this file is a CLIENT path —
+                // HandleInbound and ClientTick both return early for the host — and HandleActivate's four exits
+                // (unresolved, deferred, refused, accepted) contained none, so since A9 suppressed the native
+                // state switch the host had NO exit from a targeting state at all, on success as much as on
+                // failure. HandleActivate is synchronous, so this one line stands after all four of them.
+                ReleaseLocalUiHolding(actor, "the host's own order, answered through the same arbitration a peer's takes");
                 return true;
             }
 
@@ -3008,6 +3036,38 @@ namespace Multiplayer.Tactical
         internal static bool LocalUiMustRelease(bool viewExists, bool viewHoldsThisActor) =>
             viewExists && viewHoldsThisActor;
 
+        /// <summary>WHAT A SUPPRESSED CLICK IS LEFT STANDING IN once the host has answered it — the outcome
+        /// L232 executes to exhaustion rather than asserting that some call exists (L137's lesson: a law that
+        /// checks the call was green for four days while the thing it named was broken). TRUE is the bug: A9
+        /// suppressed the native activation WITH its state switch, and nothing put the view back, so that
+        /// player stands in <c>UIStateShoot</c> with no button that exits for the rest of the battle.
+        ///
+        /// THE ANSWERS A SUPPRESSED CLICK CAN GET, and there is no fifth:
+        ///  • THIS PEER IS THE HOST — it answers its own order synchronously inside
+        ///    <see cref="PublishClickedOrder"/>, so one release standing after <see cref="HandleActivate"/>
+        ///    covers all four of its exits, the ACCEPTED one included. Before this existed the host had no
+        ///    exit at all: <c>HandleInbound</c> and <see cref="ClientTick"/> both return early for the host,
+        ///    so every release site in this file was a client path.
+        ///  • A MIRROR CAME BACK (0x82) — <see cref="ApplyActivate"/> releases on every one of its exits.
+        ///  • ONLY A SETTLE CAME BACK — a REFUSED order is mirrored by nothing at all, so the settle is the
+        ///    whole answer and <see cref="ApplySettle"/> releases on this peer's own armed wait. Not on the
+        ///    actor being busy: since A9 the acting peer plays nothing locally, so the actor is IDLE in
+        ///    exactly the case that needs releasing, which is how this hole stayed open.
+        ///  • NOTHING CAME BACK — <see cref="TickEchoWaits"/>' ceiling is the bound, and it releases BY THE
+        ///    VIEW when the key no longer names an actor.
+        ///
+        /// The one TRUE row is the honest transient: a client whose order is still in flight and inside the
+        /// ceiling. It is what stops this law passing vacuously.</summary>
+        internal static bool SuppressedClickIsStranded(bool clickWasSuppressed, bool isHost, bool mirrorArrived,
+                                                      bool settleArrived, bool ceilingExpired)
+        {
+            if (!clickWasSuppressed) return false;   // played natively; the game leaves its own state
+            if (isHost) return false;                // released after HandleActivate, all four exits
+            if (mirrorArrived) return false;         // ApplyActivate, all four exits
+            if (settleArrived) return false;         // ApplySettle, on this peer's own armed wait
+            return !ceilingExpired;                  // still in flight, and bounded
+        }
+
         /// <summary>What the local UI is LEFT holding once a mirrored order for this actor has been through the
         /// seam — the outcome L139 asserts, as a pure function so it can be run to exhaustion. TRUE is the bug:
         /// the view is still holding an actor the engine is now driving, which is the state
@@ -3116,14 +3176,45 @@ namespace Multiplayer.Tactical
         internal static bool MoveOverlayMustNotSeeNull(bool sweepWithheld, bool engineAnsweredNull) =>
             sweepWithheld && engineAnsweredNull;
 
+        /// <summary>The HELD targeting states — the ones A9's suppressed state switch strands a player in, and
+        /// the ones the game gives no button out of once the answer to his click never comes. Matched by walking
+        /// the BASE chain, so the two the game already ships are covered by construction
+        /// (<c>UIStateFreeCam : UIStateShoot</c>, <c>UIStateFirstPersonMultiTargetSelection : UIStateFreeCam</c>)
+        /// along with anything a mod derives — the same shape, and for the same reason, as
+        /// <c>TacticalUiRepaint.IsAbilityBarState</c>.
+        ///
+        /// <c>UIStateCharacterSelected</c> is deliberately ABSENT even though a rider can be clicked from it: it
+        /// is also the ordinary browsing state, a player leaves it with one click, and clearing it for a peer
+        /// that merely had a soldier selected is postulate 2 broken in the other direction.</summary>
+        private static readonly HashSet<string> HeldTargetingStates = new HashSet<string>
+        {
+            "UIStateShoot", "UIStateAbilitySelected", "UIStateOverwatchAbilitySelected"
+        };
+
+        private static bool ViewIsHeldInTargeting(PhoenixPoint.Tactical.View.TacticalView view)
+        {
+            var state = view == null ? null : view.CurrentState;
+            for (var t = state == null ? null : state.GetType();
+                 t != null && t != typeof(PhoenixPoint.Tactical.View.TacticalViewState); t = t.BaseType)
+                if (HeldTargetingStates.Contains(t.Name)) return true;
+            return false;
+        }
+
         internal static void ReleaseLocalUiHolding(TacticalActorBase actor, string why)
         {
-            if (actor == null) return;
             try
             {
                 var tlc = Tlc();
                 var view = tlc == null ? null : tlc.View;
-                if (!LocalUiMustRelease(view != null, view != null && ReferenceEquals(view.SelectedActor, actor)))
+                // AN ACTOR THIS PEER CANNOT NAME IS STILL AN ANSWER THAT FAILED. The two sites that reach here
+                // with a null actor are the LOST ECHO and the mirror whose key did not resolve — both of them
+                // are the failure in which the key stopped resolving, so bailing on the name left exactly the
+                // peer that CLICKED standing in a state A9 gave no exit, for the rest of the battle. There the
+                // release is decided BY THE VIEW instead, and only out of a HELD TARGETING state: that is the
+                // state no button leaves, and it keeps a peer who is merely browsing untouched.
+                bool holdsThisActor = view != null && actor != null && ReferenceEquals(view.SelectedActor, actor);
+                if (!LocalUiMustRelease(view != null,
+                                        holdsThisActor || (actor == null && ViewIsHeldInTargeting(view))))
                     return;
                 var before = view.CurrentState;
                 view.ResetViewState();
@@ -3373,10 +3464,12 @@ namespace Multiplayer.Tactical
                                         List<string> statuses, List<string> traits, string selected,
                                         Dictionary<string, int> uses)
         {
-            // A9: a REFUSED order produces no mirror at all — the host answers it with a reject and this
-            // forced settle. That makes a settle the other half of "the host has answered", and without this
-            // line every refusal would leave the clicked soldier frozen for the whole echo ceiling.
-            NoteEchoArrived(key);
+            // THE DISARM IS NOT HERE, AND THAT WAS THE LOCK-UP. A settle is the other half of "the host has
+            // answered" — a REFUSED order produces no 0x82 mirror at all — but disarming the echo wait at
+            // ARRIVAL removed the 12 s ceiling while the release still sat downstream in ApplySettle behind a
+            // guard that A9 made permanently false. Wait cleared, no mirror, no release: the clicking peer
+            // stood in its targeting state for the rest of the battle. The disarm now lives WHERE THE RELEASE
+            // IS, so the two cannot come apart again.
             _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced,
                                                 Statuses = statuses, Traits = traits, Selected = selected,
                                                 Uses = uses, Epoch = TacticalDamageSync.StatEpoch };
@@ -3455,7 +3548,7 @@ namespace Multiplayer.Tactical
                 // mod's own log, which is this repo's silent-swallow shape wearing a stack trace.
                 // The entry is DROPPED, not retried: a settle that throws once throws every frame, and the
                 // 0x84 resnapshot + CRC backstop is what re-converges that actor.
-                try { ApplySettle(actor, kv.Value); }
+                try { ApplySettle(kv.Key, actor, kv.Value); }
                 catch (Exception ex)
                 {
                     Debug.LogError("[Multiplayer][tac] the settle for " + actor.name + " THREW and is being " +
@@ -3505,10 +3598,25 @@ namespace Multiplayer.Tactical
         /// <c>HasExecutingAbility</c> is true (<see cref="ClientTick"/>) — and the idle is not a victim: the
         /// same guard means a real ability is running, and an ability starting already cancels the idle
         /// underneath it (<c>TacticalAbility.PlayAction</c>:998 passes <c>cancelCurrent: true</c>).</summary>
-        private static void ApplySettle(TacticalActor actor, PendingSettle s)
+        private static void ApplySettle(int key, TacticalActor actor, PendingSettle s)
         {
             using (SyncApplyScope.Enter())
             {
+                // THE HOST HAS ANSWERED, AND THE ANSWER MAY BE "NO" (A9). A refused order is mirrored by
+                // NOTHING, so this settle is the only thing that ever comes back for it — and the release below
+                // could not serve it, because it hangs off HasExecutingAbility() and since A9 the acting peer
+                // plays nothing locally, so its actor is IDLE in exactly the case that needs releasing. That
+                // guard's premise died with the speculative play; this one asks the question that survived it.
+                //
+                // CONDITIONED ON THIS PEER'S OWN WAIT and on nothing else. A settle for an actor reaches every
+                // client, so releasing on the settle alone would clear the screen of a bystander who merely has
+                // that soldier selected — the postulate-2 half LocalUiMustRelease exists for. An armed
+                // _awaitingEcho entry is the one fact that says THIS peer is the one standing in a targeting
+                // state its click never left.
+                bool wasAwaitingHere = key != 0 && _awaitingEcho.ContainsKey(key);
+                NoteEchoArrived(key);
+                if (wasAwaitingHere)
+                    ReleaseLocalUiHolding(actor, "the host's settle answering an order it never mirrored back");
                 if (actor.HasExecutingAbility())
                 {
                     // AND THE CANCEL MAY NOT LAND UNDER A LIVE AIM HUD. The cancel below is a TEAR (see the
