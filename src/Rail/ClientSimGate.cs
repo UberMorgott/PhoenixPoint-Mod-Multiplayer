@@ -386,6 +386,55 @@ namespace Multiplayer.Network.Sync
     }
 
     /// <summary>
+    /// NINTH seam, same law, over the FACTION-SPAWNER gestures — the two rows RailCheck L42 found the moment
+    /// its receiver filter stopped being the single type <c>GeoVehicle</c> (2026-08-08, widened alongside
+    /// <c>HavenMissionGate</c>). Both are reached from a player ability with one click and both MINT A ROOT:
+    ///   • <c>CreateScanner</c> (GeoFaction.cs:2161, from <c>ScanAbility.ActivateInternal</c>) —
+    ///     <c>ActorSpawner.SpawnActor&lt;GeoScanner&gt;</c> + <c>DoEnterPlay</c> + <c>OnLevelStart</c>.
+    ///   • <c>CreateAncientSiteProbe</c> (:2152, from <c>AncientSiteProbeAbility</c>) — the same shape for
+    ///     <c>GeoAncientSiteProbe</c>.
+    /// A root the CLIENT spawns is the worst case the diff has: it is host-now vs host-before, so an actor
+    /// only the client has is never mentioned again and the CRC backstop can do nothing but report it — the
+    /// identical failure <c>HavenMissionGate</c> exists for, one entity type over. The host's own scanner
+    /// arrives as an ordinary structural create, so a client that presses Scan sees the scanner appear the
+    /// moment the host runs the same click. Both methods are void; nothing dereferences a blocked call.
+    ///
+    /// A GATE and not an intent, deliberately: unlike a launch, neither gesture is one the player is waiting
+    /// on a screen for, and the ability's own side effect (<c>GeoPhoenixFaction.AncientSiteProbes--</c>,
+    /// AncientSiteProbeAbility.cs:41) is a covered leaf the next diff overwrites from the host.
+    /// </summary>
+    [HarmonyPatch]
+    internal static class FactionSpawnerGestureGate
+    {
+        private static readonly HashSet<string> _logged = new HashSet<string>(StringComparer.Ordinal);
+
+        // Named as the game names them; a drifted name yields null, which RailCheck L23 reports as an unbound
+        // handle rather than a silently absent gate.
+        internal static readonly string[] GatedGestures = { "CreateScanner", "CreateAncientSiteProbe" };
+
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            foreach (var name in GatedGestures)
+                yield return AccessTools.Method(typeof(GeoFaction), name);
+        }
+
+        private static bool Prefix(GeoFaction __instance, MethodBase __originalMethod)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            if (SyncApplyScope.Active) return true;                                      // an apply may reach it
+
+            string who = (__originalMethod == null ? "?" : __originalMethod.Name) + " " +
+                         (__instance?.Def == null ? "?" : __instance.Def.name);
+            if (_logged.Add(who))
+                Debug.Log("[MP][faction] CLIENT gesture " + who + " BLOCKED — it SPAWNS a geoscape actor, and a " +
+                          "root only this peer has is one the host-now-vs-host-before diff can never mention " +
+                          "again; the host's own runs the same spawn and it arrives as a structural create");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// SEVENTH seam, same law, at the AUTO-MANUFACTURE funnel: <c>GeoFaction.UpdateManufacturing</c>
     /// (GeoFaction.cs:2106) is the ONE writer — both callers route through it, <c>RegisterVehicle</c>
     /// (:2069-2072) and <c>UnregisterVehicle</c> (:2095-2098). One gate in the funnel instead of a guard

@@ -4,9 +4,12 @@ using System.Linq;
 using System.IO;
 using System.Reflection;
 using Base.Core;
+using Base.Defs;
 using HarmonyLib;
 using PhoenixPoint.Common.Core;
+using PhoenixPoint.Common.Levels.Missions;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Entities.Sites;
 using PhoenixPoint.Geoscape.Events;
 using PhoenixPoint.Geoscape.Events.Eventus;
 using PhoenixPoint.Geoscape.Levels;
@@ -60,6 +63,15 @@ namespace Multiplayer.Network.Sync
         /// nothing a stale mirror could get wrong.</summary>
         internal const byte OpCancelLaunch = 2;  // (no body)
 
+        /// <summary>The HAVEN-INFILTRATION half of the same family (2026-08-08). Every steal/sabotage mission
+        /// a player starts by pressing a button ON a haven is MINTED, not chosen: the click runs
+        /// <c>GeoHaven.PrepareHavenMission</c>, which constructs a <c>GeoMission</c> and writes
+        /// <c>Site.SetActiveMission</c> (GeoHaven.cs:1091). On a client that is a structural create on its OWN
+        /// graph that the host-now-vs-host-before diff can never correct — see <see cref="HavenMissionGate"/>.
+        /// Body <c>[siteRef][missionTypeDef guid][zoneIndex:i16]</c>; the zone is an INDEX into
+        /// <c>haven.Zones</c> because a haven zone has no rail identity of its own.</summary>
+        internal const byte OpPrepareHaven = 3;
+
         internal static void RegisterIntents()
         {
             IntentRail.Register(SurfaceIds.GeoMissionIntent, "mission",
@@ -67,6 +79,7 @@ namespace Multiplayer.Network.Sync
                 {
                     [OpLaunch] = HandleLaunch,
                     [OpCancelLaunch] = DeployCountdown.HandleCancel,
+                    [OpPrepareHaven] = HandlePrepareHaven,
                 });
         }
 
@@ -92,7 +105,14 @@ namespace Multiplayer.Network.Sync
         internal struct Facts
         {
             internal bool SiteResolved;      // the site root key resolved to a live GeoSite
-            internal bool MissionRunnable;   // site.ActiveMission exists and GeoMission.IsRunnable (LaunchMissionAbility:34)
+            // TWO facts, never one. They were collapsed into a single "no runnable mission any more" refusal,
+            // and on 2026-08-08 that ambiguity cost a whole session: the host said it, the owner read it as
+            // "the mission expired", and the truth was that the client had MINTED a mission the host never had
+            // (HavenMissionGate). GeoMission.IsRunnable has ZERO overrides in the shipped assembly, so the
+            // second fact is very nearly a constant — meaning the first one is almost always the real answer,
+            // and it is the one that names a rail defect rather than a race.
+            internal bool MissionExists;     // site.ActiveMission is non-null ON THE HOST
+            internal bool MissionRunnable;   // ...and GeoMission.IsRunnable (LaunchMissionAbility:34)
             internal int UnitsRequested;     // how many soldier refs the wire carried
             internal int UnitsResolved;      // how many of them named a live GeoCharacter on the host
             internal bool AllOwnedByPlayer;  // every resolved unit belongs to the shared player faction
@@ -107,8 +127,12 @@ namespace Multiplayer.Network.Sync
         internal static string Validate(Facts f)
         {
             if (!f.SiteResolved) return "no such site on the host — stale mirror";
+            if (!f.MissionExists)
+                return "the host's site has no ActiveMission AT ALL — either it is gone (already launched, " +
+                       "cancelled or expired) or it was never on the host to begin with, which means the peer " +
+                       "that sent this minted one locally";
             if (!f.MissionRunnable)
-                return "that site has no runnable mission any more (already launched, cancelled, or expired)";
+                return "that site's mission exists on the host but is NOT RUNNABLE (GeoMission.IsRunnable)";
             if (f.UnitsRequested == 0) return "the squad is empty — nothing to deploy";
             if (f.UnitsResolved != f.UnitsRequested)
                 return "only " + f.UnitsResolved + " of " + f.UnitsRequested + " chosen soldiers exist on the host — " +
@@ -215,6 +239,7 @@ namespace Multiplayer.Network.Sync
                 string why = Validate(new Facts
                 {
                     SiteResolved = site != null,
+                    MissionExists = mission != null,
                     MissionRunnable = mission != null && mission.IsRunnable,
                     UnitsRequested = n,
                     UnitsResolved = units.Count,
@@ -236,6 +261,270 @@ namespace Multiplayer.Network.Sync
                           " nonce=" + nonce + " peer=" + senderPeerId);
             }
             catch (Exception ex) { Reject(senderPeerId, siteRef, "launch (throw) " + ex.Message); }
+        }
+
+        /// <summary>HOST: mint the haven mission the client's click was blocked from minting, by running the
+        /// GAME's own method off the HOST's own graph. Every gate below is one the game itself applies at the
+        /// same click (<c>StealAircraftAbility.GetDisabledState</c>:45-53) — re-run here rather than trusted
+        /// from the wire, and WIDENED NOWHERE: a client may not reach a mission single-player cannot.
+        ///
+        /// The wire carries no mission and no zone OBJECT, only three identities the two peers derive the same
+        /// way: the site root key, the def GUID, and the zone's INDEX into <c>haven.Zones</c>. A zone has no
+        /// rail identity (<c>IdentityResolver</c>'s <c>HavenZoneRef</c> is an ALIAS path into that same list),
+        /// and re-deriving it host-side by mission tag is NOT equivalent — <c>zone.Def.AvailableMissionsTags</c>
+        /// is a LIST and several zones of one haven can carry the same tag, so a tag lookup can pick a
+        /// different zone than the one the player's brief modal was built from. Index -1 means the caller
+        /// passed no zone at all (<c>HavenInteractionController.MissionSelected</c>:219 does exactly that), and
+        /// the host reproduces that by passing null so the GAME does its own derivation — identical to solo.
+        ///
+        /// The outcome is not shipped: <c>PrepareHavenMission</c> ends in <c>Site.SetActiveMission</c>
+        /// (GeoHaven.cs:1091) and that rides to every peer as the ordinary <c>S#&lt;id&gt;…ActiveMission</c>
+        /// structural create the launch family already depends on.</summary>
+        private static void HandlePrepareHaven(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op,
+                                               BinaryReader r)
+        {
+            string siteRef = null;
+            try
+            {
+                siteRef = r.ReadString();
+                string defGuid = r.ReadString();
+                int zoneIdx = r.ReadInt16();
+
+                var geo = GeoLevel();
+                if (geo == null) { Reject(senderPeerId, siteRef, "prepare-haven: no geoscape"); return; }
+
+                var site = IdentityResolver.Resolve(geo, siteRef, null) as GeoSite;
+                if (site == null)
+                { Reject(senderPeerId, siteRef, "prepare-haven: no such site on the host — stale mirror"); return; }
+                var haven = site.GetComponent<GeoHaven>();
+                if (haven == null)
+                { Reject(senderPeerId, siteRef, "prepare-haven: that site carries no GeoHaven on the host"); return; }
+                var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as TacMissionTypeDef;
+                if (def == null)
+                { Reject(senderPeerId, siteRef, "prepare-haven: unknown mission type def " + defGuid); return; }
+
+                // ── the GAME's own gates, off HOST state. Nothing widened. ──
+                if (site.Type != GeoSiteType.Haven)
+                { Reject(senderPeerId, siteRef, "prepare-haven: that site is not a haven on the host"); return; }
+                if (site.State != GeoSiteState.Functioning)
+                {
+                    Reject(senderPeerId, siteRef, "prepare-haven: the haven is " + site.State +
+                                                  " on the host, not Functioning");
+                    return;
+                }
+                if (site.HasActiveEncounter)
+                {
+                    Reject(senderPeerId, siteRef, "prepare-haven: the haven already has an active encounter on " +
+                                                  "the host — the game refuses an infiltration there too");
+                    return;
+                }
+
+                GeoHavenZone zone = null;
+                if (zoneIdx >= 0)
+                {
+                    var zones = haven.Zones.ToList();
+                    if (zoneIdx >= zones.Count)
+                    {
+                        Reject(senderPeerId, siteRef, "prepare-haven: zone index " + zoneIdx + " is past the " +
+                                                      "host's " + zones.Count + " zones — stale mirror. The index " +
+                                                      "is NOT re-derived by mission tag here: several zones can " +
+                                                      "carry one tag, so a lookup could mint the mission against " +
+                                                      "a zone the player never saw");
+                        return;
+                    }
+                    zone = zones[zoneIdx];
+                }
+
+                // The one per-def gate the game applies, asked only of the defs it applies to. PrepareHavenMission
+                // itself THROWS "does not have any owned aircrafts!" (GeoHaven.cs:1075) on this exact condition.
+                var stealTag = site.GeoLevel?.SharedData?.SharedGameTags?.StealAircraftMissionTag;
+                if (stealTag != null && def.Tags != null && def.Tags.Contains(stealTag) &&
+                    haven.GetAvailableStealAircraftMission() == null)
+                {
+                    Reject(senderPeerId, siteRef, "prepare-haven: the haven owns no aircraft to steal on the host");
+                    return;
+                }
+
+                var mission = haven.PrepareHavenMission(def, zone);
+                Debug.Log("[MP][mission] HOST intent APPLIED op=prepare-haven " + siteRef + " def=" + def.name +
+                          " zone=" + (zoneIdx < 0 ? "<derived by the game>" : zoneIdx.ToString()) +
+                          " mission=" + (mission == null ? "<null>" : mission.GetType().Name) +
+                          " nonce=" + nonce + " peer=" + senderPeerId +
+                          " — Site.SetActiveMission rides out as the ordinary structural create");
+            }
+            catch (Exception ex) { Reject(senderPeerId, siteRef, "prepare-haven (throw) " + ex.Message); }
+        }
+    }
+
+    /// <summary>
+    /// THE ALTITUDE IS THE FUNNEL, NOT THE ABILITY (2026-08-08).
+    ///
+    /// THE REPORT. On a client the owner flew to a haven, pressed STEAL AN AIRCRAFT from the infiltration
+    /// brief, and the squad screen answered that the aircraft was "busy with something else". The host's
+    /// verbatim refusal, 200 ms earlier: <c>S#79 — launch: that site has no runnable mission any more</c> →
+    /// <c>HOST mission REJECT peer=1</c>. Then the client repainted <c>[MP][site] repaint S#79
+    /// state=Functioning activeMission=StealAircraftAN_CustomMissionTypeDef</c> — a mission the host did not
+    /// have — and the backstop sealed it: <c>CRC backstop: root 'S#79' DIVERGED on peer 1</c>.
+    ///
+    /// WHAT ACTUALLY HAPPENED. <c>StealAircraftAbility.ActivateInternal</c>:92 calls
+    /// <c>GeoHaven.PrepareHavenMission</c> with the default <c>wireMission: true</c>, and that method
+    /// CONSTRUCTS a <c>GeoMission</c> and writes <c>Site.SetActiveMission(geoMission)</c> (GeoHaven.cs:1091).
+    /// Nothing in this mod patched, gated or intented that path, so the client minted a mission on its own
+    /// graph, then asked the host to launch a mission the host had never heard of. The host read its own
+    /// <c>site.ActiveMission</c> (null) and refused — correctly. <c>GeoMission.IsRunnable</c> has ZERO
+    /// overrides in the shipped assembly, so <c>MissionRunnable == false</c> could only ever have meant
+    /// <c>mission == null</c>; <see cref="MissionSync.Validate"/> now says which.
+    ///
+    /// AND IT IS NOT ABOUT AIRCRAFT. The same funnel serves <c>HavenFacilityController</c>:110 (every haven
+    /// infiltration the haven-details screen offers) and <c>HavenInteractionController</c>:219 (the mission
+    /// buttons on the haven panel). One prefix at <c>PrepareHavenMission</c> covers all three; a patch on
+    /// <c>StealAircraftAbility</c> would have covered one and left the class open — which is exactly the
+    /// mistake RailCheck L42 could not see, because its receiver filter only ever swept <c>GeoVehicle</c>.
+    ///
+    /// THE THREE ARMS.
+    ///   • <c>wireMission == false</c> → NATIVE, on every peer. <c>PrepareDummyMissions</c>:1096 is the only
+    ///     caller that passes it and it exists to populate the infiltration BRIEF modal; it writes nothing to
+    ///     the site, so blocking it would empty the modal the player picks from and break the click before it
+    ///     ever became a mission.
+    ///   • host / solo / inside an apply (<see cref="IntentRail.ShouldRunNative"/>) → NATIVE.
+    ///   • client → the game's OWN early-out is reproduced first: <c>if (Site.ActiveMission != null &amp;&amp;
+    ///     Site.ActiveMission.MissionDef == missionTypeDef) return Site.ActiveMission;</c> (:1056) writes
+    ///     nothing, so once the host's mission has ARRIVED the second pass simply runs native and hands back
+    ///     the host's own instance. Before that, the call is blocked, the intent is sent, and the arrival
+    ///     watch is armed. <c>__result</c> is deliberately left NULL rather than set to a mission of a
+    ///     DIFFERENT def — the callers pass the return straight into <c>ToDeploymentState</c>, and opening the
+    ///     squad screen on the wrong mission is worse than opening none (see
+    ///     <see cref="DeploymentNeedsAMission"/>).
+    ///
+    /// NO QUORUM (P13). The client waits on the HOST, which answers by itself, and the watch reads only this
+    /// peer's own site graph. No peer is counted, nothing waits for a human to press anything, and the wait is
+    /// bounded by <see cref="MissionArrivalNav.ArrivalWindowSeconds"/> with a LOUD give-up.
+    ///
+    /// REACTIVITY. The host's <c>SetActiveMission</c> is a structural create on <c>S#&lt;id&gt;…ActiveMission</c>,
+    /// so every OTHER peer's open haven panel repaints on the default <c>UiEventMap</c> arm
+    /// (<c>[MP][site] repaint S#&lt;id&gt;</c>). The CLICKING peer's own screen is not a repaint at all — it is
+    /// opened by <see cref="MissionArrivalNav"/> when the mission lands.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoHaven), nameof(GeoHaven.PrepareHavenMission))]
+    internal static class HavenMissionGate
+    {
+        /// <summary>PURE (RailCheck L271). MAY THIS PEER MINT THE MISSION ITSELF? True = run the game's own
+        /// code; false = block, ask the host, and wait for the mission to arrive as ordinary state.
+        ///
+        /// Three ways it is yes, and they are not interchangeable:
+        ///   • <paramref name="runNative"/> — host, solo, or inside a delta apply
+        ///     (<see cref="IntentRail.ShouldRunNative"/>). The authority always mints.
+        ///   • <paramref name="wireMission"/> false — <c>PrepareDummyMissions</c>:1096 builds the infiltration
+        ///     BRIEF the player picks from and writes nothing to the site. Blocking it would empty the modal
+        ///     and kill the click before it could ever become a mission, so this arm must stay open on a
+        ///     client. It is the one place a client legitimately constructs <c>GeoMission</c> objects, and it
+        ///     is safe because the ctor only fills the instance (GeoMission.cs:40-46) — no registry, no site.
+        ///   • <paramref name="missionAlreadyHere"/> — the game's OWN early-out (GeoHaven.cs:1056) already
+        ///     answers this call with the mission the site holds, and that path writes nothing. This is what
+        ///     makes the second pass, after the host's mission arrives, run natively and hand back the host's
+        ///     own instance instead of minting a second local one.</summary>
+        internal static bool MintsLocally(bool runNative, bool wireMission, bool missionAlreadyHere)
+            => runNative || !wireMission || missionAlreadyHere;
+
+        private static bool Prefix(GeoHaven __instance, TacMissionTypeDef missionTypeDef, GeoHavenZone zone,
+                                   bool wireMission, ref GeoMission __result)
+        {
+            var site = __instance == null ? null : __instance.Site;
+            var existing = site == null ? null : site.ActiveMission;
+            // The game's own early-out (:1056): the host's mission is already here, and native writes nothing.
+            // ReferenceEquals, not ==: both operands are UnityEngine.Objects and that operator answers "is the
+            // native half alive" before it compares instance ids (RailCheck L113).
+            bool alreadyHere = existing != null && missionTypeDef != null &&
+                               ReferenceEquals(existing.MissionDef, missionTypeDef);
+            if (MintsLocally(IntentRail.ShouldRunNative(), wireMission, alreadyHere)) return true;
+
+            string siteRef = null;
+            try
+            {
+                siteRef = IdentityResolver.RootRef(site);
+                __result = null;   // never hand back a mission of a different def
+                if (siteRef == null || missionTypeDef == null || string.IsNullOrEmpty(missionTypeDef.Guid))
+                {
+                    Debug.LogWarning("[MP][mission] CLIENT haven mission DROPPED — " +
+                                     (siteRef == null ? "the haven's site has no rail identity"
+                                                      : "the mission type def has no guid") +
+                                     "; nothing was sent and nothing was minted locally. The host is unchanged, " +
+                                     "so no delta will repaint this — reconverging the open screen");
+                    OpenUiRepaint.MarkDirty();
+                    return false;
+                }
+
+                // THE ZONE RIDES AS AN INDEX, never as a tag. GeoHavenZone has no root identity of its own
+                // (IdentityResolver.HavenZoneRef is an alias path into haven.Zones), and several zones of one
+                // haven can list the same MissionTypeTagDef in AvailableMissionsTags — so a host-side tag
+                // lookup could mint the mission against a zone the player never saw. -1 = the caller passed
+                // none, which the host reproduces by passing null so the GAME derives it exactly as in solo.
+                int zoneIdx = -1;
+                if (zone != null)
+                {
+                    zoneIdx = __instance.Zones.ToList().IndexOf(zone);
+                    if (zoneIdx < 0)
+                    {
+                        Debug.LogWarning("[MP][mission] CLIENT haven mission at " + siteRef + " DROPPED — the " +
+                                         "chosen zone is not in this haven's own Zones list, so there is no index " +
+                                         "to name it by and a tag lookup could pick a different zone. Nothing was " +
+                                         "sent and nothing was minted locally");
+                        OpenUiRepaint.MarkDirty();
+                        return false;
+                    }
+                }
+
+                string vehicleRef = IdentityResolver.RootRef(site.GeoLevel?.View?.GetVehicleOnSite(site));
+                MissionArrivalNav.WatchHavenMission(siteRef, vehicleRef);
+                IntentRail.Send(SurfaceIds.GeoMissionIntent, MissionSync.OpPrepareHaven,
+                    "prepare-haven " + siteRef + " def=" + missionTypeDef.name + " zone=" + zoneIdx,
+                    w =>
+                    {
+                        w.Write(siteRef);
+                        w.Write(missionTypeDef.Guid);
+                        w.Write((short)zoneIdx);
+                    });
+                Debug.Log("[MP][mission] CLIENT haven mission BLOCKED at " + siteRef + " — PrepareHavenMission " +
+                          "writes Site.SetActiveMission (GeoHaven.cs:1091) and a mission minted here is a " +
+                          "structural create on this peer's OWN graph the host-vs-host diff can never correct " +
+                          "(2026-08-08: 'launch: that site has no runnable mission' + CRC DIVERGED). Asked the " +
+                          "host instead; the squad screen opens when its mission lands");
+            }
+            catch (Exception ex)
+            {
+                __result = null;
+                Debug.LogError("[MP][mission] CLIENT haven mission capture failed for " + (siteRef ?? "S#?") +
+                               " — nothing was minted locally; reconverging the open screen: " + ex);
+                OpenUiRepaint.MarkDirty();
+            }
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The three-line belt under <see cref="HavenMissionGate"/>. <c>GeoscapeView.ToDeploymentState</c>:592
+    /// builds <c>new UIStateRosterDeployment(mission, …)</c> UNCONDITIONALLY (:595), and all three callers hand
+    /// it a <c>PrepareHavenMission</c>/<c>ActiveMission</c> return without checking it —
+    /// <c>StealAircraftAbility</c>:93, <c>HavenFacilityController</c>:111 and <c>GeoscapeView.LaunchMission</c>
+    /// :1050. A blocked prefix returns null there, and a squad screen holding a null mission is a NullReference
+    /// somewhere downstream at best and a screen for a mission nobody has at worst.
+    ///
+    /// Not role-gated, because this is not a game rule being relaxed: in solo <c>PrepareHavenMission</c> never
+    /// returns null (it THROWS instead, GeoHaven.cs:1085), so refusing null changes nothing outside a session
+    /// — and it makes the one thing that used to be silent say its name.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoscapeView), nameof(GeoscapeView.ToDeploymentState))]
+    internal static class DeploymentNeedsAMission
+    {
+        private static bool Prefix(GeoMission mission)
+        {
+            if (mission != null) return true;
+            Debug.LogWarning("[MP][mission] deployment screen NOT opened — the mission is NULL. Something handed " +
+                             "ToDeploymentState:592 a blocked or missing mission; on a client that is normally " +
+                             "HavenMissionGate holding the click while the host mints it, and MissionArrivalNav " +
+                             "opens the screen when it lands. Opening it now would build UIStateRosterDeployment " +
+                             "around nothing");
+            return false;
         }
     }
 
@@ -526,6 +815,11 @@ namespace Multiplayer.Network.Sync
     {
         private sealed class Watched
         {
+            /// <summary>NULL = there is no event behind this watch. The answer term is then THIS PEER'S OWN
+            /// CLICK — a haven infiltration the player confirmed himself (<see cref="HavenMissionGate"/>) —
+            /// which is already true by the time the watch is armed, so <see cref="Step"/> skips the record and
+            /// choice terms and waits on nothing but its own <c>site.ActiveMission</c>.</summary>
+            internal string EventId;
             internal string SiteRef;
             internal string VehicleRef;
             internal float ResolvedAt;   // realtimeSinceStartup of the first tick the record read Completed
@@ -553,15 +847,41 @@ namespace Multiplayer.Network.Sync
         {
             if (string.IsNullOrEmpty(eventId) || string.IsNullOrEmpty(siteRef)) return;
             if (!EventPopup.AnyChoiceStartsMission(data)) return;
-            if (!_watched.ContainsKey(eventId) && _watched.Count >= MaxWatched)
+            Arm(eventId, eventId, siteRef, vehicleRef, 0f);
+        }
+
+        /// <summary>THE EVENTLESS ARM (2026-08-08). A haven infiltration has no <c>GeoscapeEvent</c> anywhere in
+        /// it: the player pressed a button on the haven panel, <see cref="HavenMissionGate"/> blocked the local
+        /// mint and asked the host, and the ONLY thing left to wait for is the host's mission landing on this
+        /// peer's own site. So the answer term — "somebody resolved the window" — is not deferred, it is
+        /// ALREADY TRUE, and the clock starts HERE, at the click, rather than at a record that will never exist.
+        ///
+        /// A repeat press must not extend the bound, or a player leaning on the button could wait forever: an
+        /// existing watch keeps its ORIGINAL <c>ResolvedAt</c>, so the 60 s give-up is measured from the first
+        /// click on that site and stays monotone.</summary>
+        internal static void WatchHavenMission(string siteRef, string vehicleRef)
+        {
+            if (string.IsNullOrEmpty(siteRef)) return;
+            string key = "haven:" + siteRef;
+            float startedAt = Time.realtimeSinceStartup;
+            Watched prior;
+            if (_watched.TryGetValue(key, out prior) && prior != null && prior.ResolvedAt > 0f)
+                startedAt = prior.ResolvedAt;
+            Arm(key, null, siteRef, vehicleRef, startedAt);
+        }
+
+        private static void Arm(string key, string eventId, string siteRef, string vehicleRef, float resolvedAt)
+        {
+            if (!_watched.ContainsKey(key) && _watched.Count >= MaxWatched)
             {
-                Debug.LogWarning("[MP][mission] not watching '" + eventId + "' for its squad screen — " +
+                Debug.LogWarning("[MP][mission] not watching '" + key + "' for its squad screen — " +
                                  MaxWatched + " mission windows are already being watched, which means the " +
                                  "watches are not retiring; this peer can still reach the mission from the " +
                                  "aircraft's Launch button");
                 return;
             }
-            _watched[eventId] = new Watched { SiteRef = siteRef, VehicleRef = vehicleRef, ResolvedAt = 0f };
+            _watched[key] = new Watched
+            { EventId = eventId, SiteRef = siteRef, VehicleRef = vehicleRef, ResolvedAt = resolvedAt };
         }
 
         /// <summary>PURE (RailCheck L197). Has the mission this window promised ARRIVED on this peer?
@@ -575,6 +895,22 @@ namespace Multiplayer.Network.Sync
         /// unbounded wait — the same argument <c>WindowOrder.SettleExpired</c> rests on.</summary>
         internal static bool ArrivalGivenUp(float resolvedAt, float now)
             => resolvedAt > 0f && now - resolvedAt >= ArrivalWindowSeconds;
+
+        /// <summary>PURE (RailCheck L272). IS THE ANSWER TERM SETTLED for this watch? The watch has two terms —
+        /// "somebody answered" and "the mission arrived" — and only the first one differs between the arms.
+        ///
+        /// An EVENT-BACKED watch waits for a record to read <c>Completed</c> with a real choice, because the
+        /// window may still be open on somebody's screen. An EVENTLESS one has no record and never will: it
+        /// was armed by <see cref="HavenMissionGate"/> from THIS PEER'S OWN CLICK on a haven, and a click that
+        /// has already happened cannot be waited for. Asking <c>EventPopup.LiveRecord</c> about a null id
+        /// would leave that watch waiting on a record nothing will ever write — the screen would simply never
+        /// open, silently, which is the failure mode this whole seam exists to end.
+        ///
+        /// Both arms still wait on the SECOND term (<see cref="MissionHasArrived"/>) and both are still bounded
+        /// by <see cref="ArrivalGivenUp"/>; the eventless arm's clock is stamped when it is armed, at the
+        /// click, so the 60 s give-up covers it exactly as it covers a resolved event.</summary>
+        internal static bool AnswerIsIn(string eventId, bool recordResolved)
+            => eventId == null || recordResolved;
 
         /// <summary>Driven from <c>SyncEngine.Tick</c>. One decision per watched window per frame; every exit
         /// retires the watch or says why it is still waiting.</summary>
@@ -601,32 +937,45 @@ namespace Multiplayer.Network.Sync
         }
 
         private static void Step(NetworkEngine engine, GeoLevelController geo, GeoscapeView view,
-                                 string id, Watched w)
+                                 string key, Watched w)
         {
-            var rec = EventPopup.LiveRecord(id, null);
-            var choices = geo.EventSystem?.GetEventByID(id, canFail: true)?.GeoscapeEventData?.Choices;
-            int idx = rec == null ? -1 : rec.SelectedChoice;
-            bool resolved = rec != null && rec.State == GeoscapeEventRecordState.Completed &&
-                            choices != null && idx >= 0 && idx < choices.Count;
-            if (!resolved) return;                       // still open on somebody's screen — nothing to open yet
+            int idx = -1;
+            bool recordResolved = false;
+            List<GeoEventChoice> choices = null;
+            // THE ANSWER TERM (AnswerIsIn). With an event behind the watch it is somebody's resolved record;
+            // without one (a haven infiltration this peer confirmed itself) it is the click, already true — so
+            // the record and choice terms are never even LOOKED UP for that arm, because there is no record to
+            // look up. Everything below is shared, and the eventless arm's clock was stamped when it was armed.
+            if (w.EventId != null)
+            {
+                var rec = EventPopup.LiveRecord(w.EventId, null);
+                choices = geo.EventSystem?.GetEventByID(w.EventId, canFail: true)?.GeoscapeEventData?.Choices;
+                idx = rec == null ? -1 : rec.SelectedChoice;
+                recordResolved = rec != null && rec.State == GeoscapeEventRecordState.Completed &&
+                                 choices != null && idx >= 0 && idx < choices.Count;
+            }
+            if (!AnswerIsIn(w.EventId, recordResolved)) return;  // still open on somebody's screen
             if (w.ResolvedAt <= 0f) w.ResolvedAt = Time.realtimeSinceStartup;
 
-            if (!EventPopup.StartsMission(choices[idx]))
+            if (choices != null && !EventPopup.StartsMission(choices[idx]))
             {
-                _watched.Remove(id);
-                Debug.Log("[MP][mission] arrival watch for '" + id + "' retired — the answer (choice " + idx +
+                _watched.Remove(key);
+                Debug.Log("[MP][mission] arrival watch for '" + key + "' retired — the answer (choice " + idx +
                           ") starts no mission, so there is no squad screen owed to anybody.");
                 return;
             }
+            string because = w.EventId != null
+                ? "the answer resolved (choice " + idx + ")"
+                : "this peer's own haven-infiltration confirm was the answer";
 
             var site = IdentityResolver.Resolve(geo, w.SiteRef, null) as GeoSite;
             var mission = site?.ActiveMission;
             if (!MissionHasArrived(true, true, mission != null && mission.IsRunnable))
             {
                 if (!ArrivalGivenUp(w.ResolvedAt, Time.realtimeSinceStartup)) return;
-                _watched.Remove(id);
-                Debug.LogWarning("[MP][mission] arrival watch for '" + id + "' at " + w.SiteRef + " GIVEN UP — " +
-                                 ArrivalWindowSeconds + "s after the answer resolved the site still has " +
+                _watched.Remove(key);
+                Debug.LogWarning("[MP][mission] arrival watch for '" + key + "' at " + w.SiteRef + " GIVEN UP — " +
+                                 ArrivalWindowSeconds + "s after " + because + " the site still has " +
                                  (site == null ? "not resolved at all" : mission == null
                                      ? "no ActiveMission" : "a mission that is not runnable") +
                                  ". " + MissionEncounterNav.NoDeploymentReason(engine.IsHost, mission == null));
@@ -641,18 +990,20 @@ namespace Multiplayer.Network.Sync
             if (!MissionEncounterNav.ShouldOpenDeployment(true, engine.IsHost, true,
                                                           MissionEncounterNav.AlreadyHeadedForDeployment(view)))
             {
-                _watched.Remove(id);
-                Debug.Log("[MP][mission] arrival watch for '" + id + "' retired — this peer is already in, or " +
+                _watched.Remove(key);
+                Debug.Log("[MP][mission] arrival watch for '" + key + "' retired — this peer is already in, or " +
                           "queued for, UIStateRosterDeployment; re-issuing LaunchMission would leave a SECOND " +
                           "deployment request in a queue that is part of the save.");
                 return;
             }
 
-            _watched.Remove(id);
-            view.LaunchMission(mission, IdentityResolver.Resolve(geo, w.VehicleRef, null) as GeoVehicle);
-            Debug.Log("[MP][mission] " + (engine.IsHost ? "HOST" : "CLIENT") + " squad screen opened for '" + id +
-                      "' at " + w.SiteRef + " from the MISSION'S ARRIVAL — the answer resolved (choice " + idx +
-                      ") and this peer's own site now holds a runnable ActiveMission. Nothing here waited on a " +
+            _watched.Remove(key);
+            var container = IdentityResolver.Resolve(geo, w.VehicleRef, null) as GeoVehicle
+                            ?? view.GetVehicleOnSite(site);
+            view.LaunchMission(mission, container);
+            Debug.Log("[MP][mission] " + (engine.IsHost ? "HOST" : "CLIENT") + " squad screen opened for '" + key +
+                      "' at " + w.SiteRef + " from the MISSION'S ARRIVAL — " + because +
+                      " and this peer's own site now holds a runnable ActiveMission. Nothing here waited on a " +
                       "dialog teardown, and nothing waited on another player.");
         }
     }

@@ -287,6 +287,10 @@ namespace RailCheck
             Add(laws, () => L250_PingPaintStaysOffTheSharedHighlight.Check());
             Add(laws, () => L251_PingColourAnswersWhoPinged.Check());
             Add(laws, () => L252_TheOffScreenArrowTakesAClickToTheTarget.Check());
+            Add(laws, () => L270_AbilityMutatorSweep.Check());
+            Add(laws, () => L271_TheHavenMissionIsTheHostsToMint.Check());
+            Add(laws, () => L272_AnEventlessWatchStillOpensTheSquadScreen.Check());
+            Add(laws, () => L273_TheHavenZoneRidesAsAnIndex.Check());
             Add(laws, () => L290_TheClientsExplorationCannotFinishFirst.Check(game));
             Add(laws, () => L291_AMirroredActorClockDecidesNothingLocally.Check(game));
             Add(laws, () => L300_RenderedTextSurvivesTheWire.Check());
@@ -5426,7 +5430,7 @@ namespace RailCheck
         /// attribute rows AND from the <c>TargetMethods()</c> iterators, which L23 explicitly cannot read
         /// statically, so they are DRIVEN. One collector, because a law that only knew about one of the two
         /// shapes would call a real gate missing (or a missing one covered).</summary>
-        private static HashSet<int> OurPrefixTargets()
+        internal static HashSet<int> OurPrefixTargets()
         {
             var set = new HashSet<int>();
             foreach (var t in DeclaredTypes(typeof(IntentRail).Assembly))
@@ -5935,15 +5939,70 @@ namespace RailCheck
         /// gate (the write is refused and the host's own result mirrors). Which one each takes, and why, is
         /// argued at <c>VehicleGestureGate</c>. Falsify by removing the explore capture patch or a
         /// <c>GatedGestures</c> row.</summary>
-        private static IEnumerable<string> VehicleGestureLaw(Assembly game)
+        /// <summary>The ROOT TYPES a player ability may not write to client-locally. Shared by L42 and L270 so
+        /// there is ONE set, not two that drift: L42 sweeps it for coverage, L270 asserts it is still this
+        /// wide. Until 2026-08-08 L42's receiver filter was the single type <c>GeoVehicle</c>, and its own
+        /// comment claimed the gesture set was "DISCOVERED, never declared" — but a filter that names one type
+        /// IS the declaration, and it declared away the haven. A client's steal-aircraft click ran
+        /// <c>StealAircraftAbility.ActivateInternal</c>:92 → <c>GeoHaven.PrepareHavenMission</c> →
+        /// <c>Site.SetActiveMission</c> (GeoHaven.cs:1091) and minted a mission on its own graph, with this law
+        /// green the whole time.</summary>
+        /// A METHOD, never a static field: <c>Program</c>'s type initializer runs before Main installs the
+        /// assembly resolver, so a field holding <c>typeof(GeoVehicle)</c> makes the whole harness die with
+        /// TypeInitializationException / "Assembly-CSharp not found" before one law runs.
+        internal static Type[] RailCoveredRoots() => new[]
         {
-            var vehicle = typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle);
-            var activations = DeclaredTypes(game)
+            typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle),
+            typeof(PhoenixPoint.Geoscape.Entities.GeoSite),
+            typeof(PhoenixPoint.Geoscape.Entities.GeoHaven),
+            typeof(PhoenixPoint.Geoscape.Levels.GeoFaction),
+        };
+
+        /// <summary>Every concrete geoscape ability's own <c>ActivateInternal</c>. ONE discovery, shared by L42
+        /// and L270 — two copies would drift, and the drift would be invisible in both.</summary>
+        internal static List<MethodInfo> AbilityActivations(Assembly game) =>
+            DeclaredTypes(game)
                 .Where(t => t != null && !t.IsAbstract &&
                             typeof(PhoenixPoint.Geoscape.Entities.Abilities.GeoAbility).IsAssignableFrom(t))
                 .Select(t => t.GetMethod("ActivateInternal", AllMembers | BindingFlags.DeclaredOnly))
                 .Where(m => m != null)
                 .OrderBy(m => m.DeclaringType.Name, StringComparer.Ordinal).ToList();
+
+        /// <summary>The gesture set: every non-accessor method on a rail-covered root that a player ability
+        /// reaches with one click — keyed <c>Type.Method</c>, so two roots may share a method name.
+        ///
+        /// IT FOLLOWS THE MODAL CALLBACK, and it has to. <c>StealAircraftAbility.ActivateInternal</c>:86 hands
+        /// the mission-minting call to <c>View.OpenModal</c> AS A DELEGATE, so the write lives in a compiler
+        /// generated closure and a direct-callee scan of the activation alone never sees
+        /// <c>GeoHaven.PrepareHavenMission</c> at all — which is half of why L42 stayed green while a client
+        /// minted its own mission on 2026-08-08. A gesture the ability defers into its own callback is still
+        /// that ability's gesture.</summary>
+        internal static SortedDictionary<string, MethodBase> AbilityGestures(Assembly game, Type[] roots)
+        {
+            var bodies = new List<MethodBase>();
+            foreach (var a in AbilityActivations(game))
+            {
+                bodies.Add(a);
+                foreach (var nested in a.DeclaringType.GetNestedTypes(AllMembers))
+                {
+                    if (nested == null || !nested.Name.StartsWith("<", StringComparison.Ordinal)) continue;
+                    foreach (var nm in nested.GetMethods(AllMembers | BindingFlags.DeclaredOnly)) bodies.Add(nm);
+                }
+            }
+            var gestures = new SortedDictionary<string, MethodBase>(StringComparer.Ordinal);
+            foreach (var b in bodies)
+                foreach (var c in Callees(b, game, directCallsOnly: true))
+                    if (c != null && c.DeclaringType != null && Array.IndexOf(roots, c.DeclaringType) >= 0 &&
+                        !c.IsSpecialName && !c.IsConstructor)
+                        gestures[c.DeclaringType.Name + "." + c.Name] = c;
+            return gestures;
+        }
+
+        private static IEnumerable<string> VehicleGestureLaw(Assembly game)
+        {
+            var vehicle = typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle);
+            var roots = RailCoveredRoots();
+            var activations = AbilityActivations(game);
             if (activations.Count == 0)
             {
                 yield return "L42 abilities-undiscovered: no concrete GeoAbility declares ActivateInternal — the " +
@@ -5952,22 +6011,19 @@ namespace RailCheck
                 yield break;
             }
 
-            var gestures = new SortedDictionary<string, MethodBase>(StringComparer.Ordinal);
-            foreach (var a in activations)
-                foreach (var c in Callees(a, game, directCallsOnly: true))
-                    if (c.DeclaringType == vehicle && !c.IsSpecialName && !c.IsConstructor)
-                        gestures[c.Name] = c;
+            var gestures = AbilityGestures(game, roots);
             if (gestures.Count == 0)
             {
                 yield return "L42 vacuous: not one of the " + activations.Count + " ability activations calls a " +
-                             "GeoVehicle method — the callee scan found nothing, so a green result here means nothing";
+                             "method on any rail-covered root — the callee scan found nothing, so a green result " +
+                             "here means nothing";
                 yield break;
             }
 
             var covered = OurPrefixTargets();
             foreach (var kv in gestures)
-                if (!covered.Contains(kv.Value.MetadataToken))
-                    yield return "L42 gesture-ungated: GeoVehicle." + kv.Key + " is reached by a player ability but " +
+                if (!CoveredGesture(kv.Value, game, roots, covered))
+                    yield return "L42 gesture-ungated: " + kv.Key + " is reached by a player ability but " +
                                  "carries no Harmony PREFIX of ours — on a client it runs LOCALLY against rail-covered " +
                                  "aircraft/site state, and the host-now-vs-host-before diff can never correct it; give it " +
                                  "an intent (VehicleSync) or a gate (VehicleGestureGate)";
@@ -5986,6 +6042,40 @@ namespace RailCheck
                     yield return "L42 gate-row-dropped: GeoVehicle." + name + " is declared gated but no prefix of ours " +
                                  "binds it — the client writes rail-covered state through it again";
             }
+        }
+
+        /// <summary>Is this ability callee covered? DERIVED from the callee's own IL, never from a list of
+        /// names — a name list here would just be the old receiver filter wearing a different hat.
+        ///
+        /// A callee needs a seam only if it WRITES shared state, and there are exactly three shapes of that
+        /// among the abilities the game ships: a NON-ACCESSOR call on another rail-covered root (the funnel
+        /// case — <c>GeoHaven.PrepareDummyMissions</c> reaching <c>PrepareHavenMission</c>), a property SETTER
+        /// on one, and <c>ActorSpawner.SpawnActor</c>, which mints a root outright
+        /// (<c>GeoFaction.CreateScanner</c>). A callee that does none of those reads and returns —
+        /// <c>GeoHaven.GetAvailableStealAircraftMission</c> is the shipped example — and gating it would break
+        /// the very modal the player picks the mission from.
+        ///
+        /// A WRITER is covered by our own prefix, or by every root method it funnels into carrying one. That
+        /// second clause is what makes a wrapper honest instead of exempt: delete the
+        /// <c>PrepareHavenMission</c> prefix and BOTH it and <c>PrepareDummyMissions</c> go red together.</summary>
+        internal static bool CoveredGesture(MethodBase m, Assembly game, Type[] roots, HashSet<int> covered)
+        {
+            if (m == null || covered.Contains(m.MetadataToken)) return true;
+            bool writes = false, funnelsCovered = true;
+            foreach (var c in Callees(m, game, directCallsOnly: true))
+            {
+                if (c == null || c.DeclaringType == null) continue;
+                if (c.DeclaringType.Name == "ActorSpawner" &&
+                    c.Name.StartsWith("SpawnActor", StringComparison.Ordinal))
+                { writes = true; funnelsCovered = false; continue; }
+                if (Array.IndexOf(roots, c.DeclaringType) < 0) continue;
+                // Getters read; setters write. Constructors cannot appear on an existing root.
+                if (c.IsSpecialName && !c.Name.StartsWith("set_", StringComparison.Ordinal)) continue;
+                if (c.IsConstructor) continue;
+                writes = true;
+                if (!covered.Contains(c.MetadataToken)) funnelsCovered = false;
+            }
+            return !writes || funnelsCovered;
         }
 
         private static IEnumerable<KeyValuePair<string, VehicleSync.Facts>> StaleVehicleCases(byte op, VehicleSync.Facts legal)
