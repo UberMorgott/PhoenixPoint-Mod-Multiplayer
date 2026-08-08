@@ -12,6 +12,7 @@ using HarmonyLib;
 using Multiplayer.Network;
 using Multiplayer.Network.MessageLayer;
 using Multiplayer.Network.Sync;
+using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Tactical;
 using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.Entities.Abilities;
@@ -478,7 +479,8 @@ namespace Multiplayer.Tactical
         // ─── HOST: capture ─────────────────────────────────────────────────
 
         /// <summary>Ship one resolved hit. <paramref name="receiver"/> is the thing the game just wrote to;
-        /// its slot name plus its actor's key is the whole address (law L66c).</summary>
+        /// its slot name plus its actor's key is the whole address (law L66c) — and, for an ITEM, its def
+        /// guid as well (see <see cref="ItemGuidOf"/>).</summary>
         internal static void OnDamageApplied(IDamageReceiver receiver, DamageResult result)
         {
             var engine = LiveEngine();
@@ -497,6 +499,8 @@ namespace Multiplayer.Tactical
                 return;
             }
             string slot = TacticalActorKey.SlotOf(receiver) ?? "";
+            string itemGuid = ItemGuidOf(receiver, slot);
+            if (itemGuid == null) return;                 // an item nobody could name; ItemGuidOf said so
             var stats = (actor as TacticalActor)?.CharacterStats;
             // A4: if this hit KILLED, the corpse manifest the host just pre-rolled rides with it. It has to
             // ride HERE and not behind: the mirror's own death starts the instant it applies this very
@@ -510,6 +514,7 @@ namespace Multiplayer.Tactical
                  {
                      w.Write(key);
                      w.Write(slot);
+                     w.Write(itemGuid);
                      DamageResultCodec.Write(w, result);
                      w.Write(Stat(receiver.GetHealth()));
                      w.Write(Stat(receiver.GetArmor()));
@@ -522,6 +527,104 @@ namespace Multiplayer.Tactical
         }
 
         internal static float Stat(BaseStat s) => s == null ? float.NaN : (float)s;
+
+        // ─── THE THIRD RECEIVER SHAPE: A CARRIED ITEM ──────────────────────
+
+        /// <summary>
+        /// AN ITEM IS ITS OWN DAMAGE RECEIVER, AND IT NEEDS ONE MORE WORD THAN A LIMB DOES.
+        ///
+        /// <c>IDamageReceiver</c> has three shapes in this game and this rail carried two. The actor
+        /// (<c>GetSlotName</c> = "") and the body-part <c>ItemSlot</c> (its <c>ItemSlotDef.SlotName</c>) both
+        /// resolve through <c>TacticalActorKey.ResolveReceiver</c>. The third is a <c>TacticalItem</c> holding
+        /// its OWN hit points — every weapon and every equipment mounted in a slot whose
+        /// <c>ItemSlotDef.DamageHandler</c> is <c>AttachedItem</c> (<c>TacticalItem.RegisterStats</c>:259-266
+        /// gives it a <c>&lt;slot&gt;_Health</c> stat of its own, <c>ApplyDamage</c>:294-316 falls through to
+        /// <c>DamageReceiverImplementation.ApplyDamage</c>:103-110, and that is what an explosion beside a
+        /// soldier subtracts from). It reports the SAME <c>GetSlotName()</c> as the slot it hangs in
+        /// (<c>DamageReceiverImplementation</c>:71-74 forwards to <c>_itemSlot</c>), so (actor key, slot name)
+        /// alone names the SLOT and would apply a damaged rifle's hit points to the arm holding it.
+        ///
+        /// So an item record carries one more field: the item's DEF GUID, and the far side resolves it with the
+        /// game's own two-part lookup <c>CharacterBodyState.GetItem(slotName, itemDef)</c>:177-180. A guid and
+        /// not a name because a def guid is identical on every peer by mod parity (law 10) and this is a def,
+        /// not a runtime-minted status def (the L130 case that forces names elsewhere).
+        ///
+        /// Returns "" for the two receiver shapes that are not items — every existing record keeps its exact
+        /// meaning — and NULL for an item that cannot be addressed at all, which is a refusal to ship rather
+        /// than a record that would land on the wrong receiver.
+        /// </summary>
+        private static string ItemGuidOf(IDamageReceiver receiver, string slot)
+        {
+            var item = receiver as TacticalItem;
+            if (ReferenceEquals(item, null)) return "";                 // an actor or a slot: unchanged
+            var def = item.ItemDef;
+            if (slot.Length == 0 || ReferenceEquals(def, null) || string.IsNullOrEmpty(def.Guid))
+            {
+                SayOnce("item-unaddressable-" + (ReferenceEquals(def, null) ? "<no def>" : def.name),
+                    "[Multiplayer][tac] an item took damage that CANNOT be relayed: it hangs in no named slot " +
+                    "(slot='" + slot + "') or has no def guid, and (actor, slot name, def guid) is the only " +
+                    "address a carried item has. That weapon is damaged on this screen and undamaged on every " +
+                    "other one for the rest of the mission.");
+                return null;
+            }
+            return def.Guid;
+        }
+
+        /// <summary>The other half of the round trip, through the GAME'S own lookup so both peers land on the
+        /// same item by the same rule. Null + a sentence on any failure — never the slot as a fallback, which
+        /// would move a rifle's damage onto the arm.</summary>
+        internal static IDamageReceiver ResolveItem(TacticalActorBase actor, string slot, string guid, out string why)
+        {
+            why = null;
+            var body = (actor as TacticalActor)?.BodyState;
+            if (ReferenceEquals(body, null))            // L113: `as` already answered the only question
+            {
+                why = "that actor has no BodyState, so it can carry no addressable item";
+                return null;
+            }
+            var def = GameUtl.GameComponent<DefRepository>()?.GetDef(guid) as ItemDef;
+            if (ReferenceEquals(def, null))
+            {
+                why = "item def guid " + guid + " resolves to nothing on this peer (mod parity should have made " +
+                      "that impossible, law 10)";
+                return null;
+            }
+            var item = body.GetItem(slot, def);
+            if (ReferenceEquals(item, null))
+            {
+                why = "no item of def '" + def.name + "' hangs in slot '" + slot + "' on this peer";
+                return null;
+            }
+            return item;
+        }
+
+        /// <summary>THE HOST-SIDE SHIP CONDITION, as a pure decision so law L322 can execute all of it.
+        /// <c>TacticalItem.ApplyDamage</c>:301-313 ROUTES before it applies: a <c>Slot</c> handler hands the
+        /// whole result to <c>ItemSlot.ApplyDamage</c> (already captured by <see cref="SlotDamageSeam"/>) and a
+        /// <c>ParentItem</c> handler hands it to the owning item (captured by the next frame of this same
+        /// seam). Only the fall-through case — no parent slot, or an <c>AttachedItem</c> one — actually moves
+        /// THIS item's hit points, so only that case may ship. Shipping the routed ones would send the same hit
+        /// twice under two different addresses.</summary>
+        internal static bool ItemAppliesItsOwnDamage(bool hasParentSlot, DamageHandler handler) =>
+            !hasParentSlot || handler == DamageHandler.AttachedItem;
+
+        /// <summary>Every item on this actor that holds hit points of its own, in the shape the resnapshot
+        /// addresses them by. The same slot walk the resolver uses in reverse, so the recovery path and the
+        /// event path cannot name different sets.</summary>
+        internal static List<TacticalItem> DamageableItems(TacticalActorBase actor)
+        {
+            var items = new List<TacticalItem>();
+            var body = (actor as TacticalActor)?.BodyState;
+            if (ReferenceEquals(body, null)) return items;
+            foreach (var slot in body.GetSlots())
+            {
+                if (slot == null || slot.DamageHandler != DamageHandler.AttachedItem) continue;
+                if (string.IsNullOrEmpty(slot.GetSlotName())) continue;
+                foreach (var item in slot.GetAllDirectItems())
+                    if (!ReferenceEquals(item, null) && !ReferenceEquals(item.ItemDef, null)) items.Add(item);
+            }
+            return items;
+        }
 
         internal static void Send(byte op, string what, Action<BinaryWriter> writeBody)
         {
@@ -594,6 +697,20 @@ namespace Multiplayer.Tactical
                         w.Write(s.GetSlotName() ?? "");
                         w.Write(Stat(s.GetHealth()));
                         w.Write(Stat(s.GetArmor()));
+                    }
+                    // …AND THE ITEMS THAT HOLD HIT POINTS OF THEIR OWN. A body part's health slot is not the
+                    // whole of an actor's damageable state: a weapon damaged by the blast that hit its carrier
+                    // lives in TacticalItem's own DamageReceiverImplementation, and a resnapshot that leaves it
+                    // out heals every field of that soldier except the one the lost record was about — the
+                    // same hole L131 closed here for the status set.
+                    var items = DamageableItems(a);
+                    w.Write(items.Count);
+                    foreach (var it in items)
+                    {
+                        w.Write(it.GetSlotName() ?? "");
+                        w.Write(it.ItemDef.Guid);
+                        w.Write(Stat(it.GetHealth()));
+                        w.Write(Stat(it.GetArmor()));
                     }
                     // The recovery path carries the same field class the settle does — hp/ap/wp/dead/slots
                     // were never the whole of an actor, and a resnapshot that leaves the status set alone
@@ -689,6 +806,7 @@ namespace Multiplayer.Tactical
             var tlc = Tlc();
             int key = r.ReadInt32();
             string slot = r.ReadString();
+            string itemGuid = r.ReadString();
             var notes = new List<string>();
             var result = DamageResultCodec.Read(r, tlc, notes);
             float recvHp = r.ReadSingle(), recvArmor = r.ReadSingle();
@@ -705,11 +823,17 @@ namespace Multiplayer.Tactical
                 RequestResnap(0);
                 return;
             }
-            var receiver = TacticalActorKey.ResolveReceiver(actor, slot, out why);
+            // AN ITEM RECORD NAMES THE ITEM, NOT THE SLOT IT HANGS IN. Both report the same slot name, and
+            // resolving an item record through ResolveReceiver would subtract a damaged rifle's hit points
+            // from the arm holding it — see ItemGuidOf.
+            var receiver = itemGuid.Length == 0
+                ? TacticalActorKey.ResolveReceiver(actor, slot, out why)
+                : ResolveItem(actor, slot, itemGuid, out why);
             if (receiver == null)
             {
-                Debug.LogError("[Multiplayer][tac] resolved damage for " + actor.name + " body part '" + slot +
-                               "' CANNOT be applied — " + why + ".");
+                Debug.LogError("[Multiplayer][tac] resolved damage for " + actor.name +
+                               (itemGuid.Length == 0 ? " body part '" + slot + "'" : " item in slot '" + slot + "'") +
+                               " CANNOT be applied — " + why + ".");
                 RequestResnap(0);
                 return;
             }
@@ -791,6 +915,23 @@ namespace Multiplayer.Tactical
                         if (recv == null) continue;
                         Correct(recv.GetHealth(), sh, actor.name + "/" + name + " hp");
                         Correct(recv.GetArmor(), sa, actor.name + "/" + name + " armor");
+                    }
+                    // The carried items, same discipline: bytes consumed whether or not this peer can resolve
+                    // the actor, because every actor behind it in the stream is queued on them.
+                    int itemCount = r.ReadInt32();
+                    for (int k = 0; k < itemCount; k++)
+                    {
+                        string iSlot = r.ReadString(), iGuid = r.ReadString();
+                        float ih = r.ReadSingle(), ia = r.ReadSingle();
+                        if (actor == null) continue;
+                        var item = ResolveItem(actor, iSlot, iGuid, out why);
+                        if (item == null) continue;
+                        // Set, never re-damaged: the game's own StatChangeEvent then runs the whole cascade
+                        // this peer is missing — TacticalActor.OnEquipmentHealthChange:1023-1033 shows the
+                        // "EquipmentDamaged" popup and DamageReceiverImplementation.OnHealthChanged:112-127
+                        // fires ReachingZeroHealth, which is what disables the weapon and takes the hand.
+                        Correct(item.GetHealth(), ih, actor.name + "/" + iSlot + " item hp");
+                        Correct(item.GetArmor(), ia, actor.name + "/" + iSlot + " item armor");
                     }
                     // BEFORE the unresolvable-actor bail: the status set is this actor's share of a stream
                     // every other actor is still queued behind, so its bytes are consumed either way.
@@ -923,6 +1064,55 @@ namespace Multiplayer.Tactical
 
         private static void Postfix(ItemSlot __instance, DamageResult damageResult)
             => TacticalDamageSync.OnDamageApplied(__instance, damageResult);
+    }
+
+    /// <summary>
+    /// CARRIED ITEMS: THE THIRD RECEIVER, AND THE ONE THIS ARC NEVER CAPTURED.
+    ///
+    /// THE REPORT (2026-08-08, 3-instance battle): a worm exploded beside a soldier. The host showed hit-point
+    /// damage, an infection status AND a message that the WEAPON IN HIS HANDS was damaged; the clients got the
+    /// first two and not the third. It is not one missing field — it is a whole receiver shape that never had
+    /// a seam. <c>ActorDamageSeam</c> captures <c>TacticalActorBase.ApplyDamageInternal</c> and
+    /// <see cref="SlotDamageSeam"/> captures <c>ItemSlot.ApplyDamage</c>, and NOTHING captured
+    /// <c>TacticalItem.ApplyDamage</c>:294-316 — where a weapon's, a shield's and an <c>AttachedItem</c> body
+    /// part's own hit points are actually subtracted (<c>DamageReceiverImplementation.ApplyDamage</c>:103-110).
+    /// So on the host the item lost health, disabled itself at zero (<c>OnHealthReachedZero</c>:662-665 →
+    /// <c>SetToDisabled</c>) and raised its notification, and on every client that item was untouched: the
+    /// client cannot recompute it either, because its whole damage computation is deleted one level up at
+    /// <c>DamageAccumulation.ApplyAddedDamage</c>. Host-only state, permanently.
+    ///
+    /// THE CAPTURE IS CONDITIONAL, AND THE CONDITION IS THE GAME'S OWN. <c>ApplyDamage</c> ROUTES before it
+    /// applies (:301-313), so this postfix runs on calls that changed nothing here and moved the damage to a
+    /// slot or to the owning item — both of which are captured by their own seams.
+    /// <see cref="TacticalDamageSync.ItemAppliesItsOwnDamage"/> is that routing condition, pure, so law L322
+    /// executes every corner of it instead of trusting the comment.
+    ///
+    /// THE NEUTER IS <see cref="SlotDamageSeam"/>'S, VERBATIM AND FOR ITS REASON: a status ticking on a
+    /// client's own turn edge, and the disable cascade <c>TacticalItem.SetToDisabled</c>:428-440 runs on the
+    /// parent item, both reach this method without passing an accumulation — and the host ships its own record
+    /// for each. Never inside a mirror apply: that IS the host's damage arriving.
+    /// </summary>
+    [HarmonyPatch(typeof(TacticalItem), nameof(TacticalItem.ApplyDamage))]
+    internal static class ItemDamageSeam
+    {
+        private static bool Prefix(TacticalItem __instance)
+        {
+            if (!TacticalDamageSync.DamageIsSomebodyElses()) return true;
+            TacticalDamageSync.SayOnce("neuter-item",
+                "[Multiplayer][tac] item damage computed on this client is DISCARDED (first occurrence: " +
+                (__instance.ItemDef == null ? __instance.GetType().Name : __instance.ItemDef.name) +
+                ") — the host's resolved version arrives on 0x84.");
+            return false;
+        }
+
+        private static void Postfix(TacticalItem __instance, DamageResult damageResult)
+        {
+            var slot = __instance.ParentItemSlot;
+            if (!TacticalDamageSync.ItemAppliesItsOwnDamage(slot != null,
+                                                            slot == null ? DamageHandler.AttachedItem : slot.DamageHandler))
+                return;
+            TacticalDamageSync.OnDamageApplied(__instance, damageResult);
+        }
     }
 
     /// <summary>
