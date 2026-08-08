@@ -817,7 +817,7 @@ namespace Multiplayer.Tactical
         {
             if (key == 0) return float.NaN;
             string why;
-            var actor = TacticalActorKey.Resolve(TacticalDamageSync.Tlc(), key, out why) as TacticalActor;
+            var actor = TacticalActorKey.ResolveActor(TacticalDamageSync.Tlc(), key, out why);
             var stats = actor == null ? null : actor.CharacterStats;
             return stats == null ? float.NaN : (float)stats.ActionPoints;
         }
@@ -837,7 +837,7 @@ namespace Multiplayer.Tactical
                                  "stay where they are on this peer instead of the whole batch being refused.");
 
             string why;
-            var payer = TacticalActorKey.Resolve(TacticalDamageSync.Tlc(), payerKey, out why) as TacticalActor;
+            var payer = TacticalActorKey.ResolveActor(TacticalDamageSync.Tlc(), payerKey, out why);
             var ability = payer == null ? null : payer.GetAbility<InventoryAbility>();
             if (charged)
             {
@@ -897,7 +897,7 @@ namespace Multiplayer.Tactical
             }
             if (payerKey == 0 || float.IsNaN(payerAp)) return;
             string why;
-            var payer = TacticalActorKey.Resolve(TacticalDamageSync.Tlc(), payerKey, out why) as TacticalActor;
+            var payer = TacticalActorKey.ResolveActor(TacticalDamageSync.Tlc(), payerKey, out why);
             var stats = payer == null ? null : payer.CharacterStats;
             if (stats == null) return;
             TacticalDamageSync.Correct(stats.ActionPoints, payerAp, payer.name + " AP (inventory)");

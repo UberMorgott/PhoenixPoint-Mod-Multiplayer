@@ -359,7 +359,7 @@ namespace Multiplayer.Tactical
         {
             if (actorKey == _liveActor && targetKey == _liveTarget) { _pending.Remove(actorKey); return; }
             string why;
-            var actor = TacticalActorKey.Resolve(Tlc(), actorKey, out why) as TacticalActor;
+            var actor = TacticalActorKey.ResolveActor(Tlc(), actorKey, out why);
             var animator = actor == null ? null : actor.Animator;
             if (animator == null)
             {
@@ -477,7 +477,7 @@ namespace Multiplayer.Tactical
                 AimTurn turn;
                 if (!_turning.TryGetValue(key, out turn)) continue;
                 string why;
-                var actor = TacticalActorKey.Resolve(Tlc(), key, out why) as TacticalActor;
+                var actor = TacticalActorKey.ResolveActor(Tlc(), key, out why);
                 if (actor == null || actor.Timing == null) { _turning.Remove(key); continue; }
 
                 turn.T += (float)actor.Timing.Delta * FacingLerpSpeed;
