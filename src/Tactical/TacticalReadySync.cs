@@ -173,6 +173,13 @@ namespace Multiplayer.Tactical
             ReadyCount = ready;
             TotalCount = total;
             TacticalReadyButton.Repaint();
+            // RECEIVE-SIDE EVIDENCE, AND IT WAS MISSING. The host logged six tallies in one battle and
+            // NEITHER client log held a single line about any of them — so "the client's label repaints" was
+            // an assumption with no witness, which is this repo's dominant bug shape (silent swallow). One
+            // line per ARRIVING tally (0x80 op 4, a handful per turn), never per frame.
+            Debug.Log("[Multiplayer][tac] ready tally applied on this peer: " + ready + "/" + total +
+                      " — the already-open HUD button was repainted from it. Advisory only: nothing waits " +
+                      "on this.");
         }
 
         // ─── The round reset ───────────────────────────────────────────────
@@ -467,6 +474,20 @@ namespace Multiplayer.Tactical
             {
                 pgb.TabbingControl = null;
                 pgb.IsSelected = false;
+                // THE HOVER IS THE PREFAB'S, NOT OURS, AND THIS IS THE ONE LINE THAT KEEPS IT THAT WAY.
+                // PhoenixGeneralButton.OnPointerEnter sets VisualHovered, and Update -> UpdateColorElements
+                // walks ControlledElements (PhoenixGeneralButton.cs:147-164) while SetAnimationState drives the
+                // Animator's HighlightedStateParameter — that pair IS the white frame the native End Turn
+                // button shows, and the clone copies every component it needs. But ControlledElements is a
+                // SERIALIZED list, and Object.Instantiate re-points a serialized reference only when its target
+                // is INSIDE the copied subtree (same hazard as the hotkey links above): an entry the prefab
+                // aims at a shared HUD object would still point at the NATIVE button's child, so hovering OURS
+                // would recolour the native End Turn button and leave it stuck that way (its own Update only
+                // repaints on a state CHANGE). Entries inside the clone — the frame and the caption, i.e. our
+                // whole hover — are kept untouched.
+                if (pgb.ControlledElements != null)
+                    pgb.ControlledElements.RemoveAll(
+                        c => c == null || !c.transform.IsChildOf(go.transform));
             }
             var btn = pgb != null && pgb.BaseButton != null ? pgb.BaseButton : go.GetComponentInChildren<Button>();
             if (btn == null)
@@ -498,10 +519,30 @@ namespace Multiplayer.Tactical
             rt.offsetMax = Vector2.zero;
             rt.SetSiblingIndex(_labelDepth < 0 ? go.transform.childCount - 1 : _labelDepth);
             _green = overlay.GetComponent<Image>();
-            _green.color = new Color(0.16f, 0.70f, 0.24f, 0.55f);
+            _green.color = MineGreen;
             _green.raycastTarget = false;
             _green.enabled = false;
         }
+
+        /// <summary>"I have pressed it" — the muted shade the button has always shown for this peer's own
+        /// flag.</summary>
+        private static readonly Color MineGreen = new Color(0.16f, 0.70f, 0.24f, 0.55f);
+
+        /// <summary>"EVERYBODY has pressed it" — the loud shade, because that is the state the developer
+        /// asked to be unmissable: nobody should sit waiting on a table that is already full.
+        ///
+        /// IT PAINTS AND IT DOES NOTHING ELSE. This is the exact shade a quorum would wear, so say the
+        /// negative out loud: no code branches on all-ready, nothing waits for it, and End Turn stays
+        /// pressable by anyone at any moment whatever colour this button is. The mechanical guarantee is
+        /// L119 arm (d) — <see cref="Repaint"/> is the ONLY method permitted to load the two counters, and
+        /// the build fails the moment a second one does, which is precisely the moment a colour could
+        /// become a gate.
+        ///
+        /// A PLAIN <c>Image.color</c> WRITE IS SAFE HERE, unlike on the button's own graphics: PP re-asserts
+        /// colour through <c>UIInteractableColorController.SetColor</c>, which only ever writes the Image on
+        /// the CONTROLLER'S OWN GameObject (UIInteractableColorController.cs:72-79). Nothing native carries a
+        /// controller on this overlay, so no hover or press reverts it.</summary>
+        private static readonly Color AllGreen = new Color(0.20f, 0.95f, 0.30f, 0.90f);
 
         /// <summary>Every text component on the clone, by SHAPE (a settable public <c>string text</c>), plus
         /// the standing-down of any I2 <c>Localize</c> component — a live localiser would overwrite our label
@@ -596,10 +637,20 @@ namespace Multiplayer.Tactical
             // OnNewTurn from reaching Unity's native liveness check with no engine under them.
             if (_setters.Count == 0 && ReferenceEquals(_green, null)) return;
             bool mine = TacticalReadySync.LocalReady;
-            string label = (mine ? "READY " : "READY? ") + TacticalReadySync.ReadyCount + "/" +
-                           TacticalReadySync.TotalCount;
+            int ready = TacticalReadySync.ReadyCount, total = TacticalReadySync.TotalCount;
+            // THE ONLY BRANCH THIS COUNT IS EVER ALLOWED TO FEED, AND IT FEEDS A COLOUR. `total > 0` is not
+            // caution about division — it is the pre-tally state (0/0), which would otherwise read as
+            // "everyone is ready" before a single tally has landed. Recomputed on every repaint, so it drops
+            // back to the muted shade by itself the moment a peer un-readies or the round edge zeroes the
+            // flags; there is no separate "revert" path to forget to call.
+            bool all = total > 0 && ready >= total;
+            string label = (mine ? "READY " : "READY? ") + ready + "/" + total;
             for (int i = 0; i < _setters.Count; i++) _setters[i](label);
-            if (_green != null) _green.enabled = mine;
+            if (_green != null)
+            {
+                _green.enabled = mine || all;
+                _green.color = all ? AllGreen : MineGreen;
+            }
         }
     }
 
@@ -643,9 +694,30 @@ namespace Multiplayer.Tactical
         /// Vector3s a frame forever would be litter for nothing.</summary>
         private static readonly Vector3[] Corners = new Vector3[4];
 
-        /// <summary>The diagnostic below is a ONE-SHOT: it is the state at the first settled layout, and a
+        /// <summary>The diagnostic below is a ONE-SHOT: it is the state at the first DRAWN frame, and a
         /// per-frame version would bury the log.</summary>
         private bool _measured;
+
+        /// <summary>Frames spent waiting for the canvas to draw the clone before the one-shot report gives up
+        /// and files its answer anyway.</summary>
+        private int _waited;
+
+        /// <summary>~10s at 60fps. A bound, not a guess at curtain length: a clone the canvas NEVER draws is
+        /// the genuine "dead button" this whole diagnostic exists to catch, so the report must still land —
+        /// and land saying depth=-1, which at that point is a true finding rather than a curtain artefact.</summary>
+        private const int DrawWaitFrames = 600;
+
+        /// <summary>Has the canvas drawn any of the clone's live surfaces yet? <c>Graphic.depth</c> is uGUI's
+        /// own marker — -1 until the canvas batches the graphic, and the exact value GraphicRaycaster skips
+        /// on. ACTIVE graphics only, and deliberately: <c>GetComponentsInChildren&lt;Graphic&gt;(true)</c>
+        /// also returns the hotkey subtree this mod switched OFF, which is permanently depth=-1 by our own
+        /// hand and is not a hit surface anybody wanted.</summary>
+        private bool Drawn()
+        {
+            foreach (var g in GetComponentsInChildren<Graphic>(false))
+                if (g != null && g.raycastTarget && g.depth >= 0) return true;
+            return false;
+        }
 
         private void LateUpdate() => Apply();
 
@@ -694,6 +766,15 @@ namespace Multiplayer.Tactical
             if (lift != 0f) me.anchoredPosition += new Vector2(0f, lift);
 
             if (_measured) return;
+            // MEASURE A DRAWN CANVAS, NOT A PLACED RECT. The report below reads Graphic.depth and fires a
+            // synthetic raycast; both are meaningless until the canvas has actually drawn this clone, and the
+            // first frame the LAYOUT settles is not that frame — the battle opens behind the loading curtain,
+            // where every graphic still reads depth=-1 and a full-screen vignette is on top of everything.
+            // Firing there is what put "NOT HIT-TESTABLE" and "BURIED" into all three peers' logs as ERROR in
+            // a battle where the host then pressed the button five times: two false alarms per battle, which
+            // is how a real ERROR gets lost. Waiting costs nothing — this is a one-shot, and the answer it
+            // gives once the canvas is up is the answer anyone actually wants.
+            if (!Drawn() && ++_waited < DrawWaitFrames) return;
             _measured = true;
             Debug.Log("[Multiplayer][tac] ready row measured: EndTurn anchorMin=" + Source.anchorMin +
                       " anchorMax=" + Source.anchorMax + " pivot=" + Source.pivot +
@@ -740,17 +821,23 @@ namespace Multiplayer.Tactical
                 float pBottom = Mathf.Min(Corners[0].y, Corners[3].y);
                 float pTop = Mathf.Max(Corners[1].y, Corners[2].y);
                 hud = parent.name + " world y=[" + pBottom + ".." + pTop + "]";
+                // BY CONSTRUCTION, AND SAID AS SUCH. This used to read "OVERHANGS ... drawn over the tactical
+                // map", which is a defect's phrasing for the widget's own specification: the ask was a SECOND
+                // button UNDER the native End Turn one, and this container is exactly ONE button tall (End
+                // Turn fills it). There is no layout that fits a second row inside a one-row rect without
+                // resizing native UI, which this file refuses to do on purpose. The number stays because it is
+                // the useful part — it is how far below the row the clone sits — but it is a measurement, not
+                // a finding. The bound that CAN make this widget unhittable is the canvas, measured next and
+                // clamped against every frame in Apply.
                 verdict = myBottom < pBottom
-                    ? "OVERHANGS its HUD container by " + (pBottom - myBottom) + " world units — that part of " +
-                      "the clone is drawn over the tactical map"
+                    ? "sits " + (pBottom - myBottom) + " world units below it — expected: this clone is the " +
+                      "deliberate second row under a container that is one button tall, and the native End " +
+                      "Turn button's own glow draws past that same edge (not a clipping parent)"
                     : "inside its HUD container";
             }
 
             // THE CONTAINER THAT DECIDES WHETHER A POINTER CAN EVEN BE HERE. The line above measures the
-            // clone against the End Turn MODULE, whose rect is exactly one button tall — a second row is
-            // outside it by construction, and it is not a clipping parent (the native button's own glow
-            // draws past that same bottom edge and is not cut, and this clone renders where it stands), so
-            // "OVERHANGS" there is expected and is about drawing over the map, not about being hittable.
+            // clone against the End Turn MODULE, and that reading is informational only (see above).
             // The rect that CAN make a widget unhittable is the canvas: no pointer position maps to a rect
             // outside it, so hover and click are impossible with every wire on the button correct — which is
             // exactly the symptom, on every peer, always. This is the number four rounds of measuring our own
@@ -776,9 +863,15 @@ namespace Multiplayer.Tactical
             // NOTHING: GraphicRaycaster skips any graphic the canvas never drew (depth == -1), and a UI
             // object built at runtime lands on layer 0 where the HUD camera does not draw it. Reporting the
             // count alone is what let a completely dead button log a clean line.
+            //
+            // ACTIVE CHILDREN ONLY (the `false`), and that alone halves the false alarm this line used to
+            // raise: the includeInactive scan also returned the hotkey subtree THIS MOD switched off during
+            // Build, which is depth=-1 permanently, by our own hand, and is not a hit surface anyone wanted —
+            // six of the twelve surfaces in the live "NOT HIT-TESTABLE" report were exactly that. A graphic
+            // nobody can hit because it is switched off is not a defect; a DRAWN one at depth=-1 is.
             int live = 0, undrawn = 0;
             var names = new List<string>();
-            foreach (var g in GetComponentsInChildren<Graphic>(true))
+            foreach (var g in GetComponentsInChildren<Graphic>(false))
             {
                 if (g == null || !g.raycastTarget) continue;
                 live++;
