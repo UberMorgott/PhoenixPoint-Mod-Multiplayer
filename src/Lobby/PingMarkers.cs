@@ -45,6 +45,12 @@ namespace Multiplayer.UI
     /// thing being pointed at ("go here"). <see cref="ShowGeo"/> still understands an arriving globe point
     /// ping; only this build's send side stopped producing one.
     ///
+    /// AND IT NEVER POINTS AT SOMETHING THE VIEWER HAS NOT FOUND (2026-08-09, law L344). The globe's own
+    /// picking answers for unrevealed sites as readily as revealed ones, which made the ping key a map
+    /// scanner and published every find to every peer. Both doors now ask the game's own per-faction reveal
+    /// flag about their OWN viewer — <see cref="Capture"/> before it sends, <see cref="ShowGeo"/> before it
+    /// draws — and the two answers are allowed to differ. See <see cref="Known"/>.
+    ///
     /// PRESENTATION, NOT STATE (P4c, law L158). Nothing here is domain state: no <c>[SerializeMember]</c>
     /// leaf, no surface id, no <c>TimeAnchor</c>, no diff rail. A lost ping is not a problem and there is
     /// deliberately no exactly-once guarantee — the packet is fire-and-forget and the marker expires by
@@ -130,13 +136,6 @@ namespace Multiplayer.UI
         /// this class draws is faded here.</summary>
         private const float FadeSeconds = 1f;
 
-        /// <summary>How long one sweep of the geoscape ring takes. The ring's own shader input is
-        /// <c>_Progress</c>, a 0-1 fill the game drives off <c>GeoUpdateableMission.MissionProgress</c>; a
-        /// ping has no progress to show, so it is swept round and round instead. Four sweeps fit inside the
-        /// marker's <see cref="LifetimeSeconds"/>, which is the "blinking" the owner asked for without a
-        /// hard on/off flicker.</summary>
-        private const float SweepSeconds = 1.25f;
-
         /// <summary>HOW BIG THE ARROW IS, as its half-extent in pixels — <c>max(30, height/20)</c>, which is
         /// 2.5x the <c>max(12, height/50)</c> it shipped at. It was too small to notice, which for the one
         /// widget whose entire job is "somebody is pointing at something you cannot see" is the whole feature
@@ -179,11 +178,6 @@ namespace Multiplayer.UI
             public IHighlightable Paint;
             public Shader PriorShader;
             public bool PaintOn;
-            /// <summary>GEOSCAPE ONLY: the haven-defence ring's own progress renderer, the one the game
-            /// writes <c>_Progress</c>/<c>_FirstColor</c>/<c>_SecondColor</c> on
-            /// (GeoUpdatedableMissionVisualsController.cs:20,29-31). Kept because the sweep is re-written
-            /// every frame; null on every tactical shape.</summary>
-            public Renderer Ring;
         }
 
         // ─── lifecycle ───────────────────────────────────────────────────────
@@ -250,7 +244,10 @@ namespace Multiplayer.UI
                 // there a point of interest here" is answered by the same colliders a normal click uses,
                 // with the same tolerance.
                 var pick = view.SelectAtCursor();          // pure query — selects nothing
-                var re = pick.Actor == null ? null : IdentityResolver.RootRef(pick.Actor);
+                // AND IT MUST ALREADY BE KNOWN TO THE PRESSER — see Known. An unrevealed site is treated
+                // exactly like empty ocean, refusal cue included, so the refusal itself leaks nothing.
+                var seen = pick.Actor != null && Known(geo, pick.Actor);
+                var re = seen ? IdentityResolver.RootRef(pick.Actor) : null;
                 if (re != null) return Encode(SceneGeo, KindObject, Vector3.zero, re, 0);
                 Refuse(view);
                 return null;
@@ -270,6 +267,42 @@ namespace Multiplayer.UI
             return float.IsNaN(hit.ActionGridPos.x)
                 ? null
                 : Encode(SceneTac, KindPoint, hit.ActionGridPos, null, 0);
+        }
+
+        /// <summary>
+        /// A PING NEVER TELLS A PEER SOMETHING HIS OWN GLOBE HAS NOT TOLD HIM. Asked on BOTH sides and
+        /// always about the LOCAL viewer: at <see cref="Capture"/>, so a presser cannot ping what he has not
+        /// found, and again at <see cref="ShowGeo"/>, so an arriving ping cannot draw a ring on a site the
+        /// RECEIVER has not found. The two answers legitimately differ — one player has scanned a region the
+        /// other has not — and the receiving arm is the one that matters: without it, a host who has
+        /// explored ahead reveals every site he pings to everybody.
+        ///
+        /// WHY IT WAS NEEDED AT ALL. <c>GeoscapeView.SelectAtCursor</c>'s picking branch is
+        /// <c>GeoMap.PickObjectOnPosition</c> (GeoMap.cs:806-815), a bare <c>Physics.Raycast</c> on
+        /// <c>UnityLayers.Picking</c> that returns <c>hitInfo.transform.GetComponentInParent&lt;GeoActor&gt;()</c>
+        /// with NO visibility filter — so an unrevealed site answers the cursor exactly like a revealed one
+        /// and a player could sweep the globe with the ping key and read off where the map's contents are.
+        /// (The sibling <c>selectWithProximation</c> branch does filter, GeoscapeView.cs:985, which is what
+        /// says the missing filter here is an omission and not a design.)
+        ///
+        /// THE PREDICATE IS THE GAME'S OWN, not one of ours. A site answers
+        /// <c>GeoSite.GetVisible(GeoFaction)</c> (GeoSite.cs:387-390) — the per-faction flag the game's own
+        /// <c>GeoSite.Selectable</c> gates on with this exact viewer (<c>GetVisible(GeoLevel.ViewerFaction)</c>,
+        /// GeoSite.cs:179-186). A craft answers <c>GeoVehicle.IsVisible</c> (GeoVehicle.cs:174-187), whose
+        /// own writer is the per-viewer <c>RefreshVisibility</c> (:606-613).
+        ///
+        /// EVERY OTHER <c>GeoActor</c> PASSES, and the list is short and closed: <c>GeoScanner</c> and
+        /// <c>GeoAncientSiteProbe</c> are the viewer's own deployables, and a <c>GeoBehemothActor</c> hides by
+        /// switching its <c>VisualsRoot</c> off (:584, :609) — which takes its picking collider with it, so an
+        /// unseen one is not pickable in the first place. None of the three carries a per-faction secret this
+        /// could read, so there is nothing to ask them.
+        /// </summary>
+        private static bool Known(GeoLevelController geo, GeoActor actor)
+        {
+            var site = actor as GeoSite;
+            if (site != null) return site.GetVisible(geo.ViewerFaction);
+            var vehicle = actor as GeoVehicle;
+            return vehicle == null || vehicle.IsVisible;
         }
 
         /// <summary>
@@ -428,6 +461,16 @@ namespace Multiplayer.UI
             if (kind == KindObject)
             {
                 var actor = IdentityResolver.Resolve(geo, entityRef, null) as GeoActor;
+                // THE RECEIVER'S OWN ANSWER, not the sender's — see Known. A peer who has not found this
+                // site does not learn of it from somebody else's key press.
+                if (actor != null && !Known(geo, actor))
+                {
+                    Debug.Log("[Multiplayer] geoscape ping on '" + entityRef + "' NOT DRAWN — that site is " +
+                              "not revealed to this peer's faction (GeoSite.GetVisible is false), and a ping " +
+                              "is not allowed to be the thing that reveals it. Working as intended: the " +
+                              "sender can see it, this peer cannot, and the two globes legitimately differ.");
+                    return;
+                }
                 var surface = actor?.Surface;
                 if (surface == null)
                 {
@@ -461,7 +504,8 @@ namespace Multiplayer.UI
             ring.gameObject.SetActive(true);
             if (ring.Progress != null) ring.Progress.SetActive(true);
             Tint(ring.gameObject, mine);
-            var live = new Live
+            Ink(ring.Progress == null ? null : ring.Progress.GetComponent<Renderer>(), mine);
+            _instance.Track(new Live
             {
                 Geo = true,
                 Follow = follow,
@@ -470,10 +514,7 @@ namespace Multiplayer.UI
                 // carrier and the ring is what expires.
                 Beacon = kind == KindObject ? ring.gameObject : host.gameObject,
                 Mine = mine,
-                Ring = ring.Progress == null ? null : ring.Progress.GetComponent<Renderer>(),
-            };
-            Ink(live, 0f);
-            _instance.Track(live);
+            });
         }
 
         private static void ShowTac(byte kind, Vector3 pos, int actorKey, bool mine)
@@ -579,13 +620,37 @@ namespace Multiplayer.UI
                 if (seen != null)
                     seen.Add(r.gameObject.name + "<" + (mat == null || mat.shader == null ? "no-shader" : mat.shader.name) + ">");
             }
+
+            // THE WAVES, KEPT AND MADE ENDLESS — the second half of the owner's 2026-08-09 ask, and the one
+            // the renderer loop above cannot do on its own. The prefab's radiating pulse is a ParticleSystem,
+            // authored for a haven defence that lasts a whole mission, and a burst that plays once leaves a
+            // 5-second marker sitting still for four of those seconds. `loop` is what runs it for the
+            // marker's whole life; Destroy at Expire is what ends it.
+            //
+            // AND `startColor` IS WHERE A PARTICLE'S COLOUR ACTUALLY LIVES. A property block reaches a
+            // ParticleSystemRenderer's MATERIAL, but the per-particle colour the system multiplies over it
+            // is the module's, which is why the waves stayed stock red through the tint above.
+            var puffs = 0;
+            foreach (var ps in go.GetComponentsInChildren<ParticleSystem>(true))
+            {
+                if (ps == null) continue;
+                var main = ps.main;                      // a handle back into the system, not a copy
+                main.loop = true;
+                main.startColor = colour;
+                ps.Play(true);
+                puffs++;
+            }
+
             if (seen == null) return;
             _loggedTint = true;
             Debug.Log("[Multiplayer] ping marker tinted " + (mine ? "OWN green" : "PEER blue") +
                       " over _Color/_TintColor on " + seen.Count + " renderer(s): " +
-                      string.Join(", ", seen.ToArray()) + " (logged once per run). A count of 0, or a marker " +
+                      string.Join(", ", seen.ToArray()) + ", and over startColor on " + puffs +
+                      " looping particle system(s) (logged once per run). A count of 0, or a marker " +
                       "still drawing in its stock colour, means the visual is not a Renderer or does not " +
-                      "declare either property — the shader names above are what to write instead.");
+                      "declare either property — the shader names above are what to write instead. A " +
+                      "particle count of 0 means the radiating waves are NOT particles in this build and " +
+                      "whatever animates them still owns their colour and their one-shot life.");
         }
 
         /// <summary>THE SHADER IDS ARE NOT CACHED, AND MUST NOT BE. They used to be two
@@ -598,31 +663,37 @@ namespace Multiplayer.UI
         private static bool _loggedTint;
 
         /// <summary>
-        /// THE RING, IN THE PING'S COLOUR AND FILLING ROUND. Three shader inputs, all three taken off the
-        /// game's own writer for this exact prefab (GeoUpdatedableMissionVisualsController.cs:29-31,:38-41):
-        /// <c>_FirstColor</c> is what the site's owner wears, <c>_SecondColor</c> what the attacker wears,
-        /// and <c>_Progress</c> is the 0-1 fill between them. A ping has no attacker and no progress, so
-        /// both colours are the ping's own — the sweeping arc bright, the rest of the ring dimmed to 30% —
-        /// and <see cref="Blink"/> walks <c>_Progress</c> round and round instead of tracking a mission.
-        /// That is the "fills around and blinks" the owner asked for, and it is the widget he pointed at.
+        /// THE RING, WHOLE AND STILL, IN THE PING'S ONE COLOUR — AND THE SPINNER IS GONE (2026-08-09, owner).
+        /// Three shader inputs, all three taken off the game's own writer for this exact prefab
+        /// (GeoUpdatedableMissionVisualsController.cs:29-31,:38-41): <c>_FirstColor</c> is what the site's
+        /// owner wears, <c>_SecondColor</c> what the attacker wears, and <c>_Progress</c> is the 0-1 fill
+        /// between them.
         ///
-        /// A property block again, and a SHARED one, re-fetched per renderer: this runs every frame for
-        /// every live ping, and <see cref="Tint"/>'s <c>_Color</c>/<c>_TintColor</c> must survive it, which
-        /// <c>GetPropertyBlock</c>-then-<c>SetPropertyBlock</c> is what guarantees (the block is read back
-        /// out of the renderer, added to, and written whole). Allocated lazily inside the method, never into
-        /// a static initialiser — see the note on <see cref="_loggedTint"/> for what a Unity ecall in this
-        /// type's static constructor costs the harness.
+        /// WHAT WAS WRONG WITH SWEEPING IT. A ping has no progress to show, so <c>_Progress</c> used to be
+        /// walked round and round by <see cref="Blink"/> — and a fill that grows to full and RESTARTS AT ZERO
+        /// is not a rotation, it is a saw tooth: the arc's trailing edge snaps back across the ring every
+        /// 1.25 s, which is the "spinner that jitters back and forth" the owner reported. There is no phase
+        /// to fix, because a 0-1 fill has no wrap-around to be continuous through. So it is not animated at
+        /// all: <c>_Progress</c> = 1 and BOTH colours the ping's own, which draws the whole ring in one flat
+        /// colour with no arc boundary anywhere on it. The MOTION the owner kept is the prefab's own
+        /// radiating waves, which <see cref="Tint"/> now loops for the marker's whole life.
+        ///
+        /// A property block again: <see cref="Tint"/>'s <c>_Color</c>/<c>_TintColor</c> must survive this,
+        /// which <c>GetPropertyBlock</c>-then-<c>SetPropertyBlock</c> is what guarantees (the block is read
+        /// back out of the renderer, added to, and written whole). Allocated lazily inside the method, never
+        /// into a static initialiser — see the note on <see cref="_loggedTint"/> for what a Unity ecall in
+        /// this type's static constructor costs the harness.
         /// </summary>
-        private static void Ink(Live p, float progress)
+        private static void Ink(Renderer ring, bool mine)
         {
-            if (p.Ring == null) return;
+            if (ring == null) return;
             if (_ink == null) _ink = new MaterialPropertyBlock();
-            var colour = p.Mine ? Own : Peer;
-            p.Ring.GetPropertyBlock(_ink);
+            var colour = mine ? Own : Peer;
+            ring.GetPropertyBlock(_ink);
             _ink.SetColor("_SecondColor", colour);
-            _ink.SetColor("_FirstColor", new Color(colour.r * 0.3f, colour.g * 0.3f, colour.b * 0.3f, colour.a));
-            _ink.SetFloat("_Progress", progress);
-            p.Ring.SetPropertyBlock(_ink);
+            _ink.SetColor("_FirstColor", colour);
+            _ink.SetFloat("_Progress", 1f);
+            ring.SetPropertyBlock(_ink);
         }
 
         private static MaterialPropertyBlock _ink;
@@ -688,10 +759,8 @@ namespace Multiplayer.UI
         private void Blink()
         {
             var on = ((int)(Time.unscaledTime * 4f) & 1) == 0;
-            var sweep = Mathf.Repeat(Time.unscaledTime, SweepSeconds) / SweepSeconds;
             foreach (var p in _live)
             {
-                Ink(p, sweep);
                 if (p.Paint == null || p.PaintOn == on) continue;
                 p.PaintOn = on;
                 Repaint(p, on);

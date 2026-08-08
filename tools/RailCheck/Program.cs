@@ -291,6 +291,7 @@ namespace RailCheck
             Add(laws, () => L251_PingColourAnswersWhoPinged.Check());
             Add(laws, () => L252_TheOffScreenArrowTakesAClickToTheTarget.Check());
             Add(laws, () => L253_APingLandsOnTheGlobeNotInsideIt.Check());
+            Add(laws, () => L344_APingRevealsNothingUnfound.Check());
             Add(laws, () => L270_AbilityMutatorSweep.Check());
             Add(laws, () => L271_TheHavenMissionIsTheHostsToMint.Check());
             Add(laws, () => L272_AnEventlessWatchStillOpensTheSquadScreen.Check());
