@@ -1137,6 +1137,17 @@ namespace Multiplayer.Tactical
             /// live actor, so the host's answer lands on every peer at the next turn edge at the latest,
             /// whichever direction the event was lost in.</summary>
             public string Selected;
+
+            /// <summary>The host's PER-TURN USE COUNTS for that actor, as ability-def guid → count, non-zero
+            /// entries only. The fourth field to move onto the settle for the same reason as
+            /// <see cref="Statuses"/>, <see cref="Traits"/> and <see cref="Selected"/> — and the one nothing
+            /// replicated at all. <c>TacticalActor._abilityUsesThisTurn</c>:113 is keyed by
+            /// <c>TacticalAbilityDef</c>, so one entry covers every weapon's copy of an ability, and it is
+            /// cleared only at the turn edge (:1194): a use this peer spent on an order the host refused
+            /// blocked that ability on EVERY weapon for the rest of the turn, and switching weapons could not
+            /// clear it by design. An ABSENT entry means ZERO, not "leave it alone" — see
+            /// <see cref="HostUsesFor"/>.</summary>
+            public Dictionary<string, int> Uses;
         }
 
         /// <summary>HOST: which peer's order started the ability an actor is currently executing — 0 = the
@@ -1826,11 +1837,51 @@ namespace Multiplayer.Tactical
             bool hasEquip = equips != null;
             var selected = hasEquip ? equips.SelectedEquipment : null;
             string selGuid = selected == null || selected.ItemDef == null ? "" : selected.ItemDef.Guid;
+            var uses = CollectAbilityUses(tacActor);
             Send(OpSettle, "settle " + tacActor.name + " @ " + Fmt(pos) + " ap=" + ap.ToString("0.##") +
                  " wp=" + wp.ToString("0.##") + (forced ? " FORCED" : ""), 0,
                  w => { w.Write(key); w.Write(pos.x); w.Write(pos.y); w.Write(pos.z); w.Write(ap); w.Write(wp);
                         w.Write(forced); TacticalStatusSet.Write(w, statuses); WriteTraits(w, traits);
-                        w.Write(hasEquip); if (hasEquip) w.Write(selGuid); });
+                        w.Write(hasEquip); if (hasEquip) w.Write(selGuid); WriteUses(w, uses); });
+        }
+
+        /// <summary>THE PER-TURN USE COUNTER, WHICH NOTHING REPLICATED (2026-08-08 RCA, symptom 2).
+        ///
+        /// <c>TacticalAbility.Activate</c>:1092 calls <c>IncrementUsesThisTurn</c>, and the counter it feeds
+        /// — <c>TacticalActor._abilityUsesThisTurn</c>:113 — is a
+        /// <c>Dictionary&lt;TacticalAbilityDef,int&gt;</c>. Keyed by DEF, so every weapon's Overwatch shares
+        /// ONE entry, and it is cleared only at the turn edge (<c>TacticalActor</c>:1194). With
+        /// <c>UsesPerTurn</c> defaulting to 1, a client that played an order SPECULATIVELY spent the turn's
+        /// use while the host — which refused before activating — kept 0; the client's own gate then answered
+        /// "cannot be used again this turn" for every weapon he switched to, because a def-keyed counter
+        /// cannot be cleared by changing weapons, by design.
+        ///
+        /// It rides the settle for the reason L131 (statuses), L137 (traits) and L186 (selection) already do:
+        /// the settle is the host's closer for one actor AND sweeps every keyed live actor at every turn
+        /// edge, so the authoritative value is RE-ASSERTED routinely and repairs this counter whatever leaked
+        /// it — not only the reject case a targeted <c>ResetUsesThisTurn</c> would have covered. The game
+        /// itself treats the field as actor state worth persisting
+        /// (<c>TacActorInstanceData.AbilityUsesThisTurn</c>:30, written at <c>TacticalActor</c>:693 and
+        /// restored at :606), which is this repo's own test for what belongs on the settle.
+        ///
+        /// Only non-zero entries ride, and one per DEF: several instances of one def (one per weapon) read
+        /// the same dictionary slot, so shipping each would be the same number several times.</summary>
+        private static List<KeyValuePair<string, int>> CollectAbilityUses(TacticalActor actor)
+        {
+            var list = new List<KeyValuePair<string, int>>();
+            HashSet<string> seen = null;
+            foreach (var ab in actor.GetAbilities<TacticalAbility>())
+            {
+                if (ab == null || ab.AbilityDef == null) continue;
+                string g = ab.AbilityDef.Guid;
+                if (string.IsNullOrEmpty(g)) continue;
+                int n = actor.GetAbilityUsesThisTurn(ab);
+                if (n <= 0) continue;
+                if (seen == null) seen = new HashSet<string>(StringComparer.Ordinal);
+                if (!seen.Add(g)) continue;
+                list.Add(new KeyValuePair<string, int>(g, n));
+            }
+            return list;
         }
 
         /// <summary>A5 adds the HAS-TARGET flag, and it is not thrift: the codec writes mask 0 for a null
@@ -1864,6 +1915,61 @@ namespace Multiplayer.Tactical
             var traits = new List<string>(n < 0 ? 0 : n);
             for (int i = 0; i < n; i++) traits.Add(r.ReadString());
             return traits;
+        }
+
+        /// <summary>The per-turn use codec, the same count-prefixed shape as the trait one and appended at the
+        /// TAIL of the settle so the existing positional read chain is untouched. Always consumes its bytes.
+        /// Def GUID, not a def reference: a def is not a shared address either peer can send.</summary>
+        internal static void WriteUses(BinaryWriter w, IList<KeyValuePair<string, int>> uses)
+        {
+            w.Write(uses == null ? 0 : uses.Count);
+            if (uses == null) return;
+            foreach (var kv in uses) { w.Write(kv.Key ?? ""); w.Write(kv.Value); }
+        }
+
+        internal static Dictionary<string, int> ReadUses(BinaryReader r)
+        {
+            int n = r.ReadInt32();
+            var d = new Dictionary<string, int>(n < 0 ? 0 : n, StringComparer.Ordinal);
+            for (int i = 0; i < n; i++) { string g = r.ReadString(); d[g] = r.ReadInt32(); }
+            return d;
+        }
+
+        /// <summary>Pure: the host's use count for one ability def. ABSENT MEANS ZERO — and that IS the
+        /// repair, because the spurious use a refused order left behind is precisely an entry the host does
+        /// NOT have. An apply that only wrote the entries it was sent would never clear one, which is the
+        /// silent-swallow shape this whole arc exists to close. RailCheck L242 executes this.</summary>
+        internal static int HostUsesFor(Dictionary<string, int> hostCounts, string guid)
+        {
+            int n;
+            return hostCounts != null && guid != null && hostCounts.TryGetValue(guid, out n) ? n : 0;
+        }
+
+        /// <summary>Drive this peer's per-turn use counters to the host's, through the game's own public
+        /// writers (<c>TacticalActor.ResetAbilityUsesThisTurn</c>:1265 / <c>IncrementAbilityUsesThisTurn</c>
+        /// :1253) — no reflection at the private dictionary. Iterates the ACTOR'S abilities and not the
+        /// dictionary's keys, so an entry the host does not have is driven to 0 rather than skipped. Instances
+        /// sharing one def are self-deduplicating: the first repairs the slot, the rest then agree.</summary>
+        private static void ReconcileAbilityUses(TacticalActor actor, Dictionary<string, int> host)
+        {
+            if (actor == null || host == null) return;
+            foreach (var ab in actor.GetAbilities<TacticalAbility>())
+            {
+                if (ab == null || ab.AbilityDef == null) continue;
+                int want = HostUsesFor(host, ab.AbilityDef.Guid);
+                int have = actor.GetAbilityUsesThisTurn(ab);
+                if (have == want) continue;
+                actor.ResetAbilityUsesThisTurn(ab);
+                for (int i = 0; i < want; i++) actor.IncrementAbilityUsesThisTurn(ab);
+                // Law 11 / postulate 1: CanUseThisTurn is what greys the ability bar, and nothing native
+                // repaints it for a model change this peer did not click.
+                TacticalUiRepaint.MarkDirty();
+                Debug.LogWarning("[Multiplayer][tac] per-turn uses of " + ab.AbilityDef.name + " on " + actor.name +
+                                 " reconciled at the host's settle — " + have + " -> " + want + ". The counter is " +
+                                 "keyed by DEF (TacticalActor:113), so a use this peer spent on an order the host " +
+                                 "refused blocked that ability on EVERY weapon until the turn edge, and no weapon " +
+                                 "switch could clear it.");
+            }
         }
 
         /// <summary>Do these two trait lists say different things? <c>OrdinalIgnoreCase</c> because that is
@@ -2004,6 +2110,90 @@ namespace Multiplayer.Tactical
             return null;
         }
 
+        /// <summary>THE EQUIPMENT AN ABILITY SPEAKS FOR. Deliberately the SAME pair the game's own gate reads
+        /// (<c>TacticalAbility.GetDisabledStateInternal</c>:414-417 takes <c>OverrideEquipment</c> and falls
+        /// back to <c>EquipmentSource</c>) and the same pair <see cref="PreSelectSourceEquipment"/> reads, so
+        /// all three agree about WHICH weapon is being judged. Null for an ability a soldier owns himself
+        /// rather than through an item.</summary>
+        private static Equipment SourceOf(Base.Entities.Abilities.Ability a)
+        {
+            var t = a as TacticalAbility;
+            return t == null ? null : (t.OverrideEquipment ?? t.EquipmentSource);
+        }
+
+        /// <summary>THE DISAMBIGUATOR, PURE — so RailCheck L240 can execute the OUTCOME rather than assert
+        /// that a call exists. TRUE = this candidate is the instance the acting peer meant. A source of
+        /// <c>null</c> never wins by selection: an actor-owned ability is unique anyway, so it must fall
+        /// through to the plain def match instead of tying with whatever happens to be in his hands.</summary>
+        internal static bool CandidateMatchesSelection(bool defMatches, object source, object selected)
+            => defMatches && source != null && ReferenceEquals(source, selected);
+
+        /// <summary>ONE DEF GUID IS NOT ONE ABILITY, AND THE HOST WAS ANSWERING FOR THE WRONG WEAPON
+        /// (2026-08-08 RCA).
+        ///
+        /// <c>Overwatch_AbilityDef</c> and <c>Reload_AbilityDef</c> mint ONE INSTANCE PER WEAPON that grants
+        /// them (<c>OverwatchAbility.OverwatchWeapon => GetSource&lt;Weapon&gt;()</c>;
+        /// <c>ReloadAbility</c>'s source is the <c>TacticalItem</c> it reloads), and
+        /// <c>ActorComponent.GetAbilityFiltered</c>:211-221 returns the FIRST match. So a guid-only lookup
+        /// always handed back the PRIMARY's instance, whatever the peer was holding. Measured on a soldier
+        /// with broken arms who could not hold his rifle, client 3: <c>02:45:42.816 select → PX_Pistol</c>
+        /// ACCEPTED (seq=259) → <c>02:45:43.965 command Reload_AbilityDef</c> →
+        /// <c>.970 CLIENT weapon switch applied → PX_SniperRifle</c> → <c>.970 reject … Недостаточно
+        /// свободных рук</c>. Five reloads refused that way; the sixth was accepted only because an inventory
+        /// move had removed the rifle and first-match finally landed on the pistol. Overwatch was offered and
+        /// refused for the same rifle by the same mechanism (<c>NoSuitableEquipment</c> via
+        /// <c>ShootAbility.GetWeaponDisabledState</c> / <c>!Weapon.IsUsable</c>).
+        ///
+        /// THE GAME'S OWN DISAMBIGUATOR IS THE SELECTION, not the def: <c>TacticalAbility.Activate</c>:1087-1090
+        /// selects the source equipment of the instance the player activated, and
+        /// <c>GetDisabledStateInternal</c>:435 judges that instance's own equipment. Resolving by selection
+        /// therefore RELAXES NOTHING — the rifle a broken arm cannot hold stays refused; it only stops the host
+        /// answering a question about the pistol with the rifle's answer. It also makes
+        /// <see cref="PreSelectSourceEquipment"/> a no-op for a peer's own click, which is what stops a refused
+        /// order from publishing a weapon nobody chose on the following 0x82 settle (L186 propagated that
+        /// wrong pre-select flawlessly — see L243).
+        ///
+        /// ponytail: selection is the disambiguator only while every rider is activated FROM the selected
+        /// weapon. A def declaring <c>UsableOnNonSelectedEquipment</c> falls through to first-match exactly as
+        /// before; giving it a right answer would need the source equipment's shared address to ride in the
+        /// intent itself, which is a wire change no observed bug asks for yet.</summary>
+        private static TacticalAbility ResolveAbility(TacticalActor actor, string guid)
+        {
+            if (actor == null) return null;
+            var comp = actor.Equipments;
+            var selected = comp == null ? null : comp.SelectedEquipment;
+            // The guid comparison stays INSIDE both lambdas rather than in a shared helper: L80 asserts that
+            // this resolution reads AbilityDef.Guid (an ldfld the scan can see), and a comparison one call
+            // away would leave that law green over a lookup by list position.
+            var bySelection = actor.GetAbilityFiltered<TacticalAbility>(
+                a => CandidateMatchesSelection(a.AbilityDef != null && a.AbilityDef.Guid == guid,
+                                               SourceOf(a), selected));
+            if (bySelection != null) return bySelection;
+
+            var any = actor.GetAbilityFiltered<TacticalAbility>(
+                a => a.AbilityDef != null && a.AbilityDef.Guid == guid);
+            // NEVER SILENTLY (this repo's dominant bug class): the guid AND the weapon that answered for it.
+            // Only when the answer really is an equipment-sourced instance that is NOT what he is holding —
+            // an actor-owned ability has no weapon to disagree with and must not narrate.
+            var fell = SourceOf(any);
+            if (fell != null && !ReferenceEquals(fell, selected) &&
+                _saidUncovered.Add("resolve:" + TacticalActorKey.Of(actor) + "/" + guid + "/" + EqName(fell)))
+                Debug.LogWarning("[Multiplayer][tac] ability guid " + guid + " on " + SafeActorName(actor) +
+                                 " resolved to the instance sourced from " + EqName(fell) + ", but he has " +
+                                 EqName(selected) + " selected. No instance of that def belongs to the selected " +
+                                 "weapon, so this is first-match-by-guid — the answer (offered, refused, " +
+                                 "charges spent) is about " + EqName(fell) + " and not about what is in his " +
+                                 "hands. Expected only for a def that is UsableOnNonSelectedEquipment.");
+            return any;
+        }
+
+        /// <summary>Pure: does the host move this soldier's selection before validating his order? Since
+        /// <see cref="ResolveAbility"/> the resolved instance is the SELECTED weapon's whenever the peer has
+        /// one, so the answer for a peer's own click is NO and this belt is a no-op — which is precisely what
+        /// stops a REFUSED order from publishing a weapon nobody chose (L243). RailCheck executes it.</summary>
+        internal static bool SelectionMoves(bool usableOnNonSelectedEquipment, bool hasSource, bool sourceIsSelected)
+            => hasSource && !sourceIsSelected && !usableOnNonSelectedEquipment;
+
         /// <summary>THE GAME'S OWN AUTO-SELECT, RUN ONE STEP EARLY — and it is a BELT, not the fix.
         ///
         /// <c>TacticalAbility.Activate</c>:1087-1090 selects the ability's own source equipment before it does
@@ -2023,9 +2213,9 @@ namespace Multiplayer.Tactical
         /// soldier draws the same weapon.</summary>
         private static void PreSelectSourceEquipment(TacticalAbility ability)
         {
-            if (ability == null || ability.UsableOnNonSelectedEquipment) return;
+            if (ability == null) return;
             var eq = ability.OverrideEquipment ?? ability.EquipmentSource;
-            if (eq == null || eq.IsSelected) return;
+            if (!SelectionMoves(ability.UsableOnNonSelectedEquipment, eq != null, eq != null && eq.IsSelected)) return;
             var actor = ability.TacticalActor;
             var comp = actor == null ? null : actor.Equipments;
             if (comp == null || !comp.Items.Contains(eq)) return;
@@ -2330,8 +2520,8 @@ namespace Multiplayer.Tactical
             string why;
             var actor = TacticalActorKey.Resolve(tlc, key, out why) as TacticalActor;
             var faction = actor == null ? null : actor.TacticalFaction;
-            TacticalAbility ability = actor == null ? null
-                : actor.GetAbilityFiltered<TacticalAbility>(a => a.AbilityDef != null && a.AbilityDef.Guid == guid);
+            // BY SELECTION, NOT BY FIRST MATCH — several instances share one def guid (see ResolveAbility).
+            TacticalAbility ability = ResolveAbility(actor, guid);
 
             PreSelectSourceEquipment(ability);
 
@@ -2482,7 +2672,8 @@ namespace Multiplayer.Tactical
                                                         new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
                                                         r.ReadSingle(), r.ReadSingle(), r.ReadBoolean(),
                                                         TacticalStatusSet.Read(r), ReadTraits(r),
-                                                        r.ReadBoolean() ? r.ReadString() : null);
+                                                        r.ReadBoolean() ? r.ReadString() : null,
+                                                        ReadUses(r));
                     else if (op == OpSelectEquipment) ApplySelectEquipment(r.ReadInt32(), r.ReadString());
                     else
                     {
@@ -2715,7 +2906,10 @@ namespace Multiplayer.Tactical
                                    "only the animation is missing on this screen.");
                 return;
             }
-            var ability = actor.GetAbilityFiltered<TacticalAbility>(a => a.AbilityDef != null && a.AbilityDef.Guid == guid);
+            // THE SAME RESOLUTION AS THE HOST'S, and it must be: a HOST-initiated pistol reload carries the
+            // same non-unique guid, so first-match here would replay it as the rifle's on every client and
+            // hand every mirroring peer a weapon switch the acting player never made.
+            var ability = ResolveAbility(actor, guid);
             if (ability == null)
             {
                 Debug.LogError("[Multiplayer][tac] " + actor.name + " has no ability with guid " + guid +
@@ -2908,7 +3102,8 @@ namespace Multiplayer.Tactical
         }
 
         private static void QueueSettle(int key, Vector3 pos, float ap, float wp, bool forced,
-                                        List<string> statuses, List<string> traits, string selected)
+                                        List<string> statuses, List<string> traits, string selected,
+                                        Dictionary<string, int> uses)
         {
             // A9: a REFUSED order produces no mirror at all — the host answers it with a reject and this
             // forced settle. That makes a settle the other half of "the host has answered", and without this
@@ -2916,7 +3111,7 @@ namespace Multiplayer.Tactical
             NoteEchoArrived(key);
             _pending[key] = new PendingSettle { Pos = pos, Ap = ap, Wp = wp, WaitedFrames = 0, Forced = forced,
                                                 Statuses = statuses, Traits = traits, Selected = selected,
-                                                Epoch = TacticalDamageSync.StatEpoch };
+                                                Uses = uses, Epoch = TacticalDamageSync.StatEpoch };
         }
 
         /// <summary>The standing settle applier (driven from <c>SyncEngine.Tick</c>, client-only inside). A
@@ -3098,6 +3293,12 @@ namespace Multiplayer.Tactical
                 // event that arrives before this peer has a map — or is raised before this peer has a key for
                 // the actor — is simply gone, in whichever direction it was travelling. Here it is re-asserted.
                 ReconcileSelection(actor, s.Selected);
+                // AND WHAT HE HAS ALREADY SPENT THIS TURN, by the same argument once more. A REFUSED order is
+                // the case that needs it: this peer played it speculatively and Activate:1092 charged the
+                // turn's use, while the host — which refused BEFORE activating — never did. The counter is
+                // def-keyed and cleared only at the turn edge, so without this the ability stays dead on
+                // every weapon for the rest of the turn with no way for the player to clear it.
+                ReconcileAbilityUses(actor, s.Uses);
                 RefreshVisionTowards(actor);
             }
             Debug.Log("[Multiplayer][tac] CLIENT settled " + actor.name + " @ " + Fmt(s.Pos) +

@@ -91,7 +91,13 @@ namespace RailCheck
                              "order across peers or across a turn edge — anything but the def guid names a " +
                              "DIFFERENT ability on the far side, which is the wrong-ability-executed class.";
 
-            foreach (var name in new[] { "HandleActivate", "ApplyActivate" })
+            // ResolveAbility joined the set on 2026-08-08 (L240): the two SITES now share one resolver,
+            // because a def guid names SEVERAL ability instances — one per weapon that grants it — and
+            // first-match answered for the primary rifle while the peer was holding a pistol. This law's
+            // requirement is unchanged and still enforced end to end: the lookup is a FILTER OVER THE DEF
+            // GUID and never a list position. It is asserted on whichever of the three does the lookup, and a
+            // site is allowed to reach it through the shared resolver rather than inline.
+            foreach (var name in new[] { "HandleActivate", "ApplyActivate", "ResolveAbility" })
             {
                 var m = cmd.GetMethod(name, AllMembers);
                 if (m == null)
@@ -105,11 +111,12 @@ namespace RailCheck
                 // lambda "<HandleActivate>b__N", which is what makes the wider scan precise rather than "any
                 // guid read anywhere in the class".
                 var callees = Calls(m);
-                if (!callees.Any(c => c.Name == "GetAbilityFiltered"))
+                bool viaResolver = callees.Any(c => c.Name == "ResolveAbility");
+                if (!viaResolver && !callees.Any(c => c.Name == "GetAbilityFiltered"))
                     yield return "L80 ability-resolve-by-order: " + name + " no longer resolves the ability through " +
                                  "TacticalActor.GetAbilityFiltered. The only sound lookup is a filter over the def " +
                                  "guid; picking by position replays whatever happens to sit at that index here.";
-                if (!ReadsGuid(m) && !LambdaBodies(cmd, name).Any(ReadsGuid))
+                if (!viaResolver && !ReadsGuid(m) && !LambdaBodies(cmd, name).Any(ReadsGuid))
                     yield return "L80 ability-resolve-guidless: " + name + " no longer compares AbilityDef.Guid, so " +
                                  "whatever filter it now uses is not the identity the sender wrote.";
             }
