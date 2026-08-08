@@ -82,6 +82,18 @@ namespace Multiplayer.Tactical
         /// to sit in a turn hold for a battle that is already over (that is A1's stranding hole).</summary>
         internal static bool HostMissionOver;
 
+        /// <summary>HOST: the mission end has been ANNOUNCED — the mission-end sweep has gone out and OpEnd
+        /// behind it, so the host has said its last word about this board (law L334). Deliberately NOT
+        /// <c>tlc.IsGameOver</c>: that is already true when <c>HostBroadcastEnd</c> runs (it is a POSTFIX on
+        /// <c>TacticalLevelController.GameOver</c>), so a guard reading it would silence the mission-end sweep
+        /// itself — the very correction that makes the scored board the host's.</summary>
+        internal static bool MissionEndSent;
+
+        /// <summary>THE BATTLE IS SCORED — on EITHER role. Both flags are one-way and role-exclusive
+        /// (<see cref="MissionEndSent"/> is written only by the host's announcement, <see cref="HostMissionOver"/>
+        /// only by a client applying it), so this is simply "has this peer passed the mission end yet".</summary>
+        internal static bool BattleAlreadyScored => MissionEndSent || HostMissionOver;
+
         /// <summary>Per-BATTLE state, dropped at tactical teardown (and at session teardown). Not doing this
         /// would carry <see cref="HostMissionOver"/> into the next battle and end it on frame one.</summary>
         internal static void Reset()
@@ -90,6 +102,7 @@ namespace Multiplayer.Tactical
             HostFactionGuid = null;
             HostTurnNumber = 0;
             HostMissionOver = false;
+            MissionEndSent = false;            // carrying this into the next battle would mute it on frame one
             LeftBattle = false;
             _pendingSweepWhen = null;          // a sweep owed to a battle that is over must not fire in the next
             ClientMissionStartHints.Reset();   // the next battle gets its own mission-start replay
@@ -237,6 +250,10 @@ namespace Multiplayer.Tactical
             TacticalCommandSync.HostSettleAllLive("mission end");
             byte state = (byte)(player?.State ?? TacFactionState.None);
             Send(SurfaceIds.TacTurn, OpEnd, "mission END outcome=" + (TacFactionState)state, w => w.Write(state));
+            // AND THE LAST WORD IS THE ONE ABOVE (law L334). ORDER-CRITICAL, both halves: the latch is set
+            // AFTER the sweep (setting it first would silence the sweep, since HostSettle now reads it) and
+            // AFTER the Send (so nothing can slip between the correction and the verdict it belongs to).
+            MissionEndSent = true;
         }
 
         /// <summary>The host is LEAVING the finished battle — carry every other peer out with it. Sent from

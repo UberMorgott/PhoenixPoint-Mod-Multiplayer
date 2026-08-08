@@ -1383,6 +1383,22 @@ namespace Multiplayer.Tactical
             var engine = LiveEngine();
             if (engine == null) return;                  // solo, or connected but not in a co-op game
             if (SyncApplyScope.Active) return;           // law 8: this activation IS a mirror being applied
+            // AND NOTHING IS RELAYED FOR A BATTLE THAT IS ALREADY SCORED (law L334). The cheaper half of the
+            // same 2026-08-08 defect: the client kept a live ExitMission button through the mission end and
+            // pressed it once more (:2338, 154 ms after applying the end), which is what produced the reject
+            // whose rollback then stripped the evacuation. A command sent after the verdict cannot be
+            // honoured by anyone — it can only be refused, and the refusal is the thing that does the damage.
+            // Both roles, one flag pair: the host stops relaying once it has announced, a client once it has
+            // applied. The gesture still runs LOCALLY (this is a capture seam, not a block) — it just stops
+            // reaching the wire.
+            if (TacticalTurnSync.BattleAlreadyScored)
+            {
+                if (_saidKeyless.Add("scored"))
+                    Debug.Log("[Multiplayer][tac] this mission is already scored — commands are no longer " +
+                              "relayed from this peer (law L334). Whatever is still being pressed here runs " +
+                              "locally on a battle every peer has finished counting.");
+                return;
+            }
             var actor = ability == null ? null : ability.TacticalActorBase;
             if (actor == null) return;
             var faction = actor.TacticalFaction;
@@ -2021,6 +2037,27 @@ namespace Multiplayer.Tactical
         /// correcting.</summary>
         internal static void HostSettle(TacticalActorBase actor, bool forced = false)
         {
+            // NOTHING CORRECTS A BOARD THAT HAS ALREADY BEEN SCORED (law L334). A settle is a FULL-STATE
+            // snapshot — position, AP, WP, statuses, traits, selected weapon — so it does not "roll back the
+            // refused command", it overwrites the actor with whatever the host reads at that instant. After
+            // the mission end that instant is a torn-down board, and the overwrite lands on peers that have
+            // already scored. Live 2026-08-08, the 3-vs-2 evacuation count: the client evacuated a soldier
+            // (`applied [0@Evacuated_StatusDef||]`, its own log :2335), the host ended the mission (:2337),
+            // the client then sent ONE duplicate ExitMission press (:2338, nonce=131), the host refused it
+            // ("it is not that faction's turn on the host") — and the REJECT'S ROLLBACK SETTLE stripped the
+            // evacuation right back off (:2340 `applied [] removed [0@Evacuated_StatusDef||]`, the last
+            // Evacuated line in the whole log). EvacuateFactionObjective then counted one evacuee fewer on
+            // that peer and the XP followed. This is the guard for the CLASS, not for that status def: any
+            // trailing settle — reject rollback, end-of-action rider, a queued one — is a peer's score being
+            // rewritten after the fact.
+            if (TacticalTurnSync.MissionEndSent)
+            {
+                Debug.Log("[Multiplayer][tac] settle for " + SafeActorName(actor) + " WITHHELD — this mission " +
+                          "is already scored. The mission-end sweep was the host's last word about this board " +
+                          "(law L334); anything after it would overwrite a result every peer has already " +
+                          "counted" + (forced ? " (this one was FORCED, i.e. a reject rollback)" : "") + ".");
+                return;
+            }
             var tacActor = actor as TacticalActor;
             if (tacActor == null) return;                 // no CharacterStats to settle (structural targets, etc.)
             int key = TacticalActorKey.Of(tacActor);

@@ -310,6 +310,7 @@ namespace RailCheck
             Add(laws, () => L327_AViewSettingNeverRidesTheCampaignRail.Check());
             Add(laws, () => L328_ARestartTakesEveryPeerOrNobody.Check());
             Add(laws, () => L329_ThePeersScoreTheHostsBoard.Check(game));
+            Add(laws, () => L334_AScoredBoardIsNeverRewritten.Check());
             Add(laws, () => L330_AFactionsUnlockTagsReachEveryPeer.Check());
             Add(laws, () => L331_AListApplyKeepsTheObjectTheGameReads.Check());
             Add(laws, () => L332_AnAnswerWindowIsNotHeldBehindItsOwnScreen.Check());
