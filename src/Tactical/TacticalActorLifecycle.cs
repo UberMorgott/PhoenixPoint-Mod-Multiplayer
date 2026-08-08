@@ -177,6 +177,48 @@ namespace Multiplayer.Tactical
             return false;
         }
 
+        /// <summary>THE MID-BATTLE ENTER-PLAY WINDOW (law L339). A mid-battle spawn is KEYLESS for the whole
+        /// of its own <c>DoEnterPlay</c>, and that is not a bug to be minted away — it is forced from both ends:
+        ///
+        ///   • EARLIER IS UNSOUND. <c>GeoUnitId</c> is stamped at <c>TacticalActorBase.ProcessInstanceData</c>
+        ///     :399, reached from <c>ActorComponent.DoEnterPlay</c>:120 — INSIDE the body. A prefix that minted
+        ///     would read 0 for an actor that has a real cross-layer identity and stamp a derived ordinal over
+        ///     it, which is the one thing <see cref="TacticalActorKey.AssignHostKey"/> exists to refuse.
+        ///   • AND RELAYING EARLY IS WORSE. The record that NAMES this actor rides 0x84
+        ///     (<c>SurfaceIds.TacResult</c>) and is only assembled in <see cref="OnActorEnteredPlay"/>, after
+        ///     <c>FinalizeEnterPlay</c> — that is where TFTV's champ roll lands. Every capture seam that fires
+        ///     during enter-play ships on 0x82 (<c>SurfaceIds.TacCommand</c>): a DIFFERENT seq stream, so a
+        ///     message about the actor emitted here can overtake its own spawn and land on a peer that has
+        ///     never heard of the key.
+        ///
+        /// So nothing about the actor may ride out until the spawn record has. That was already true by
+        /// ACCIDENT — the key is 0, so every seam refused — and the accident is what made this expensive: the
+        /// refusals all read "that actor has no shared key at all, and the battle key map IS built … it entered
+        /// play on this peer alone", a claim of PERMANENT roster divergence about a 40 ms window. Live
+        /// 2026-08-08, one mission: eight of them (multiplayer.log:2468/2652/2953/3129/3279/3657/3877/4213),
+        /// each followed 30-60 ms later by that very actor's own <c>HOST spawn … key=-149…-156</c>. Every one
+        /// was a false alarm, and they were read as evidence of a lost spawn-key mechanism.
+        ///
+        /// The window is therefore DECLARED, with the scope the mirror side already uses: <see cref="ApplySpawn"/>
+        /// rebuilds the same actor inside <c>SyncApplyScope</c>, so host and client now run a mid-battle spawn's
+        /// enter-play under the same rule. It changes no shipped byte (everything it silences was refused for
+        /// key 0 anyway) and it closes the CLASS — equipment selection, statuses, inventory and any seam added
+        /// later — instead of one message. The state itself is not lost: the client's own enter-play reproduces
+        /// it from the same def, and the turn-edge settle sweep (L123) carries the host's answer afterwards.
+        ///
+        /// NOT ARMED AT BATTLE START, and that gate is load-bearing: before <c>Built</c> the selection seam
+        /// PENDS its raise and <c>BuildBattleKeys</c> flushes it, so suppressing it there would drop the
+        /// mission-entry selections for good (L186).</summary>
+        internal static IDisposable HoldMidBattleEnterPlay(ActorComponent component)
+        {
+            if (!(component is TacticalActor)) return null;
+            if (!TacticalActorKey.Built) return null;    // battle start: selections PEND, they must reach the seam
+            if (SpawnApplyScope.Active) return null;     // a mirror's rebuild already holds the scope
+            var engine = TacticalDamageSync.LiveEngine();
+            if (engine == null || !engine.IsHost) return null;
+            return SyncApplyScope.Enter();
+        }
+
         /// <summary>The enter-play POSTFIX, host side: mint the key and ship the actor. Harmony runs a postfix
         /// even when a prefix skipped the original, so the FIRST thing this asks is whether the actor really
         /// entered play — <c>InPlay</c> is the game's own answer and it is false for a contained spawn.</summary>
@@ -621,9 +663,27 @@ namespace Multiplayer.Tactical
     [HarmonyPatch(typeof(ActorComponent), nameof(ActorComponent.DoEnterPlay))]
     internal static class ActorEnterPlaySeam
     {
-        private static bool Prefix(ActorComponent __instance) => TacticalActorLifecycle.OnActorEnteringPlay(__instance);
+        private static bool Prefix(ActorComponent __instance, out IDisposable __state)
+        {
+            // BEFORE the containment decision, and it survives it: a contained spawn still runs its
+            // components' OnEnterPlay on the way to being refused, and those raises are exactly as
+            // un-announceable as an accepted spawn's. See HoldMidBattleEnterPlay.
+            __state = TacticalActorLifecycle.HoldMidBattleEnterPlay(__instance);
+            return TacticalActorLifecycle.OnActorEnteringPlay(__instance);
+        }
 
         private static void Postfix(ActorComponent __instance) => TacticalActorLifecycle.OnActorEnteredPlay(__instance);
+
+        /// <summary>A FINALIZER, not a second postfix line: a postfix does not run when the original throws,
+        /// and a leaked depth on <c>SyncApplyScope</c> would silently suppress every intent capture on this
+        /// peer until the next session reset — the dominant bug class of this repo with no log line at all.
+        /// Runs after the postfix, so the mint and the spawn record are still inside the window they close.
+        /// <c>__exception</c> is returned unchanged: a finalizer that returns null SWALLOWS the throw.</summary>
+        private static Exception Finalizer(Exception __exception, IDisposable __state)
+        {
+            if (__state != null) __state.Dispose();
+            return __exception;
+        }
     }
 
     /// <summary>

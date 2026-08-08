@@ -292,12 +292,14 @@ namespace RailCheck
             {
                 const int key = 4242;
                 // Trailing args are the settle's carried STATE (statuses, ability traits, selected equipment,
-                // per-turn ability uses, TFTV champ identity — L131/L137/L186/L242/L262). All empty here: this
-                // arm is about which ENTRY survives, not what rides in it.
+                // per-turn ability uses, TFTV champ identity, the host's per-faction known-state —
+                // L131/L137/L186/L242/L262/L338). All empty here: this arm is about which ENTRY survives, not
+                // what rides in it, and giving the two settles different vision rows would assert a fact this
+                // law does not own (L338 owns it, and executes it against the game's own counters).
                 queue.Invoke(null, new object[] { key, new Vector3(1f, 0f, 1f), 9f, 5f, false,
-                                                  new List<string>(), new List<string>(), null, null, null });
+                                                  new List<string>(), new List<string>(), null, null, null, null });
                 queue.Invoke(null, new object[] { key, new Vector3(2f, 0f, 2f), 1f, 5f, false,
-                                                  new List<string>(), new List<string>(), null, null, null });
+                                                  new List<string>(), new List<string>(), null, null, null, null });
 
                 var entry = pending[key];
                 var ap = entry == null ? null : entry.GetType().GetField("Ap", AllMembers);
