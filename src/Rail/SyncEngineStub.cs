@@ -126,6 +126,11 @@ namespace Multiplayer.Network.Sync
                                 "resnapshot after a turn-epoch hold ceiling");
             }
             ManufactureSync.HostTick(_engine);
+            // client-only in effect: release the ONE held appearance edit once the player stopped moving the
+            // customization control. A trailing-edge debounce has nothing to ride out to on its own, so the
+            // flush lives here rather than on the screen's ExitState — the held value then lands whether or
+            // not that screen is ever closed the way the state machine expects.
+            PersonnelSync.CustomizeTick();
             MistSync.Tick(_engine); // host: recompute the "M#mist" payload; client: hand it to the native loader
             // host-only inside: one decrement per real second of the deployment countdown, and the launch it
             // releases. Driven HERE and not from any screen, so it completes whether or not a single peer is

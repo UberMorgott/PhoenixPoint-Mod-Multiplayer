@@ -1316,6 +1316,34 @@ namespace Multiplayer.Network.Sync
         /// is the exact failure this whole file is written against.</summary>
         private static NetworkEngine _customizeCacheOwner;
 
+        /// <summary>The one held appearance edit (see <see cref="CustomizeCoalescer"/>).</summary>
+        private static readonly CustomizeCoalescer _customizePending = new CustomizeCoalescer();
+
+        /// <summary>Point both per-session customize caches at the LIVE engine, dropping what belonged to
+        /// the previous one. Called from BOTH ends — the capture (which owns <see cref="_lastCustomizeSent"/>)
+        /// and the per-frame flush (the only one of the two that still runs after a session ends, and
+        /// therefore the only one that can catch a held edit whose host is gone). A dropped edit is
+        /// ANNOUNCED: this is the one place the coalescer is allowed to lose a write, so it may not do it
+        /// quietly.</summary>
+        private static void CustomizeCacheReconcile(NetworkEngine engine)
+        {
+            if (ReferenceEquals(_customizeCacheOwner, engine)) return;
+            _customizeCacheOwner = engine;
+            _lastCustomizeSent.Clear();
+            var stale = _customizePending.Drain();
+            if (stale != null)
+                Debug.Log("[MP][personnel] customize U#" + stale.Id + " (" + stale.Why + ") dropped after " +
+                          stale.Captures + " capture(s) — it was held for the previous session's host");
+        }
+
+        private static void SendCustomize(CustomizeCoalescer.Held held)
+        {
+            IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpCustomize,
+                "customize U#" + held.Id + " (" + held.Why + ", settled after " + held.Captures + " tick" +
+                (held.Captures == 1 ? "" : "s") + ")",
+                w => { w.Write(held.Id); w.Write(held.Body); });
+        }
+
         private static void ShipCustomize(GeoCharacter character, string why)
         {
             if (character == null) return;
@@ -1327,7 +1355,7 @@ namespace Multiplayer.Network.Sync
             if (identity == null) return;
             try
             {
-                if (!ReferenceEquals(_customizeCacheOwner, engine)) { _customizeCacheOwner = engine; _lastCustomizeSent.Clear(); }
+                CustomizeCacheReconcile(engine);
 
                 byte[] body;
                 using (var ms = new MemoryStream())
@@ -1337,11 +1365,39 @@ namespace Multiplayer.Network.Sync
                 if (_lastCustomizeSent.TryGetValue(id, out var sent) && sent.SequenceEqual(body)) return;
                 _lastCustomizeSent[id] = body;
 
-                IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpCustomize,
-                    "customize U#" + id + " (" + why + ")",
-                    w => { w.Write(id); w.Write(body); });
+                // HOLD, don't send (see CustomizeCoalescer). The one thing that still goes out INSIDE the
+                // gesture is the previous soldier's edit when the player cycles to another one mid-screen:
+                // the hold is a single slot, so the character change is what evicts it, and it ships under
+                // ITS OWN id — never re-attributed to the soldier now on screen.
+                var superseded = _customizePending.Capture(id, body, why, Time.realtimeSinceStartup);
+                if (superseded != null) SendCustomize(superseded);
             }
             catch (Exception ex) { Debug.LogError("[MP][personnel] customize capture failed: " + ex); }
+        }
+
+        /// <summary>Per-frame, from SyncEngine.Tick: put the held appearance edit on the wire once the
+        /// player has stopped moving the control. DRIVEN FROM THE TICK AND NOT FROM THE SCREEN'S OWN
+        /// ExitState, deliberately — a trailing-edge debounce has no successor event to ride out to, so its
+        /// flush must come from something that runs whether or not the screen is ever closed the way the
+        /// state machine expects. The tick is that thing, and it is already here.</summary>
+        internal static void CustomizeTick()
+        {
+            var engine = NetworkEngine.Instance;
+            CustomizeCacheReconcile(engine);
+            var held = _customizePending.Settled(Time.realtimeSinceStartup);
+            if (held == null) return;
+            // Re-asked at flush time because the hold spans frames: the session can end, or a delta apply
+            // can be in progress, between the last control tick and here. Never a silent drop.
+            if (CustomizeShipDecision(engine != null && engine.IsActiveSession,
+                                      engine != null && engine.IsHost,
+                                      SyncApplyScope.Active) != CustomizeAction.Ship)
+            {
+                Debug.LogWarning("[MP][personnel] customize U#" + held.Id + " (" + held.Why + ") NOT sent after " +
+                                 held.Captures + " capture(s) — this peer is no longer a client with a live " +
+                                 "session to send it to");
+                return;
+            }
+            SendCustomize(held);
         }
 
         /// <summary>The customization funnel, soldier screen — see the block comment above. Postfix: the
@@ -1648,5 +1704,75 @@ namespace Multiplayer.Network.Sync
         private static void Reject(ulong peer, int charId, string why) =>
             IntentRail.Reject(SurfaceIds.GeoPersonnelIntent, peer, "char=U#" + charId + " — " + why,
                               charId >= 0 ? "U#" + charId : null);
+    }
+
+    /// <summary>
+    /// ONE held appearance edit, released once the player stops moving the control — the whole of the
+    /// customize rate fix, and PURE (no engine, no Unity clock: the caller passes <c>now</c>) so L340 can
+    /// drive a real burst against the real code instead of a copy of it.
+    ///
+    /// THE DEFECT IT ANSWERS (multiplayer.log:3357-3386, 2026-08-08): every control tick on the
+    /// customization screen calls <c>RefreshUnitDisplay</c>, and every call shipped a full 15-leaf identity
+    /// intent — 191 in one session, 27 of them in 15 seconds, gaps of 0.16-1.0 s. Each one made the host
+    /// replay the write, <c>FlushNow</c>, and mark every peer's open screen dirty, so the AUTHOR'S OWN
+    /// customization screen was Exit+Enter'd out from under the control he was still dragging: measured at
+    /// tickMax=103.8 ms then 122.5 ms with <c>worst=repaint</c> against a ~15 ms baseline, and it is the
+    /// window in which the "stuck gesture flag" backstop fired (:3349). Nobody needs to watch another
+    /// player's slider move; they need the value he stopped on.
+    ///
+    /// TRAILING EDGE ONLY, no leading edge. A leading send would halve nothing — the measured gaps are
+    /// mostly UNDER the settle window, so a throttle at the same period still emits once per period for
+    /// the whole gesture. Trailing-only collapses that 12-second burst to ONE intent, and costs the single
+    /// discrete gesture (a rename) <see cref="SettleSec"/> of latency, which nothing in this game observes.
+    ///
+    /// THE HOLD IS ONE SLOT, KEYED BY CHARACTER, and a capture for a DIFFERENT character evicts it rather
+    /// than overwriting it — the eviction is returned to the caller to send under the OLD id. That is what
+    /// keeps cycling to the next soldier mid-edit from attributing the previous soldier's appearance to
+    /// them. Nothing here can drop a write silently: eviction and settle both hand the value back, and
+    /// <see cref="Drain"/> is the only other exit (its caller logs it).
+    /// </summary>
+    internal sealed class CustomizeCoalescer
+    {
+        /// <summary>Quiet time before a held edit ships. Chosen against the measured burst above: the
+        /// longest gap inside it was 1.04 s, so a shorter window would have split that one gesture into
+        /// several intents for no gain, and a longer one only delays a value nobody is watching arrive.</summary>
+        internal const float SettleSec = 1.0f;
+
+        internal sealed class Held
+        {
+            internal int Id;
+            internal byte[] Body;
+            internal string Why;
+            internal float DueAt;
+            internal int Captures;
+        }
+
+        private Held _held;
+
+        /// <summary>Record one control tick. Returns the edit that must go out RIGHT NOW because this tick
+        /// belongs to a different character (never null-dropped), or null when the hold simply extended.</summary>
+        internal Held Capture(int id, byte[] body, string why, float now)
+        {
+            Held evicted = null;
+            if (_held != null && _held.Id != id) { evicted = _held; _held = null; }
+            if (_held == null) _held = new Held { Id = id };
+            _held.Body = body;
+            _held.Why = why;
+            _held.Captures++;
+            _held.DueAt = now + SettleSec;
+            return evicted;
+        }
+
+        /// <summary>The held edit once the gesture has settled, or null while it is still moving. Taking it
+        /// clears the hold, so one gesture ships exactly once.</summary>
+        internal Held Settled(float now)
+        {
+            if (_held == null || now < _held.DueAt) return null;
+            var held = _held; _held = null; return held;
+        }
+
+        /// <summary>Whatever is still held, due or not. For the session boundary only — the caller says so
+        /// in the log, because this is the one exit that does not lead to the wire.</summary>
+        internal Held Drain() { var held = _held; _held = null; return held; }
     }
 }
