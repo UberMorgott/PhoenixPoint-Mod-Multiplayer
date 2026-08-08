@@ -614,20 +614,21 @@ namespace Multiplayer.Tactical
             rt.offsetMax = Vector2.zero;
             rt.SetSiblingIndex(_labelDepth < 0 ? go.transform.childCount - 1 : _labelDepth);
             _green = overlay.GetComponent<Image>();
-            _green.color = MineGreen;
+            _green.color = AllGreen;
             _green.raycastTarget = false;
             _green.enabled = false;
         }
 
-        /// <summary>"I have pressed it" — the muted shade for this peer's own flag. NOT "the shade the button
-        /// has always shown", which this comment used to claim: the button was unclickable in every build
-        /// between the overlay's introduction (<c>03a8ccc</c>) and 2026-08-08, so neither shade has ever been
-        /// seen by anyone. The alpha belongs to the OVERLAY; the native tint takes the same RGB at alpha 1
-        /// (see <see cref="Repaint"/>), because there it multiplies the prefab's own sprites and a fractional
-        /// alpha would make the button's frame translucent rather than green.</summary>
-        private static readonly Color MineGreen = new Color(0.16f, 0.70f, 0.24f, 0.55f);
-
-        /// <summary>"EVERYBODY has pressed it" — the loud shade, because that is the state the developer
+        /// <summary>"EVERYBODY has pressed it" — THE ONLY GREEN, and that is the whole point (2026-08-08).
+        /// There used to be a second, muted <c>MineGreen</c> for "I have pressed it", latched by
+        /// <c>mine || all</c> — so the button went green the instant THIS player pressed, which is the exact
+        /// opposite of the fact it exists to announce. Green now means all-ready and nothing else; "I have
+        /// pressed it" is carried by the caption ("READY N/M" vs "READY? N/M") and by the player panel's tick
+        /// marks, neither of which can be mistaken for the full table. The alpha belongs to the OVERLAY; the
+        /// native tint takes the same RGB at alpha 1 (see <see cref="Repaint"/>), because there it multiplies
+        /// the prefab's own sprites and a fractional alpha would make the frame translucent, not green.
+        ///
+        /// The loud shade, because that is the state the developer
         /// asked to be unmissable: nobody should sit waiting on a table that is already full.
         ///
         /// IT PAINTS AND IT DOES NOTHING ELSE. This is the exact shade a quorum would wear, so say the
@@ -742,27 +743,30 @@ namespace Multiplayer.Tactical
             // THE ONLY BRANCH THIS COUNT IS EVER ALLOWED TO FEED, AND IT FEEDS A COLOUR. `total > 0` is not
             // caution about division — it is the pre-tally state (0/0), which would otherwise read as
             // "everyone is ready" before a single tally has landed. Recomputed on every repaint, so it drops
-            // back to the muted shade by itself the moment a peer un-readies or the round edge zeroes the
+            // back to the prefab's own shade by itself the moment a peer un-readies or the round edge zeroes the
             // flags; there is no separate "revert" path to forget to call.
             bool all = total > 0 && ready >= total;
             string label = (mine ? "READY " : "READY? ") + ready + "/" + total;
             for (int i = 0; i < _setters.Count; i++) _setters[i](label);
 
-            bool latched = mine || all;
-            var shade = all ? AllGreen : MineGreen;
+            // GREEN MEANS EVERYBODY, NOT ME. The latch follows `all` alone: `mine` never colours the button,
+            // because a peer who sees green the moment he presses learns nothing he did not already know and
+            // is told the table is full when it is not. `mine` still moves the caption one character
+            // ("READY N/M" vs "READY? N/M") — that is the self-pressed indication, and it is deliberately
+            // not a colour.
             if (_green != null)
             {
-                _green.enabled = latched;
-                _green.color = shade;
+                _green.enabled = all;
+                _green.color = AllGreen;
             }
-            // THE NATIVE HALF. Same two shades at full alpha — here they MULTIPLY the prefab's own sprites,
+            // THE NATIVE HALF. The same shade at full alpha — here it MULTIPLIES the prefab's own sprites,
             // so a fractional alpha would read as a see-through button rather than a green one. Restored to
-            // the shade the prefab shipped with whenever the latch is off, so pressing a not-ready button
-            // flashes its own colour and not this feature's.
-            var tint = new Color(shade.r, shade.g, shade.b, 1f);
+            // the shade the prefab shipped with whenever the latch is off, so a plain press on a table that
+            // is not yet full flashes the button's own colour and not this feature's.
+            var tint = new Color(AllGreen.r, AllGreen.g, AllGreen.b, 1f);
             for (int i = 0; i < _tintDefs.Count; i++)
-                _tintDefs[i].PressedColor = latched ? tint : _tintPressed[i];
-            if (_latch != null) _latch.IsOn = latched;
+                _tintDefs[i].PressedColor = all ? tint : _tintPressed[i];
+            if (_latch != null) _latch.IsOn = all;
             // THE REPAINT SEAM, AND THE REASON IT IS AN EXPLICIT CALL. PhoenixGeneralButton.Update repaints
             // only when a VISUAL state changed (PhoenixGeneralButton.cs:147-156) — a tally arriving off the
             // rail is not one, so the open HUD would keep last frame's colour until the player happened to
@@ -770,7 +774,7 @@ namespace Multiplayer.Tactical
             // -> GetColor -> IsSelectedTab -> PressedColor) is what makes an ALREADY-OPEN screen go green on
             // the beat the tally lands, which is this mod's first postulate.
             if (_button != null) _button.UpdateColorElements();
-            ReportGreen(latched, all);
+            ReportGreen(all);
         }
 
         /// <summary>
@@ -787,15 +791,14 @@ namespace Multiplayer.Tactical
         /// press, a tally or a round edge, never per frame, and this line speaks only when what it would
         /// print differs from what it printed last.
         /// </summary>
-        private static void ReportGreen(bool latched, bool all)
+        private static void ReportGreen(bool all)
         {
             string state = _green == null
                 ? "overlay=<none built>"
                 : "overlay enabled=" + _green.enabled + " color=" + _green.color + " depth=" + _green.depth +
                   " cull=" + _green.canvasRenderer.cull + " sibling=" + _green.transform.GetSiblingIndex();
             state += " | native latch IsOn=" + (_latch == null ? "<no ToggleButton>" : _latch.IsOn.ToString()) +
-                     " over " + _tintDefs.Count + " tinted def(s), state=" +
-                     (latched ? (all ? "ALL-READY" : "mine") : "off");
+                     " over " + _tintDefs.Count + " tinted def(s), state=" + (all ? "ALL-READY" : "off");
             if (state == _lastGreenState) return;
             _lastGreenState = state;
             Debug.Log("[Multiplayer][tac] ready button green: " + state +
