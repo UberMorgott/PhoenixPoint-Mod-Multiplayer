@@ -280,9 +280,18 @@ namespace Multiplayer.Network.Sync
                         Debug.Log("[MP][vehicle] CLIENT loadout write on " + vehicleRef + " BLOCKED — not a player aircraft, nothing to relay");
                     return false;
                 }
-                byte[] body = EncodeSlots(weapons, modules);
-                byte[] canon = EncodeSlots(vehicle.Weapons, vehicle.Modules);
-                if (RailMeta.BytesEqual(body, canon)) return false; // this flush changes nothing — zero traffic
+                byte[] body = EncodeSlots(weapons, modules, GuidOfSlot);
+                byte[] canon = EncodeSlots(vehicle.Weapons, vehicle.Modules, GuidOfSlot);
+                // "Changes nothing" is a question about the FILLED slots, and only those: the UI's list
+                // carries one entry per SLOT (a null per empty one, UIStateVehicleRoster
+                // .UpdateVehicleEquipments:246-272) while the vehicle's own list is COMPACT after a load
+                // (GeoVehicle.AddNullWeapon has no caller but ReplaceEquipments, decompile
+                // GeoVehicle.cs:884-897). Compared raw, a compact canon can never be byte-equal to a
+                // capacity-shaped body, so every roster exit shipped an intent for an aircraft nobody had
+                // edited — the nonce=1 in the join log.
+                if (RailMeta.BytesEqual(EncodeSlots(weapons, modules, GuidOfSlot, filledOnly: true),
+                                        EncodeSlots(vehicle.Weapons, vehicle.Modules, GuidOfSlot, filledOnly: true)))
+                    return false; // this flush changes nothing — zero traffic
                 // THE GATE, taken one round trip early and from the SAME predicate the host validates with.
                 // It has to live HERE and not on the screen because the screen is not the only caller:
                 // UIStateVehicleRoster.ExitState:128-131 flushes UpdateVehicleEquipmentAndStorage on EVERY
@@ -379,20 +388,54 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>Slot list → wire body: two counted runs of def guids, "" for an empty slot. Also the
         /// CANON encoder the repeat guard compares against, so both sides of that comparison are produced
-        /// by one function.</summary>
-        private static byte[] EncodeSlots(IEnumerable<GeoVehicleEquipment> weapons, IEnumerable<GeoVehicleEquipment> modules)
+        /// by one function.
+        ///
+        /// The wire body stays CAPACITY-shaped on purpose — its empty slots are the only evidence of slot
+        /// capacity the host ever receives (capacity is a PREFAB fact,
+        /// <c>UIVehicleEquipmentInventoryList.Slots</c>, carried by no def and no model member), and
+        /// <see cref="TakeSlots"/> turns each "" straight back into a null slot. <paramref name="filledOnly"/>
+        /// is the shape-proof projection for COMPARING two loadouts whose shapes may differ.</summary>
+        /// <summary>An empty slot's guid. THE definition of "empty", used by every arm below, so the encoder,
+        /// the no-op compare and the capacity arithmetic cannot disagree about what an empty slot is.</summary>
+        internal static string GuidOfSlot(GeoVehicleEquipment e) => e?.EquipmentDef == null ? "" : e.EquipmentDef.Guid;
+
+        /// <summary>Generic in the slot type for the SAME reason <see cref="TakeSlots"/> is (RailCheck L32):
+        /// a live <c>GeoVehicleEquipment</c> needs a DefRepository, so the law drives the real function with
+        /// plain guid strings.</summary>
+        internal static byte[] EncodeSlots<T>(IEnumerable<T> weapons, IEnumerable<T> modules, Func<T, string> guidOf,
+                                              bool filledOnly = false)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
             {
                 foreach (var list in new[] { weapons, modules })
                 {
-                    var slots = list == null ? new List<GeoVehicleEquipment>() : list.ToList();
+                    var guids = (list ?? Enumerable.Empty<T>()).Select(guidOf).Select(g => g ?? "");
+                    if (filledOnly) guids = guids.Where(g => g.Length > 0);
+                    var slots = guids.ToList();
                     w.Write((ushort)slots.Count);
-                    foreach (var s in slots) w.Write(s?.EquipmentDef == null ? "" : s.EquipmentDef.Guid);
+                    foreach (var g in slots) w.Write(g);
                 }
                 return ms.ToArray();
             }
+        }
+
+        /// <summary>Requested slot count vs the vehicle's, in the ONE case where the two are the same unit.
+        /// A capacity comparison needs a live list the UI itself shaped — one that still carries its empty
+        /// slots — because capacity lives in the roster PREFAB and nowhere in the model or the defs. A list
+        /// with no empty slot is either full (nothing to compare) or COMPACT because it came off a save
+        /// (GeoVehicle.AddNullWeapon has no caller but ReplaceEquipments, decompile GeoVehicle.cs:884-897),
+        /// and there the host has no capacity to compare against at all. It abstains rather than subtracting
+        /// two different units: the raw arithmetic refused a perfectly legal edit as "slot count off by 2"
+        /// (1 weapon + 2 empty module slots against a host list holding 1 item), and would go on refusing
+        /// every edit to every aircraft the host had not itself opened the roster on this session.
+        /// Generic in the slot type for the same reason <see cref="TakeSlots"/> is — RailCheck L366 drives
+        /// this exact function with plain guid strings.</summary>
+        internal static int CapacityDelta<T>(int wantSlots, IEnumerable<T> live, Func<T, string> guidOf)
+        {
+            var slots = (live ?? Enumerable.Empty<T>()).ToList();
+            if (!slots.Any(s => string.IsNullOrEmpty(guidOf(s)))) return 0;
+            return wantSlots - slots.Count;
         }
 
         private static List<string> ReadSlots(BinaryReader r)
@@ -505,7 +548,8 @@ namespace Multiplayer.Network.Sync
                     // The SAME predicate the sending client gated itself with (CaptureEquip) — one copy.
                     Docked = IsDocked(vehicle),
                     SlotCountDelta = vehicle == null ? 0
-                        : (wantWeapons.Count + wantModules.Count) - (vehicle.Weapons.Count() + vehicle.Modules.Count()),
+                        : CapacityDelta(wantWeapons.Count, vehicle.Weapons, GuidOfSlot) +
+                          CapacityDelta(wantModules.Count, vehicle.Modules, GuidOfSlot),
                 });
                 if (why != null) { Reject(senderPeerId, vehicleRef, "loadout: " + why); return; }
 
@@ -518,7 +562,7 @@ namespace Multiplayer.Network.Sync
                 var modulePool = vehicle.Modules.Where(x => x != null).ToList();
                 List<GeoVehicleEquipment> newWeapons = new List<GeoVehicleEquipment>(), newModules = new List<GeoVehicleEquipment>();
                 List<bool> wFromStorage = new List<bool>(), mFromStorage = new List<bool>();
-                Func<GeoVehicleEquipment, string> guidOf = e => e.EquipmentDef == null ? "" : e.EquipmentDef.Guid;
+                Func<GeoVehicleEquipment, string> guidOf = GuidOfSlot;   // ONE definition of "empty slot"
 
                 why = TakeSlots(wantWeapons, weaponPool, storagePool, guidOf, newWeapons, wFromStorage)
                       ?? TakeSlots(wantModules, modulePool, storagePool, guidOf, newModules, mFromStorage);
