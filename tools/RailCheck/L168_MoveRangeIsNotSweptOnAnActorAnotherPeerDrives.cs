@@ -139,7 +139,7 @@ namespace RailCheck
                 yield return "L168 prefix-cannot-withhold: the patch method no longer returns bool, so it cannot " +
                              "skip the original. Harmony runs the engine's body regardless and the gate is a " +
                              "log line attached to the storm it was meant to stop.";
-            if (!Program.Callees(prefix, cmd.Assembly).Any(c => c.MetadataToken == decision.MetadataToken))
+            if (!Reaches(prefix, decision, cmd.Assembly))
                 yield return "L168 gate-is-decorative: the prefix no longer consults MovePollMustBeWithheld, so " +
                              "every arm above is proved about a decision the live seam does not make. This is " +
                              "the shape this repo keeps paying for (L132, four days green while the gate it " +
@@ -151,6 +151,28 @@ namespace RailCheck
                              "non-null sequence. UIStateCharacterSelected.ValidMoves:156 calls .ToList() on " +
                              "whatever comes back, so null throws inside the game's own property — trading a " +
                              "logged error for an unhandled one.";
+        }
+
+        /// <summary>DOES THE SEAM REACH THE DECISION — directly, or through ONE of our own helpers.
+        ///
+        /// AMENDED 2026-08-08, and this is the amendment L80 taught: arm (d) used to demand the decision be
+        /// called from the prefix ITSELF, which is a shape we control, not an outcome. L310 then had to give the
+        /// withhold a SECOND caller — the postfix that feeds <c>MoveAbilitySceneViewElement.ValidMoves</c> an
+        /// empty list instead of the null the withhold makes it return — and the only way to keep those two
+        /// asking ONE question is a shared <c>SweepIsWithheldFor</c>. The old arm turned red on the fix, while
+        /// the property it was written to protect (the live seam consults the decision) had never been
+        /// stronger. One hop is deliberate and not "any depth": it keeps the arm able to catch a prefix that
+        /// wanders off to some unrelated predicate, which is the failure it exists for.</summary>
+        private static bool Reaches(MethodBase seam, MethodBase decision, Assembly ours)
+        {
+            foreach (var direct in Program.Callees(seam, ours))
+            {
+                if (direct.MetadataToken == decision.MetadataToken) return true;
+                if (direct.DeclaringType == null || direct.DeclaringType.Assembly != ours) continue;
+                if (Program.Callees(direct, ours).Any(c => c.MetadataToken == decision.MetadataToken))
+                    return true;
+            }
+            return false;
         }
     }
 }

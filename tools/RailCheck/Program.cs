@@ -290,6 +290,7 @@ namespace RailCheck
             Add(laws, () => L290_TheClientsExplorationCannotFinishFirst.Check(game));
             Add(laws, () => L291_AMirroredActorClockDecidesNothingLocally.Check(game));
             Add(laws, () => L300_RenderedTextSurvivesTheWire.Check());
+            Add(laws, () => L310_TheMoveOverlayNeverReadsANullSweep.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

@@ -18,6 +18,7 @@ using PhoenixPoint.Tactical.Entities.Abilities;
 using PhoenixPoint.Tactical.Entities.Equipments;
 using PhoenixPoint.Tactical.Entities.Statuses;
 using PhoenixPoint.Tactical.Levels;
+using PhoenixPoint.Tactical.UI;
 using UnityEngine;
 
 namespace Multiplayer.Tactical
@@ -2856,6 +2857,71 @@ namespace Multiplayer.Tactical
                                                     bool drivenByAnotherPeer) =>
             inSharedBattle && engineSaysItIsExecuting && drivenByAnotherPeer;
 
+        /// <summary>THE SAME QUESTION, ASKED FROM TWO SEAMS. The withhold (the prefix on
+        /// <c>MoveAbility.GetTargetsData</c>) and the feed (the postfix on
+        /// <c>MoveAbilitySceneViewElement.ValidMoves</c>) MUST agree frame for frame, or the overlay is fed an
+        /// empty list on a frame the sweep ran, or left null on a frame it did not. One method, both callers —
+        /// L310 asserts both route through it, because two copies of a three-axis predicate is exactly how they
+        /// drift apart.</summary>
+        internal static bool SweepIsWithheldFor(MoveAbility ability)
+        {
+            try
+            {
+                var actor = ability == null ? null : ability.TacticalActor;
+                if (actor == null) return false;
+                // The engine's OWN condition, with the engine's OWN two exceptions (GetTargetsData:165-172).
+                var ignored = new TacticalAbility[]
+                {
+                    actor.GetAbility<PanicAbility>(),
+                    actor.GetAbility<AIEvaluationAbility>()
+                };
+                var engine = NetworkEngine.Instance;
+                return MovePollMustBeWithheld(engine != null && engine.IsActiveSession,
+                                              actor.HasExecutingAbility(ignored),
+                                              TacticalActorDrive.DrivenByAnotherPeer(actor));
+            }
+            catch { return false; }   // a presentation gate alters NOTHING when it cannot answer (P4c)
+        }
+
+        /// <summary>MUST THE MOVE OVERLAY BE HANDED AN EMPTY SWEEP INSTEAD OF THE ENGINE'S NULL — pure, so
+        /// RailCheck L310 executes the outcome rather than asserting a call.
+        ///
+        /// THE WITHHELD EMPTY ARRAY WAS NOT ENOUGH, AND IT WAS THE PROXIMATE CAUSE. <c>MoveAbility</c>:26
+        /// declares <c>HasValidTargets =&gt; GetTargetsData().Any()</c>, and <c>TacticalAbility</c>:465-468
+        /// turns <c>!HasValidTargets</c> into <c>AbilityDisabledState.NoValidTarget</c> — so the instant
+        /// <see cref="MovePollMustBeWithheld"/> answers "withhold", the ability reports NOT ENABLED, and
+        /// <c>MoveAbilitySceneViewElement.ValidMoves</c>:69-79 answers <c>null</c> rather than a list.
+        ///
+        /// That property is re-read INSIDE a running coroutine, AFTER its yields:
+        /// <c>UpdateMoveAreas</c>:237, :243, :253, :259, whose only guard (<c>HasValidMoves</c>, :223) runs once
+        /// before the first yield. So a sweep that was legal when the draw started and withheld one frame later
+        /// hands <c>Enumerable.Where</c> a null source — <c>ArgumentNullException: … Parameter name: source</c>
+        /// on <c>&lt;UpdateMoveAreas&gt;d__36.MoveNext</c>, four times in one client's log (02:41:56, 02:45:15,
+        /// 02:47:20, 02:48:41), each followed by Unity's <c>Broken coroutine call chain</c>, which ABORTS the
+        /// chain — everything downstream of that coroutine stops for the rest of the battle.
+        ///
+        /// WHY FEED AND NOT STOP. Stopping the coroutine cannot fix the frame that throws: the withheld sweep is
+        /// reached from <em>inside</em> the same <c>ValidMoves</c> read (:73 evaluates <c>IsEnabled()</c> first),
+        /// so by the time our seam can see it, the getter is already committed to returning <c>null</c> to a
+        /// caller two instructions away. Feeding an EMPTY list there is the whole fix and it needs no
+        /// cancellation machinery: the loop then finds no moves (:240 <c>flag</c> false), <c>UpdateMoveArea</c>
+        /// :268-271 yield-breaks on an empty list, and the coroutine ends normally having drawn nothing over the
+        /// <c>ClearGroundMarkers</c> it already did at :227 — which IS the blank overlay the withhold promises.
+        /// The native lifecycle needs no help either: every LATER restart (<c>UIStateCharacterSelected</c>:1165
+        /// <c>StartDrawing</c> → <c>DrawTargetMarkers</c>, :214, :255, :757) re-enters <c>UpdateMoveAreas</c>:223,
+        /// where <c>HasValidMoves</c> is now false and it yield-breaks BEFORE its first yield.
+        ///
+        /// IT IS NOT SPECIFIC TO A MIRRORED MOVE. The seam is the property, not the release: it holds for every
+        /// path that can take this peer's UI off an actor mid-sweep — <c>ApplyActivate</c>'s release for ANY
+        /// mirrored ability, the FORCED settle's release, and the standing case L168 exists for, where nothing
+        /// released anything and the player simply re-selected a soldier another peer drives.
+        ///
+        /// <paramref name="engineAnsweredNull"/> keeps the engine's own nulls untouched: outside the withhold
+        /// (a solo game, this peer's own order, an actor with no AP left) <c>null</c> is the game's answer and
+        /// its callers were written for it.</summary>
+        internal static bool MoveOverlayMustNotSeeNull(bool sweepWithheld, bool engineAnsweredNull) =>
+            sweepWithheld && engineAnsweredNull;
+
         internal static void ReleaseLocalUiHolding(TacticalActorBase actor, string why)
         {
             if (actor == null) return;
@@ -3846,16 +3912,7 @@ namespace Multiplayer.Tactical
             try { actor = __instance == null ? null : __instance.TacticalActor; }
             catch { return true; }   // a presentation gate alters NOTHING when it cannot answer (P4c)
             if (actor == null) return true;
-            // The engine's OWN condition, with the engine's OWN two exceptions (GetTargetsData:165-172).
-            var ignored = new TacticalAbility[]
-            {
-                actor.GetAbility<PanicAbility>(),
-                actor.GetAbility<AIEvaluationAbility>()
-            };
-            var engine = NetworkEngine.Instance;
-            if (!TacticalCommandSync.MovePollMustBeWithheld(engine != null && engine.IsActiveSession,
-                                                            actor.HasExecutingAbility(ignored),
-                                                            TacticalActorDrive.DrivenByAnotherPeer(actor)))
+            if (!TacticalCommandSync.SweepIsWithheldFor(__instance))
             {
                 _withheld.Remove(actor);
                 return true;
@@ -3869,6 +3926,68 @@ namespace Multiplayer.Tactical
                           "soldier is unaffected and nothing else about this peer's screen changes.");
             __result = Nothing;
             return false;
+        }
+
+        private static string SafeName(TacticalActorBase actor)
+        {
+            try { return actor.name; } catch { return "<an actor>"; }
+        }
+    }
+
+    /// <summary>THE OTHER HALF OF THE WITHHOLD, and the half that keeps Unity's coroutine chain alive
+    /// (<see cref="TacticalCommandSync.MoveOverlayMustNotSeeNull"/> carries the full reasoning).
+    ///
+    /// The sibling above answers an EMPTY sweep, which the engine immediately reads as
+    /// <c>AbilityDisabledState.NoValidTarget</c> (<c>MoveAbility</c>:26 → <c>TacticalAbility</c>:465-468) — so
+    /// <c>ValidMoves</c>:69-79 starts answering <c>null</c> to a coroutine that already passed its only guard
+    /// (<c>UpdateMoveAreas</c>:223) and re-reads the property after every yield (:237, :243, :253, :259). One
+    /// null there is an <c>ArgumentNullException</c> out of <c>Enumerable.Where</c> and Unity's
+    /// <c>Broken coroutine call chain</c>, which aborts the chain for the rest of the battle. This postfix hands
+    /// that read an EMPTY list instead, so the coroutine finishes normally having drawn nothing.
+    ///
+    /// A POSTFIX ON THE GETTER, not a rewrite of it: the engine's own null is left alone everywhere else, and
+    /// the getter is the one place ALL of those reads route through — so this covers every path that takes this
+    /// peer's UI off an actor mid-sweep (any mirrored ability's release, the forced settle's release, and the
+    /// standing L168 case where the player merely re-selected), not the mirrored Move that was reported.</summary>
+    [HarmonyPatch(typeof(MoveAbilitySceneViewElement), "ValidMoves", MethodType.Getter)]
+    internal static class TheMoveOverlayIsNeverHandedANullSweep
+    {
+        // NEVER a fabricated target: an empty list draws nothing, a populated one would paint move tiles the
+        // player cannot use and TacticalActorDrive.RefuseLocalCommand would refuse (L146). L310 arm (d).
+        private static readonly List<MoveAbilityTargetData> Empty = new List<MoveAbilityTargetData>();
+
+        // ONE LINE PER EPISODE, like the withhold's own: the getter is read several times a frame and the
+        // withholding lasts as long as the other peer's order. Cleared on the first non-null answer, which is
+        // that order ending — so a second order logs a second line.
+        private static readonly HashSet<TacticalActor> _fed = new HashSet<TacticalActor>();
+
+        private static void Postfix(MoveAbilitySceneViewElement __instance,
+                                    ref List<MoveAbilityTargetData> __result)
+        {
+            MoveAbility ability;
+            TacticalActor actor;
+            try
+            {
+                ability = __instance == null ? null : __instance.GetActorMoveAbility;
+                actor = ability == null ? null : ability.TacticalActor;
+            }
+            catch { return; }   // a presentation gate alters NOTHING when it cannot answer (P4c)
+            if (actor == null) return;
+            if (!TacticalCommandSync.MoveOverlayMustNotSeeNull(TacticalCommandSync.SweepIsWithheldFor(ability),
+                                                               __result == null))
+            {
+                if (__result != null) _fed.Remove(actor);
+                return;
+            }
+            __result = Empty;
+            if (_fed.Add(actor))
+                Debug.Log("[Multiplayer][tac] move overlay fed an EMPTY sweep for " + SafeName(actor) +
+                          " instead of the null the game answers while his move ability is disabled — the " +
+                          "withheld sweep is what disables it (MoveAbility:26 -> TacticalAbility:465-468), and " +
+                          "MoveAbilitySceneViewElement.UpdateMoveAreas re-reads ValidMoves after its yields " +
+                          "(:237, :243, :253, :259) with only one guard at :223, so the null landed in " +
+                          "Enumerable.Where and Unity aborted the whole coroutine chain. His overlay draws " +
+                          "nothing until that order ends; nothing else on this screen changes.");
         }
 
         private static string SafeName(TacticalActorBase actor)
