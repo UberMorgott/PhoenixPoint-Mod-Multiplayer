@@ -328,6 +328,20 @@ namespace Multiplayer.Tactical
             return true;
         }
 
+        /// <summary>MUST THE STANCE WRITE WAIT — pure, so RailCheck L231 executes the OUTCOME rather than
+        /// asserting that a guard exists. TRUE means the animator belongs to the engine right now and this
+        /// mirror keeps its hands off; the write is not dropped, it goes on <see cref="_pending"/> and is
+        /// retried every frame by <see cref="RetryPending"/>, so the stance still lands the frame the actor
+        /// is free.
+        ///
+        /// Two axes and no more. NAVIGATION was always here. EXECUTION is the one this law is named for:
+        /// <c>TacticalLevelController.FireWeaponAtTargetCrt</c>:1646-1665 writes the SAME animator
+        /// parameters this mirror writes and then SPINS on the "AimStart" checkpoint for up to five of that
+        /// actor's seconds — so a stance write that lands inside a shot does not merely look wrong, it stalls
+        /// the shot on the host, and the host is the peer that decides when the damage is dealt.</summary>
+        internal static bool StanceMustWait(bool actorIsNavigating, bool engineIsExecutingAnAbility) =>
+            actorIsNavigating || engineIsExecutingAnAbility;
+
         /// <summary>
         /// THE MIRROR HALF — the animator integers plus the facing lerp, and nothing else. It moves no
         /// camera, opens no UI and touches no view state.
@@ -358,7 +372,34 @@ namespace Multiplayer.Tactical
                 return;
             }
             var nav = actor.TacticalNav;
-            if (nav != null && nav.IsNavigating) { _pending.Add(actorKey); return; }
+            // AN ACTOR THE ENGINE IS DRIVING OWNS ITS OWN ANIMATOR (law L231). The stance mirror writes the
+            // very animator parameters the game's fire coroutine writes and then WAITS on:
+            // TacticalLevelController.FireWeaponAtTargetCrt:1646-1665 arms the "AimStart" checkpoint
+            // behaviour, calls SetAimParams(animator, AimSegmentType.AimStart), and spins until that
+            // checkpoint clears with a 5 s timeout. A clear landing inside that window calls
+            // SetNullNavParams on the same animator, the checkpoint never becomes inactive, and the shot
+            // sits out the WHOLE timeout before firing.
+            //
+            // MEASURED, NOT ARGUED (2026-08-08, three instances). The acting peer's UI leaves UIStateShoot
+            // the instant its mirrored order arrives (TacticalCommandSync.ReleaseLocalUiHolding), which is a
+            // stance it no longer holds, so Emit announces the clear one frame later. On the host that
+            // intent landed 17 ms AFTER FireWeaponAtTargetCrt had started waiting: "wait while
+            // [AIM_START_ANIMATION_IS_ACTIVE]" at 536.391, "HOST aim-pose 3 -> <none>" at 536.408, and
+            // "Actor Soldier_5 has timed out waiting for aim animation" at 540.043 — 3.65 s of nothing, on
+            // the ONE peer that decides when the damage is dealt. Every other peer had already played the
+            // whole shot from the same record; the enemy then died a second and a half after the shooter had
+            // visibly finished, which is the owner's report verbatim.
+            //
+            // TRANSIENT, so it PENDS rather than drops — the same posture as the navigation guard above,
+            // through the same RetryPending loop, so the aim-out still happens the frame the shot ends.
+            // HasExecutingAbility ignores IdleAbility by the engine's own rule
+            // (TacticalActorBase:695-704), which is exactly right here: idling IS the state a stance is
+            // written on, and only a real ability (shoot, melee, throw, move) owns the animator.
+            if (StanceMustWait(nav != null && nav.IsNavigating, actor.HasExecutingAbility()))
+            {
+                _pending.Add(actorKey);
+                return;
+            }
 
             if (targetKey == 0)
             {

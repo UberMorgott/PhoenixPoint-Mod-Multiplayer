@@ -1585,6 +1585,11 @@ namespace Multiplayer.Tactical
                                "peer may already have played. The wait is RELEASED here (the soldier is " +
                                "clickable again); it is NOT replayed locally, because a locally-replayed order " +
                                "the host also ran is a second shot from one actor (law L83).");
+                // "Clickable again" was only half true, and the other half was the lock-up (law L231):
+                // A9 suppressed the native state switch at the click, so this peer is still standing in
+                // UIStateShoot with no exit. Releasing the wait without releasing the SCREEN leaves a player
+                // whose every button does nothing, for the rest of the battle.
+                ReleaseLocalUiHolding(actor, "an echo that never arrived");
             }
         }
 
@@ -2970,6 +2975,12 @@ namespace Multiplayer.Tactical
                     Debug.LogError("[Multiplayer][tac] host command for " + actor.name + " NOT played here — " +
                                    string.Join("; ", unresolved.ToArray()) + ". The host's damage still applies; " +
                                    "only the animation is missing on this screen.");
+                // AND THE CLICKING PEER GETS ITS SCREEN BACK (law L231). Since A9 the native activation —
+                // state switch included — is SUPPRESSED at the click, so the ONLY thing that ever leaves
+                // UIStateShoot / UIStateAbilitySelected is this release. A failure branch that returns
+                // without it leaves that player aiming at a soldier nothing will ever start, with no button
+                // that exits: the order is gone, the wait is already cleared, and nothing else is coming.
+                ReleaseLocalUiHolding(actor, "a mirrored order that cannot be played here");
                 return;
             }
             // THE SAME RESOLUTION AS THE HOST'S, and it must be: a HOST-initiated pistol reload carries the
@@ -2981,12 +2992,14 @@ namespace Multiplayer.Tactical
                 Debug.LogError("[Multiplayer][tac] " + actor.name + " has no ability with guid " + guid +
                                " on this peer — mod parity should have made that impossible (law 10). The order " +
                                "is dropped and this peer's battle has diverged.");
+                ReleaseLocalUiHolding(actor, "a mirrored order naming an ability this peer does not have");
                 return;
             }
             if (!IsRider(ability))
             {
                 Debug.LogError("[Multiplayer][tac] the host mirrored '" + ability.AbilityDef.name + "', which is " +
                                "not a declared rider — the two peers disagree about what this arc carries.");
+                ReleaseLocalUiHolding(actor, "a mirrored order this peer does not treat as a rider");
                 return;
             }
             MirrorTelemetry(actor, ability);
