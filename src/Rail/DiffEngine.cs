@@ -1036,7 +1036,29 @@ namespace Multiplayer.Network.Sync
 
             var rt = RailType.Get(obj.GetType());
             if (rt == null) return;
-            if (rt.Fields.Count == 0) { Incident(obj.GetType(), "(type)", "no persistent members", path); return; }
+            // ZERO FIELDS IS NOT AUTOMATICALLY A LOSS. RailType.Source == "none" is the GAME's own verdict
+            // (RailMeta.Build:227-231): no serialized members, no *InstanceData sibling/nested DTO, no
+            // RecordInstanceData contract — nothing of this type survives the game's OWN save, so nothing
+            // of it can be missing on a client. GeoMissionGenerator is the case that taught it: every
+            // member it owns is a def index rebuilt from DefRepository in Start() plus two scratch buffers
+            // (GeoMissionGenerator.cs:28-38, :40-61), and GeoLevelController.RecordInstanceData (:387-417)
+            // records EventSystem / Marketplace / MissionScheduler and NOT MissionGenerator. Reporting that
+            // as an exclusion made a CORRECT empty walk read as lost state, and 20 walks later the verdict
+            // below escalated it to an Error claiming the root "has NEVER crossed to a client".
+            // Only a type that DECLARES persistence and STILL classifies empty is a real meta gap.
+            // Reaching here at all means a declared ROOT (Descend targets and collection element types are
+            // already HasPersistentMembers-gated at classify time, RailMeta:408/476), so it stays named
+            // once — a root that ships nothing is dead weight in IdentityResolver.RootKinds — but as a
+            // note, never a verdict.
+            if (rt.Fields.Count == 0)
+            {
+                if (rt.Source == "none")
+                    Note(rt.Type, "(type)", "the game persists nothing of this type (no serialized members, no " +
+                         "InstanceData bridge) — an empty walk is the correct answer here, no state is lost", path);
+                else
+                    Incident(rt.Type, "(type)", "no persistent members", path);
+                return;
+            }
             _entityCounts.TryGetValue(rt.Type, out var c);
             _entityCounts[rt.Type] = c + 1;
             byte kindId = KindIdOf(rt.Type);
@@ -1326,9 +1348,22 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>THE DECISION, pure so the harness can falsify it (RailCheck L188): the FIRST sighting is
         /// news and rides the existing warn-once; the <see cref="PermanentAfterWalks"/>-th is the verdict and
-        /// escalates ONCE. Escalating on every walk after that would be a per-frame error storm, and never
-        /// escalating is the bug — so the answer is exactly one line, at the count where "transient" is dead.</summary>
-        internal static bool EscalateAt(int walks) => walks == PermanentAfterWalks;
+        /// escalates. Escalating on every walk after that would be a per-frame error storm (L188's
+        /// escalation-storms arm), and never escalating again is the SAME bug one threshold later — the
+        /// verdict scrolls away and the log is silent about a dead field for the rest of the session. So:
+        /// one line at the count where "transient" is dead, then one restate per
+        /// <see cref="RestateVerdictEveryWalks"/> failed walks for as long as it stays dead.</summary>
+        internal static bool EscalateAt(int walks) =>
+            walks == PermanentAfterWalks ||
+            (walks > PermanentAfterWalks && walks % RestateVerdictEveryWalks == 0);
+
+        /// <summary>…and how often it is RESTATED while the field is STILL dead (~3.5 min at the ≤0.5 s
+        /// cadence). The verdict used to fire once and then say nothing for the rest of the session, so the
+        /// reader could not tell a field that died at minute one from one that recovered at minute two —
+        /// the same silent-swallow shape L188 was written against, just moved past the threshold. A restate
+        /// is not the per-frame storm L188 outlaws (that is ~2/s); at this spacing the ABSENCE of the next
+        /// line is itself the signal that the field started crossing again.</summary>
+        internal const int RestateVerdictEveryWalks = PermanentAfterWalks * 20;
 
         /// <summary>Count one more walk in which this exclusion fired, and answer whether THIS is the walk
         /// that turns it from news into a verdict. Separated from the logging so RailCheck L188 can drive the
@@ -1344,11 +1379,26 @@ namespace Multiplayer.Network.Sync
         /// verdict from its own walks, or the second session gets the silence the first one was fixed for.</summary>
         internal static void ForgetIncidentCounts() => _incidentWalks.Clear();
 
-        private static void Incident(Type t, string field, string reason, string path)
+        /// <summary>The report line + its warn-once, shared by <see cref="Incident"/> and <see cref="Note"/>
+        /// so both stay visible in rail-coverage.txt through the ONE channel.</summary>
+        private static string ReportLine(Type t, string field, string reason, string path, string what)
         {
             var line = t.Name + "." + field + ": " + reason + " [" + path + "]";
             if (_walkIncidents.Add(line) && _reportWritten)
-                Debug.LogWarning("[Multiplayer][rail] DiffEngine excluded: " + line);
+                Debug.LogWarning("[Multiplayer][rail] DiffEngine " + what + ": " + line);
+            return line;
+        }
+
+        /// <summary>A walk outcome that is CORRECT rather than a loss. Same visible channel as
+        /// <see cref="Incident"/> — it still lands in rail-coverage.txt and still says its name once — minus
+        /// the permanent verdict: a type that persists nothing cannot be "never crossing to a client", and
+        /// an Error that says it is a false alarm the next reader has to chase to the decompile.</summary>
+        private static void Note(Type t, string field, string reason, string path) =>
+            ReportLine(t, field, reason, path, "note");
+
+        private static void Incident(Type t, string field, string reason, string path)
+        {
+            var line = ReportLine(t, field, reason, path, "excluded");
 
             // A FIELD THAT FAILS ON EVERY WALK IS NOT A WARNING, IT IS A DEAD FIELD (2026-08-07 session).
             // `FactionDiplomacy._factionsDiplomacyState` threw at the first campaign walk, kept throwing for
@@ -1357,11 +1407,13 @@ namespace Multiplayer.Network.Sync
             // way to tell "this happened once during a load" from "this state has never reached a client and
             // never will". That distinction is the whole content of the report, so it is now stated.
             if (NoteIncidentWalk(line))
-                Debug.LogError("[Multiplayer][rail] DiffEngine PERMANENTLY excluded (failed " +
-                               PermanentAfterWalks + " walks in a row, ~" + PermanentAfterWalks / 2 +
-                               "s): " + line + " — this field has NEVER " +
-                               "crossed to a client and will not until the code changes. Every peer is " +
-                               "running on whatever the save transfer left there.");
+                Debug.LogError("[Multiplayer][rail] DiffEngine PERMANENTLY excluded (failed every walk for at " +
+                               "least " + PermanentAfterWalks + " walks, ~" + PermanentAfterWalks / 2 +
+                               "s): " + line + " — this field has NEVER crossed to a client. The walk DOES " +
+                               "keep retrying it every cycle, so nothing here is switched off; what is dead is " +
+                               "the field, and only a code change revives it. Restated every " +
+                               RestateVerdictEveryWalks + " failed walks — if this line stops, it started " +
+                               "crossing. Until then every peer runs on whatever the save transfer left there.");
         }
 
         // ─── Structural emit (root create/destroy — law 3) ─────────────────
