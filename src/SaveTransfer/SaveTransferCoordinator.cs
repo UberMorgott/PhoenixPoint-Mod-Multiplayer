@@ -2036,8 +2036,10 @@ namespace Multiplayer.Network
             Debug.Log($"[Multiplayer] OnReachedPlaying slot={_engine.Session.LocalSlotIndex} " +
                       $"→ hold + SendLoadComplete");
             // This peer is done but HELD (curtain gate parks every native lift until Revealed).
-            // Label the held native loading screen so the wait reads as intentional.
-            Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel("Waiting for players…");
+            // Label the held native loading screen so the wait reads as intentional. Update() re-writes
+            // this every frame from here on (see the held-wait bar block) — a one-shot label loses to any
+            // native rewrite, which is why the host looked like it was showing nothing at all.
+            Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel(WaitingForPlayersLabel);
             // Done is ARMED here and only here — and it LEAVES one frame later, because Playing is reached
             // in the middle of a multi-second blocking frame and "loaded" said from inside that frame is
             // what let the host out first (see _loadCompleteDueFrame for the measured run).
@@ -2342,6 +2344,14 @@ namespace Multiplayer.Network
         private const long BarrierWaitLogIntervalMs = 5_000;
         private long _lastBarrierWaitLogMs;
 
+        /// <summary>The one held-at-the-barrier caption. Plain English constant like every other curtain
+        /// label in this file — the mod has no loc table for runtime strings.</summary>
+        internal const string WaitingForPlayersLabel = "Waiting for players…";
+
+        // The held-wait bar has been taken over for THIS boundary (source swapped + fill lowered). One
+        // shot per wait window; cleared the moment the window closes so the next boundary re-arms.
+        private bool _waitBarArmed;
+
         /// <summary>
         /// HOST, diagnostics only: name the slots the reveal is still waiting on, throttled. Deliberately has
         /// NO return value and NO release power. THE WAIT IS UNBOUNDED (user ruling 2026-08-05, superseding
@@ -2403,7 +2413,7 @@ namespace Multiplayer.Network
                 }
                 else if (_rxStarted)
                 {
-                    Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel("Waiting for players…");
+                    Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel(WaitingForPlayersLabel);
                     Multiplayer.UI.NativeWidgetFactory.SetDownloadBar(1f);
                 }
                 else
@@ -2419,6 +2429,39 @@ namespace Multiplayer.Network
                     Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel("Host is loading…");
                     Multiplayer.UI.NativeWidgetFactory.SetDownloadBar(_tracker.Get(0).percent / 100f);
                 }
+            }
+
+            // HELD AT THE REVEAL BARRIER, OWN LOAD FINISHED — the window the host spends waiting for its
+            // clients, and until now the one window with NOTHING on screen: the native bar sat at a FULL
+            // 100% (its own load left it there and ProgressBarController.Update never lowers fillAmount,
+            // decompile ProgressBarController.cs:73) and the caption was written exactly once at
+            // OnReachedPlaying, so any native rewrite silently won. Drive BOTH here, every frame:
+            //   - caption: the same held-wait label, re-asserted (uGUI's Text setter early-outs on equal).
+            //   - bar: the AVERAGE fill of every OTHER roster slot, straight off the same _tracker the
+            //     barrier itself counts (host: fed by OnLoadProgress; client: by OnRosterProgress), so it
+            //     moves live as each peer reports. 9 of 10 in and the tenth at 50% → 95%.
+            // This DISPLAYS the existing barrier, it does not gate anything: no peer waits on a human, and
+            // a peer that leaves shrinks GetRosterSlots() so the average rises toward full on its own.
+            // _reachedPlaying is the exact "my load is done and I am held" flag (set at Playing, cleared at
+            // every new load boundary); _onDemandJoiner peers self-reveal and never wait.
+            if (_reachedPlaying && !_revealed && _begun && !_onDemandJoiner && !_downloadCurtain
+                && _engine.Session != null)
+            {
+                if (!_waitBarArmed)
+                {
+                    _waitBarArmed = true;
+                    // Take the bar over: swap its source to ours (the native one is pinned at 1.0), then
+                    // lower the Image itself — only a direct write can bring a full bar back down.
+                    Multiplayer.UI.NativeWidgetFactory.BeginDownloadBar(WaitingForPlayersLabel);
+                    Multiplayer.UI.NativeWidgetFactory.ResetBarFill();
+                }
+                Multiplayer.UI.NativeWidgetFactory.SetCurtainLabel(WaitingForPlayersLabel);
+                Multiplayer.UI.NativeWidgetFactory.SetDownloadBar(
+                    _tracker.AverageFill(_engine.Session.GetRosterSlots(), _engine.Session.LocalSlotIndex));
+            }
+            else if (_waitBarArmed)
+            {
+                _waitBarArmed = false;   // window closed (revealed / new boundary) → next wait re-arms
             }
 
             // Phase-2 progress pump — runs on EVERY peer (host + clients) regardless of overlay visibility.
