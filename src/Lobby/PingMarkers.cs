@@ -14,6 +14,7 @@ using Multiplayer.Network;
 using Multiplayer.Network.MessageLayer;
 using Multiplayer.Network.Sync;
 using Multiplayer.Tactical;
+using PhoenixPoint.Common.Entities;
 using PhoenixPoint.Geoscape.Cameras;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Levels;
@@ -90,25 +91,15 @@ namespace Multiplayer.UI
     /// the GAME'S OWN cursor-over-UI guard rather than by anything of ours; see
     /// <see cref="PingArrowIsGuiInBattle"/>.
     ///
-    /// WHY THE PINGED ACTOR IS NOT PAINTED WITH THE GAME'S FULL-BODY ABILITY FLASH (asked for 2026-08-08,
-    /// REJECTED after reading it — the finding, so nobody re-opens it). The white/coloured full-body paint an
-    /// ability's target wears IS <c>IHighlightable.Highlight(highlight, friendly, ability: true)</c> — the
-    /// very mechanism this class already refused. The ability branch is genuinely nicer than the selection
-    /// one: it swaps in PER-ACTOR cloned materials (<c>HighlightControllerComponent.cs:179-181</c>) and skips
-    /// the global <c>Shader.SetGlobalColor("BodypartHighlightColor")</c> the selection branch writes (:166-170).
-    /// But the ENTRY IS SHARED AND SO IS ITS LATCH: <c>Highlight</c> opens with
-    /// <c>if (_isHighlighted == highlight) return false;</c> (:144-153) over ONE bool per body part, and the
-    /// game's own ability targeting rides that same bool — <c>UIStateShoot.cs:1445</c> sets it with
-    /// <c>ability: true</c> and clears it at <c>:1463</c>. So a ping on an actor the local player is already
-    /// aiming at is SWALLOWED (returns false, nothing drawn), and the ping's expiry clears a paint the game
-    /// still wants — after which the game's own clear at :1463 no-ops and the actor is left wrong. Exactly
-    /// the two failures this class was built to avoid.
-    /// AND IT COULD NOT CARRY THE COLOUR ANYWAY: the ability paint's look is one scene-wide shader asset,
-    /// <c>LightingSettingsCharacters.AbilityHighlightShader</c> (:42, applied at
-    /// <c>HighlightControllerComponent.cs:245-249</c>), with no per-call colour anywhere on that branch — the
-    /// only colour the component takes per call is the GLOBAL one on the branch we must not use. Green-mine /
-    /// blue-yours is structurally impossible there. So the actor ping keeps the beacon shaft, which already
-    /// follows the actor, already expires on our clock, and IS tintable per instance (<see cref="Tint"/>).
+    /// A TACTICAL OBJECT PING PAINTS THE MODEL AND PLANTS NO SHAFT (2026-08-08). The whole actor blinks in
+    /// the ping's colour — green mine, blue somebody else's — through the game's own whole-body repaint. Two
+    /// earlier readings of this got the mechanism wrong and are recorded in <see cref="Repaint"/>, which is
+    /// the only place that matters: it is NOT <c>Highlight(_, _, ability: true)</c> (a latched bool the
+    /// game's own ability targeting rides, so a ping would be swallowed and its expiry would clear a paint
+    /// the game still wants), and it is NOT <c>AbilityHighlightShader</c> (one fixed scene asset, carries no
+    /// colour). It is <c>SetSpecialShader</c> — the unlatched per-actor slot a stance and a holographic
+    /// status already use — driven with <c>BodypartHighlightShader</c>, the one look the game does colour.
+    /// The beacon shaft stays as the FALLBACK, for a pinged thing that is not <c>IHighlightable</c>.
     /// </summary>
     public sealed class PingMarkers : MonoBehaviour
     {
@@ -160,6 +151,14 @@ namespace Multiplayer.UI
             /// key. The marker's tint is written once at birth, but the arrow is redrawn every frame, so it
             /// needs the answer kept.</summary>
             public bool Mine;
+            /// <summary>TACTICAL OBJECT PING ONLY: the pinged model, repainted whole. Null on every other
+            /// shape, and null on an actor whose model could not be painted (then <see cref="Beacon"/> is
+            /// the shaft, as before). <see cref="PriorShader"/> is what the actor's special-shader channel
+            /// held before us — a stance or a holographic status owns that channel too, so the expiry
+            /// hands it back rather than clearing to nothing.</summary>
+            public IHighlightable Paint;
+            public Shader PriorShader;
+            public bool PaintOn;
         }
 
         // ─── lifecycle ───────────────────────────────────────────────────────
@@ -168,7 +167,11 @@ namespace Multiplayer.UI
 
         private void OnDestroy()
         {
-            foreach (var p in _live) if (p.Beacon != null) Destroy(p.Beacon);
+            foreach (var p in _live)
+            {
+                if (p.Beacon != null) Destroy(p.Beacon);
+                if (p.Paint != null) Repaint(p, false);
+            }
             _live.Clear();
             // ReferenceEquals, not == (L113): this is "am I the registered instance", a reference question.
             // Unity's == answers "is the native half alive", which is false for a component being destroyed —
@@ -181,6 +184,7 @@ namespace Multiplayer.UI
         private void Update()
         {
             Expire();
+            Blink();
 
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return;
@@ -412,11 +416,25 @@ namespace Multiplayer.UI
                     Debug.LogWarning("[Multiplayer] ping names actor key " + actorKey + ", unresolved: " + why);
                     return;
                 }
+                // AN ACTOR PING PAINTS THE MODEL, IT DOES NOT PLANT A SHAFT — see Repaint. The shaft is
+                // the fallback for an actor the paint cannot reach.
+                var painted = new Live { Follow = actor.transform, Mine = mine, Paint = actor as IHighlightable };
+                if (painted.Paint != null && LightingSettingsCharacters.Instance?.BodypartHighlightShader != null)
+                {
+                    painted.PriorShader = PriorShaderOf(actor);
+                    painted.PaintOn = true;
+                    Repaint(painted, true);
+                    _instance.Track(painted);
+                    return;
+                }
+                Debug.LogWarning("[Multiplayer] ping on actor key " + actorKey + " falls back to the beacon shaft — " +
+                                 (painted.Paint == null
+                                     ? actor.GetType().Name + " is not IHighlightable, so it owns no body materials to repaint."
+                                     : "LightingSettingsCharacters names no BodypartHighlightShader in this scene.") +
+                                 " The ping is still shown; only the full-body colour is missing.");
+
                 // Parented to the actor, exactly as RefreshLocatedBeacon:439-449 does it, so the shaft
-                // travels with him. Deliberately NOT IHighlightable.Highlight: that is a shared boolean
-                // with a global shader colour (HighlightControllerComponent.cs:146-149,169), so a ping on
-                // an actor the local player already has highlighted is swallowed on the way in and the
-                // expiry then clears a highlight the game still wants — silently.
+                // travels with him.
                 var beacon = Instantiate(prefab, actor.transform);
                 beacon.transform.ResetTransform();
                 // SetActive, exactly as RefreshLocatedBeacon:449 does on the line after its own
@@ -503,6 +521,75 @@ namespace Multiplayer.UI
         /// minute, so the cache bought nothing and cost a harness.</summary>
         private static bool _loggedTint;
 
+        /// <summary>
+        /// THE PINGED ACTOR, PAINTED WHOLE AND BLINKING — green mine, blue somebody else's, the same two
+        /// colours the marker wears. This is the game's own full-body repaint, reached through the game's
+        /// own free channel.
+        ///
+        /// THE CHANNEL IS <c>SetSpecialShader</c>, NOT <c>Highlight</c>, AND THAT IS THE WHOLE TRICK.
+        /// The white fill an ability's target wears is <c>Highlight(_, _, ability: true)</c>, and that entry
+        /// is unusable here: it opens with <c>if (_isHighlighted == highlight) return false;</c> over ONE
+        /// bool per body part (HighlightControllerComponent.cs:146-149) that the game's own ability
+        /// targeting rides (UIStateShoot.cs:1445 sets it, :1463 clears it) — so a ping on an actor the local
+        /// player is already aiming at would be swallowed, and our expiry would clear a paint the game still
+        /// wants. <c>SetSpecialShader</c> is a SEPARATE, unlatched, per-actor slot on the same component
+        /// (:269-293): the game itself parks a whole-body look there for a stance and for a holographic
+        /// status (StanceStatus.cs:41,56; HolographicStatus.cs:30,38), sets it and hands it back with null.
+        /// It composes correctly with the ability paint too — <c>SelectShader</c> takes the highlight branch
+        /// while a highlight is on (:177-187) and falls back to <c>_specialMaterials</c> when it is not
+        /// (:192-195), so neither of us can lose the other's visual.
+        ///
+        /// THE SHADER IS <c>BodypartHighlightShader</c>, NOT <c>AbilityHighlightShader</c>, BECAUSE ONLY ONE
+        /// OF THEM TAKES A COLOUR. The ability look is one fixed scene asset with no colour input anywhere
+        /// on its branch; the bodypart-highlight look reads <c>BodypartHighlightColor</c>, which is exactly
+        /// the colour the game writes at HighlightControllerComponent.cs:169 to say friendly-or-enemy. So
+        /// green-mine / blue-yours is expressible there and nowhere else.
+        ///
+        /// THE BLINK IS THE CHANNEL ITSELF, TOGGLED — special shader on, special shader back to whatever was
+        /// there before, 4 Hz off <c>unscaledTime</c> so it keeps blinking while the game sits paused
+        /// mid-turn. No coroutine and no material of ours: the component already owns both material sets and
+        /// swaps between them.
+        /// ponytail: <c>BodypartHighlightColor</c> is a GLOBAL shader colour, so two live pings of different
+        /// colours, or a hover-highlight landing mid-ping, share one value and the last writer wins for a
+        /// frame or two — re-asserted on every blink tick, which is why it settles. Per-renderer property
+        /// blocks would fix it; do that if anyone ever notices.
+        /// </summary>
+        private static void Repaint(Live p, bool on)
+        {
+            // The actor can die, ragdoll or unload while its ping is still live. Unity-null on the followed
+            // transform is the cheap answer; the catch covers the rest, because a throw here would unwind
+            // through Update into native code (L158 arm (c)).
+            if (p.Follow == null) return;
+            try
+            {
+                if (on) Shader.SetGlobalColor("BodypartHighlightColor", p.Mine ? Own : Peer);
+                p.Paint.SetSpecialShader(on ? LightingSettingsCharacters.Instance?.BodypartHighlightShader : p.PriorShader);
+            }
+            catch (Exception e) { Debug.LogWarning("[Multiplayer] ping paint not applied: " + e.Message); }
+        }
+
+        /// <summary>What the actor's special-shader slot held before the ping took it. Read by reflection
+        /// because <c>TacticalActor._specialShader</c> (TacticalActor.cs:111) has no getter — and read
+        /// LAZILY, inside a method, never into a static field: this type's static initializer must stay free
+        /// of engine and game reflection or RailCheck's out-of-Unity pass over <see cref="Own"/> aborts on
+        /// the type initializer (see the note on <see cref="_loggedTint"/>).</summary>
+        private static Shader PriorShaderOf(object actor)
+        {
+            try { return AccessTools.Field(typeof(TacticalActor), "_specialShader")?.GetValue(actor) as Shader; }
+            catch { return null; }
+        }
+
+        private void Blink()
+        {
+            var on = ((int)(Time.unscaledTime * 4f) & 1) == 0;
+            foreach (var p in _live)
+            {
+                if (p.Paint == null || p.PaintOn == on) continue;
+                p.PaintOn = on;
+                Repaint(p, on);
+            }
+        }
+
         // ─── the audible half ────────────────────────────────────────────────
 
         /// <summary>
@@ -542,6 +629,9 @@ namespace Multiplayer.UI
             {
                 if (Time.unscaledTime < _live[i].Until) continue;
                 if (_live[i].Beacon != null) Destroy(_live[i].Beacon);
+                // Hand the special-shader slot back to whoever held it (a stance, a holographic status, or
+                // nobody) — never blanket-clear it to null.
+                if (_live[i].Paint != null) Repaint(_live[i], false);
                 _live.RemoveAt(i);
             }
         }
