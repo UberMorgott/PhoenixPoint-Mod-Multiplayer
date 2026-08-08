@@ -237,47 +237,23 @@ namespace Multiplayer.UI
         /// keeps a solid color).
         /// </summary>
         // ═══════════════════════════════════════════════════════════════════
-        //  Native loading bar — Base.Utils.ProgressBarController clone
+        //  Native loading bar — Base.Utils.ProgressBarController (the LIVE one, not a clone)
         // ═══════════════════════════════════════════════════════════════════
         //
         // The vanilla loading-screen bottom bar is Base.Utils.ProgressBarController (MonoBehaviour):
         //   - public Image ProgressFill;  (type=Filled; set .fillAmount 0..1 to drive it)
         //   - public Text  ProgressText;  (the "NN%" text)
-        // Its own Update() ramps ProgressFill.fillAmount toward _currentLoadingProgress?.Progress, so
-        // to drive it MANUALLY we DISABLE the component (Behaviour.enabled=false) and set fillAmount
-        // ourselves. The clonable template is reached at runtime via Base.Utils.SceneFadeController's
-        // public ProgressBar field. The mod assembly cannot strong-reference these Base.Utils types,
-        // so we resolve them by name (AccessTools.TypeByName / AccessTools.Field) and operate on the
-        // UnityEngine base types (Component/GameObject/Behaviour/Image/Text). The curtain (hence the
-        // bar) is guaranteed present after MultiplayerUI.DropCurtainEarly().
-
-        /// <summary>
-        /// Capture the live native loading-bar GameObject (SceneFadeController.ProgressBar's
-        /// gameObject) to use as a clone template. Returns null on any failure (caller falls back to
-        /// the from-code row). Safe to call after the curtain has dropped (DropCurtainEarly()).
-        /// </summary>
-        public static GameObject CaptureLoadingBarTemplate()
-        {
-            GameObject result = null;
-            try
-            {
-                var sfcType = HarmonyLib.AccessTools.TypeByName("Base.Utils.SceneFadeController");
-                if (sfcType == null) return null;
-                var sfc = UnityEngine.Object.FindObjectOfType(sfcType);
-                if (sfc == null) return null;
-                var pbField = HarmonyLib.AccessTools.Field(sfcType, "ProgressBar");
-                var pbc = pbField?.GetValue(sfc) as Component;
-                if (pbc == null) return null;
-                result = pbc.gameObject;
-            }
-            catch (Exception e)
-            {
-                Debug.LogError("[Multiplayer] CaptureLoadingBarTemplate failed: " + e.Message);
-                result = null;
-            }
-            Debug.Log("[Multiplayer] loading-bar template " + (result != null ? "captured" : "NOT found"));
-            return result;
-        }
+        // Its own Update() ramps ProgressFill.fillAmount toward _currentLoadingProgress?.Progress and
+        // NEVER lowers it — which is why ResetBarFill below writes the Image directly. It is reached at
+        // runtime via Base.Utils.SceneFadeController's public ProgressBar field. The mod assembly cannot
+        // strong-reference these Base.Utils types, so we resolve them by name (AccessTools.TypeByName /
+        // AccessTools.Field) and operate on the UnityEngine base types. The curtain (hence the bar) is
+        // guaranteed present after MultiplayerUI.DropCurtainEarly().
+        //
+        // The bar-CLONE helpers that used to live here (template capture, CloneLoadingBar,
+        // GetProgressBarController, GetProgressText, DisableController) are gone with their only caller:
+        // the co-op load panel now draws its per-peer rows in the PlayerPanel plaque's style instead of
+        // instantiating a prefab subtree per row. This bar remains THIS peer's own load display.
 
         /// <summary>
         /// Capture the LIVE native ProgressBarController COMPONENT (not the template GameObject):
@@ -329,44 +305,12 @@ namespace Multiplayer.UI
             }
         }
 
-        /// <summary>Clone a captured loading-bar template under <paramref name="parent"/> and activate it.</summary>
-        public static GameObject CloneLoadingBar(GameObject template, Transform parent)
-        {
-            if (template == null) return null;
-            var go = UnityEngine.Object.Instantiate(template, parent);
-            go.SetActive(true);
-            return go;
-        }
-
-        /// <summary>Fetch the cloned bar's ProgressBarController component (by name), or null.</summary>
-        public static Component GetProgressBarController(GameObject barClone)
-        {
-            if (barClone == null) return null;
-            var pbcType = HarmonyLib.AccessTools.TypeByName("Base.Utils.ProgressBarController");
-            if (pbcType == null) return null;
-            return barClone.GetComponent(pbcType);
-        }
-
         /// <summary>The ProgressBarController's ProgressFill Image (the Filled bar we drive), or null.</summary>
         public static Image GetProgressFill(Component pbc)
         {
             if (pbc == null) return null;
             var f = HarmonyLib.AccessTools.Field(pbc.GetType(), "ProgressFill");
             return f?.GetValue(pbc) as Image;
-        }
-
-        /// <summary>The ProgressBarController's ProgressText ("NN%") Text, or null.</summary>
-        public static Text GetProgressText(Component pbc)
-        {
-            if (pbc == null) return null;
-            var f = HarmonyLib.AccessTools.Field(pbc.GetType(), "ProgressText");
-            return f?.GetValue(pbc) as Text;
-        }
-
-        /// <summary>Disable the controller's own Update() so we drive ProgressFill.fillAmount manually.</summary>
-        public static void DisableController(Component pbc)
-        {
-            if (pbc is Behaviour b) b.enabled = false;
         }
 
         // ═══════════════════════════════════════════════════════════════════

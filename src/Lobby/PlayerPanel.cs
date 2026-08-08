@@ -86,17 +86,17 @@ namespace Multiplayer.UI
         // page; over a live battle map the same numbers are a plate that covers the HUD it reports over
         // (the owner's report, 2026-08-07). So the bases below are the panel's own — roughly half the
         // lobby's — and they still go through LobbyTheme.Scale, so UiScale remains the one knob.
-        private static int Pad => LobbyTheme.Scale(6);
-        private static int RowH => LobbyTheme.Scale(24);
-        private static int NameW => LobbyTheme.Scale(80);
+        internal static int Pad => LobbyTheme.Scale(6);
+        internal static int RowH => LobbyTheme.Scale(24);
+        internal static int NameW => LobbyTheme.Scale(80);
         /// <summary>Wide enough for the four bars AND for the "123 ms" the hover swaps in over them — the
         /// number replaces the meter in the same cell, so there is no floating tooltip to place, clip or
         /// keep on screen.</summary>
         private static int PingW => LobbyTheme.Scale(44);
         private static int StatusW => LobbyTheme.Scale(18);
         private static int PanelW => Pad * 2 + NameW + Pad + PingW + Pad + StatusW;
-        private static int NameFont => LobbyTheme.Scale(13);
-        private static int NumberFont => LobbyTheme.Scale(11);
+        internal static int NameFont => LobbyTheme.Scale(13);
+        internal static int NumberFont => LobbyTheme.Scale(11);
 
         /// <summary>Gap between the panel's top edge and the ready button's bottom edge, and the margin
         /// <see cref="ClampOnScreen"/> keeps from every screen edge. One value, themed.</summary>
@@ -104,8 +104,8 @@ namespace Multiplayer.UI
 
         /// <summary>SEE-THROUGH ON PURPOSE. The panel deliberately overhangs the tactical HUD, so an
         /// opaque plate hides the interface rather than reporting over it. Theme colours, panel alpha.</summary>
-        private const float FillAlpha = 0.45f;
-        private const float BorderAlpha = 0.35f;
+        internal const float FillAlpha = 0.45f;
+        internal const float BorderAlpha = 0.35f;
 
         private sealed class Row
         {
