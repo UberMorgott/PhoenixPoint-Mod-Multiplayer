@@ -6,6 +6,7 @@ using System.Text;
 using Base;
 using Base.Cameras;
 using Base.Core;
+using Base.Defs;
 using Base.Eventus;
 using Base.UI.MessageBox.PromptControllers;
 using Base.Utils;
@@ -17,6 +18,7 @@ using Multiplayer.Tactical;
 using PhoenixPoint.Common.Entities;
 using PhoenixPoint.Geoscape.Cameras;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Interception;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Tactical.Entities;
@@ -35,6 +37,14 @@ namespace Multiplayer.UI
     /// ping: a stable id travels and the marker hangs off the object, so it follows a moving aircraft or
     /// soldier for free. Cursor over empty ground → a POINT ping: a coordinate travels.
     ///
+    /// ON THE GLOBE THERE IS NO POINT PING — IT IS REFUSED (2026-08-08). Empty ocean is not a thing to point
+    /// at: a ring drawn on open water names nothing, so the geoscape half pings only what the GAME'S OWN
+    /// picking finds under the cursor (<c>Map.PickObjectOnPosition</c>, reached through
+    /// <c>SelectAtCursor</c>) and otherwise sends NOTHING and plays the game's own refusal click at the
+    /// presser — see <see cref="Refuse"/>. The battlefield keeps its point ping, where a bare tile IS the
+    /// thing being pointed at ("go here"). <see cref="ShowGeo"/> still understands an arriving globe point
+    /// ping; only this build's send side stopped producing one.
+    ///
     /// PRESENTATION, NOT STATE (P4c, law L158). Nothing here is domain state: no <c>[SerializeMember]</c>
     /// leaf, no surface id, no <c>TimeAnchor</c>, no diff rail. A lost ping is not a problem and there is
     /// deliberately no exactly-once guarantee — the packet is fire-and-forget and the marker expires by
@@ -52,34 +62,37 @@ namespace Multiplayer.UI
     /// name prefix to match the band. One packet type serves both screens. Client → host → everyone else,
     /// exactly like <c>ChatMessage</c>; the sender shows its own ping locally the same frame it sends.
     ///
-    /// NATIVE VISUALS ONLY, AND THE MOD OWNS EVERY INSTANCE. Geoscape: the game's own
-    /// <c>SitePointOfInterest</c> marker prefab, taken from <c>GeoscapeGlobeMarkers.Binds</c> via
-    /// <c>GetMarkerPrefab</c>. Tactical: the <c>LocatedBeaconPrefab</c> shaft (<c>TacticalView.cs:83</c>)
-    /// the game already raises over a heard-but-unseen actor, i.e. the native "something is HERE" idiom.
-    /// AND A NATIVE SOUND — a silent marker is easy to miss, so every shown ping also plays the game's own
-    /// modal-appears cue through the game's own audio path; see <see cref="Cue"/>.
+    /// NATIVE VISUALS ONLY, AND THE MOD OWNS EVERY INSTANCE. Geoscape: the game's own HAVEN-DEFENCE RING,
+    /// <c>GeoSiteVisualsDefs.Instance.HavenDefenseVisualsPrefab</c> — the thick outline the globe already
+    /// fills around a site while one faction is taking it off another. Tactical: the
+    /// <c>LocatedBeaconPrefab</c> shaft (<c>TacticalView.cs:83</c>) the game already raises over a
+    /// heard-but-unseen actor, i.e. the native "something is HERE" idiom. AND A NATIVE SOUND — a silent
+    /// marker is easy to miss, so every shown ping also plays the game's own modal-appears cue through the
+    /// game's own audio path; see <see cref="Cue"/>.
     ///
-    /// WHY NOT <c>GeoscapeGlobeMarkers.AddMarker</c>, WHICH THIS USED TO CALL AND WHICH DREW NOTHING (fixed
-    /// 2026-08-08, law L182). <c>AddMarker</c> has two branches and only ONE of them activates the marker:
-    /// the POOLED branch calls <c>gameObject.SetActive(true)</c> (GeoscapeGlobeMarkers.cs:72 point, :101
-    /// actor), the FRESH-INSTANTIATE branch (:62-66) does not. <c>SitePointOfInterest</c> has no pooled
-    /// instance sitting in <c>MarkersContainer</c> when a ping lands, so every ping took the fresh branch
-    /// and got back a marker that was never switched on. <c>AddMarker</c> RETURNED NORMALLY — which is why
-    /// the cue, which fires downstream of it in <see cref="Track"/>, was audible over an empty globe. The
-    /// game itself never hits that hole: it is the only caller and it explicitly activates the prefabs it
-    /// instantiates by hand (<c>AncientSiteProbeAbilityView.cs:88 SetActive(true)</c>,
-    /// <c>UIStateVehicleSelected.cs:728</c>, <c>TacticalActorViewBase.cs:449</c>).
+    /// WHY THE GLOBE MARKER WAS INVISIBLE FOR ITS WHOLE LIFE, and it was never the ACTIVATION (2026-08-08,
+    /// second attempt — the first, law L182, added the missing <c>SetActive(true)</c> and changed nothing on
+    /// screen). IT WAS BURIED AT THE CENTRE OF THE EARTH. Every globe object is a CENTRE-pivot:
+    /// <c>GeoActor.PivotTransform => transform</c> and <c>WorldPosition => Surface.position</c>
+    /// (GeoActor.cs:23,25), with <c>Surface = PivotTransform.Find("GlobeOffset")</c> (GeoVehicle.cs:315) the
+    /// only child that is out at globe radius. An object ping parented its marker to <c>actor.transform</c>
+    /// — the PIVOT, at (0,0,0) — and a point ping placed its marker by ROTATION ALONE, which likewise leaves
+    /// the object sitting at its parent's origin. Both recipes only ever work if the marker prefab carries
+    /// the ~6.4-unit radius offset in its own local transform, and the <c>Binds</c> prefab does not: the
+    /// game never exercises that path, because <c>ReadMarkersCache</c> (GeoscapeGlobeMarkers.cs:38-52)
+    /// pre-loads POOLED scene instances that keep their authored local offset across
+    /// <c>SetParent(…, worldPositionStays: false)</c> (:71,:99). THE LOG PROVED IT before a line was
+    /// changed: <c>ping arrow CLICKED — centring … on the pinged object at (0.0, 0.0, 0.0)</c>, i.e. the
+    /// globe centre, against <c>(-6.0, 2.0, 1.0)</c> for a point ping on the surface.
     ///
-    /// So the marker is instantiated here, by the game's OWN free-standing recipe — the one
-    /// <c>AncientSiteProbeAbilityView</c> uses for its probe preview, verbatim: instantiate the prefab
-    /// under a geoscape container, <c>SetActive(true)</c>, then place it by ROTATION ALONE,
-    /// <c>transform.rotation = Quaternion.Euler(SceneReferences.GetSphericalCoordinates(worldPos))</c>
-    /// (AncientSiteProbeAbilityView.cs:87-89). Rotation alone is not a shortcut: every globe object is a
-    /// CENTRE-pivot whose art hangs off a child at globe radius (<c>GeoActor.PivotTransform</c> +
-    /// <c>Surface = PivotTransform.Find("GlobeOffset")</c>, GeoAncientSiteProbe.cs:44), which is also why
-    /// <c>GlobeMarker.SetWorldPosition</c> (GlobeMarker.cs:70-74) writes a rotation and never a position.
-    /// Owning the instance is what buys the two things the pool could not give: the expiry is ours (one
-    /// <see cref="Expire"/> for both screens) and so is the COLOUR (see <see cref="Tint"/>).
+    /// SO PLACEMENT IS EXPLICIT NOW AND OWES A PREFAB NOTHING. An object ping parents to
+    /// <c>GeoActor.Surface</c> — the transform the game itself hangs world visuals off
+    /// (<c>Instantiate(VehicleDef.ExplorationVisualsPrefab, CurrentSite.Surface)</c>, GeoVehicle.cs:454) —
+    /// and an arriving point ping gets a carrier with BOTH halves written, <c>position</c> = the surface
+    /// point and <c>rotation</c> = <c>Quaternion.Euler(GetSphericalCoordinates(pos))</c>, which is the same
+    /// orientation <c>Surface</c> inherits from its pivot. Owning the instance is what buys the rest: the
+    /// expiry is ours (one <see cref="Expire"/> for both screens) and so is the COLOUR (see
+    /// <see cref="Tint"/> and <see cref="Ink"/>).
     ///
     /// THE OFF-SCREEN ARROW IS OURS, and the recon's <c>UIObjectTracker.KeepOnScreen</c> route is NOT
     /// usable: <c>UIObjectTrackersController.LateUpdate</c>'s <c>shouldUpdateTracker</c>
@@ -116,6 +129,13 @@ namespace Multiplayer.UI
         /// <summary>The arrow fades over its last second. The native markers animate themselves; only what
         /// this class draws is faded here.</summary>
         private const float FadeSeconds = 1f;
+
+        /// <summary>How long one sweep of the geoscape ring takes. The ring's own shader input is
+        /// <c>_Progress</c>, a 0-1 fill the game drives off <c>GeoUpdateableMission.MissionProgress</c>; a
+        /// ping has no progress to show, so it is swept round and round instead. Four sweeps fit inside the
+        /// marker's <see cref="LifetimeSeconds"/>, which is the "blinking" the owner asked for without a
+        /// hard on/off flicker.</summary>
+        private const float SweepSeconds = 1.25f;
 
         /// <summary>HOW BIG THE ARROW IS, as its half-extent in pixels — <c>max(30, height/20)</c>, which is
         /// 2.5x the <c>max(12, height/50)</c> it shipped at. It was too small to notice, which for the one
@@ -159,6 +179,11 @@ namespace Multiplayer.UI
             public IHighlightable Paint;
             public Shader PriorShader;
             public bool PaintOn;
+            /// <summary>GEOSCAPE ONLY: the haven-defence ring's own progress renderer, the one the game
+            /// writes <c>_Progress</c>/<c>_FirstColor</c>/<c>_SecondColor</c> on
+            /// (GeoUpdatedableMissionVisualsController.cs:20,29-31). Kept because the sweep is re-written
+            /// every frame; null on every tactical shape.</summary>
+            public Renderer Ring;
         }
 
         // ─── lifecycle ───────────────────────────────────────────────────────
@@ -219,19 +244,16 @@ namespace Multiplayer.UI
             {
                 var view = geo.View;
                 if (view == null) return null;
+                // THE GAME'S OWN HIT TEST, not one of ours: SelectAtCursor raycasts the Globe layer and
+                // then hands the surface point to Map.PickObjectOnPosition (GeoscapeView.cs:986-996), which
+                // casts back down through the site/vehicle PICKING colliders (GeoMap.cs:806-815). So "is
+                // there a point of interest here" is answered by the same colliders a normal click uses,
+                // with the same tolerance.
                 var pick = view.SelectAtCursor();          // pure query — selects nothing
-                if (pick.Actor != null)
-                {
-                    var re = IdentityResolver.RootRef(pick.Actor);
-                    if (re != null) return Encode(SceneGeo, KindObject, Vector3.zero, re, 0);
-                }
-                if (float.IsNaN(pick.GlobePos.x)) return null;
-                var root = GlobeRoot(geo);
-                if (root == null) return null;
-                // Globe-LOCAL, never world: GeoscapeYRotation spins under the camera, so a world point
-                // means a different place on every peer (GeoSceneReferences.cs:100-109 is the game's own
-                // proof — it inverse-transforms through that root to get lat/long).
-                return Encode(SceneGeo, KindPoint, root.InverseTransformPoint(pick.GlobePos), null, 0);
+                var re = pick.Actor == null ? null : IdentityResolver.RootRef(pick.Actor);
+                if (re != null) return Encode(SceneGeo, KindObject, Vector3.zero, re, 0);
+                Refuse(view);
+                return null;
             }
 
             var tlc = Tlc();
@@ -249,6 +271,50 @@ namespace Multiplayer.UI
                 ? null
                 : Encode(SceneTac, KindPoint, hit.ActionGridPos, null, 0);
         }
+
+        /// <summary>
+        /// PINGING OPEN OCEAN IS REFUSED, AND THE PRESSER HEARS WHY. Nothing is sent, nothing is drawn, and
+        /// the only peer that learns anything is the one who pressed the key — a refusal is not state and
+        /// has no business on the wire.
+        ///
+        /// THE SOUND IS THE GAME'S OWN "you clicked something you cannot use":
+        /// <c>InterceptionGameSoundDef.DisabledEquipmentClick</c>, the Wwise event the game posts in place
+        /// of its normal click when the equipment under the cursor is disabled
+        /// (<c>InterceptionGameSound.cs:34-43</c> — the two lines below are those lines). Posted through
+        /// <c>AK.Wwise.Event.Post</c> exactly as the game posts it, so it rides the player's own volume
+        /// sliders like every other cue. It is the only NAMED refusal cue in the build: a sweep of every
+        /// <c>AK.Wwise.Event</c> and <c>UIEventDef</c> field in Assembly-CSharp turns up no error/invalid/
+        /// denied event anywhere else, so this is reuse rather than a nearest guess.
+        ///
+        /// THE GATE IS THE GAME'S TOO. <c>SelectAtCursor</c> reports "nothing" for three different reasons —
+        /// empty ocean, cursor off the globe entirely, and cursor over a panel — and only the first two are
+        /// a missed ping. <c>IsCursorOverGui</c> (GeoscapeView.cs:905, the same method the globe's own
+        /// picking and camera drag gate on) separates them, so typing over a panel does not beep.
+        /// </summary>
+        private static void Refuse(GeoscapeView view)
+        {
+            if (view.IsCursorOverGui()) return;
+            var host = _instance == null ? null : _instance.gameObject;
+            if (host == null) return;
+
+            var def = GameUtl.GameComponent<DefRepository>()?.GetAllDefs<InterceptionGameSoundDef>()
+                             .FirstOrDefault();
+            var cue = def?.DisabledEquipmentClick;
+            if (cue != null && cue.IsValid()) { cue.Post(host); return; }
+
+            if (_loggedRefusal) return;
+            _loggedRefusal = true;
+            Debug.LogWarning("[Multiplayer] geoscape ping REFUSED (nothing under the cursor) but SILENTLY — " +
+                             (def == null
+                                 ? "the def repository names no InterceptionGameSoundDef"
+                                 : "InterceptionGameSoundDef.DisabledEquipmentClick is not a valid Wwise " +
+                                   "event in this build") +
+                             ", so there is no native refusal cue to post. The refusal itself is correct — " +
+                             "no packet was sent and no marker drawn — only the sound is missing (logged " +
+                             "once per run).");
+        }
+
+        private static bool _loggedRefusal;
 
         private static byte[] Encode(byte scene, byte kind, Vector3 pos, string entityRef, int actorKey)
         {
@@ -338,66 +404,76 @@ namespace Multiplayer.UI
         {
             var geo = GeoLevel();
             var refs = geo?.SceneReferences;
-            var markers = geo?.View?.Markers;
             var root = GlobeRoot(geo);
-            if (markers == null || root == null || refs?.MarkersContainer == null)
+            // The game's own haven-defence ring. GeoSiteVisualsDefs is a def, not a scene object, so unlike
+            // the marker bind table it cannot go missing with a view — but it is still read rather than
+            // assumed, and a missing prefab draws NO substitute: a hand-rolled overlay is exactly what
+            // "native UI first" forbids, and a named log line is worth more than a stray quad.
+            var prefab = GeoSiteVisualsDefs.Instance?.HavenDefenseVisualsPrefab;
+            if (root == null || refs?.MarkersContainer == null || prefab == null)
             {
                 // Not an error — a peer on another screen legitimately has no globe to draw on — but it is
                 // the difference between "he is in a battle" and "the ping broke", so it says which.
                 Debug.LogWarning("[Multiplayer] geoscape ping DROPPED — no live globe to draw it on (level=" +
                                  (geo == null ? "not geoscape" : "geoscape") + ", view=" +
-                                 (geo?.View == null ? "none" : "live") + ", markers=" +
-                                 (markers == null ? "none" : "live") + ", globe root=" +
+                                 (geo?.View == null ? "none" : "live") + ", globe root=" +
                                  (root == null ? "none" : "live") + ", container=" +
-                                 (refs?.MarkersContainer == null ? "none" : "live") + "). The sender still " +
-                                 "saw his own marker.");
-                return;
-            }
-
-            // The game's own POI marker, taken from the game's own bind table. If the type is unbound there
-            // is no native widget for this and we do NOT draw a substitute — a hand-rolled overlay is
-            // exactly what "native UI first" forbids, and a named log line is worth more than a stray quad.
-            var prefab = markers.GetMarkerPrefab(GlobeMarkerType.SitePointOfInterest);
-            if (prefab == null)
-            {
-                Debug.LogWarning("[Multiplayer] geoscape ping DROPPED — GeoscapeGlobeMarkers.Binds names no " +
-                                 "prefab for SitePointOfInterest, so the game ships no widget to show. Nothing " +
-                                 "is drawn on purpose; the fix is a different bound GlobeMarkerType, not an " +
-                                 "overlay of ours.");
+                                 (refs?.MarkersContainer == null ? "none" : "live") + ", ring prefab=" +
+                                 (prefab == null ? "none" : "live") + "). The sender still saw his own marker.");
                 return;
             }
 
             Transform follow = null;
-            Transform parent;
+            Transform host;
             if (kind == KindObject)
             {
                 var actor = IdentityResolver.Resolve(geo, entityRef, null) as GeoActor;
-                if (actor == null)
+                var surface = actor?.Surface;
+                if (surface == null)
                 {
-                    Debug.LogWarning("[Multiplayer] ping names '" + entityRef + "', which does not resolve on " +
-                                     "this peer — nothing to point at.");
+                    Debug.LogWarning("[Multiplayer] ping names '" + entityRef + "', which does not resolve to " +
+                                     "a geoscape actor with a globe surface on this peer — nothing to point at.");
                     return;
                 }
-                // Under the actor's own PIVOT, at local zero — the same frame AddMarker(actor, …) parents
-                // into (GeoscapeGlobeMarkers.cs:92/:99). The pivot is at the globe centre and already
-                // carries the actor's lat/long as its rotation, so the marker needs no placement of its
-                // own and follows a moving aircraft for free.
-                parent = actor.transform;
-                follow = actor.transform;
+                // SURFACE, NOT transform. The actor's own transform is the centre-pivot at (0,0,0); Surface
+                // is the "GlobeOffset" child out at globe radius (GeoVehicle.cs:315) and is where the game
+                // itself hangs world visuals (GeoVehicle.cs:454). It carries the actor's lat/long as its
+                // inherited rotation, so the ring needs no placement of its own and follows a moving
+                // aircraft for free — and the off-screen arrow, which reads Follow.position, finally gets a
+                // point on the globe instead of the middle of the earth.
+                host = surface;
+                follow = surface;
             }
             else
             {
-                parent = refs.MarkersContainer;
+                // A globe point ping is no longer SENT (see Refuse) but is still shown if one arrives.
+                // BOTH halves are written: rotation alone leaves the object at its parent's origin, which
+                // is the globe centre, which is why nothing was ever visible here.
+                var world = root.TransformPoint(local);
+                var carrier = new GameObject("MpPingRing");
+                carrier.transform.SetParent(refs.MarkersContainer, false);
+                carrier.transform.position = world;
+                carrier.transform.rotation = Quaternion.Euler(refs.GetSphericalCoordinates(world));
+                host = carrier.transform;
             }
 
-            var go = Instantiate(prefab, parent);
-            if (kind == KindPoint)
-                go.transform.rotation = Quaternion.Euler(refs.GetSphericalCoordinates(root.TransformPoint(local)));
-            // THE LINE AddMarker's fresh-instantiate branch is missing, and the whole reason nothing was
-            // ever visible. The game writes it by hand at every one of its own instantiate sites.
-            go.SetActive(true);
-            Tint(go, mine);
-            _instance.Track(new Live { Geo = true, Follow = follow, Local = local, Beacon = go, Mine = mine });
+            var ring = Instantiate(prefab, host);
+            ring.gameObject.SetActive(true);
+            if (ring.Progress != null) ring.Progress.SetActive(true);
+            Tint(ring.gameObject, mine);
+            var live = new Live
+            {
+                Geo = true,
+                Follow = follow,
+                Local = local,
+                // The carrier owns the ring, so destroying the carrier destroys both; an object ping has no
+                // carrier and the ring is what expires.
+                Beacon = kind == KindObject ? ring.gameObject : host.gameObject,
+                Mine = mine,
+                Ring = ring.Progress == null ? null : ring.Progress.GetComponent<Renderer>(),
+            };
+            Ink(live, 0f);
+            _instance.Track(live);
         }
 
         private static void ShowTac(byte kind, Vector3 pos, int actorKey, bool mine)
@@ -522,6 +598,36 @@ namespace Multiplayer.UI
         private static bool _loggedTint;
 
         /// <summary>
+        /// THE RING, IN THE PING'S COLOUR AND FILLING ROUND. Three shader inputs, all three taken off the
+        /// game's own writer for this exact prefab (GeoUpdatedableMissionVisualsController.cs:29-31,:38-41):
+        /// <c>_FirstColor</c> is what the site's owner wears, <c>_SecondColor</c> what the attacker wears,
+        /// and <c>_Progress</c> is the 0-1 fill between them. A ping has no attacker and no progress, so
+        /// both colours are the ping's own — the sweeping arc bright, the rest of the ring dimmed to 30% —
+        /// and <see cref="Blink"/> walks <c>_Progress</c> round and round instead of tracking a mission.
+        /// That is the "fills around and blinks" the owner asked for, and it is the widget he pointed at.
+        ///
+        /// A property block again, and a SHARED one, re-fetched per renderer: this runs every frame for
+        /// every live ping, and <see cref="Tint"/>'s <c>_Color</c>/<c>_TintColor</c> must survive it, which
+        /// <c>GetPropertyBlock</c>-then-<c>SetPropertyBlock</c> is what guarantees (the block is read back
+        /// out of the renderer, added to, and written whole). Allocated lazily inside the method, never into
+        /// a static initialiser — see the note on <see cref="_loggedTint"/> for what a Unity ecall in this
+        /// type's static constructor costs the harness.
+        /// </summary>
+        private static void Ink(Live p, float progress)
+        {
+            if (p.Ring == null) return;
+            if (_ink == null) _ink = new MaterialPropertyBlock();
+            var colour = p.Mine ? Own : Peer;
+            p.Ring.GetPropertyBlock(_ink);
+            _ink.SetColor("_SecondColor", colour);
+            _ink.SetColor("_FirstColor", new Color(colour.r * 0.3f, colour.g * 0.3f, colour.b * 0.3f, colour.a));
+            _ink.SetFloat("_Progress", progress);
+            p.Ring.SetPropertyBlock(_ink);
+        }
+
+        private static MaterialPropertyBlock _ink;
+
+        /// <summary>
         /// THE PINGED ACTOR, PAINTED WHOLE AND BLINKING — green mine, blue somebody else's, the same two
         /// colours the marker wears. This is the game's own full-body repaint, reached through the game's
         /// own free channel.
@@ -582,8 +688,10 @@ namespace Multiplayer.UI
         private void Blink()
         {
             var on = ((int)(Time.unscaledTime * 4f) & 1) == 0;
+            var sweep = Mathf.Repeat(Time.unscaledTime, SweepSeconds) / SweepSeconds;
             foreach (var p in _live)
             {
+                Ink(p, sweep);
                 if (p.Paint == null || p.PaintOn == on) continue;
                 p.PaintOn = on;
                 Repaint(p, on);

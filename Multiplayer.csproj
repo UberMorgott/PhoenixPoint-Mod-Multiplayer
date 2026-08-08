@@ -32,6 +32,12 @@
       <HintPath>$(GameManaged)\Facepunch.Steamworks.Win64.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- AK.Wwise.Event — the type every one of the game's sound defs is made of. Needed to POST one of
+         the game's own cues (PingMarkers.Refuse); the game ships this assembly, so it is always present. -->
+    <Reference Include="AK.Wwise.Unity.API.WwiseTypes">
+      <HintPath>$(GameManaged)\AK.Wwise.Unity.API.WwiseTypes.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="0Harmony">
       <HintPath>$(ModSDK)\0Harmony.dll</HintPath>
       <Private>false</Private>
