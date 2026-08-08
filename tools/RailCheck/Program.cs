@@ -308,6 +308,11 @@ namespace RailCheck
             Add(laws, () => L325_OnlyAnEnemyTftvWouldNameIsSuppressed.Check(game));
             Add(laws, () => L326_ADestroyedSoldierLeavesNobodysScreen.Check());
             Add(laws, () => L327_AViewSettingNeverRidesTheCampaignRail.Check());
+            Add(laws, () => L328_ARestartTakesEveryPeerOrNobody.Check());
+            Add(laws, () => L329_ThePeersScoreTheHostsBoard.Check(game));
+            Add(laws, () => L330_AFactionsUnlockTagsReachEveryPeer.Check());
+            Add(laws, () => L331_AListApplyKeepsTheObjectTheGameReads.Check());
+            Add(laws, () => L332_AnAnswerWindowIsNotHeldBehindItsOwnScreen.Check());
             Add(laws, () => L333_AVariableIntentLandsOrSaysWhyNot.Check());
             Add(laws, () => L335_AScopedResendLandsInTheMirror.Check());
             Add(laws, () => L336_TheReadyProbeMeasuresALiftedCurtain.Check());

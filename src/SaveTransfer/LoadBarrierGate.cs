@@ -2,6 +2,7 @@ using System;
 using Base.Levels;
 using HarmonyLib;
 using Multiplayer.Network;
+using Multiplayer.Tactical;
 using PhoenixPoint.Common.Game;
 using PhoenixPoint.Common.Levels.Params;
 using UnityEngine;
@@ -71,18 +72,59 @@ namespace Multiplayer.Harmony
     [HarmonyPatch(typeof(PhoenixGame), nameof(PhoenixGame.FinishLevel))]
     internal static class LoadBarrierGate
     {
+        /// <summary>What this funnel is looking at. Three kinds, because the prefix owes each a different
+        /// answer and the third one did not exist until 2026-08-08.</summary>
+        internal enum Boundary
+        {
+            /// <summary>Leaving for the menu, or no next level at all — nobody is loading anything.</summary>
+            NotALoad,
+            /// <summary>The same level, torn down and reloaded (<c>PhoenixGame.cs</c>:574-580).</summary>
+            Restart,
+            /// <summary>An ordinary level change: launch, entry, F2 reload, post-mission return.</summary>
+            Ordinary,
+        }
+
+        /// <summary>The prefix's verdict as a PURE function, so RailCheck can EXECUTE it (law L328) instead of
+        /// asserting that some method was called. A restart is distinguishable from every other level change
+        /// ONLY by this result type — there is no <c>RestartMission()</c> anywhere in the engine — so this
+        /// three-way answer IS the fix, and a law that cannot run it is a law that cannot see it disappear.</summary>
+        internal static Boundary Classify(ILevelParams result) =>
+            result == null || result is QuitGameResult ? Boundary.NotALoad
+          : result is RestartGameResult ? Boundary.Restart
+          : Boundary.Ordinary;
+
         // Harmony binds injected params BY NAME to the original (PhoenixGame.cs:262
         // `FinishLevel(ILevelParams result = null)`).
-        private static void Prefix(ILevelParams result)
+        // Returns false to SKIP the original — the one case is a client's own restart (see below). Every
+        // other prefix on this method is side-effect-free and therefore still runs (Harmony calls those
+        // unconditionally); GeoTeardownResetGate is the only one, and it self-returns when the peer holds no
+        // GeoLevelController — which a restart never does, the native Restart button exists in TACTICAL only
+        // (UIStateTacticalOptions:45 `restartEnabed: true`, UIStateGeoscapeOptions:34 `restartEnabed: false`).
+        private static bool Prefix(ILevelParams result)
         {
             try
             {
+                var boundary = Classify(result);
                 // Not a load boundary: leaving for the menu, or no next level at all.
-                if (result == null || result is QuitGameResult) return;
+                if (boundary == Boundary.NotALoad) return true;
+
+                // A RESTART IS THE ONE LEVEL CHANGE NOBODY ANNOUNCED (law L328). There is no
+                // PhoenixGame.RestartMission() to patch — a restart is distinguishable ONLY by this result
+                // type (PhoenixGame.cs:574-580 loops a RestartGameResult back into RunGameLevel), which is
+                // why the discrimination belongs here, in the method that already discriminates by type.
+                // Until this arm landed, `RestartGameResult` appeared nowhere in the mod: whoever pressed
+                // Restart tore down and reloaded ALONE, and on 2026-08-08 that was the CLIENT — it reloaded
+                // while the host stayed pinned at 68 %, after which the two peers were in different tactical
+                // levels with different key maps and every actor key on the wire named a different board.
+                // The HOST's restart is broadcast so every peer follows without anybody pressing anything;
+                // the CLIENT's becomes an ask and is BLOCKED here.
+                if (boundary == Boundary.Restart && !TacticalTurnSync.OnLocalRestart()) return false;
 
                 var coord = NetworkEngine.Instance?.SaveTransfer;
-                if (coord == null) return;
-                // Self-guarded: a no-op unless this boundary is one nobody else armed (see class doc).
+                if (coord == null) return true;
+                // Self-guarded: a no-op unless this boundary is one nobody else armed (see class doc). A
+                // restart that DOES run reaches it, and should: every peer is about to load the same map, so
+                // they wait behind the curtain for each other exactly as they do on every other boundary.
                 coord.OpenReturnBarrier();
             }
             catch (Exception e)
@@ -91,6 +133,7 @@ namespace Multiplayer.Harmony
                 // outright ("Broken coroutine call chain"), which is law L70's blocker one level down.
                 Debug.LogError("[Multiplayer] LoadBarrierGate.Prefix failed: " + e.Message);
             }
+            return true;
         }
     }
 }

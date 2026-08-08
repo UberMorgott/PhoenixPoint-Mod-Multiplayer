@@ -9,7 +9,9 @@ using HarmonyLib;
 using Multiplayer.Network;
 using Multiplayer.Network.MessageLayer;
 using Multiplayer.Network.Sync;
+using PhoenixPoint.Common.Game;
 using PhoenixPoint.Common.Levels.Missions;
+using PhoenixPoint.Common.Levels.Params;
 using PhoenixPoint.Tactical.Levels;
 using PhoenixPoint.Tactical.Levels.Missions;
 using UnityEngine;
@@ -61,8 +63,12 @@ namespace Multiplayer.Tactical
         private const byte OpTurn = 1;
         private const byte OpEnd = 2;
         private const byte OpLeave = 3;
+        // 4 host→all is TacticalReadySync.OpReadyTally — it ships on THIS surface (see Send's doc).
+        private const byte OpRestart = 5;
         internal const byte OpEndTurn = 1;
         internal const byte OpLeaveBattle = 2;
+        // 3 client→host is TacticalReadySync.OpSetReady.
+        internal const byte OpRestartMission = 4;
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
 
@@ -98,6 +104,7 @@ namespace Multiplayer.Tactical
             {
                 [OpEndTurn] = HandleEndTurn,
                 [OpLeaveBattle] = HandleLeaveBattle,
+                [OpRestartMission] = HandleRestartMission,
                 // ADVISORY, gates nothing (RailCheck L119). It rides this family because it is the same
                 // question one step earlier: "I am done with this turn" → "end this turn" → "we are done
                 // with this battle".
@@ -217,6 +224,17 @@ namespace Multiplayer.Tactical
             if (player == null)
                 Debug.LogError("[Multiplayer][tac] mission-end broadcast has NO player faction to read the outcome " +
                                "from — clients will still be torn down, but their battle summary will show a loss.");
+            // THE LAST BOARD EVERY PEER SCORES MUST BE THE HOST'S (law L329). Every peer computes its own
+            // objectives and its own XP off its own actors — RescueSoldiersFactionObjective.EvaluateObjective
+            // :37-72 counts what IT can see, and TacticalFaction.GiveExperienceForObjectives:207-294 is run
+            // LOCALLY on each peer from LOCAL objective state. The turn-edge sweep (HostSweepTick) is what
+            // normally makes those boards agree, and a mission that ends on the same turn its last unit
+            // evacuates never reaches another turn edge: nothing heals a divergence introduced during that
+            // final turn. Live 2026-08-08: 3 evacuated on the host, 2 on the client, XP diverged with it.
+            // So the sweep runs HERE, immediately before the outcome goes out, on the same ordered stream —
+            // the settles are on the wire ahead of OpEnd, which is ahead of the native GameOver the clients
+            // run from ApplyEnd.
+            TacticalCommandSync.HostSettleAllLive("mission end");
             byte state = (byte)(player?.State ?? TacFactionState.None);
             Send(SurfaceIds.TacTurn, OpEnd, "mission END outcome=" + (TacFactionState)state, w => w.Write(state));
         }
@@ -234,6 +252,33 @@ namespace Multiplayer.Tactical
             var coord = engine.SaveTransfer;
             if (coord == null || !coord.SessionStarted) return;
             Send(SurfaceIds.TacTurn, OpLeave, "battle LEFT — every peer follows", w => { });
+        }
+
+        /// <summary>THE HOST IS RESTARTING THE MISSION — carry every peer through the SAME reload (law L328).
+        ///
+        /// The native restart is a level change like any other and the game gives it no method of its own:
+        /// <c>UIModulePauseScreen.OnRestartConfirmed</c>:203-211 calls <c>PhoenixGame.FinishLevel(new
+        /// RestartGameResult(GameUtl.CurrentLevel().LevelParams))</c> and <c>TacticalGameCrt</c>:574-580 loops
+        /// that result back into <c>RunGameLevel</c> — a full teardown and reload of the same map. So the
+        /// only thing that distinguishes a restart is the RESULT TYPE at the funnel this mod already patches
+        /// (<see cref="Multiplayer.Harmony.LoadBarrierGate"/>), and until this arm landed nothing anywhere in
+        /// the mod mentioned <c>RestartGameResult</c> at all: the presser reloaded ALONE. Live 2026-08-08 —
+        /// the client pressed restart, loaded a fresh level by itself, and the host sat pinned at 68 % while
+        /// the two peers fought different tactical levels with different key maps.
+        ///
+        /// Rides 0x80 next to <c>OpEnd</c>/<c>OpLeave</c> for the same reason they do: one ordered stream in
+        /// which a restart cannot overtake, or be overtaken by, the turn edge or the mission end.
+        ///
+        /// This is NOT a quorum and cannot become one — nobody waits for anybody to press anything. One
+        /// player restarts and every peer follows, exactly like one player's Continue takes everyone out of
+        /// a finished battle. The simultaneous-start barrier that follows waits only on LOADS.</summary>
+        private static void HostBroadcastRestart()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            var coord = engine.SaveTransfer;
+            if (coord == null || !coord.SessionStarted) return;
+            Send(SurfaceIds.TacTurn, OpRestart, "mission RESTART — every peer reloads the same level", w => { });
         }
 
         /// <summary>internal, not private: <see cref="TacticalReadySync"/> ships its advisory tally as op 4
@@ -310,6 +355,7 @@ namespace Multiplayer.Tactical
                     if (op == OpTurn) ApplyTurn(r.ReadString(), r.ReadInt32());
                     else if (op == OpEnd) ApplyEnd((TacFactionState)r.ReadByte());
                     else if (op == OpLeave) ApplyLeave();
+                    else if (op == OpRestart) ApplyRestart();
                     else if (op == TacticalReadySync.OpReadyTally)
                         TacticalReadySync.ApplyTally(r.ReadInt32(), r.ReadInt32());
                     else
@@ -366,6 +412,30 @@ namespace Multiplayer.Tactical
             using (SyncApplyScope.Enter()) tlc.GameOver();
             Debug.Log("[Multiplayer][tac] CLIENT applied host mission END outcome=" + playerState +
                       " — native teardown → battle summary → geoscape.");
+        }
+
+        /// <summary>The host restarted the mission — this peer runs the SAME native restart, on its own level
+        /// params, so both sides re-enter <c>TacticalGameCrt</c>'s reload loop together and the
+        /// simultaneous-start barrier (armed for this boundary by <c>LoadBarrierGate</c>, which sees this very
+        /// <c>FinishLevel</c>) holds every curtain down until the last peer is in.
+        ///
+        /// It is the pause screen's own two lines verbatim (<c>UIModulePauseScreen.OnRestartConfirmed</c>
+        /// :209-211), inside a <see cref="SyncApplyScope"/> so this peer's own <c>FinishLevel</c> capture lets
+        /// it through instead of bouncing the ask back to the host as a second restart (law 8).</summary>
+        private static void ApplyRestart()
+        {
+            var level = GameUtl.CurrentLevel();
+            var game = GameUtl.GameComponent<PhoenixGame>();
+            if (level == null || game == null)
+            {
+                Debug.LogError("[Multiplayer][tac] host mission RESTART arrived with no live level on this peer " +
+                               "— nothing to reload here, so this peer and the host are now in different levels " +
+                               "and every actor key they exchange names a different board.");
+                return;
+            }
+            using (SyncApplyScope.Enter()) game.FinishLevel(new RestartGameResult(level.LevelParams));
+            Debug.Log("[Multiplayer][tac] CLIENT applied host mission RESTART — reloading this level through " +
+                      "the game's own restart loop; the curtain stays down until every peer is back in.");
         }
 
         /// <summary>SOMEBODY pressed Continue and the host left the battle — so does this peer. Without it,
@@ -651,6 +721,71 @@ namespace Multiplayer.Tactical
             // arrives here too and the broadcast has exactly one emission point. HostBroadcastLeave is
             // self-gated on IsHost, so a client re-entering from ApplyLeave's own apply scope sends nothing.
             if (first) HostBroadcastLeave();
+        }
+
+        /// <summary>Pure, so RailCheck can execute it (law L328). A restart needs a live, unfinished mission
+        /// to restart — everything else is a press the host cannot honour and must say so about.</summary>
+        internal static string ValidateRestart(bool hasLevel, bool isGameOver)
+        {
+            if (!hasLevel)
+                return "this host holds no tactical level, so there is no mission to restart";
+            if (isGameOver)
+                return "this battle is already over — a finished mission is LEFT, not restarted";
+            return null;
+        }
+
+        /// <summary>A client pressed Restart. The host runs the restart ITSELF (law 3): its own
+        /// <c>FinishLevel</c> passes <see cref="OnLocalRestart"/>, which is the ONE emission point for
+        /// <see cref="HostBroadcastRestart"/> — so a client's ask and the host's own press take exactly the
+        /// same road and every peer reloads once. The asking client already blocked its own restart and is
+        /// still standing in the battle; if the host refuses, the reject tells it why instead of leaving a
+        /// button that visibly did nothing.</summary>
+        private static void HandleRestartMission(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
+        {
+            var tlc = Tlc();
+            string why = ValidateRestart(tlc != null, tlc != null && tlc.IsGameOver);
+            if (why == null)
+            {
+                var level = GameUtl.CurrentLevel();
+                var game = GameUtl.GameComponent<PhoenixGame>();
+                if (level == null || game == null) why = "this host has no PhoenixGame/level to restart through";
+            }
+            if (why != null)
+            {
+                // QUIETLY (law L123 arm g). Both refusal arms mean the host's battle is already over or gone,
+                // and in both the asking peer is being carried out of it by a message already in flight
+                // (OpEnd → ApplyEnd, OpLeave → ApplyLeave). A modal there pops over a teardown; it is not the
+                // player's only word, so this stays a reject + a log line.
+                IntentRail.Reject(SurfaceIds.TacTurnIntent, senderPeerId, why);
+                return;
+            }
+            GameUtl.GameComponent<PhoenixGame>().FinishLevel(new RestartGameResult(GameUtl.CurrentLevel().LevelParams));
+            Debug.Log("[Multiplayer][tac] HOST restart-mission intent from peer=" + senderPeerId + " nonce=" + nonce +
+                      " ACCEPTED — running the host's own restart; its FinishLevel carries every peer with it.");
+        }
+
+        /// <summary>THE RESTART CAPTURE (law L328), called from the ONE funnel every level change passes
+        /// (<see cref="Multiplayer.Harmony.LoadBarrierGate"/> on <c>PhoenixGame.FinishLevel</c>) the moment the
+        /// result is a <c>RestartGameResult</c>. Returns TRUE to let the native restart run, FALSE to block it.
+        ///
+        /// A restart is a full teardown and reload of the map: it is a STATE change of the harshest kind, so
+        /// it is block-first like every other one. On a client the press becomes an ask and NOTHING happens
+        /// locally — self-restarting is what put the two peers in different tactical levels with different key
+        /// maps on 2026-08-08. On the host (or solo, or inside an apply) the native restart runs and every
+        /// other peer is told to run its own; <see cref="HostBroadcastRestart"/> self-gates on host+session, so
+        /// a client re-entering here from <see cref="ApplyRestart"/>'s apply scope sends nothing back.</summary>
+        internal static bool OnLocalRestart()
+        {
+            if (!IntentRail.ShouldRunNative())
+            {
+                IntentRail.Send(SurfaceIds.TacTurnIntent, OpRestartMission, "restart mission");
+                Debug.Log("[Multiplayer][tac] LOCAL mission restart BLOCKED on this client and sent to the host " +
+                          "as an ask — a peer that reloads the map on its own is fighting a different battle " +
+                          "from everyone else. This screen stays in the mission until the host restarts it.");
+                return false;
+            }
+            HostBroadcastRestart();
+            return true;
         }
     }
 
