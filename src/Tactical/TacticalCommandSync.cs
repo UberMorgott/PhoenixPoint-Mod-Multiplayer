@@ -3191,6 +3191,18 @@ namespace Multiplayer.Tactical
             "UIStateShoot", "UIStateAbilitySelected", "UIStateOverwatchAbilitySelected"
         };
 
+        /// <summary>THE CAMERA HINTS A TARGETING STATE PUSHES, and the exact pair the states' own exits would
+        /// have popped: <c>UIStateShoot</c>:519-524 / :702-707 push <c>Aim</c> or <c>ManualAim</c>, and
+        /// <c>UIStateShoot.ExitState</c>:1265, <c>ShootAbilityFinishedExecutionHandler</c>:1330/:1350 and
+        /// <c>UIStateFreeCam.ExitState</c>:458 are the three native releases. A field rather than two literal
+        /// calls so RailCheck L232 can READ which hints the release clears instead of guessing at IL operands —
+        /// dropping one of the two is the regression that leaves half the players in the shoulder camera.</summary>
+        internal static readonly Base.Cameras.CameraDirectorHint[] TargetingCameraHints =
+        {
+            Base.Cameras.CameraDirectorHint.Aim,
+            Base.Cameras.CameraDirectorHint.ManualAim
+        };
+
         private static bool ViewIsHeldInTargeting(PhoenixPoint.Tactical.View.TacticalView view)
         {
             var state = view == null ? null : view.CurrentState;
@@ -3218,6 +3230,23 @@ namespace Multiplayer.Tactical
                     return;
                 var before = view.CurrentState;
                 view.ResetViewState();
+                // AND THE AIM CAMERA COMES BACK WITH IT. ResetViewState is not enough on its own:
+                // UIStateShoot.ExitState:1263-1270 guards its own RemoveHint with `&& !_abilityActivated`, and
+                // the click set that flag at :1385 — so the state exits and leaves its orbit hint installed.
+                // The only thing that would have cleared it is ShootAbilityFinishedExecutionHandler:1330/:1350,
+                // delivered through the UIStateWaiting that TacticalViewState.ActivateAbility:273-275 creates,
+                // which is precisely the state switch A9 suppresses. It never self-heals either:
+                // CameraDirector.Evaluate:163 sweeps only params with Unmanaged == true and
+                // TacOrbitCamDirectorParams never sets it, so every later evaluation — including the ones
+                // another peer's plain moves cause — re-matches the orbit node and puts the shoulder camera
+                // back. This runs the game's own release for the two hints that state pushed, and Pop no-ops
+                // on a peer that was not aiming (CameraDirectorState:71-78).
+                //
+                // BEFORE the "already neutral" return: a peer whose view has since been reset by something
+                // else still owns the stranded hint, and that is the one case with nothing left to clear it.
+                var director = view.CameraDirector;
+                if (director != null)
+                    foreach (var hint in TargetingCameraHints) director.RemoveHint(hint);
                 if (ReferenceEquals(before, view.CurrentState)) return;   // already neutral — nothing to report
                 Debug.Log("[Multiplayer][tac] released this peer's UI from " + SafeActorName(actor) + " (" + why +
                           ") — it was held in " + (before == null ? "<none>" : before.GetType().Name) +

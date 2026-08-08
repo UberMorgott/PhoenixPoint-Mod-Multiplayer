@@ -98,17 +98,9 @@ namespace Multiplayer.Tactical
             var selected = ReferenceEquals(view, null) ? null : view.SelectedActor;
             bool allowed = Allow(faction != null && faction.IsControlledByPlayer, actor, selected);
 
-            // L104(j) INSTRUMENTATION — THE PAIR THAT MEASURES THE WIND-UP, ON EVERY PEER INCLUDING THE OWNER.
-            // Shoot is pushed when the fire coroutine begins and ShootingStarted when the round leaves the
-            // barrel, so their delta IS the aim entry TacticalLevelController:1645 gates on CurrentlyAiming.
-            // Until now only SUPPRESSED hints were logged — and the hints that survive are exactly the ACTING
-            // peer's, so the one wind-up that had to be compared was the one invisible in every log we had.
-            // Two lines per shot per peer: the measurement is the point, and it is user-gesture rate.
-            if (hint == CameraDirectorHint.Shoot || hint == CameraDirectorHint.ShootingStarted)
-                Debug.Log("[Multiplayer][tac] " + hint + " " + actor.DisplayName + " t=" +
-                          Time.realtimeSinceStartup.ToString("0.000") + " " +
-                          (allowed ? "played here" : "suppressed here"));
-
+            // The L104(j) wind-up instrumentation that stood here (two Debug.Log per shot per peer) is GONE:
+            // the question it measured — when each peer's aim entry begins — was answered and closed by
+            // L230/L231, which now start every peer's animation from the host's own record.
             if (allowed) return true;
 
             // Never silent: an unexplained camera that DOESN'T move is as confusing as one that does, and a
@@ -162,8 +154,10 @@ namespace Multiplayer.Tactical
         internal static void SnapToAbilitySubject(CameraDirectorParams directorParams, CameraChaseParams chase)
         {
             if (chase == null || chase.Instant) return;   // the game is already cutting — PlanarCamDef:69-70
-            if (!(directorParams is IAbilityParams)) return;
-            if (!(directorParams is TacCamDirectorParams abilityParams)) return;   // the arm that names an actor
+            // IAbilityParams is implemented by exactly TacAbilityDirectorParams and TacOrbitCamDirectorParams,
+            // and both derive from TacCamDirectorParams — so one cast names the family AND the actor.
+            if (!(directorParams is IAbilityParams) || !(directorParams is TacCamDirectorParams abilityParams))
+                return;
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return;   // solo play stays fully native
 
@@ -205,14 +199,22 @@ namespace Multiplayer.Tactical
         // DirectorState, to avoid a cosmetic jolt from a re-instantiated non-persistent
         // ActionCamDef. But CameraDirectorState.Pop ALREADY no-ops on an empty match, so the
         // gate protected nothing the game did not protect itself — while taking the Evaluate() with
-        // it. And the state does lose entries without a pop: Evaluate:157 ends with
+        // it. And the state can lose entries without a pop: Evaluate:163 ends with
         // ClearUnmanagedParams, which drops every item whose params are Unmanaged and whose
-        // hint is not in the node's StateFrom — and the whole SHOT family is unmanaged
-        // (TacOrbitCamDirectorParams, "Unmanaged: True" in every director log line). Two peers acting
-        // at once is precisely what makes those extra evaluations happen: each mirrored order this peer
-        // suppresses still delivers its pop, each pop re-evaluates, and one of those sweeps this peer's own
-        // live entry. Its real pop then found nothing in the state, the gate skipped the original, no
+        // hint is not in the node's StateFrom. Two peers acting at once is precisely what makes those extra
+        // evaluations happen: each mirrored order this peer suppresses still delivers its pop, and each pop
+        // re-evaluates. Its real pop then found nothing in the state, the gate skipped the original, no
         // Evaluate ran, and the locked chase on that soldier stayed installed for good.
+        //
+        // CORRECTION (2026-08-08), because the paragraph above used to justify itself with a fact that is
+        // FALSE: it claimed "the whole SHOT family is unmanaged (TacOrbitCamDirectorParams, Unmanaged: True in
+        // every director log line)". TacOrbitCamDirectorParams never sets Unmanaged and CameraDirectorParams
+        // defaults it to false; across the whole assembly the only two pushes that set it are Weapon:459-465
+        // (ProjectileFired) and TacticalView:911 (ActorReveal). So the SHOT family is MANAGED and the sweep
+        // cannot touch it. The gate deletion still stands — Pop already no-ops and the lost Evaluate was the
+        // real damage — but the sweep is not what consumes a live shot entry, and the same fact is why a
+        // stranded Aim hint is PERMANENT rather than self-healing (see
+        // TacticalCommandSync.TargetingCameraHints, which is now what clears it).
         //
         // So the release path is left exactly as the game wrote it. The cost is the jolt the gate was
         // bought for, plus the pre-existing behaviour it never changed anyway: a suppressed cinematic's pop

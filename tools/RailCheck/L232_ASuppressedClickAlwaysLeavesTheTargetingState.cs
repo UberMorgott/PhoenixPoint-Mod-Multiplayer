@@ -7,7 +7,8 @@ using Multiplayer.Tactical;
 namespace RailCheck
 {
     /// <summary>
-    /// L232 — A PEER THAT SUPPRESSED ITS NATIVE STATE SWITCH ALWAYS ENDS UP OUT OF THE TARGETING STATE.
+    /// L232 — A PEER THAT SUPPRESSED ITS NATIVE STATE SWITCH ALWAYS ENDS UP OUT OF THE TARGETING STATE, AND
+    /// WITHOUT A STRANDED AIM CAMERA.
     ///
     /// THE OUTCOME, NOT THE CALL. A9/L230 made <c>ClickedOrderWaitsForTheEcho</c> skip the whole native
     /// <c>TacticalViewState.ActivateAbility</c> body — <c>SwitchToState(new UIStateWaiting())</c> at :274-275
@@ -56,7 +57,9 @@ namespace RailCheck
     /// mirror row → <c>L232 mirror-has-no-exit</c>; make it return false always → <c>L232 outcome-is-vacuous</c>;
     /// delete the release from <c>PublishClickedOrder</c> → <c>L232 seam-does-not-release</c>; put
     /// <c>NoteEchoArrived</c> back into <c>QueueSettle</c> → <c>L232 disarm-outlives-the-release</c>; add a
-    /// second patch class on <c>ActivateAbility</c> → <c>L232 two-prefixes-on-one-click</c>.
+    /// second patch class on <c>ActivateAbility</c> → <c>L232 two-prefixes-on-one-click</c>; drop a hint from
+    /// <c>TargetingCameraHints</c> → <c>L232 aim-camera-is-stranded</c>; delete the pop loop from the release
+    /// → <c>L232 release-does-not-pop-the-camera</c>.
     /// </summary>
     internal static class L232_ASuppressedClickAlwaysLeavesTheTargetingState
     {
@@ -156,6 +159,39 @@ namespace RailCheck
                              "the wait it answers keeps ticking to its ceiling and reports an ECHO LOST for an " +
                              "order the host demonstrably answered. The disarm and the release are one fact and " +
                              "have to sit at one seam.";
+
+            // ── (e) …AND WITHOUT A STRANDED AIM CAMERA ───────────────────────
+            // The state switch A9 suppresses carries a CALLBACK as well as a state:
+            // TacticalViewState.ActivateAbility:273-275 builds the UIStateWaiting whose UpdateState:32 invokes
+            // UIStateShoot.ShootAbilityFinishedExecutionHandler:1330/:1350 — the ONLY thing that pops
+            // CameraDirectorHint.Aim once the click set _abilityActivated. UIStateShoot.ExitState:1263-1270
+            // guards its own pop with `&& !_abilityActivated`, so ResetViewState does not do it either, and
+            // Evaluate:163's sweep cannot: it drops only Unmanaged params and TacOrbitCamDirectorParams never
+            // sets that. So the hint is PERMANENT — every later evaluation, including the ones another peer's
+            // plain moves cause, re-matches the orbit node and the peer is stuck in the shoulder camera.
+            var hintsField = cmd.GetField("TargetingCameraHints", All);
+            var hints = hintsField == null ? null : hintsField.GetValue(null) as Base.Cameras.CameraDirectorHint[];
+            if (hints == null)
+                yield return "L232 targeting-hints-gone: TacticalCommandSync.TargetingCameraHints no longer " +
+                             "resolves, so nothing names the camera hints a suppressed click leaves behind.";
+            else
+            {
+                foreach (var want in new[] { Base.Cameras.CameraDirectorHint.Aim,
+                                             Base.Cameras.CameraDirectorHint.ManualAim })
+                    if (!hints.Contains(want))
+                        yield return "L232 aim-camera-is-stranded (" + want + "): the release no longer clears " +
+                                     "that hint. UIStateShoot pushes Aim for a click and ManualAim for free-aim, " +
+                                     "and dropping either one leaves exactly those players locked in the " +
+                                     "shoulder camera for the rest of the battle — it cannot self-heal, because " +
+                                     "the sweep at CameraDirector.Evaluate:163 only touches Unmanaged params and " +
+                                     "TacOrbitCamDirectorParams is managed.";
+                var game = typeof(PhoenixPoint.Tactical.Entities.TacticalActorBase).Assembly;
+                if (!Program.Callees(release, game).Any(c => c.Name == "RemoveHint"))
+                    yield return "L232 release-does-not-pop-the-camera: ReleaseLocalUiHolding no longer reaches " +
+                                 "CameraDirector.RemoveHint, so TargetingCameraHints names hints nothing pops. " +
+                                 "ResetViewState alone does NOT clear them: UIStateShoot.ExitState guards its " +
+                                 "own pop with !_abilityActivated, and the click is what set that flag.";
+            }
 
             // ── (d) exactly ONE patch class on the click seam ─────────────────
             var view = typeof(PhoenixPoint.Tactical.View.TacticalViewState);
