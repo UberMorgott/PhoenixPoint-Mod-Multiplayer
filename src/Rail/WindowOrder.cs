@@ -228,9 +228,41 @@ namespace Multiplayer.Network.Sync
             head != null &&
             HoldsForOpenScreen(head.Priority, head.State == null ? null : head.State.GetType(), currentViewState);
 
+        /// <summary>WINDOWS THAT ARE AN ANSWER, NOT AN INTERRUPTION — never held for an open screen.
+        ///
+        /// THE REPORT (2026-08-08), measured end to end in multiplayer.log:3283-3291 on one clock: the
+        /// client's hire intent went at 20:36:32.146 (personnel hire S#89), the host replayed it, the panel
+        /// re-entered at :32.298, the character arrived structurally at :32.719 ('U#9'), the destination
+        /// popup was raised at :32.721 — and at :32.747 `queue HELD while UIStateHavenDetailsScreen is
+        /// open`. It drained 71 SECONDS later, when the player finally left the view. The player bought a
+        /// soldier and the game simply did not ask where to send them.
+        ///
+        /// THE HOLD'S OWN RATIONALE DOES NOT REACH THIS WINDOW. <see cref="HoldsForOpenScreen"/> exists so
+        /// that an UNRELATED host event is not pushed on top of a screen the player deliberately opened
+        /// (see the long note above). <c>UIStateAssetDeployment</c> is the opposite of unrelated: every one
+        /// of its three native raise sites is an ACQUISITION completing — a recruit hired
+        /// (GeoPhoenixFaction.cs:708), an aircraft manufactured (VehicleItemDef.cs:47), a ground vehicle
+        /// manufactured (GroundVehicleItemDef.cs:48) — each reached through
+        /// <c>GeoscapeView.PrepareDeployAsset:1308-1326</c>, which already gates on
+        /// <c>faction == _context.ViewerFaction</c>. It is the game asking a question the purchase raised;
+        /// holding it strands the asset with nowhere to go and no visible reason.
+        ///
+        /// SHOWN ON EVERY PEER, IMMEDIATELY (explicit product decision, and it may differ from vanilla):
+        /// the co-op faction is shared, so the asset every peer is being asked about is one they all own.
+        /// This is not a quorum and cannot become one — nothing waits for anybody to answer; each peer's
+        /// own queue simply stops swallowing the question.
+        ///
+        /// DELIBERATELY A NAMED SET AND NOT A WEAKENING. Everything else keeps the hold exactly as it was:
+        /// declared by NAME so that a new window is held by default, which is the recoverable direction.</summary>
+        private static readonly HashSet<string> NeverHeldAnswerStates = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "UIStateAssetDeployment",   // "where do you want this?" — the direct answer to an acquisition
+        };
+
         internal static bool HoldsForOpenScreen(int priority, Type queuedState, Type currentViewState) =>
             (priority < TransitionPriority ||
              (queuedState != null && HeldTransitionStates.Contains(queuedState.Name))) &&
+            !(queuedState != null && NeverHeldAnswerStates.Contains(queuedState.Name)) &&
             currentViewState != null &&
             !MapStates.Contains(currentViewState.Name);
 
@@ -372,6 +404,11 @@ namespace Multiplayer.Network.Sync
 
                 // THE OPEN-SCREEN HOLD (see HoldsForOpenScreen). Asked of the head, because the head is what
                 // the game is about to push; a transition further down the queue is not in front of anybody.
+                // ponytail: an exempt answer window (NeverHeldAnswerStates) still waits when a HELD window
+                // is in front of it — the native drain only ever pops index 0, so skipping past it means
+                // reordering, and reordering on a LOCAL condition (which screen this peer has open) is the
+                // one thing this class exists to avoid. Promote it to the head only if a session shows an
+                // answer window queued behind a held one; the measured defect was the head itself.
                 var current = GeoLevel()?.View?.CurrentViewState;
                 var head = pending[0].State;
                 if (HoldsHead(pending[0], current == null ? null : current.GetType()))

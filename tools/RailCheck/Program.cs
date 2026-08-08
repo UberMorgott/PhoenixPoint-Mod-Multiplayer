@@ -309,6 +309,7 @@ namespace RailCheck
             Add(laws, () => L326_ADestroyedSoldierLeavesNobodysScreen.Check());
             Add(laws, () => L327_AViewSettingNeverRidesTheCampaignRail.Check());
             Add(laws, () => L333_AVariableIntentLandsOrSaysWhyNot.Check());
+            Add(laws, () => L335_AScopedResendLandsInTheMirror.Check());
             Add(laws, () => L336_TheReadyProbeMeasuresALiftedCurtain.Check());
             laws.Sort(StringComparer.Ordinal);
 
