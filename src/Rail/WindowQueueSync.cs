@@ -384,6 +384,9 @@ namespace Multiplayer.Network.Sync
         /// the send, so a later non-modal dismissal can never inherit somebody's Confirm.</summary>
         private static byte _pendingResult = ResultNone;
 
+        /// <summary>Once per ModalType: a brief is answered at click rate all game long.</summary>
+        private static readonly HashSet<string> _perPeerLogged = new HashSet<string>(StringComparer.Ordinal);
+
         /// <summary>Called from the client's own <c>FinishQueriedState</c>, with the state it is closing.
         /// Non-blocking on purpose: closing this peer's own window is PRESENTATION and must happen locally
         /// whatever the host does with the intent (the block-first law governs STATE mutations, and this
@@ -403,7 +406,23 @@ namespace Multiplayer.Network.Sync
                 // the asset-deployment prompt (for OpDeploy), and that window closes through this same
                 // FinishQueriedState, so without this line every deploy would send a second, answerless
                 // message the host could only log as a mismatch.
-                if (!(state is UIStateGeoModal)) return;
+                if (!(state is UIStateGeoModal modal)) return;
+                // THE PER-PEER ANSWER CLASS NEVER CROSSES. A mission brief / outcome is answered by each peer
+                // for itself (GeoWindowCoverage.IsPerPeerAnswer): this peer's copy carries the game's OWN
+                // callback now, so the answer already ran locally, and sending it on would make the HOST run
+                // ModalResultCallback a second time for somebody else's click — whose Cancel arm is
+                // GeoMission.Cancel:253, the very thing that deleted the shared mission when one player
+                // declined. Declining is "I am busy", never "cancelled for everyone".
+                if (GeoWindowCoverage.IsPerPeerAnswer(modal.ModalType, modal.ModalData))
+                {
+                    if (_perPeerLogged.Add(modal.ModalType.ToString()))
+                        Debug.Log("[MP][windows] '" + modal.ModalType + "' answered LOCALLY — no 0x" +
+                                  SurfaceIds.GeoWindowIntent.ToString("X2") +
+                                  " advance crosses for a mission brief/outcome, because every peer answers " +
+                                  "this window for itself and one peer's decline must not cancel the mission " +
+                                  "for the others (logged once per ModalType)");
+                    return;
+                }
                 string identity = IdentityOf(state);
                 // THE ORDINARY CASE, and the whole of the 2026-08-01 fix: this peer closed a window of its
                 // OWN — its event picker, its tutorial, its replenish screen, its ability prompt — or the

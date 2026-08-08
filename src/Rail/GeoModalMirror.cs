@@ -687,7 +687,24 @@ namespace Multiplayer.Network.Sync
                 // button funnels into UIStateGeoModal.FinishDialog:82 -> `_dialogHandler?.Invoke` and does nothing
                 // but close this peer's own copy. Persistent stays FALSE (never set): a persistent modal is
                 // save-restored with the game's own authoritative ModalResultCallback closure (RestoreContext:36).
-                state = new UIStateGeoModal(modalType, null, data);
+                //
+                // EXCEPT FOR THE PER-PEER ANSWER CLASS (GeoWindowCoverage.IsPerPeerAnswer), where a null handler
+                // is the DEFECT: a mission brief's Confirm has to reach this peer's own ToDeploymentState, and
+                // with no handler the copy could only emit 0xB9 — which made the HOST answer the brief for the
+                // clicking peer and, on a Cancel, delete the mission for everybody. The closure below is
+                // VERBATIM the game's own (UIStateGeoModal.RestoreContext.RegenerateState:36-39), and it is safe
+                // here because both of its arms are already gated: Confirm -> GeoscapeView.LaunchMission:1043 is
+                // pure view (its SkipDeploymentScreen arm's mission.Launch:1046 is captured block-first as
+                // 0xB8), and Cancel/Close is refused by MissionSync.PerPeerModalAnswer + MissionCancelGate.
+                DialogCallback handler = null;
+                if (GeoWindowCoverage.IsPerPeerAnswer(modalType, data))
+                {
+                    var lvl = geo;
+                    var mt = modalType;
+                    var md = data;
+                    handler = res => lvl.View.ModalResultCallback(mt, res, md);
+                }
+                state = new UIStateGeoModal(modalType, handler, data);
             }
             q.QueryStateSwitch(new GeoscapeViewStateSwitchRequest(state, p.Priority)
             // The GAME'S OWN flag, true as on the host: a mirrored modal must pause THIS peer, which is what

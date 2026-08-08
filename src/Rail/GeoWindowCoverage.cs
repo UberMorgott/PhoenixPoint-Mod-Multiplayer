@@ -1,7 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using Base.Core;
 using HarmonyLib;
 using PhoenixPoint.Common.Utils;
+using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
@@ -107,7 +111,10 @@ namespace Multiplayer.Network.Sync
                       "(MissionSync), and the host's launch then pulls EVERY peer into the battle through the " +
                       "native save transfer (TacticalEntry + SaveTransferCoordinator), which is why no peer " +
                       "needs the other's screen. The Back button's GeoMission.Cancel is gated on a client " +
-                      "(MissionCancelGate) so backing out stays navigation and never deletes a shared mission. " +
+                      "(MissionCancelGate) so backing out stays navigation and never deletes a shared mission; " +
+                      "the BRIEF that opens this screen is answered per peer for the same reason since " +
+                      "2026-08-09 (MissionSync.PerPeerModalAnswer), so one player declining leaves everybody " +
+                      "else's brief live. " +
                       "Mirroring the screen itself would drag a peer into a squad pick it did not ask for",
             },
             [typeof(UIStateGeoscapeTutorial)] = new WindowRule
@@ -265,15 +272,23 @@ namespace Multiplayer.Network.Sync
                 "structurally creates on the client, docs/rail-baseline.txt), and the client's copy is built " +
                 "from what THAT path resolves to on its own graph, never from a wire reference the host may " +
                 "already have cancelled. Ten ModalTypes ride it and none of them cost a line: " +
-                "GetMissionBriefModal:1724 only picks the prefab. The BUTTONS were this entry's prerequisite " +
-                "and both halves already exist — Confirm's LaunchMission is captured block-first as the 0xB8 " +
-                "launch intent (MissionSync, which likewise reads the host's OWN site.ActiveMission) and " +
-                "Cancel is gated (MissionCancelGate); the click itself crosses as the 0xB9 advance intent " +
-                "(WindowQueueSync) and the HOST runs its own FinishDialog:82, because the copy here carries a " +
-                "null DialogCallback and no button on it can run game logic locally. Law 91 is the whole " +
-                "point: a brief on an idle host held the shared queue and the shared clock with no peer able " +
-                "to answer it. If the mission has not reached this peer yet the raise is REFUSED loudly " +
-                "(DataRefusal) — no window beats a window over placeholder text",
+                "GetMissionBriefModal:1724 only picks the prefab. ANSWERED PER PEER SINCE 2026-08-09, and the " +
+                "previous wording is what broke: it said \"the click crosses as the 0xB9 advance intent and the " +
+                "HOST runs its own FinishDialog:82, because the copy here carries a null DialogCallback\". That " +
+                "host-side FinishDialog runs ModalResultCallback:825-826, whose Cancel arm is GeoMission.Cancel" +
+                ":253 (Site.ActiveMission = null, DestroySite, Reward wiped) — so ONE player declining deleted " +
+                "the mission for the whole team and left everybody else a window whose Confirm the host then " +
+                "refused. Now the copy carries the game's OWN callback (verbatim from UIStateGeoModal" +
+                ".RestoreContext:36-39, GeoModalMirror), emits NO 0xB9 (WindowQueueSync.SendAdvance), and " +
+                "MissionSync.PerPeerModalAnswer refuses every non-Confirm answer of this class on BOTH roles — " +
+                "declining is \"I am busy building\", never \"cancelled for everyone\". Confirm still goes where " +
+                "it always did: LaunchMission:1043 is pure view and its SkipDeploymentScreen arm's " +
+                "mission.Launch:1046 is captured block-first as the 0xB8 launch intent (MissionSync, which " +
+                "likewise reads the host's OWN site.ActiveMission); MissionCancelGate still holds the model " +
+                "funnel on a client. Law 91 holds and is stronger than before — a brief on an idle host holds " +
+                "nobody, because no peer is waiting on its answer at all. If the mission has not reached this " +
+                "peer yet the raise is REFUSED loudly (DataRefusal) — no window beats a window over " +
+                "placeholder text",
                 ModalType.GeoHavenAttackBrief, ModalType.GeoAlienBaseBrief, ModalType.GeoScavengeBrief,
                 ModalType.GeoPhoenixBaseDefenseBrief, ModalType.GeoAmbushBrief,
                 ModalType.GeoPhoenixBaseInfestationBrief, ModalType.AncientSiteAttackBrief,
@@ -413,6 +428,70 @@ namespace Multiplayer.Network.Sync
         /// impossible to commit and <see cref="AnnounceModal"/> makes impossible to miss at runtime.</summary>
         internal static WindowRule RuleForModal(ModalType modal) =>
             DeclaredModals.TryGetValue(modal, out var rule) ? rule : null;
+
+        // ─── The THIRD axis: WHO the answer belongs to ──────────────────────
+
+        /// <summary>PURE (RailCheck L351/L352). Is this window one EVERY PEER ANSWERS FOR ITSELF?
+        ///
+        /// THE REPORT (2026-08-08): one player declined a deployment brief and the mission vanished for the
+        /// whole team. <c>GeoscapeView.ModalResultCallback</c>:825-826 answers a brief's Cancel with
+        /// <c>geoMission.Cancel()</c>, and <c>GeoMission.Cancel</c>:253-265 nulls <c>Site.ActiveMission</c>,
+        /// may <c>DestroySite()</c> and wipes <c>Reward</c>. So a gesture that means "I am busy building"
+        /// deleted shared campaign state, and every other peer was left holding a window over a mission the
+        /// host no longer had — its Confirm then refused by <see cref="MissionSync.Validate"/>.
+        ///
+        /// THE CLASS IS THE GAME'S, NOT A LIST OF OURS. A hand-written set of ModalTypes would be stale the
+        /// day a DLC or a mod adds one — and TFTV adds no ModalType, it PATCHES
+        /// <c>GetMissionBriefModal</c> itself, so keying on the METHOD inherits TFTV and DLC content for
+        /// free. Anything the game would answer with a mission's own Launch/Cancel is in;
+        /// <c>InterceptionBrief</c>/<c>HavenInfiltrateBrief</c> carry no <c>GeoMission</c> and drop out
+        /// naturally. The 10 briefs and their 11 <c>*Outcome</c> siblings all ride one state
+        /// (<c>UIStateGeoModal</c>) and one raiser (<c>ShowMissionBriefing</c>:1903).</summary>
+        internal static bool IsPerPeerAnswerClass(bool hasMission, bool isBrief, bool isOutcome)
+            => hasMission && (isBrief || isOutcome);
+
+        /// <summary><c>GetMissionBriefModal</c> is private (GeoscapeView.cs:1724); its outcome sibling is
+        /// public (:1800). Reflection reaches the PATCHED method, so TFTV's own arm answers here too.</summary>
+        private static readonly MethodInfo BriefModalMethod =
+            AccessTools.Method(typeof(GeoscapeView), "GetMissionBriefModal", new[] { typeof(GeoMission) });
+
+        private static bool _briefBindLogged;
+
+        /// <summary>The live question, asked of the game itself. Never throws into game code: an
+        /// unanswerable question means "not in the class", which is the pre-fix behaviour.</summary>
+        internal static bool IsPerPeerAnswer(ModalType modalType, object modalData)
+        {
+            var mission = modalData as GeoMission;
+            if (mission == null) return false;
+            var view = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.View;
+            if (view == null) return false;
+            if (BriefModalMethod == null)
+            {
+                if (_briefBindLogged) return false;
+                _briefBindLogged = true;
+                Debug.LogError("[MP][windows] GeoscapeView.GetMissionBriefModal did not bind, so the per-peer " +
+                               "answer class is EMPTY — one peer declining a mission brief will cancel the " +
+                               "mission for every peer again (GeoMission.Cancel:253 nulls Site.ActiveMission)");
+                return false;
+            }
+            try
+            {
+                // OUTCOME FIRST, and deliberately: it is the public one, and GetMissionBriefModal's own
+                // fallthrough LogErrors for a mission type it cannot place — asking it about an outcome-only
+                // mission would print the game's error for a question the game never asked.
+                if (modalType == view.GetMissionOutcomeModal(mission))
+                    return IsPerPeerAnswerClass(true, false, true);
+                return IsPerPeerAnswerClass(true, modalType == (ModalType)BriefModalMethod.Invoke(
+                                                      view, new object[] { mission }), false);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MP][windows] could not ask the game whether '" + modalType + "' is a mission " +
+                               "brief/outcome — treating it as NOT per-peer, which is the pre-fix behaviour " +
+                               "(one peer's Cancel can then delete the mission for everyone): " + ex);
+                return false;
+            }
+        }
 
         // Once per TYPE per session: these fire on a queue that runs all game long, and a line the player
         // scrolls past a hundred times is a line nobody reads.

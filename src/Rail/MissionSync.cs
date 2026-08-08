@@ -8,6 +8,7 @@ using Base.Defs;
 using HarmonyLib;
 using PhoenixPoint.Common.Core;
 using PhoenixPoint.Common.Levels.Missions;
+using PhoenixPoint.Common.Utils;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.Sites;
 using PhoenixPoint.Geoscape.Events;
@@ -1067,6 +1068,78 @@ namespace Multiplayer.Network.Sync
                           "campaign state (Site.ActiveMission/DestroySite) the host owns; backing out of the " +
                           "deployment screen is navigation, not a cancellation for every peer");
             return false;
+        }
+    }
+
+    /// <summary>
+    /// EVERY PEER ANSWERS THE DEPLOYMENT WINDOW FOR ITSELF, AND ONLY FOR ITSELF.
+    ///
+    /// THE REPORT (2026-08-08). A player declined a mission brief and the mission was gone for the whole
+    /// team; the others kept a window over nothing, and pressing Confirm on it was refused by
+    /// <see cref="MissionSync.Validate"/> ("the host's site has no ActiveMission AT ALL"). The route is one
+    /// line of the game's own: <c>GeoscapeView.ModalResultCallback</c>:825-826 answers a mission brief's
+    /// Cancel with <c>geoMission.Cancel()</c>, and <c>GeoMission.Cancel</c>:253-265 writes
+    /// <c>Site.ActiveMission = null</c>, may <c>Site.DestroySite()</c> and replaces <c>Reward</c>.
+    ///
+    /// <see cref="MissionCancelGate"/> ALREADY BLOCKS THAT — ON A CLIENT ONLY (:1059 lets the host run
+    /// native). The destructive call in the report ran on the HOST, which is precisely the peer that gate
+    /// waves through. So the missing half is here, at the callback rather than at the model: a NON-CONFIRM
+    /// answer to a window of the per-peer class does nothing to anybody, on either role.
+    ///
+    /// IT IS THE ANSWER THAT IS PER-PEER, NOT THE MISSION. Confirm is untouched and still reaches the
+    /// game's own <c>LaunchMission</c>:1043 → this peer's squad screen (host) or the 0xB8 launch intent
+    /// (client), so one player still takes the whole team into the battle. Declining means "I am busy
+    /// building" and leaves every other peer's window live and answerable. NO QUORUM (P13): nothing here
+    /// waits for anybody — a peer that never answers is simply a peer with a window open.
+    ///
+    /// WHY THE PREDICATE AND NOT A LIST. <see cref="GeoWindowCoverage.IsPerPeerAnswer"/> asks the GAME which
+    /// modal a mission's brief/outcome is (<c>GetMissionBriefModal</c>:1724 / <c>GetMissionOutcomeModal</c>
+    /// :1800), so all 21 types are covered, TFTV's patch of that method is inherited, and every OTHER
+    /// <c>Cancel</c> caller is untouched — <c>ShowMissionBriefing</c>:1890's KeepEncounter arm, mission
+    /// expiry, <c>OnSiteMissionCancelled</c>:1930 and the deployment screen's own Back button.
+    ///
+    /// REACTIVITY: nothing new. The window this refuses to act on is one the peer is closing through the
+    /// game's own <c>UIStateGeoModal.FinishDialog</c>:82 → <c>FinishQueriedState</c> →
+    /// <c>GeoscapeViewSwitchQuery.ProcessQueriedStateSwitch</c>:58-63, so the copy leaves this peer's screen
+    /// exactly as it always did and no other peer's screen is touched at all.
+    /// </summary>
+    [HarmonyPatch(typeof(GeoscapeView), nameof(GeoscapeView.ModalResultCallback))]
+    internal static class PerPeerModalAnswer
+    {
+        private static readonly HashSet<string> _logged = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>PURE (RailCheck L351). Does this answer RUN? Confirm always does — it is the gesture that
+        /// starts the mission and it is gated downstream, not here. Everything else (Cancel, and the Close
+        /// the game synthesises at <c>UIStateGeoModal.ExitState</c>:121-123 for a window torn down without a
+        /// click) is refused for the per-peer class, because on this class "not now" is a statement about
+        /// ONE player and the native arm is a deletion for all of them.</summary>
+        internal static bool Runs(bool inSession, bool perPeerClass, bool isConfirm)
+            => !inSession || !perPeerClass || isConfirm;
+
+        private static bool Prefix(ModalType modalType, ModalResult result, object modalData)
+        {
+            var engine = NetworkEngine.Instance;
+            bool inSession = engine != null && engine.IsActiveSession;
+            if (!inSession || result == ModalResult.Confirm) return true;   // solo, or the launching gesture
+            try
+            {
+                if (Runs(true, GeoWindowCoverage.IsPerPeerAnswer(modalType, modalData), false)) return true;
+                if (_logged.Add(modalType + ":" + result))
+                    Debug.Log("[MP][mission] '" + modalType + "' answered " + result + " on THIS PEER ONLY — the " +
+                              "game's own arm here is GeoMission.Cancel (ModalResultCallback:825-826), which " +
+                              "nulls Site.ActiveMission and can DestroySite, i.e. one player declining would " +
+                              "delete the mission for the whole team. The window is closed for this peer and " +
+                              "stays live and answerable on every other one (logged once per type+result)");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                // Never block on a question we could not ask: falling through is vanilla behaviour.
+                Debug.LogError("[MP][mission] per-peer answer check threw for '" + modalType + "' — running the " +
+                               "game's own callback, so a Cancel here may still cancel the mission for every " +
+                               "peer: " + ex);
+                return true;
+            }
         }
     }
 }
