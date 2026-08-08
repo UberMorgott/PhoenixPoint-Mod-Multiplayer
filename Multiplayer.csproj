@@ -15,6 +15,12 @@
   <ItemGroup>
     <!-- tools/ are their own projects (RailCheck); the SDK glob must not swallow them into the mod. -->
     <Compile Remove="tools\**" />
+    <!-- The SDK auto-excludes only $(BaseIntermediateOutputPath)/$(BaseOutputPath). Building with
+         -p:BaseIntermediateOutputPath=obj\wipXX\ therefore leaves every OTHER obj\* visible to the
+         glob, and each one holds a generated .NETFramework,...AssemblyAttributes.cs — so a second
+         build in the same tree fails with CS0579 duplicate-attribute. Exclude the roots outright. -->
+    <Compile Remove="obj\**" />
+    <Compile Remove="bin\**" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="Assembly-CSharp">

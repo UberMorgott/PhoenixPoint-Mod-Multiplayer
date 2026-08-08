@@ -5,6 +5,7 @@ using HarmonyLib;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
 using PhoenixPoint.Geoscape.Levels;
+using PhoenixPoint.Tactical.Entities.Abilities;
 using PhoenixPoint.Tactical.Levels;
 using UnityEngine;
 
@@ -339,5 +340,48 @@ namespace Multiplayer.Tactical
         }
 
         private static IEnumerator<NextUpdate> Nothing() { yield break; }
+    }
+
+    /// <summary>
+    /// CLIENT turn control, arm 4 — THE SEAM. Arms 2 and 3 are DOORS; this one is where the doors meet.
+    ///
+    /// <see cref="ClientAiEvaluationGate"/> covers ONE caller of <c>AIEvaluationAbility</c>:
+    /// <c>TacticalLevelController.ExecuteAIEvaluationAbilities</c>:1257, which reaches it as
+    /// <c>ability.Execute(null)</c>. That is not the only caller. <c>TacticalAbility.Execute</c>:1158-1160
+    /// is a two-liner over <c>Activate(parameter)</c>, and <c>AIEvaluationStatus.OnApply</c>:17 calls that
+    /// SAME <c>Activate()</c> DIRECTLY whenever <c>AIEvaluationStatusDef.ExecuteActionsOnApply</c> is set —
+    /// no coroutine, no turn machinery, nothing arm 3 can see. So a status merely MIRRORED onto a client
+    /// walked straight into <c>AIEvaluationAbility.ExecuteAIEvaluation</c>:32 →
+    /// <c>TacticalFaction.EvaluateAiActionsAsync</c>:668 → <c>AIFaction.EvaluateActionsAsync</c>:109, and
+    /// the client decided for itself — law 5's exact prohibition, reached without tripping a single gate.
+    ///
+    /// GATED AT THE SEAM ON PURPOSE. <c>Activate</c> is the one method BOTH doors pass through, so this
+    /// closes the class instead of the instance; a gate per known call path is precisely how the previous
+    /// hole opened. (<c>AIFaction.EvaluateActionsAsync</c> is the seam one level deeper and would also
+    /// catch arm 2's <c>AIUpdateCrt</c>:593 — but suppressing it there leaves the caller reading a STALE
+    /// <c>EvaluationResult</c>, since nulling it is the first thing the real method does. Blocking at
+    /// <c>Activate</c> means nothing downstream ever reads that field.)
+    ///
+    /// LOUD BY CONSTRUCTION — that is the whole design, not a log-level preference. Arm 3 already stops the
+    /// ordinary path UPSTREAM of here, so on a client this prefix is unreachable via any door we know
+    /// about. Every line it prints is therefore a caller nobody had enumerated. A backstop that says
+    /// nothing when it catches something is the silent-swallow class this project keeps paying for.
+    /// </summary>
+    [HarmonyPatch(typeof(AIEvaluationAbility), "Activate", new[] { typeof(object) })]
+    internal static class ClientAiEvaluationSeamGate
+    {
+        private static bool Prefix(AIEvaluationAbility __instance)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
+            Debug.LogError("[Multiplayer][tac] client AI evaluation BACKSTOP caught '" +
+                           (__instance?.TacticalActor?.name ?? "<unknown actor>") + "' — AIEvaluationAbility." +
+                           "Activate was reached by a caller NO gate covers, so name it and close it: the " +
+                           "known door (ExecuteAIEvaluationAbilities) is suppressed upstream by " +
+                           "ClientAiEvaluationGate, and the other one on record is AIEvaluationStatus.OnApply " +
+                           "under ExecuteActionsOnApply. Suppressed either way — an AI decision is the host's " +
+                           "and its result arrives on 0x82 like every other action.");
+            return false;
+        }
     }
 }
