@@ -571,8 +571,16 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>The kill funnel under the law, on the MODEL funnel <c>GeoPhoenixFaction.KillCharacter</c>
         /// (the override, GeoPhoenixFaction.cs:1377 — TFTV patches this same target,
-        /// TFTVBaseRework\PersonnelDismissal.cs:158, so the HOST replay re-runs TFTV's prefix natively;
-        /// client-side ordering of the two prefixes stays untested). On a client NO death reason may
+        /// TFTVBaseRework\PersonnelDismissal.cs:158 — plus TFTVVanillaFixes.cs:4213 on the base virtual —
+        /// so the HOST replay re-runs TFTV's prefix natively). ORDERING IS DECLARED, not hoped for: a
+        /// prefix returning false cancels the prefixes that would have run after it, so whichever of the
+        /// two won an unordered registration decided whether an intent was sent at all — and if TFTV's had
+        /// won, the client's dismissal would have been swallowed with nothing in the log. Priority.First
+        /// puts the capture in front, which is also the right ORDER on the merits: TFTV's dismissal
+        /// side-effects belong to the host's replay, not to a client running them locally on a kill that is
+        /// then blocked. No HarmonyBefore id: TFTV patches through the SDK's own `ModMain.HarmonyInstance`
+        /// (TFTVMain.cs:91) and never names an id in its source, and a guessed one binds to nothing.
+        /// On a client NO death reason may
         /// execute locally:
         ///   • <c>Dismissed</c> — the ONE user gesture (UIStateEditSoldier:425, UIStateEditVehicle:556)
         ///     → op=7 intent, host replays the same override + the scrap tail.
@@ -589,6 +597,7 @@ namespace Multiplayer.Network.Sync
         [HarmonyPatch(typeof(GeoPhoenixFaction), nameof(GeoPhoenixFaction.KillCharacter))]
         internal static class DismissCapturePatch
         {
+            [HarmonyPriority(Priority.First)]
             private static bool Prefix(GeoCharacter unit, CharacterDeathReason reason)
             {
                 if (IntentRail.ShouldRunNative()) return true;
