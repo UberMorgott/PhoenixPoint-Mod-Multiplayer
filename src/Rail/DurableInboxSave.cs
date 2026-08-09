@@ -90,7 +90,7 @@ namespace Multiplayer.Network.Sync
     internal static class DurableInboxSaveCodec
     {
         internal const string Magic = "Multiplayer.DurableInbox/v1";
-        internal const int Schema = 1;
+        internal const int Schema = 3;
         private const int MaxCount = 65535;
         private const int MaxString = 4096;
 
@@ -108,20 +108,41 @@ namespace Multiplayer.Network.Sync
             return root;
         }
 
+        internal static DurableInboxSaveRoot CreateSchema1ForMigrationTest(HostLedger ledger)
+        {
+            if (ledger == null) throw new ArgumentNullException(nameof(ledger));
+            byte[] snapshot;
+            using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms))
+            {
+                w.Write(ledger.CommittedRevision); WriteCount(w, ledger.Members.Count);
+                foreach (var pair in ledger.Members.OrderBy(x => x.Key)) { WriteMembership(w, pair.Key); w.Write((byte)pair.Value); }
+                WriteCount(w, ledger.AllEntries.Count);
+                foreach (var e in ledger.AllEntries.OrderBy(x => x.HostOrderKey).ThenBy(x => x.Occurrence))
+                {
+                    WriteOccurrence(w, e.Occurrence); WriteMembership(w, e.Membership); w.Write((byte)e.Lifecycle);
+                    WriteOptionalChoice(w, e.Choice); w.Write(e.LifecycleRevision); w.Write(e.TombstoneRevision);
+                    w.Write(e.HostOrderKey.CampaignOrdinal); WriteString(w, e.HostOrderKey.TriggerId);
+                }
+                WriteCount(w, 0); WriteCount(w, 0); WriteCount(w, 0); snapshot = ms.ToArray();
+            }
+            var root = new DurableInboxSaveRoot { Schema = 1, Snapshot = snapshot, Journal = Array.Empty<byte[]>(), SnapshotRevision = ledger.CommittedRevision };
+            root.Crc = ComputeRootCrc(root); return root;
+        }
+
         internal static bool TryRestore(DurableInboxSaveRoot root, IDurableInboxStableResolver resolver,
             out DurableInboxRestore restore, out string refusal)
         {
             restore = null; refusal = null;
             try
             {
-                if (root == null || root.Magic != Magic || root.Schema != Schema) throw new InvalidDataException("unknown durable inbox save root");
+                if (root == null || root.Magic != Magic || (root.Schema != 1 && root.Schema != 2 && root.Schema != Schema)) throw new InvalidDataException("unknown durable inbox save root");
                 if (root.Snapshot == null || root.Journal == null || root.Crc != ComputeRootCrc(root)) throw new InvalidDataException("durable inbox CRC mismatch");
                 HostLedger ledger; List<CanonicalChoiceId> choices; List<CanonicalResultId> results; List<CanonicalRewardItemId> rewards;
-                DecodeSnapshot(root.Snapshot, out ledger, out choices, out results, out rewards);
+                DecodeSnapshot(root.Snapshot, root.Schema, out ledger, out choices, out results, out rewards);
                 if (ledger.CommittedRevision != root.SnapshotRevision) throw new InvalidDataException("snapshot revision mismatch");
                 var snapshotLedger = ledger;
                 var snapshotCanonical = new DurableInboxCanonicalState(choices, results, rewards);
-                var records = root.Journal.Select(DecodeJournal).OrderBy(r => r.Revision).ToList();
+                var records = root.Journal.Select(bytes => DecodeJournal(bytes, root.Schema)).OrderBy(r => r.Revision).ToList();
                 ulong previous = root.SnapshotRevision;
                 foreach (var record in records)
                 {
@@ -129,7 +150,7 @@ namespace Multiplayer.Network.Sync
                     List<CanonicalRewardItemId> replayRewards; string replayRefusal = null;
                     if (previous == ulong.MaxValue || record.Revision != previous + 1 ||
                         record.Crc != Crc32.Compute(record.Payload) ||
-                        !TryDecodeJournalCandidate(record.Payload, out replayed, out replayChoices, out replayResults,
+                        !TryDecodeJournalCandidate(record.Payload, root.Schema, out replayed, out replayChoices, out replayResults,
                             out replayRewards, out replayRefusal) ||
                         replayed.CommittedRevision != record.Revision)
                         throw new InvalidDataException("invalid journal sequence: " + replayRefusal);
@@ -179,6 +200,7 @@ namespace Multiplayer.Network.Sync
                     WriteOccurrence(w, e.Occurrence); WriteMembership(w, e.Membership); w.Write((byte)e.Lifecycle);
                     WriteOptionalChoice(w, e.Choice); w.Write(e.LifecycleRevision); w.Write(e.TombstoneRevision);
                     w.Write(e.HostOrderKey.CampaignOrdinal); WriteString(w, e.HostOrderKey.TriggerId);
+                    w.Write((byte)e.SuspensionReason); WriteOptionalCheckpoint(w, e.Checkpoint);
                 }
                 WriteIdentities(w, choices ?? Enumerable.Empty<CanonicalChoiceId>(), (bw, x) => { WriteOccurrence(bw, x.Occurrence); WriteString(bw, x.Value); });
                 WriteIdentities(w, results ?? Enumerable.Empty<CanonicalResultId>(), (bw, x) => { WriteOccurrence(bw, x.Occurrence); WriteString(bw, x.Value); });
@@ -190,16 +212,16 @@ namespace Multiplayer.Network.Sync
         internal static byte[] EncodeJournalCandidate(HostLedger ledger, DurableInboxCanonicalState canonical) =>
             EncodeSnapshot(ledger, canonical.Choices, canonical.Results, canonical.Rewards);
 
-        private static bool TryDecodeJournalCandidate(byte[] payload, out HostLedger ledger,
+        private static bool TryDecodeJournalCandidate(byte[] payload, int schema, out HostLedger ledger,
             out List<CanonicalChoiceId> choices, out List<CanonicalResultId> results,
             out List<CanonicalRewardItemId> rewards, out string refusal)
         {
             ledger = null; choices = null; results = null; rewards = null; refusal = null;
-            try { DecodeSnapshot(payload, out ledger, out choices, out results, out rewards); return true; }
+            try { DecodeSnapshot(payload, schema, out ledger, out choices, out results, out rewards); return true; }
             catch (Exception ex) { refusal = ex.Message; return false; }
         }
 
-        private static void DecodeSnapshot(byte[] bytes, out HostLedger ledger, out List<CanonicalChoiceId> choices,
+        private static void DecodeSnapshot(byte[] bytes, int schema, out HostLedger ledger, out List<CanonicalChoiceId> choices,
             out List<CanonicalResultId> results, out List<CanonicalRewardItemId> rewards)
         {
             using (var ms = new MemoryStream(bytes, false)) using (var r = new BinaryReader(ms))
@@ -213,7 +235,10 @@ namespace Multiplayer.Network.Sync
                     var occurrence = ReadOccurrence(r); var member = ReadMembership(r); var lifecycle = ReadEnum<InboxLifecycle>(r);
                     var choice = ReadOptionalChoice(r, occurrence); ulong lifecycleRevision = r.ReadUInt64(); ulong tombstone = r.ReadUInt64();
                     var order = new HostOrderKey(r.ReadUInt64(), ReadString(r));
-                    entries.Add(new InboxEntry(occurrence, member, lifecycle, choice, lifecycleRevision, tombstone, order));
+                    var reason = schema >= 2 ? ReadEnum<InboxSuspensionReason>(r) : InboxSuspensionReason.None;
+                    var checkpoint = schema >= 2 ? ReadOptionalCheckpoint(r, schema) : null;
+                    entries.Add(new InboxEntry(occurrence, member, lifecycle, choice, lifecycleRevision, tombstone, order,
+                        reason, checkpoint));
                 }
                 choices = ReadIdentities(r, br => { var o = ReadOccurrence(br); return new CanonicalChoiceId(o, ReadString(br)); });
                 results = ReadIdentities(r, br => { var o = ReadOccurrence(br); return new CanonicalResultId(o, ReadString(br)); });
@@ -225,7 +250,7 @@ namespace Multiplayer.Network.Sync
 
         private static byte[] EncodeJournal(DurableInboxJournalRecord record)
         { using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms)) { w.Write(record.Revision); var p = record.Payload; w.Write(p.Length); w.Write(p); w.Write(record.Crc); return ms.ToArray(); } }
-        private static DurableInboxJournalRecord DecodeJournal(byte[] bytes)
+        private static DurableInboxJournalRecord DecodeJournal(byte[] bytes, int schema)
         {
             using (var ms = new MemoryStream(bytes ?? Array.Empty<byte>(), false)) using (var r = new BinaryReader(ms))
             {
@@ -235,7 +260,7 @@ namespace Multiplayer.Network.Sync
                 if (ms.Position != ms.Length || crc != Crc32.Compute(p)) throw new InvalidDataException("journal CRC");
                 HostLedger decoded; List<CanonicalChoiceId> c; List<CanonicalResultId> result;
                 List<CanonicalRewardItemId> reward; string refusal;
-                if (!TryDecodeJournalCandidate(p, out decoded, out c, out result, out reward, out refusal) || decoded.CommittedRevision != rev)
+                if (!TryDecodeJournalCandidate(p, schema, out decoded, out c, out result, out reward, out refusal) || decoded.CommittedRevision != rev)
                     throw new InvalidDataException("journal ledger: " + refusal);
                 return new DurableInboxJournalRecord(rev, p, decoded.AllEntries.Select(x => x.Occurrence));
             }
@@ -253,6 +278,35 @@ namespace Multiplayer.Network.Sync
         private static MembershipId ReadMembership(BinaryReader r) => new MembershipId(ReadString(r), r.ReadUInt64());
         private static void WriteOptionalChoice(BinaryWriter w, CanonicalChoiceId c) { bool has = c.Value != null; w.Write(has); if (has) WriteString(w, c.Value); }
         private static CanonicalChoiceId ReadOptionalChoice(BinaryReader r, OccurrenceId o) => r.ReadBoolean() ? new CanonicalChoiceId(o, ReadString(r)) : default(CanonicalChoiceId);
+        private static void WriteOptionalCheckpoint(BinaryWriter w, InboxWindowCheckpoint checkpoint)
+        {
+            w.Write(checkpoint != null);
+            if (checkpoint == null) return;
+            WriteString(w, checkpoint.ContentPhase); WriteNullableString(w, checkpoint.Selection);
+            WriteNullableString(w, checkpoint.ReadCheckpoint);
+            WriteNullableString(w, checkpoint.EventId); WriteNullableString(w, checkpoint.Title);
+            WriteNullableString(w, checkpoint.Narrative); w.Write(checkpoint.NativePriority);
+            WriteNullableString(w, checkpoint.NativeDataIdentity);
+        }
+        private static InboxWindowCheckpoint ReadOptionalCheckpoint(BinaryReader r, int schema)
+        {
+            if (!r.ReadBoolean()) return null;
+            string phase = ReadString(r), selection = ReadNullableString(r), read = ReadNullableString(r);
+            return schema >= 3 ? new InboxWindowCheckpoint(phase, selection, read, ReadNullableString(r),
+                ReadNullableString(r), ReadNullableString(r), r.ReadInt32(), ReadNullableString(r)) :
+                new InboxWindowCheckpoint(phase, selection, read);
+        }
+        private static void WriteNullableString(BinaryWriter w, string value)
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(value ?? "");
+            if (bytes.Length > MaxString) throw new InvalidDataException("string too long");
+            w.Write((ushort)bytes.Length); w.Write(bytes);
+        }
+        private static string ReadNullableString(BinaryReader r)
+        {
+            int count = r.ReadUInt16(); if (count > MaxString) throw new InvalidDataException("string too long");
+            return System.Text.Encoding.UTF8.GetString(r.ReadBytes(count));
+        }
         private static T ReadEnum<T>(BinaryReader r) where T : struct
         {
             object value = Convert.ChangeType(r.ReadByte(), Enum.GetUnderlyingType(typeof(T)));
@@ -268,7 +322,16 @@ namespace Multiplayer.Network.Sync
         private static readonly object Gate = new object();
         private static DurableInboxStore _activeStore;
         private static DurableInboxRestore _pendingRestore;
-        internal static DurableInboxStore ActiveStore { get { lock (Gate) return _activeStore; } set { lock (Gate) _activeStore = value; } }
+        internal static DurableInboxStore ActiveStore
+        {
+            get { lock (Gate) return _activeStore; }
+            set
+            {
+                bool changed;
+                lock (Gate) { changed = !ReferenceEquals(_activeStore, value); _activeStore = value; }
+                if (changed) WindowQueueSync.ClearDurableRuntimeCarriers();
+            }
+        }
         internal static DurableInboxRestore PendingRestore { get { lock (Gate) return _pendingRestore; } }
         private static DurableInboxSaveRoot _pendingRoot;
 

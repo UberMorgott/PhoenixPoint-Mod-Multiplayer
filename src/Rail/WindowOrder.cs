@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using HarmonyLib;
 using PhoenixPoint.Geoscape.View;
@@ -94,6 +95,41 @@ namespace Multiplayer.Network.Sync
 
         private static readonly ConditionalWeakTable<GeoscapeViewStateSwitchRequest, OrderKey> _stamps =
             new ConditionalWeakTable<GeoscapeViewStateSwitchRequest, OrderKey>();
+        private sealed class DurableBinding { internal OccurrenceId Occurrence; }
+        private static readonly ConditionalWeakTable<GeoscapeViewStateSwitchRequest, DurableBinding> _durable =
+            new ConditionalWeakTable<GeoscapeViewStateSwitchRequest, DurableBinding>();
+
+        internal static void BindDurable(GeoscapeViewStateSwitchRequest request, OccurrenceId occurrence)
+        {
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            _durable.Remove(request); _durable.Add(request, new DurableBinding { Occurrence = occurrence });
+        }
+
+        internal static bool TryGetDurable(GeoscapeViewStateSwitchRequest request, out OccurrenceId occurrence)
+        {
+            DurableBinding binding;
+            if (request != null && _durable.TryGetValue(request, out binding)) { occurrence = binding.Occurrence; return true; }
+            occurrence = default(OccurrenceId); return false;
+        }
+
+        internal static GeoscapeViewStateSwitchRequest CurrentRequest(GeoscapeViewSwitchQuery query) =>
+            query == null ? null : CurrentField.GetValue(query) as GeoscapeViewStateSwitchRequest;
+
+        internal static GeoscapeViewStateSwitchRequest DurablePriorityHead(
+            IList<GeoscapeViewStateSwitchRequest> pending)
+        {
+            var store = DurableInboxSaveBridge.ActiveStore;
+            if (pending == null || store == null) return pending == null || pending.Count == 0 ? null : pending[0];
+            return pending.Select((request, index) =>
+            {
+                OccurrenceId occurrence;
+                if (!TryGetDurable(request, out occurrence)) return null;
+                var entry = store.Ledger.AllEntries.FirstOrDefault(x => x.Occurrence.Equals(occurrence));
+                return entry == null ? null : new { request, index, occurrence, entry.HostOrderKey };
+            }).Where(x => x != null)
+              .OrderByDescending(x => DurableWindowRegistry.PriorityOf(x.occurrence))
+              .ThenBy(x => x.HostOrderKey).ThenBy(x => x.index).Select(x => x.request).FirstOrDefault();
+        }
 
         private static bool _bindLogged;
 
@@ -392,7 +428,15 @@ namespace Multiplayer.Network.Sync
                     }
                     return true;
                 }
-                if (CurrentField.GetValue(query) != null) return true;   // a switch is in flight; native early-returns
+                var currentRequest = CurrentField.GetValue(query) as GeoscapeViewStateSwitchRequest;
+                if (currentRequest != null)
+                {
+                    var priorityHead = DurablePriorityHead(queued);
+                    if (priorityHead != null &&
+                        WindowQueueSync.TryDurablePriorityPreemption(query, currentRequest, priorityHead)) return false;
+                    return true;   // a switch is in flight; native early-returns
+                }
+                if (WindowQueueSync.TryDurableResume(query)) return false;
                 if (!(RequestsField.GetValue(query) is IList<GeoscapeViewStateSwitchRequest> pending) ||
                     pending.Count == 0) return true;
 
@@ -448,6 +492,8 @@ namespace Multiplayer.Network.Sync
         internal static class QueueSettlePatch
         {
             private static bool Prefix(GeoscapeViewSwitchQuery __instance) => ReadyToDequeue(__instance);
+            private static void Postfix(GeoscapeViewSwitchQuery __instance) =>
+                WindowQueueSync.ConfirmDurableNativeOpen(__instance);
         }
     }
 }

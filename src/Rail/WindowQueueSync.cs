@@ -7,6 +7,7 @@ using Base.Core;
 using HarmonyLib;
 using PhoenixPoint.Common.Utils;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Events;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewStates;
@@ -73,6 +74,222 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     internal static class WindowQueueSync
     {
+        [ThreadStatic] private static bool _durableSilentExit;
+        [ThreadStatic] private static bool _durableRestoreActive;
+        [ThreadStatic] private static bool _durableEnginePresentation;
+        private static readonly Dictionary<OccurrenceId, GeoscapeViewStateSwitchRequest> _durableSuspended =
+            new Dictionary<OccurrenceId, GeoscapeViewStateSwitchRequest>();
+        private static readonly object _durableCarrierGate = new object();
+        private static DurableInboxStore _durableCarrierStore;
+        private static ulong _durableCarrierEpoch;
+        private static readonly FieldInfo DurableEventStateField =
+            AccessTools.Field(typeof(GeoscapeEventRecord), "_state");
+        private static readonly FieldInfo DurableModalHandledField =
+            AccessTools.Field(typeof(UIStateGeoModal), "_handledByDialog");
+
+        internal static void ClearDurableRuntimeCarriers()
+        { lock (_durableCarrierGate) { _durableSuspended.Clear(); _durableCarrierStore = null; _durableCarrierEpoch = 0; } }
+
+        private static void EnsureDurableCarrierSession(DurableInboxStore store)
+        {
+            string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
+            ulong epoch = store?.Ledger.Members.Keys.Where(x => string.Equals(x.PlayerGuid, local,
+                StringComparison.OrdinalIgnoreCase)).Select(x => x.Epoch).DefaultIfEmpty(0UL).Max() ?? 0;
+            lock (_durableCarrierGate)
+            {
+                if (ReferenceEquals(_durableCarrierStore, store) && _durableCarrierEpoch == epoch) return;
+                _durableSuspended.Clear(); _durableCarrierStore = store; _durableCarrierEpoch = epoch;
+            }
+        }
+
+        internal static bool SuppressDurableCallback(bool durableSilentExit) => durableSilentExit;
+
+        internal static GeoscapeEventRecordState? BeginSilentEventExit(GeoscapeEventRecord record, bool silent)
+        {
+            if (!SuppressDurableCallback(silent) || record == null || DurableEventStateField == null) return null;
+            var original = record.State;
+            DurableEventStateField.SetValue(record, GeoscapeEventRecordState.Completed); return original;
+        }
+        internal static void EndSilentEventExit(GeoscapeEventRecord record, GeoscapeEventRecordState? original)
+        { if (original.HasValue && record != null && DurableEventStateField != null) DurableEventStateField.SetValue(record, original.Value); }
+        internal static bool? BeginSilentModalExit(UIStateGeoModal state, bool silent)
+        {
+            if (!SuppressDurableCallback(silent) || state == null || DurableModalHandledField == null) return null;
+            bool original = (bool)DurableModalHandledField.GetValue(state);
+            DurableModalHandledField.SetValue(state, true); return original;
+        }
+        internal static void EndSilentModalExit(UIStateGeoModal state, bool? original)
+        { if (original.HasValue && state != null && DurableModalHandledField != null) DurableModalHandledField.SetValue(state, original.Value); }
+
+        internal static bool AlreadyCurrent(GeoscapeViewSwitchQuery query,
+            GeoscapeViewStateSwitchRequest original, OccurrenceId occurrence)
+        {
+            if (original == null || !ReferenceEquals(WindowOrder.CurrentRequest(query), original)) return false;
+            OccurrenceId bound;
+            return WindowOrder.TryGetDurable(original, out bound) && bound.Equals(occurrence);
+        }
+
+        internal static bool TryDurablePriorityPreemption(GeoscapeViewSwitchQuery query,
+            GeoscapeViewStateSwitchRequest current, GeoscapeViewStateSwitchRequest pending)
+        {
+            OccurrenceId ordinary, priority;
+            if (!WindowOrder.TryGetDurable(current, out ordinary) || !WindowOrder.TryGetDurable(pending, out priority) ||
+                DurableWindowRegistry.PriorityOf(ordinary) != DurableWindowPriority.Ordinary ||
+                DurableWindowRegistry.PriorityOf(priority) == DurableWindowPriority.Ordinary) return false;
+            var store = DurableInboxSaveBridge.ActiveStore;
+            if (store == null) return false;
+            EnsureDurableCarrierSession(store);
+            string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
+            var memberships = store.Ledger.Members.Keys.Where(x =>
+                string.Equals(x.PlayerGuid, local, StringComparison.OrdinalIgnoreCase)).OrderByDescending(x => x.Epoch).ToArray();
+            if (memberships.Length == 0) return false;
+            var carrier = new NativeCarrier(query, ordinary, priority, current, pending);
+            return new DurableInboxEngine(store, memberships[0], carrier).TryPreempt(ordinary, priority,
+                true, typeof(UIStateNothingSelected));
+        }
+
+        internal static bool TryDurableResume(GeoscapeViewSwitchQuery query)
+        {
+            if (_durableRestoreActive) return false;
+            var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+            if (store == null || !TryLocalMember(store, out member)) return false;
+            EnsureDurableCarrierSession(store);
+            return new DurableInboxEngine(store, member,
+                new NativeCarrier(query, default(OccurrenceId), default(OccurrenceId), null, null))
+                .TryResumeSuspended(true, typeof(UIStateNothingSelected));
+        }
+
+        internal static void ConfirmDurableNativeOpen(GeoscapeViewSwitchQuery query)
+        {
+            if (_durableEnginePresentation || _durableRestoreActive) return;
+            OccurrenceId occurrence; var request = WindowOrder.CurrentRequest(query);
+            if (!WindowOrder.TryGetDurable(request, out occurrence)) return;
+            var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+            if (store == null || !TryLocalMember(store, out member)) return;
+            EnsureDurableCarrierSession(store);
+            new DurableInboxEngine(store, member,
+                new NativeCarrier(query, default(OccurrenceId), default(OccurrenceId), null, null))
+                .ConfirmNativePresented(occurrence);
+        }
+
+        private static bool TryLocalMember(DurableInboxStore store, out MembershipId member)
+        {
+            string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
+            var found = store.Ledger.Members.Keys.Where(x => string.Equals(x.PlayerGuid, local,
+                StringComparison.OrdinalIgnoreCase)).OrderByDescending(x => x.Epoch).ToArray();
+            member = found.Length == 0 ? default(MembershipId) : found[0]; return found.Length != 0;
+        }
+
+        private static void MarkDurableDismissed(GeoscapeView view)
+        {
+            if (_durableSilentExit) return;
+            var query = AccessTools.Field(typeof(GeoscapeView), "_viewSwichQuery")?.GetValue(view) as GeoscapeViewSwitchQuery;
+            OccurrenceId occurrence; var current = WindowOrder.CurrentRequest(query);
+            if (!WindowOrder.TryGetDurable(current, out occurrence)) return;
+            var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+            if (store == null || !TryLocalMember(store, out member)) return;
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                var expected = store.Ledger; InboxEntry entry;
+                try { entry = expected.Get(occurrence, member); } catch { return; }
+                if (entry.Lifecycle == InboxLifecycle.Dismissed || entry.Lifecycle == InboxLifecycle.Removed) return;
+                var next = expected.Replace(entry.WithLifecycle(InboxLifecycle.Dismissed,
+                    checked(entry.LifecycleRevision + 1))).WithAuthority(checked(expected.CommittedRevision + 1), expected.Members);
+                if (store.Commit(expected, next)) return;
+            }
+        }
+
+        private sealed class NativeCarrier : IDurableWindowCarrierAdapter
+        {
+            private readonly GeoscapeViewSwitchQuery _query; private readonly OccurrenceId _ordinary, _priority;
+            private readonly GeoscapeViewStateSwitchRequest _current, _pending;
+            internal NativeCarrier(GeoscapeViewSwitchQuery query, OccurrenceId ordinary, OccurrenceId priority,
+                GeoscapeViewStateSwitchRequest current, GeoscapeViewStateSwitchRequest pending)
+            { _query = query; _ordinary = ordinary; _priority = priority; _current = current; _pending = pending; }
+            public InboxWindowCheckpoint Capture(OccurrenceId occurrence)
+            {
+                if (!occurrence.Equals(_ordinary)) return null;
+                var view = GenericApplier.StartedGeoLevel()?.View;
+                if (_current.State is UIStateGeoscapeEvent) return EventPopup.CaptureCheckpoint(_current.State as GeoscapeViewState, view);
+                if (_current.State is UIStateGeoModal modal)
+                    return GeoModalMirror.CaptureCheckpoint(modal);
+                return null;
+            }
+            public bool Present(OccurrenceId occurrence)
+            {
+                if (!occurrence.Equals(_priority)) return false;
+                var view = GenericApplier.StartedGeoLevel()?.View; if (view == null) return false;
+                _durableSilentExit = true;
+                try { view.FinishQueriedState(); } finally { _durableSilentExit = false; }
+                if (ReferenceEquals(WindowOrder.CurrentRequest(_query), _current)) return false;
+                lock (_durableCarrierGate) _durableSuspended[_ordinary] = _current;
+                var pending = WindowOrder.RequestsField?.GetValue(_query) as IList<GeoscapeViewStateSwitchRequest>;
+                if (pending == null || !pending.Contains(_pending)) return false;
+                pending.Remove(_pending); pending.Insert(0, _pending);
+                _durableEnginePresentation = true;
+                try { _query.ProcessQueriedStateSwitch(); }
+                finally { _durableEnginePresentation = false; }
+                return ReferenceEquals(WindowOrder.CurrentRequest(_query), _pending);
+            }
+            public bool Restore(OccurrenceId occurrence, InboxWindowCheckpoint checkpoint)
+            {
+                if (occurrence.Equals(_ordinary) && AlreadyCurrent(_query, _current, occurrence)) return true;
+                GeoscapeViewStateSwitchRequest request;
+                lock (_durableCarrierGate) _durableSuspended.TryGetValue(occurrence, out request);
+                if (request == null)
+                    request = EventPopup.ReconstructCarrier(occurrence, checkpoint) ??
+                              GeoModalMirror.ReconstructCarrier(occurrence, checkpoint);
+                if (request == null) return false;
+                var view = GenericApplier.StartedGeoLevel()?.View; if (view == null) return false;
+                _durableRestoreActive = true;
+                try { _query.QueryStateSwitch(request); _query.ProcessQueriedStateSwitch(); }
+                finally { _durableRestoreActive = false; }
+                bool restored = request.State is UIStateGeoscapeEvent
+                    ? EventPopup.RestoreSuspended(request, view, checkpoint)
+                    : request.State is UIStateGeoModal modal && GeoModalMirror.RestoreSuspended(checkpoint, () =>
+                        ReferenceEquals(WindowOrder.CurrentRequest(_query), request) &&
+                        checkpoint.ContentPhase == "modal" && checkpoint.Selection == ((int)modal.ModalType).ToString() &&
+                        ReferenceEquals((WindowOrder.CurrentRequest(_query)?.State as UIStateGeoModal)?.ModalData,
+                            modal.ModalData));
+                return restored;
+            }
+            public void Abandon(OccurrenceId occurrence)
+            {
+                var view = GenericApplier.StartedGeoLevel()?.View; if (view == null) return;
+                OccurrenceId currentOccurrence;
+                if (!WindowOrder.TryGetDurable(WindowOrder.CurrentRequest(_query), out currentOccurrence) ||
+                    !currentOccurrence.Equals(occurrence)) return;
+                _durableSilentExit = true; try { view.FinishQueriedState(); } finally { _durableSilentExit = false; }
+            }
+            public void FinalizeRestore(OccurrenceId occurrence)
+            { lock (_durableCarrierGate) _durableSuspended.Remove(occurrence); }
+        }
+
+        [HarmonyPatch(typeof(GeoLevelController), "OnLevelEnd")]
+        private static class DurableCarrierLevelTeardownPatch
+        { private static void Prefix() => ClearDurableRuntimeCarriers(); }
+
+        [HarmonyPatch(typeof(UIStateGeoscapeEvent), "ExitState")]
+        private static class DurableEventSilentExitPatch
+        {
+            private static void Prefix(UIStateGeoscapeEvent __instance, ref GeoscapeEventRecordState? __state)
+            { __state = BeginSilentEventExit(__instance?.Event?.Record, _durableSilentExit); }
+            private static Exception Finalizer(UIStateGeoscapeEvent __instance,
+                GeoscapeEventRecordState? __state, Exception __exception)
+            {
+                EndSilentEventExit(__instance?.Event?.Record, __state);
+                return __exception;
+            }
+        }
+
+        [HarmonyPatch(typeof(UIStateGeoModal), "ExitState")]
+        private static class DurableModalSilentExitPatch
+        {
+            private static void Prefix(UIStateGeoModal __instance, ref bool? __state)
+            { __state = BeginSilentModalExit(__instance, _durableSilentExit); }
+            private static Exception Finalizer(UIStateGeoModal __instance, bool? __state, Exception __exception)
+            { EndSilentModalExit(__instance, __state); return __exception; }
+        }
         internal const byte OpAdvance = 1;  // [identity:string][result:u8]
 
         /// <summary>THE SECOND ANSWER SHAPE — a window whose resolution is not "which button" but "which
@@ -467,7 +684,8 @@ namespace Multiplayer.Network.Sync
         [HarmonyPatch(typeof(GeoscapeView), nameof(GeoscapeView.FinishQueriedState))]
         internal static class FinishQueriedStateCapture
         {
-            private static void Prefix(GeoscapeView __instance) => SendAdvance(__instance);
+            private static void Prefix(GeoscapeView __instance)
+            { MarkDurableDismissed(__instance); SendAdvance(__instance); }
         }
 
         /// <summary>Half three, and the ONLY blocking seam in this family: the asset-deployment prompt's one

@@ -3,12 +3,15 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using Multiplayer.Util;
 
 namespace Multiplayer.Network.Sync
 {
     internal static class DurableInboxCodec
     {
-        private const byte Schema = 1;
+        private const byte Schema = 3;
+        private const uint LedgerMagic = 0x33495744; // DWI3, cannot alias the first four bytes of a framed ledger
+        private const uint LedgerTail = 0xCCA6A8BB;
         private const int MaxStringBytes = 4096;
         private const int MaxCollection = 1024;
         private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
@@ -58,7 +61,8 @@ namespace Multiplayer.Network.Sync
                 using (var stream = new MemoryStream(payload, false))
                 using (var reader = new BinaryReader(stream, StrictUtf8))
                 {
-                    if (reader.ReadByte() != Schema) throw new InvalidDataException("unknown schema");
+                    byte schema = reader.ReadByte();
+                    if (schema != 1 && schema != 2 && schema != Schema) throw new InvalidDataException("unknown schema");
                     var kind = (InboxMessageKind)reader.ReadByte();
                     if (!Enum.IsDefined(typeof(InboxMessageKind), kind)) throw new InvalidDataException("unknown kind");
                     var occurrence = ReadOccurrence(reader);
@@ -92,6 +96,7 @@ namespace Multiplayer.Network.Sync
         internal static byte[] EncodeLedger(IEnumerable<InboxEntry> entries, ulong committedRevision,
             IEnumerable<KeyValuePair<MembershipId, MemberPresence>> members)
         {
+            byte[] body;
             using (var stream = new MemoryStream())
             using (var writer = new BinaryWriter(stream, StrictUtf8))
             {
@@ -122,8 +127,26 @@ namespace Multiplayer.Network.Sync
                         WriteOccurrence(writer, entry.Choice.Occurrence);
                         WriteString(writer, entry.Choice.Value);
                     }
+                    writer.Write((byte)entry.SuspensionReason);
+                    writer.Write(entry.Checkpoint != null);
+                    if (entry.Checkpoint != null)
+                    {
+                        WriteString(writer, entry.Checkpoint.ContentPhase);
+                        WriteLooseString(writer, entry.Checkpoint.Selection);
+                        WriteLooseString(writer, entry.Checkpoint.ReadCheckpoint);
+                        WriteLooseString(writer, entry.Checkpoint.EventId);
+                        WriteLooseString(writer, entry.Checkpoint.Title);
+                        WriteLooseString(writer, entry.Checkpoint.Narrative);
+                        writer.Write(entry.Checkpoint.NativePriority);
+                        WriteLooseString(writer, entry.Checkpoint.NativeDataIdentity);
+                    }
                 }
-                return stream.ToArray();
+                body = stream.ToArray();
+            }
+            using (var framed = new MemoryStream()) using (var writer = new BinaryWriter(framed, StrictUtf8))
+            {
+                writer.Write(LedgerMagic); writer.Write(Schema); writer.Write(body.Length); writer.Write(body);
+                writer.Write(Crc32.Compute(body)); writer.Write(LedgerTail); return framed.ToArray();
             }
         }
 
@@ -132,9 +155,25 @@ namespace Multiplayer.Network.Sync
             ledger = null; refusal = null;
             try
             {
-                using (var stream = new MemoryStream(payload ?? Array.Empty<byte>(), false))
+                payload = payload ?? Array.Empty<byte>(); int ledgerSchema = 1; byte[] bodyPayload = payload;
+                if (payload.Length >= 17 && BitConverter.ToUInt32(payload, 0) == LedgerMagic)
+                {
+                    int length = BitConverter.ToInt32(payload, 5);
+                    bool framed = length >= 0 && length <= payload.Length - 17 && payload.Length == length + 17 &&
+                        BitConverter.ToUInt32(payload, payload.Length - 4) == LedgerTail;
+                    if (framed)
+                    {
+                        ledgerSchema = payload[4];
+                        if (ledgerSchema != Schema) throw new InvalidDataException("unknown ledger schema");
+                        bodyPayload = new byte[length]; Buffer.BlockCopy(payload, 9, bodyPayload, 0, length);
+                        if (BitConverter.ToUInt32(payload, 9 + length) != Crc32.Compute(bodyPayload))
+                            throw new InvalidDataException("ledger CRC mismatch");
+                    }
+                }
+                using (var stream = new MemoryStream(bodyPayload, false))
                 using (var reader = new BinaryReader(stream, StrictUtf8))
                 {
+                    bool extended = ledgerSchema >= 2;
                     ulong revision = reader.ReadUInt64();
                     var members = new List<KeyValuePair<MembershipId, MemberPresence>>();
                     for (int i = 0, count = ReadCount(reader); i < count; i++)
@@ -160,8 +199,19 @@ namespace Multiplayer.Network.Sync
                             choice = new CanonicalChoiceId(choiceOccurrence, ReadString(reader));
                             if (!choiceOccurrence.Equals(occurrence)) throw new InvalidDataException("foreign choice namespace");
                         }
+                        var reason = extended ? (InboxSuspensionReason)reader.ReadByte() : InboxSuspensionReason.None;
+                        if (!Enum.IsDefined(typeof(InboxSuspensionReason), reason)) throw new InvalidDataException("invalid suspension reason");
+                        InboxWindowCheckpoint checkpoint = null;
+                        if (extended && reader.ReadBoolean())
+                        {
+                            string phase = ReadString(reader), selection = ReadLooseString(reader), read = ReadLooseString(reader);
+                            checkpoint = ledgerSchema >= 3
+                                ? new InboxWindowCheckpoint(phase, selection, read, ReadLooseString(reader),
+                                    ReadLooseString(reader), ReadLooseString(reader), reader.ReadInt32(), ReadLooseString(reader))
+                                : new InboxWindowCheckpoint(phase, selection, read);
+                        }
                         entries.Add(new InboxEntry(occurrence, membership, (InboxLifecycle)rawLifecycle, choice,
-                            lifecycleRevision, tombstoneRevision, new HostOrderKey(ordinal, orderTrigger)));
+                            lifecycleRevision, tombstoneRevision, new HostOrderKey(ordinal, orderTrigger), reason, checkpoint));
                     }
                     if (stream.Position != stream.Length) throw new InvalidDataException("trailing ledger bytes");
                     ledger = new HostLedger(entries, revision, members);
@@ -204,6 +254,21 @@ namespace Multiplayer.Network.Sync
             if (bytes.Length != length) throw new EndOfStreamException();
             var value = new UTF8Encoding(false, true).GetString(bytes);
             return InboxIdentity.Required(value, "wire string");
+        }
+
+        private static void WriteLooseString(BinaryWriter writer, string value)
+        {
+            var bytes = StrictUtf8.GetBytes(value ?? "");
+            if (bytes.Length > MaxStringBytes) throw new ArgumentOutOfRangeException(nameof(value), "string exceeds codec bound");
+            writer.Write((ushort)bytes.Length); writer.Write(bytes);
+        }
+
+        private static string ReadLooseString(BinaryReader reader)
+        {
+            int length = reader.ReadUInt16();
+            if (length > MaxStringBytes) throw new InvalidDataException("invalid string length");
+            var bytes = reader.ReadBytes(length); if (bytes.Length != length) throw new EndOfStreamException();
+            return new UTF8Encoding(false, true).GetString(bytes);
         }
 
         private static void WriteCount(BinaryWriter writer, int count)

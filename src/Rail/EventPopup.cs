@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using Base.UI;
 using HarmonyLib;
@@ -316,6 +317,18 @@ namespace Multiplayer.Network.Sync
                     Priority = QueuedPriority(view, ev),
                 };
                 uint seq = Seq.Next(SurfaceIds.GeoEventRaise);
+                var store = DurableInboxSaveBridge.ActiveStore;
+                if (store != null)
+                {
+                    var occurrence = new OccurrenceId("EventPopup", "raise:" + seq,
+                        new[] { "event:" + p.EventId,
+                                string.IsNullOrEmpty(p.SiteRef) ? "site:none" : p.SiteRef,
+                                string.IsNullOrEmpty(p.VehicleRef) ? "vehicle:none" : p.VehicleRef });
+                    DurableWindowRegistry.EnqueuePriorityOccurrence(store, occurrence);
+                    var request = DurableWindowRegistry.LastQueuedRequest(r =>
+                        r.State is UIStateGeoscapeEvent ui && ReferenceEquals(ui.Event, ev));
+                    if (request != null) WindowOrder.BindDurable(request, occurrence);
+                }
                 var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventRaise, SyncKind.StateDelta, Encode(seq, p));
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
                 Debug.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority +
@@ -674,6 +687,18 @@ namespace Multiplayer.Network.Sync
                 return true;
             }
 
+            var durableStore = DurableInboxSaveBridge.ActiveStore;
+            var durableOccurrence = new OccurrenceId("EventPopup", "raise:" + seq,
+                new[] { "event:" + p.EventId,
+                        string.IsNullOrEmpty(p.SiteRef) ? "site:none" : p.SiteRef,
+                        string.IsNullOrEmpty(p.VehicleRef) ? "vehicle:none" : p.VehicleRef });
+            if (durableStore == null || !durableStore.Ledger.Contains(durableOccurrence))
+            {
+                if (_held.All(x => x.Key != seq)) _held.Add(new KeyValuePair<uint, Raise>(seq, p));
+                Debug.Log("[MP][events] raise of '" + p.EventId + "' waits for its host-authoritative durable occurrence");
+                return true;
+            }
+
             var es = geo.EventSystem;
             var data = es?.GetEventByID(p.EventId, canFail: true)?.GeoscapeEventData;
             if (data == null)
@@ -708,7 +733,7 @@ namespace Multiplayer.Network.Sync
             Bound.Add(geoEvent, new RaiseBinding { Seq = seq, TriggerCount = raiseTrigger });
 
             // The host's OWN priority, so this peer's queue orders the window exactly as the host's did.
-            q.QueryStateSwitch(new GeoscapeViewStateSwitchRequest(new UIStateGeoscapeEvent(geoEvent), p.Priority)
+            var request = new GeoscapeViewStateSwitchRequest(new UIStateGeoscapeEvent(geoEvent), p.Priority)
             // PauseGame = the GAME'S OWN flag, and it must be true on a mirror too. "Pause mirrors from the
             // host via the TimeAnchor" (what this said until 2026-08-04) is false whenever the host is
             // ALREADY paused: its re-write is swallowed by the change-gated Timing.Paused setter, no delta
@@ -716,7 +741,9 @@ namespace Multiplayer.Network.Sync
             // makes ProcessQueriedStateSwitch:67-70 call RequestGamePause:1269 on THIS peer — a ONE-SHOT
             // pause issued by the game itself, captured by TimeSync at SetGamePauseState. Nothing holds it:
             // any peer may resume at any time, first-to-act-wins, and no peer's window vetoes that.
-            { PauseGame = true });
+            { PauseGame = true };
+            q.QueryStateSwitch(request);
+            WindowOrder.BindDurable(request, durableOccurrence);
             Debug.Log("[MP][events] raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority + " site=" +
                       (site == null ? "none" : site.SiteId.ToString()) +
                       " vehicle=" + (vehicle == null ? "none" : vehicle.VehicleID.ToString()) +
@@ -879,6 +906,101 @@ namespace Multiplayer.Network.Sync
             // click on the winner then walks to the native result page instead of the window vanishing.
             ctrl.SetChoices(module.Context.ViewerFaction, module.ChoiceButtonsContainer, module.ChoiceButtonPrefab, ev);
             return true;
+        }
+
+        internal static bool RestoreSuspended(GeoscapeViewStateSwitchRequest request, GeoscapeView view,
+            InboxWindowCheckpoint checkpoint)
+        {
+            var state = request?.State as GeoscapeViewState;
+            var ui = state as UIStateGeoscapeEvent;
+            var module = view?.GeoscapeModules?.SiteEncountersModule;
+            if (checkpoint == null || ui?.Event == null || module == null) return false;
+            var query = SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
+            if (!IsExpectedCurrent(query, request)) return false;
+            int page; if (!int.TryParse(checkpoint.ReadCheckpoint, out page) || page < 0) return false;
+            var pageField = AccessTools.Field(module.GetType(), "_encounterTextIndex");
+            var pagingField = AccessTools.Field(module.GetType(), "_pagingEvent");
+            if (pageField == null || pagingField == null) return false;
+            pageField.SetValue(module, page);
+            if (checkpoint.ContentPhase == "choices")
+            {
+                AccessTools.Method(module.GetType(), "SetEncounter")?.Invoke(module,
+                    new object[] { ui.Event, false, null });
+                return RepaintDialog(state, view);
+            }
+            if (checkpoint.ContentPhase == "paging")
+            {
+                AccessTools.Method(module.GetType(), "SetEncounter")?.Invoke(module,
+                    new object[] { ui.Event, true, null });
+                return true;
+            }
+            int selected;
+            if (checkpoint.ContentPhase != "result" || !int.TryParse(checkpoint.Selection, out selected) ||
+                selected < 0 || selected >= ui.Event.EventData.Choices.Count) return false;
+            AccessTools.Method(module.GetType(), "SetClosingEncounter")?.Invoke(module,
+                new object[] { ui.Event, ui.Event.EventData.Choices[selected], false });
+            return true;
+        }
+
+        internal static bool IsExpectedCurrent(GeoscapeViewSwitchQuery query,
+            GeoscapeViewStateSwitchRequest request) => request != null &&
+            ReferenceEquals(WindowOrder.CurrentRequest(query), request);
+
+        internal static InboxWindowCheckpoint CaptureCheckpoint(GeoscapeViewState state, GeoscapeView view)
+        {
+            var ui = state as UIStateGeoscapeEvent;
+            var module = view?.GeoscapeModules?.SiteEncountersModule;
+            if (ui?.Event == null || module == null) return null;
+            var pageField = AccessTools.Field(module.GetType(), "_encounterTextIndex");
+            var pagingField = AccessTools.Field(module.GetType(), "_pagingEvent");
+            if (pageField == null || pagingField == null) return null;
+            int page = (int)pageField.GetValue(module);
+            bool paging = (bool)pagingField.GetValue(module);
+            int selected = ui.Event.Record == null ? -1 : ui.Event.Record.SelectedChoice;
+            bool showingChoices = module.ChoicesButtonController != null &&
+                ShowingRealChoices(module.ChoicesButtonController, ui.Event);
+            var query = SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
+            int nativePriority = WindowOrder.CurrentRequest(query)?.Priority ?? 0;
+            return NativeCheckpoint(page, paging, showingChoices, selected, ui.Event.EventID,
+                module.EncounterTitle?.text, module.EncounterDescriptionText?.text, nativePriority);
+        }
+
+        internal static InboxWindowCheckpoint NativeCheckpoint(int page, bool paging, int selected)
+            => NativeCheckpoint(page, paging, !paging && selected < 0, selected);
+
+        internal static InboxWindowCheckpoint NativeCheckpoint(int page, bool paging, bool showingChoices, int selected)
+            => NativeCheckpoint(page, paging, showingChoices, selected, "", "", "", 0);
+
+        internal static InboxWindowCheckpoint NativeCheckpoint(int page, bool paging, bool showingChoices, int selected,
+            string eventId, string title, string narrative, int nativePriority)
+        {
+            if (page < 0) throw new ArgumentOutOfRangeException(nameof(page));
+            string phase = paging ? "paging" : showingChoices ? "choices" : "result";
+            return new InboxWindowCheckpoint(phase, selected.ToString(), page.ToString(), eventId, title,
+                narrative, nativePriority);
+        }
+
+        internal static GeoscapeViewStateSwitchRequest ReconstructCarrier(OccurrenceId occurrence,
+            InboxWindowCheckpoint checkpoint)
+        {
+            if (occurrence.EventId != "EventPopup" || checkpoint == null) return null;
+            var geo = GeoLevel(); if (geo?.EventSystem == null) return null;
+            string eventId = !string.IsNullOrEmpty(checkpoint.EventId) ? checkpoint.EventId :
+                occurrence.SubjectIds.FirstOrDefault(x => x.StartsWith("event:", StringComparison.Ordinal))?.Substring(6);
+            if (string.IsNullOrEmpty(eventId)) return null;
+            var data = geo.EventSystem.GetEventByID(eventId, canFail: true)?.GeoscapeEventData;
+            var record = geo.EventSystem.GetEventRecord(eventId);
+            if (data == null || record == null) return null;
+            string siteRef = occurrence.SubjectIds.FirstOrDefault(x => x.StartsWith("S#", StringComparison.Ordinal));
+            string vehicleRef = occurrence.SubjectIds.FirstOrDefault(x => x.StartsWith("V#", StringComparison.Ordinal));
+            var site = IdentityResolver.Resolve(geo, siteRef, null) as GeoSite;
+            var vehicle = IdentityResolver.Resolve(geo, vehicleRef, null) as GeoVehicle;
+            var context = vehicle == null ? new GeoscapeEventContext(site, geo.ViewerFaction) :
+                new GeoscapeEventContext(site, geo.ViewerFaction, vehicle);
+            var shown = WithWireTexts(data, checkpoint.Title, checkpoint.Narrative);
+            var state = new UIStateGeoscapeEvent(new GeoscapeEvent(shown, context) { Record = record });
+            var request = new GeoscapeViewStateSwitchRequest(state, checkpoint.NativePriority) { PauseGame = true };
+            WindowOrder.BindDurable(request, occurrence); return request;
         }
 
         /// <summary>Is the dialog showing the REAL event's choice buttons, or one of the module's own

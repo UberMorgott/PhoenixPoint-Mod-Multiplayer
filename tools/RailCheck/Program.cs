@@ -360,6 +360,7 @@ namespace RailCheck
             Add(laws, () => L400_EnrollmentAndCreationShareOneOrder.Check());
             Add(laws, () => L394_ACompactionNeedsProofNoDurableSourceCanNameIt.Check());
             Add(laws, () => L379_AHostOrderSurvivesTheNativeSaveBlob.Check());
+            Add(laws, () => L380_APriorityWindowSuspendsBeforeItPreempts.Check());
             Add(laws, () => L383_ACanonicalResultNeverRebindsByListPosition.Check());
             Add(laws, () => L378_WindowsPresentOnlyOnTheGeoscape.Check());
             Add(laws, () => L393_EveryRoutedWindowFamilyHasAVerdict.Check());

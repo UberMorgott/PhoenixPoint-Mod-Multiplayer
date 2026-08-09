@@ -187,7 +187,44 @@ namespace Multiplayer.Network.Sync
     }
 
     internal enum InboxMessageKind : byte { TransportAck = 0x46, Lifecycle = 0x40 }
-    internal enum InboxLifecycle : byte { Queued, Open, Read, Dismissed, Removed }
+    // Append-only: values 0..4 already exist in campaign saves and on the wire.
+    internal enum InboxLifecycle : byte { Queued, Open, Read, Dismissed, Removed, Suspended }
+    internal enum InboxSuspensionReason : byte { None, PriorityPreemption, LevelTeardown }
+
+    internal sealed class InboxWindowCheckpoint : IEquatable<InboxWindowCheckpoint>
+    {
+        internal string ContentPhase { get; }
+        internal string Selection { get; }
+        internal string ReadCheckpoint { get; }
+        internal string EventId { get; }
+        internal string Title { get; }
+        internal string Narrative { get; }
+        internal int NativePriority { get; }
+        internal string NativeDataIdentity { get; }
+
+        internal InboxWindowCheckpoint(string contentPhase, string selection, string readCheckpoint,
+            string eventId = "", string title = "", string narrative = "", int nativePriority = 0,
+            string nativeDataIdentity = "")
+        {
+            ContentPhase = InboxIdentity.Required(contentPhase, nameof(contentPhase));
+            Selection = selection ?? "";
+            ReadCheckpoint = readCheckpoint ?? "";
+            EventId = eventId ?? ""; Title = title ?? ""; Narrative = narrative ?? "";
+            NativePriority = nativePriority; NativeDataIdentity = nativeDataIdentity ?? "";
+        }
+
+        public bool Equals(InboxWindowCheckpoint other) => other != null &&
+            string.Equals(ContentPhase, other.ContentPhase, StringComparison.Ordinal) &&
+            string.Equals(Selection, other.Selection, StringComparison.Ordinal) &&
+            string.Equals(ReadCheckpoint, other.ReadCheckpoint, StringComparison.Ordinal) &&
+            string.Equals(EventId, other.EventId, StringComparison.Ordinal) &&
+            string.Equals(Title, other.Title, StringComparison.Ordinal) &&
+            string.Equals(Narrative, other.Narrative, StringComparison.Ordinal) && NativePriority == other.NativePriority &&
+            string.Equals(NativeDataIdentity, other.NativeDataIdentity, StringComparison.Ordinal);
+        public override bool Equals(object obj) => Equals(obj as InboxWindowCheckpoint);
+        public override int GetHashCode() => InboxIdentity.Hash(ContentPhase, Selection, ReadCheckpoint,
+            EventId, Title, Narrative, NativePriority, NativeDataIdentity);
+    }
 
     internal sealed class InboxMessage
     {
@@ -241,16 +278,34 @@ namespace Multiplayer.Network.Sync
         internal ulong LifecycleRevision { get; }
         internal ulong TombstoneRevision { get; }
         internal HostOrderKey HostOrderKey { get; }
+        internal InboxSuspensionReason SuspensionReason { get; }
+        internal InboxWindowCheckpoint Checkpoint { get; }
         internal InboxEntry(OccurrenceId occurrence, MembershipId membership, InboxLifecycle lifecycle,
-            CanonicalChoiceId choice, ulong lifecycleRevision, ulong tombstoneRevision, HostOrderKey hostOrderKey)
+            CanonicalChoiceId choice, ulong lifecycleRevision, ulong tombstoneRevision, HostOrderKey hostOrderKey,
+            InboxSuspensionReason suspensionReason = InboxSuspensionReason.None,
+            InboxWindowCheckpoint checkpoint = null)
         {
             if (!string.Equals(hostOrderKey.TriggerId, occurrence.TriggerId, StringComparison.Ordinal))
                 throw new ArgumentException("foreign order namespace", nameof(hostOrderKey));
             Occurrence = occurrence; Membership = membership; Lifecycle = lifecycle; Choice = choice;
             LifecycleRevision = lifecycleRevision; TombstoneRevision = tombstoneRevision; HostOrderKey = hostOrderKey;
+            if (!Enum.IsDefined(typeof(InboxSuspensionReason), suspensionReason))
+                throw new ArgumentOutOfRangeException(nameof(suspensionReason));
+            if ((lifecycle == InboxLifecycle.Suspended) != (suspensionReason != InboxSuspensionReason.None))
+                throw new ArgumentException("only suspended entries name a suspension reason", nameof(suspensionReason));
+            if (lifecycle == InboxLifecycle.Suspended && checkpoint == null)
+                throw new ArgumentNullException(nameof(checkpoint));
+            SuspensionReason = suspensionReason;
+            Checkpoint = checkpoint;
         }
         internal InboxEntry WithLifecycle(InboxLifecycle lifecycle, ulong revision) =>
-            new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision, HostOrderKey);
+            lifecycle == InboxLifecycle.Suspended
+                ? new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision,
+                    HostOrderKey, SuspensionReason, Checkpoint)
+                : new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision, HostOrderKey);
+        internal InboxEntry Suspend(InboxSuspensionReason reason, InboxWindowCheckpoint checkpoint, ulong revision) =>
+            new InboxEntry(Occurrence, Membership, InboxLifecycle.Suspended, Choice, revision, TombstoneRevision,
+                HostOrderKey, reason, checkpoint);
     }
 
     internal sealed class HostLedger
@@ -436,9 +491,13 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
         internal MembershipId Membership { get; }
         internal InboxLifecycle Lifecycle { get; }
         internal ulong Revision { get; }
+        internal InboxSuspensionReason SuspensionReason { get; }
+        internal InboxWindowCheckpoint Checkpoint { get; }
         private InboxCommand(InboxCommandKind kind, OccurrenceId occurrence, MembershipId membership,
-            InboxLifecycle lifecycle, ulong revision)
-        { Kind = kind; Occurrence = occurrence; Membership = membership; Lifecycle = lifecycle; Revision = revision; }
+            InboxLifecycle lifecycle, ulong revision, InboxSuspensionReason reason = InboxSuspensionReason.None,
+            InboxWindowCheckpoint checkpoint = null)
+        { Kind = kind; Occurrence = occurrence; Membership = membership; Lifecycle = lifecycle; Revision = revision;
+          SuspensionReason = reason; Checkpoint = checkpoint; }
         internal static InboxCommand FromMessage(InboxMessage message)
         {
             if (message == null) throw new ArgumentNullException(nameof(message));
@@ -449,6 +508,10 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
         internal static InboxCommand SetLifecycle(OccurrenceId occurrence, MembershipId member,
             InboxLifecycle lifecycle, ulong revision) =>
             new InboxCommand(InboxCommandKind.SetLifecycle, occurrence, member, lifecycle, revision);
+        internal static InboxCommand Suspend(OccurrenceId occurrence, MembershipId member,
+            InboxSuspensionReason reason, InboxWindowCheckpoint checkpoint, ulong revision) =>
+            new InboxCommand(InboxCommandKind.SetLifecycle, occurrence, member, InboxLifecycle.Suspended,
+                revision, reason, checkpoint);
     }
 
     internal readonly struct ReduceResult

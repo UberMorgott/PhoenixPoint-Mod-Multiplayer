@@ -186,6 +186,8 @@ namespace Multiplayer.Network.Sync
             /// windows the moment two are pending. Same reason <see cref="EventPopup.Raise.Priority"/>
             /// exists.</summary>
             public int Priority;
+            public string DurableTrigger;
+            public string DurableSubject;
         }
 
         /// <summary>[seq:u32][kind:u8][modalType:i32][shape:u8][ref][n:u16][key × n][num:i32][priority:i32].
@@ -207,6 +209,8 @@ namespace Multiplayer.Network.Sync
                 foreach (var k in keys) w.Write(k ?? "");
                 w.Write(p.Num);
                 w.Write(p.Priority);
+                w.Write(p.DurableTrigger ?? "");
+                w.Write(p.DurableSubject ?? "");
                 return ms.ToArray();
             }
         }
@@ -229,6 +233,8 @@ namespace Multiplayer.Network.Sync
                 p.Keys = keys;
                 p.Num = r.ReadInt32();
                 p.Priority = r.ReadInt32();
+                p.DurableTrigger = r.ReadString();
+                p.DurableSubject = r.ReadString();
                 return p;
             }
         }
@@ -382,6 +388,13 @@ namespace Multiplayer.Network.Sync
                 p.Kind = kind;
                 p.ModalType = (int)modalType;
                 p.Priority = priority;
+                var durable = DurableWindowRegistry.LastCapturedPriorityOccurrence;
+                if (durable.HasValue && durable.Value.EventId == "Modal:" + modalType)
+                {
+                    p.DurableTrigger = durable.Value.TriggerId;
+                    p.DurableSubject = durable.Value.SubjectIds.FirstOrDefault() ?? "";
+                }
+                DurableWindowRegistry.LastCapturedPriorityOccurrence = null;
                 if (p.Shape == DataShape.Unsupported)
                 {
                     Debug.LogError("[MP][modals] '" + name + "' is DECLARED Mirrored but its data is a " +
@@ -542,6 +555,41 @@ namespace Multiplayer.Network.Sync
             return true;
         }
 
+        internal static bool RestoreSuspended(InboxWindowCheckpoint checkpoint, Func<bool> exactRebuild)
+        {
+            if (checkpoint == null || exactRebuild == null) return false;
+            return exactRebuild();
+        }
+
+        internal static InboxWindowCheckpoint CaptureCheckpoint(UIStateGeoModal state)
+        {
+            if (state == null) return null;
+            var query = SwitchQuery(); int priority = WindowOrder.CurrentRequest(query)?.Priority ?? 0;
+            string identity = state.ModalData is GeoMission mission
+                ? DurableWindowRegistry.StableMissionSubject(mission) : "";
+            return new InboxWindowCheckpoint("modal", ((int)state.ModalType).ToString(), "open", "", "", "",
+                priority, identity);
+        }
+
+        internal static GeoscapeViewStateSwitchRequest ReconstructCarrier(OccurrenceId occurrence,
+            InboxWindowCheckpoint checkpoint)
+        {
+            int raw;
+            if (checkpoint == null || checkpoint.ContentPhase != "modal" ||
+                !int.TryParse(checkpoint.Selection, out raw) || !Enum.IsDefined(typeof(ModalType), raw)) return null;
+            var geo = GeoLevel(); if (geo == null) return null;
+            var mission = geo.Map?.ActiveSites?.Select(x => x.ActiveMission).FirstOrDefault(x => x != null &&
+                occurrence.SubjectIds.Contains(DurableWindowRegistry.StableMissionSubject(x)));
+            if (mission == null) return null;
+            var modal = (ModalType)raw;
+            DialogCallback handler = result => geo.View.ModalResultCallback(modal, result, mission);
+            if (!string.IsNullOrEmpty(checkpoint.NativeDataIdentity) &&
+                checkpoint.NativeDataIdentity != DurableWindowRegistry.StableMissionSubject(mission)) return null;
+            var request = new GeoscapeViewStateSwitchRequest(new UIStateGeoModal(modal, handler, mission), checkpoint.NativePriority)
+                { PauseGame = true };
+            WindowOrder.BindDurable(request, occurrence); return request;
+        }
+
         /// <summary>THE DEFERRAL PREDICATE, and the whole reason <see cref="ModalParkQueue"/> exists: an
         /// <see cref="DataShape.EntityRef"/> raise routinely arrives BEFORE the entity it names. The host
         /// broadcasts inside the <c>OpenModal</c> postfix — SYNCHRONOUSLY, in the same call stack that just
@@ -562,6 +610,13 @@ namespace Multiplayer.Network.Sync
         /// keep the loud drop, with that same function's reason on it.</summary>
         private static bool NeedsPark(Raise p)
         {
+            if (!string.IsNullOrEmpty(p.DurableTrigger))
+            {
+                var store = DurableInboxSaveBridge.ActiveStore;
+                if (!DurableWindowRegistry.MatchPriorityOccurrence(store, "Modal:" + (ModalType)p.ModalType,
+                    p.DurableTrigger, p.DurableSubject).HasValue)
+                    return true;
+            }
             if (SwitchQuery() == null) return NoViewRefusal(p) == null;   // no screen yet — wait for one, if it may still be shown
             if (!NamesEntity(p)) return false;   // only a NAME can be early; None/research resolve or never will
             var geo = GeoLevel();
@@ -707,13 +762,21 @@ namespace Multiplayer.Network.Sync
                 }
                 state = new UIStateGeoModal(modalType, handler, data);
             }
-            q.QueryStateSwitch(new GeoscapeViewStateSwitchRequest(state, p.Priority)
+            var request = new GeoscapeViewStateSwitchRequest(state, p.Priority)
             // The GAME'S OWN flag, true as on the host: a mirrored modal must pause THIS peer, which is what
             // ProcessQueriedStateSwitch:67-70 -> RequestGamePause:1269 does. It used to be false on the theory
             // that pause arrives via the rail — it does not when the host is already paused (change-gated
             // Timing.Paused setter → no delta), which is how a client kept running under an open window.
             // A ONE-SHOT pause, not a hold: any peer resumes unconditionally, first-to-act-wins.
-            { PauseGame = true });
+            { PauseGame = true };
+            q.QueryStateSwitch(request);
+            if (!string.IsNullOrEmpty(p.DurableTrigger))
+            {
+                var occurrence = DurableWindowRegistry.MatchPriorityOccurrence(DurableInboxSaveBridge.ActiveStore,
+                    "Modal:" + (ModalType)p.ModalType, p.DurableTrigger, p.DurableSubject);
+                if (occurrence.HasValue && occurrence.Value.EventId != null)
+                    WindowOrder.BindDurable(request, occurrence.Value);
+            }
             Debug.Log("[MP][modals] raised '" + name + "' seq=" + seq + " kind=" + p.Kind + " shape=" + p.Shape +
                       " priority=" + p.Priority + " data=" + (data == null ? "none" : data.GetType().Name));
             return true;

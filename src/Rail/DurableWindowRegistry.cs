@@ -126,6 +126,7 @@ namespace Multiplayer.Network.Sync
     /// <summary>Approved durable taxonomy and the only DWI display gate.</summary>
     internal static class DurableWindowRegistry
     {
+        [ThreadStatic] internal static OccurrenceId? LastCapturedPriorityOccurrence;
         internal sealed class RouterRegistration
         {
             internal string Family;
@@ -168,19 +169,19 @@ namespace Multiplayer.Network.Sync
             throw new InvalidOperationException("durable priority occurrence commit contention exceeded bound");
         }
 
-        private static void EnqueueCapturedPriority(string family, string stableTrigger, params string[] subjects)
+        private static OccurrenceId? EnqueueCapturedPriority(string family, string stableTrigger, params string[] subjects)
         {
             var engine = NetworkEngine.Instance;
             var store = DurableInboxSaveBridge.ActiveStore;
-            if (engine == null || !engine.IsActiveSession || !engine.IsHost || store == null) return;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost || store == null) return null;
+            var occurrence = new OccurrenceId(family, stableTrigger, subjects);
             for (int attempt = 0; attempt != 32; attempt++)
             {
                 var expected = store.Ledger;
-                var occurrence = new OccurrenceId(family, stableTrigger, subjects);
-                if (expected.AllEntries.Any(e => e.Occurrence.Equals(occurrence))) return;
+                if (expected.AllEntries.Any(e => e.Occurrence.Equals(occurrence))) return occurrence;
                 var sequencer = new HostInboxSequencer(expected);
-                if (!sequencer.CreateOccurrence(occurrence)) return;
-                if (store.Commit(expected, sequencer.Ledger)) return;
+                if (!sequencer.CreateOccurrence(occurrence)) return null;
+                if (store.Commit(expected, sequencer.Ledger)) return occurrence;
             }
             throw new InvalidOperationException("native priority occurrence commit contention exceeded bound");
         }
@@ -233,6 +234,37 @@ namespace Multiplayer.Network.Sync
         internal static bool MayPresent(bool geoscapeStarted, Type currentViewState) =>
             geoscapeStarted && currentViewState != null && MapStates.Contains(currentViewState);
 
+        internal static DurableWindowPriority PriorityOf(OccurrenceId occurrence)
+        {
+            if (string.Equals(occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal))
+                return DurableWindowPriority.Deployment;
+            if (PriorityOccurrenceFamilies.Contains(occurrence.EventId) ||
+                string.Equals(occurrence.EventId, "mission-offer", StringComparison.Ordinal) ||
+                string.Equals(occurrence.EventId, "ambush", StringComparison.Ordinal))
+                return DurableWindowPriority.Priority;
+            return DurableWindowPriority.Ordinary;
+        }
+
+        private static readonly HashSet<string> PriorityOccurrenceFamilies = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "AssetDestination", "Modal:" + ModalType.GeoAmbushBrief,
+            "Modal:" + ModalType.GeoHavenAttackBrief, "Modal:" + ModalType.GeoAlienBaseBrief,
+            "Modal:" + ModalType.GeoScavengeBrief, "Modal:" + ModalType.GeoPhoenixBaseDefenseBrief,
+            "Modal:" + ModalType.GeoPhoenixBaseInfestationBrief, "Modal:" + ModalType.AncientSiteAttackBrief,
+            "Modal:" + ModalType.AncientSiteDefenceBrief, "Modal:" + ModalType.BehemothAttackBrief,
+            "Modal:" + ModalType.InfestedHavenBrief,
+        };
+
+        internal static OccurrenceId? MatchPriorityOccurrence(DurableInboxStore store, string family,
+            string trigger, string stableSubject)
+        {
+            if (store == null || !PriorityOccurrenceFamilies.Contains(family) ||
+                string.IsNullOrEmpty(trigger) || string.IsNullOrEmpty(stableSubject)) return null;
+            var matches = store.Ledger.AllEntries.Select(x => x.Occurrence).Distinct().Where(x =>
+                x.EventId == family && x.TriggerId == trigger && x.SubjectIds.Contains(stableSubject)).ToArray();
+            return matches.Length == 1 ? matches[0] : (OccurrenceId?)null;
+        }
+
         internal static bool MayPresent()
         {
             GeoLevelController geo = GenericApplier.StartedGeoLevel();
@@ -268,21 +300,50 @@ namespace Multiplayer.Network.Sync
         {
             var token = NativeRaiserToken.CurrentMissionBrief;
             if (token != null && IsPriority(typeof(UIStateGeoModal), modal, subject, token))
-                EnqueueCapturedPriority("Modal:" + modal, token.StableRaiserId,
+            {
+                var occurrence = EnqueueCapturedPriority("Modal:" + modal, token.StableRaiserId,
                     StableMissionSubject(subject as GeoMission));
+                var request = LastQueuedRequest(r => r.State is UIStateGeoModal m && m.ModalType == modal &&
+                    ReferenceEquals(m.ModalData, subject));
+                if (occurrence.HasValue && request != null) WindowOrder.BindDurable(request, occurrence.Value);
+                LastCapturedPriorityOccurrence = occurrence;
+            }
         }
 
         internal static void CaptureDeployment(GeoMission mission, NativeRaiserToken token)
         {
             if (IsPriority(typeof(UIStateRosterDeployment), ModalType.None, mission, token))
-                EnqueueCapturedPriority("DeploymentPreparing", token.StableRaiserId,
+            {
+                var occurrence = EnqueueCapturedPriority("DeploymentPreparing", token.StableRaiserId,
                     StableMissionSubject(mission));
+                var request = LastQueuedRequest(r => r.State is UIStateRosterDeployment d && ReferenceEquals(d.Mission, mission));
+                if (occurrence.HasValue && request != null) WindowOrder.BindDurable(request, occurrence.Value);
+            }
         }
 
         internal static void CaptureAssetDestination(object subject, NativeRaiserToken token)
         {
             if (IsPriority(typeof(UIStateAssetDeployment), ModalType.None, subject, token))
-                EnqueueCapturedPriority("AssetDestination", token.StableRaiserId, token.StableRaiserId);
+            {
+                var occurrence = EnqueueCapturedPriority("AssetDestination", token.StableRaiserId, token.StableRaiserId);
+                var request = LastQueuedRequest(r => r.State is UIStateAssetDeployment a && ReferenceEquals(a.DeployBind, subject));
+                if (occurrence.HasValue && request != null) WindowOrder.BindDurable(request, occurrence.Value);
+            }
+        }
+
+        internal static GeoscapeViewStateSwitchRequest LastQueuedRequest(
+            Func<GeoscapeViewStateSwitchRequest, bool> match)
+        {
+            var geo = GenericApplier.StartedGeoLevel();
+            var query = geo == null ? null : AccessTools.Field(typeof(GeoscapeView), "_viewSwichQuery")?.GetValue(geo.View);
+            var requests = query == null ? null : WindowOrder.RequestsField?.GetValue(query) as System.Collections.IList;
+            if (requests == null || match == null) return null;
+            for (int i = requests.Count - 1; i >= 0; i--)
+            {
+                var request = requests[i] as GeoscapeViewStateSwitchRequest;
+                if (request != null && match(request)) return request;
+            }
+            return null;
         }
 
         internal static string AssetSubject(PhoenixPoint.Geoscape.View.ViewControllers.GeoDeployAssetFactionCharacterBind bind) =>

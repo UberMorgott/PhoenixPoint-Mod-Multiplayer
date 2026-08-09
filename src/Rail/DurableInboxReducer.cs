@@ -12,7 +12,8 @@ namespace Multiplayer.Network.Sync
             {
                 var entry = ledger.AllEntries[i];
                 entries[i] = new InboxEntry(entry.Occurrence, entry.Membership, entry.Lifecycle, entry.Choice,
-                    entry.LifecycleRevision, entry.TombstoneRevision, entry.HostOrderKey);
+                    entry.LifecycleRevision, entry.TombstoneRevision, entry.HostOrderKey,
+                    entry.SuspensionReason, entry.Checkpoint);
             }
             return new HostLedger(entries, ledger.CommittedRevision, ledger.Members);
         }
@@ -33,11 +34,16 @@ namespace Multiplayer.Network.Sync
             bool sameLifecycle = current.Lifecycle == command.Lifecycle;
             bool validTransition = current.Lifecycle == InboxLifecycle.Queued && command.Lifecycle == InboxLifecycle.Open ||
                                    current.Lifecycle == InboxLifecycle.Open &&
-                                       (command.Lifecycle == InboxLifecycle.Read || command.Lifecycle == InboxLifecycle.Dismissed) ||
+                                       (command.Lifecycle == InboxLifecycle.Suspended || command.Lifecycle == InboxLifecycle.Read || command.Lifecycle == InboxLifecycle.Dismissed) ||
+                                   current.Lifecycle == InboxLifecycle.Suspended && command.Lifecycle == InboxLifecycle.Open ||
                                    current.Lifecycle == InboxLifecycle.Read && command.Lifecycle == InboxLifecycle.Dismissed;
             if (!sameLifecycle && !validTransition) return new ReduceResult(ledger, false);
 
-            return new ReduceResult(ledger.Replace(current.WithLifecycle(command.Lifecycle, command.Revision)), true);
+            var replacement = command.Lifecycle == InboxLifecycle.Suspended
+                ? current.Suspend(command.SuspensionReason == InboxSuspensionReason.None ? current.SuspensionReason : command.SuspensionReason,
+                    command.Checkpoint ?? current.Checkpoint, command.Revision)
+                : current.WithLifecycle(command.Lifecycle, command.Revision);
+            return new ReduceResult(ledger.Replace(replacement), true);
         }
     }
 }
