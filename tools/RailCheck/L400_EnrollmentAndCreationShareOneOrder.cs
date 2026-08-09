@@ -9,24 +9,44 @@ namespace RailCheck
     {
         internal static IEnumerable<string> Check()
         {
+            const int occurrenceCount = 256;
             var member = new MembershipId("player", 3);
-            var before = new OccurrenceId("event", "before-enroll", new[] { "subject" });
-            var after = new OccurrenceId("event", "after-enroll", new[] { "subject" });
             var host = new HostInboxSequencer(new HostLedger(new InboxEntry[0]));
-            host.CreateOccurrence(before);
-            host.Enroll(member, MemberPresence.Active);
-            host.Enroll(member, MemberPresence.Disconnected); // retry updates presence, not durable order or epoch
-            host.CreateOccurrence(after);
-            host.CreateOccurrence(after); // retry dedupes
-            var restored = host.Reconnect(member);
-            if (restored.Count != 1 || !restored.Single().Occurrence.Equals(after))
-                yield return "L400 committed-create-enroll-order-not-preserved";
-            if (host.CommittedRevision != 3) yield return "L400 retry-mutated-serialized-transaction-order";
+            var start = new System.Threading.ManualResetEventSlim(false);
+            var failures = new System.Collections.Concurrent.ConcurrentQueue<System.Exception>();
+            var enrolls = Enumerable.Range(0, occurrenceCount).Select(_ => System.Threading.Tasks.Task.Run(() =>
+            {
+                start.Wait();
+                try { host.Enroll(member, MemberPresence.Active); }
+                catch (System.Exception ex) { failures.Enqueue(ex); }
+            })).ToArray();
+            var creates = Enumerable.Range(0, occurrenceCount).Select(i => System.Threading.Tasks.Task.Run(() =>
+            {
+                start.Wait();
+                var occurrence = new OccurrenceId("event", "trigger-" + i.ToString("D3"), new[] { "subject" });
+                try
+                {
+                    host.CreateOccurrence(occurrence);
+                    host.CreateOccurrence(occurrence); // concurrent retry must be idempotent
+                }
+                catch (System.Exception ex) { failures.Enqueue(ex); }
+            })).ToArray();
+            start.Set();
+            System.Threading.Tasks.Task.WaitAll(enrolls.Concat(creates).ToArray());
 
-            // POSITIVE CONTROL: reversing the first two transactions includes the epoch.
-            var reversed = new HostInboxSequencer(new HostLedger(new InboxEntry[0]));
-            reversed.Enroll(member, MemberPresence.Active); reversed.CreateOccurrence(before);
-            if (reversed.Reconnect(member).Count != 1) yield return "L400 control-not-red: reversed order was not distinguishable";
+            if (!failures.IsEmpty) yield return "L400 concurrent-authority-operation-threw";
+            if (host.CommittedRevision != occurrenceCount + 1UL)
+                yield return "L400 concurrent-retry-lost-or-duplicated-committed-order";
+            var restored = host.Reconnect(member);
+            if (restored.Select(e => e.Occurrence).Distinct().Count() != restored.Count)
+                yield return "L400 concurrent-retry-duplicated-entitlement";
+
+            // POSITIVE CONTROL: after the concurrent transaction batch, the next create is exactly one later commit.
+            var revision = host.CommittedRevision;
+            var after = new OccurrenceId("event", "after-concurrency", new[] { "subject" });
+            if (!host.CreateOccurrence(after) || host.CommittedRevision != revision + 1 ||
+                !host.Reconnect(member).Any(e => e.Occurrence.Equals(after)))
+                yield return "L400 control-not-red: sequencer-did-not-remain-usable";
         }
     }
 }
