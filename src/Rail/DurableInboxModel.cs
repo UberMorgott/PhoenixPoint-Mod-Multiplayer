@@ -240,10 +240,12 @@ namespace Multiplayer.Network.Sync
         internal CanonicalChoiceId Choice { get; }
         internal ulong LifecycleRevision { get; }
         internal ulong TombstoneRevision { get; }
-        internal ulong HostOrderKey { get; }
+        internal HostOrderKey HostOrderKey { get; }
         internal InboxEntry(OccurrenceId occurrence, MembershipId membership, InboxLifecycle lifecycle,
-            CanonicalChoiceId choice, ulong lifecycleRevision, ulong tombstoneRevision, ulong hostOrderKey = 0)
+            CanonicalChoiceId choice, ulong lifecycleRevision, ulong tombstoneRevision, HostOrderKey hostOrderKey)
         {
+            if (!string.Equals(hostOrderKey.TriggerId, occurrence.TriggerId, StringComparison.Ordinal))
+                throw new ArgumentException("foreign order namespace", nameof(hostOrderKey));
             Occurrence = occurrence; Membership = membership; Lifecycle = lifecycle; Choice = choice;
             LifecycleRevision = lifecycleRevision; TombstoneRevision = tombstoneRevision; HostOrderKey = hostOrderKey;
         }
@@ -263,7 +265,7 @@ namespace Multiplayer.Network.Sync
                 throw new ArgumentException("duplicate ledger entry", nameof(entries));
             if (copy.GroupBy(e => e.Occurrence).Any(g => g.Select(e => e.HostOrderKey).Distinct().Count() != 1))
                 throw new ArgumentException("occurrence has inconsistent host order", nameof(entries));
-            if (copy.Any(e => e.HostOrderKey > committedRevision))
+            if (copy.Any(e => e.HostOrderKey.CampaignOrdinal > committedRevision))
                 throw new ArgumentException("host order exceeds committed revision", nameof(entries));
             var memberCopy = members == null
                 ? copy.Select(e => e.Membership).Distinct().ToDictionary(m => m, m => MemberPresence.Disconnected)
@@ -344,8 +346,9 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
             {
                 if (_occurrences.Contains(occurrence)) return false;
                 var committedRevision = checked(CommittedRevision + 1);
+                var order = new HostOrderKey(committedRevision, occurrence.TriggerId);
                 var additions = _members.Keys.Select(member => new InboxEntry(occurrence, member,
-                    InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, committedRevision)).ToArray();
+                    InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, order)).ToArray();
                 var ledger = new HostLedger(Ledger.AllEntries.Concat(additions), committedRevision, _members);
                 _occurrences.Add(occurrence);
                 Ledger = ledger;

@@ -14,7 +14,9 @@ namespace RailCheck
 
         internal static IEnumerable<string> Check()
         {
-            var occurrence = new OccurrenceId("event-a", "trigger-a", new[] { "subject-b", "subject-a" });
+            // Deliberately invert OccurrenceId ordering versus HostOrderKey.TriggerId: an
+            // occurrence-first sort would put sibling first and must fail the tie-break arm.
+            var occurrence = new OccurrenceId("event-z", "trigger-a", new[] { "subject-b", "subject-a" });
             var sibling = new OccurrenceId("event-a", "trigger-b", new[] { "subject-a", "subject-b" });
             var member = new MembershipId("player-a", 7);
             var choice = new CanonicalChoiceId(occurrence, "choice-a");
@@ -31,6 +33,8 @@ namespace RailCheck
                 yield return "L377 premise-changed: a production TransportAck did not decode: " + refusal;
                 yield break;
             }
+            if (!decoded.Order.Equals(ack.Order))
+                yield return "L377 full-host-order-key-did-not-round-trip";
 
             var separatelyDecoded = DurableInboxCodec.Encode(decoded);
             InboxMessage decodedAgain;
@@ -39,7 +43,7 @@ namespace RailCheck
                 yield return "L377 separately-decoded-subjects-differ: equal normalized subject arrays lost value equality";
 
             var mutableSubjects = new[] { "subject-b", "subject-a" };
-            var copiedOccurrence = new OccurrenceId("event-a", "trigger-a", mutableSubjects);
+            var copiedOccurrence = new OccurrenceId("event-z", "trigger-a", mutableSubjects);
             mutableSubjects[0] = "mutated-after-construction";
             if (!copiedOccurrence.Equals(occurrence) || copiedOccurrence.GetHashCode() != occurrence.GetHashCode() ||
                 copiedOccurrence.CompareTo(occurrence) != 0)
@@ -51,13 +55,38 @@ namespace RailCheck
                 yield return "L377 codec-accepted-duplicate-reward";
 
             var otherMember = new MembershipId("player-b", 9);
+            var order = new HostOrderKey(11, occurrence.TriggerId);
+            var siblingOrder = new HostOrderKey(11, sibling.TriggerId);
             var ledger = new HostLedger(new[]
             {
-                new InboxEntry(occurrence, member, InboxLifecycle.Open, choice, 3, 1),
-                new InboxEntry(sibling, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0),
-                new InboxEntry(occurrence, otherMember, InboxLifecycle.Read, default(CanonicalChoiceId), 5, 2),
-                new InboxEntry(sibling, otherMember, InboxLifecycle.Dismissed, default(CanonicalChoiceId), 6, 3)
-            });
+                new InboxEntry(occurrence, member, InboxLifecycle.Open, choice, 3, 1, order),
+                new InboxEntry(sibling, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, siblingOrder),
+                new InboxEntry(occurrence, otherMember, InboxLifecycle.Read, default(CanonicalChoiceId), 5, 2, order),
+                new InboxEntry(sibling, otherMember, InboxLifecycle.Dismissed, default(CanonicalChoiceId), 6, 3, siblingOrder)
+            }, 11);
+            var reorderedLedger = new HostLedger(ledger.AllEntries.Reverse(), 11);
+            if (!ledger.EncodeCanonical().SequenceEqual(reorderedLedger.EncodeCanonical()) ||
+                !ledger.EntriesFor(member).Select(e => e.Occurrence).SequenceEqual(new[] { occurrence, sibling }))
+                yield return "L377 full-host-order-key-tie-break-is-not-canonical";
+            var acceptedMismatchedOrder = true;
+            try
+            {
+                new InboxEntry(occurrence, member, InboxLifecycle.Queued, default(CanonicalChoiceId),
+                    1, 0, siblingOrder);
+            }
+            catch (ArgumentException) { acceptedMismatchedOrder = false; }
+            if (acceptedMismatchedOrder)
+                yield return "L377 inbox-entry-accepted-trigger-mismatched-order-key";
+
+            var acceptedFutureOrder = true;
+            try
+            {
+                new HostLedger(new[] { new InboxEntry(occurrence, member, InboxLifecycle.Queued,
+                    default(CanonicalChoiceId), 1, 0, order) }, 10);
+            }
+            catch (ArgumentException) { acceptedFutureOrder = false; }
+            if (acceptedFutureOrder)
+                yield return "L377 ledger-accepted-order-beyond-committed-revision";
             var before = ledger.EncodeCanonical();
             var receipt = DurableInboxReducer.Apply(ledger, InboxCommand.FromMessage(decoded));
             if (receipt.Changed || !before.SequenceEqual(receipt.Ledger.EncodeCanonical()))
@@ -67,11 +96,11 @@ namespace RailCheck
                 InboxCommand.SetLifecycle(occurrence, member, InboxLifecycle.Read, 4));
             var expectedLifecycle = new HostLedger(new[]
             {
-                new InboxEntry(occurrence, member, InboxLifecycle.Read, choice, 4, 1),
-                new InboxEntry(sibling, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0),
-                new InboxEntry(occurrence, otherMember, InboxLifecycle.Read, default(CanonicalChoiceId), 5, 2),
-                new InboxEntry(sibling, otherMember, InboxLifecycle.Dismissed, default(CanonicalChoiceId), 6, 3)
-            });
+                new InboxEntry(occurrence, member, InboxLifecycle.Read, choice, 4, 1, order),
+                new InboxEntry(sibling, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, siblingOrder),
+                new InboxEntry(occurrence, otherMember, InboxLifecycle.Read, default(CanonicalChoiceId), 5, 2, order),
+                new InboxEntry(sibling, otherMember, InboxLifecycle.Dismissed, default(CanonicalChoiceId), 6, 3, siblingOrder)
+            }, 11);
             if (!lifecycle.Changed ||
                 !expectedLifecycle.EncodeCanonical().SequenceEqual(lifecycle.Ledger.EncodeCanonical()))
                 yield return "L377 lifecycle-not-narrow: explicit lifecycle did not change only that peer at its named occurrence";

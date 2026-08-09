@@ -1,5 +1,9 @@
+using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 using Multiplayer.Network.Sync;
 
 namespace RailCheck
@@ -40,6 +44,56 @@ namespace RailCheck
             if (host.Enroll(member, MemberPresence.Disconnected) || host.CreateOccurrence(after) ||
                 host.CommittedRevision != revision || host.Reconnect(member)[0].Occurrence.Equals(before))
                 yield return "L400 authority-retry-was-not-idempotent";
+
+            const int occurrenceCount = 32;
+            var concurrent = new HostInboxSequencer(new HostLedger(new InboxEntry[0]));
+            var concurrentMember = new MembershipId("concurrent-player", 1);
+            var gate = new ManualResetEventSlim(false);
+            var exceptions = new ConcurrentQueue<Exception>();
+            var enrollmentWorker = Task.Run(() =>
+            {
+                try { gate.Wait(); concurrent.Enroll(concurrentMember, MemberPresence.Active); }
+                catch (Exception ex) { exceptions.Enqueue(ex); }
+            });
+            var creationWorker = Task.Run(() =>
+            {
+                try
+                {
+                    gate.Wait();
+                    for (var i = 0; i < occurrenceCount; i++)
+                    {
+                        var occurrence = new OccurrenceId("event-" + i, "trigger-" + i, new[] { "subject" });
+                        concurrent.CreateOccurrence(occurrence);
+                        concurrent.CreateOccurrence(occurrence);
+                    }
+                }
+                catch (Exception ex) { exceptions.Enqueue(ex); }
+            });
+            gate.Set();
+            Task.WaitAll(enrollmentWorker, creationWorker);
+
+            var all = concurrent.Ledger.AllEntries;
+            if (!exceptions.IsEmpty)
+                yield return "L400 bounded-concurrency-threw";
+            if (concurrent.CommittedRevision != occurrenceCount + 1UL)
+                yield return "L400 bounded-concurrency-revision-cardinality-wrong";
+            if (all.Select(e => e.Occurrence).Distinct().Count() != all.Count ||
+                all.Any(e => e.HostOrderKey.TriggerId != e.Occurrence.TriggerId) ||
+                all.Select(e => e.HostOrderKey).Distinct().Count() != all.Count ||
+                all.Any(e => e.HostOrderKey.CampaignOrdinal < 1 ||
+                             e.HostOrderKey.CampaignOrdinal > concurrent.CommittedRevision))
+                yield return "L400 bounded-concurrency-produced-invalid-identity-or-order";
+
+            var afterContention = new OccurrenceId("event-after", "trigger-after", new[] { "subject" });
+            var beforeContentionRevision = concurrent.CommittedRevision;
+            if (!concurrent.CreateOccurrence(afterContention) ||
+                concurrent.CommittedRevision != beforeContentionRevision + 1)
+                yield return "L400 post-contention-create-did-not-advance-exactly-once";
+            var post = concurrent.Reconnect(concurrentMember)
+                .SingleOrDefault(e => e.Occurrence.Equals(afterContention));
+            if (post == null || post.HostOrderKey.CampaignOrdinal != concurrent.CommittedRevision ||
+                post.HostOrderKey.TriggerId != afterContention.TriggerId)
+                yield return "L400 post-contention-create-not-restored-with-full-key";
         }
     }
 }

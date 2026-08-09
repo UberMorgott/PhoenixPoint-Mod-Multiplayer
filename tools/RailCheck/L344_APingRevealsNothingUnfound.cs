@@ -135,7 +135,7 @@ namespace RailCheck
             var passes = false;
             string threw = null;
             try { passes = (bool)known.Invoke(null, new object[] { null, null }); }
-            catch (Exception e) { threw = (e.InnerException ?? e).GetType().Name; Console.Error.WriteLine("TEMP-TRACE L344 >>> " + e); }
+            catch (Exception e) { threw = (e.InnerException ?? e).GetType().Name; }
 
             if (threw != null)
             {

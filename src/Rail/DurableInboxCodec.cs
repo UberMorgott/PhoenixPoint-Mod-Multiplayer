@@ -108,7 +108,8 @@ namespace Multiplayer.Network.Sync
                 WriteCount(writer, ordered.Length);
                 foreach (var entry in ordered)
                 {
-                    writer.Write(entry.HostOrderKey);
+                    writer.Write(entry.HostOrderKey.CampaignOrdinal);
+                    WriteString(writer, entry.HostOrderKey.TriggerId);
                     WriteOccurrence(writer, entry.Occurrence);
                     WriteString(writer, entry.Membership.PlayerGuid);
                     writer.Write(entry.Membership.Epoch);

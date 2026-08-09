@@ -76,7 +76,8 @@ namespace RailCheck
 
             var maxLedger = new HostLedger(
                 new[] { new InboxEntry(maxOccurrences[0], maxMember, InboxLifecycle.Queued,
-                    default(CanonicalChoiceId), 1, 0, ulong.MaxValue) }, ulong.MaxValue,
+                    default(CanonicalChoiceId), 1, 0,
+                    new HostOrderKey(ulong.MaxValue, maxOccurrences[0].TriggerId)) }, ulong.MaxValue,
                 new[] { new KeyValuePair<MembershipId, MemberPresence>(maxMember, MemberPresence.Active) });
             foreach (var operation in new System.Func<HostInboxSequencer, bool>[]
             {
