@@ -50,22 +50,31 @@ namespace RailCheck
             if (DurableInboxCodec.TryDecode(duplicateRewards, out ignoredDuplicate, out refusal))
                 yield return "L377 codec-accepted-duplicate-reward";
 
+            var otherMember = new MembershipId("player-b", 9);
             var ledger = new HostLedger(new[]
             {
                 new InboxEntry(occurrence, member, InboxLifecycle.Open, choice, 3, 1),
-                new InboxEntry(sibling, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0)
+                new InboxEntry(sibling, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0),
+                new InboxEntry(occurrence, otherMember, InboxLifecycle.Read, default(CanonicalChoiceId), 5, 2),
+                new InboxEntry(sibling, otherMember, InboxLifecycle.Dismissed, default(CanonicalChoiceId), 6, 3)
             });
             var before = ledger.EncodeCanonical();
             var receipt = DurableInboxReducer.Apply(ledger, InboxCommand.FromMessage(decoded));
             if (receipt.Changed || !before.SequenceEqual(receipt.Ledger.EncodeCanonical()))
-                yield return "L377 ack-advanced-lifecycle: receipt changed queued/open/read/dismissed/choice bytes";
+                yield return "L377 ack-advanced-lifecycle: receipt changed the exact queued/open/read/dismissed two-member matrix bytes";
 
             var lifecycle = DurableInboxReducer.Apply(ledger,
                 InboxCommand.SetLifecycle(occurrence, member, InboxLifecycle.Read, 4));
-            if (!lifecycle.Changed || lifecycle.Ledger.Get(occurrence, member).Lifecycle != InboxLifecycle.Read ||
-                lifecycle.Ledger.Get(sibling, member).Lifecycle != InboxLifecycle.Queued ||
-                !lifecycle.Ledger.Get(occurrence, member).Choice.Equals(choice))
-                yield return "L377 lifecycle-not-narrow: explicit lifecycle did not change only its named member/occurrence";
+            var expectedLifecycle = new HostLedger(new[]
+            {
+                new InboxEntry(occurrence, member, InboxLifecycle.Read, choice, 4, 1),
+                new InboxEntry(sibling, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0),
+                new InboxEntry(occurrence, otherMember, InboxLifecycle.Read, default(CanonicalChoiceId), 5, 2),
+                new InboxEntry(sibling, otherMember, InboxLifecycle.Dismissed, default(CanonicalChoiceId), 6, 3)
+            });
+            if (!lifecycle.Changed ||
+                !expectedLifecycle.EncodeCanonical().SequenceEqual(lifecycle.Ledger.EncodeCanonical()))
+                yield return "L377 lifecycle-not-narrow: explicit lifecycle did not change only that peer at its named occurrence";
 
             // POSITIVE CONTROL: the pre-fix ACK-as-read mutation must be observable by the byte comparison above.
             var ackAsRead = DurableInboxReducer.Apply(ledger,
