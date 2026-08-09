@@ -374,6 +374,27 @@ namespace Multiplayer.Network
         public void SetLoadingLevel(object level)
         {
             NoteProgress(); // flag edge (native load started / finished)
+
+            // THE PUMP'S WINDOW CLOSES ON THIS LINE, AND THIS IS THE LAST FRAME THAT CAN PUBLISH ITS 100.
+            // 98fa85e put the terminal 100 in the pump's `LoadingProgress == null` branch — which NEVER RUNS:
+            // Player.log has 46 + 45 + … "phase-2 pump: slot=0 pct=NN" samples across three loads and not one
+            // "LoadingProgress null → data loaded" line, because the curtain reaches Playing/Loaded FIRST and
+            // routes here. Clearing _loadingLevel drops LoadPhaseStarted, which drops HostEntryLoad in the
+            // same statement, so the pump's whole `if (InPhase2 || HostEntryLoad)` block is skipped from the
+            // very next frame and the branch holding the 100 is unreachable. The last number the other peers
+            // ever saw stayed whatever the eased fillAmount had reached — measured 80 and 62 on the host's own
+            // geoscape loads. Publishing HERE covers the host (whose window is HostEntryLoad only, never
+            // InPhase2 — see HostEntryLoad) and the client alike, and the older branch stays for the case it
+            // was written for: LoadingProgress ending while the curtain is still up.
+            // Done is NOT reported here — only OnReachedPlaying does that, so the reveal barrier is untouched.
+            if (level == null && _lastReportedLoadPct >= 0 && (InPhase2 || HostEntryLoad))
+            {
+                if (InPhase2) ReportLoadProgress(100); else PublishHostEntryLoad(100);
+                Debug.Log("[Multiplayer] phase-2 pump: curtain handed off at pct=" + _lastReportedLoadPct +
+                          " → published 100 (window closing), awaiting Playing");
+                _lastReportedLoadPct = -1;
+            }
+
             _loadingLevel = level as Base.Levels.Level;
             // Capture the LIVE native bar when phase-2 begins (Loading), clear it on Playing/Loaded.
             // Done ONCE here (not per-frame) so the pump never FindObjectOfType's every tick.
