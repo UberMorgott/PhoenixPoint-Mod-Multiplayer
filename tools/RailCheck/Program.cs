@@ -353,6 +353,7 @@ namespace RailCheck
             Add(laws, () => L371_AMidSessionParityDiffIsSaidOutLoud.Check());
             Add(laws, () => L372_OneDeploymentCapForTheScreenAndTheValidator.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
+            Add(laws, () => L377_AReceiptAdvancesNoInboxLifecycle.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

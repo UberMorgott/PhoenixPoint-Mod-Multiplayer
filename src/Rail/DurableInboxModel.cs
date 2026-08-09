@@ -1,0 +1,299 @@
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Globalization;
+using System.Linq;
+
+namespace Multiplayer.Network.Sync
+{
+    internal static class InboxIdentity
+    {
+        internal static string Required(string value, string name)
+        {
+            if (string.IsNullOrWhiteSpace(value)) throw new ArgumentException(name + " is required", name);
+            return value;
+        }
+
+        internal static int Hash(params object[] values)
+        {
+            unchecked
+            {
+                uint hash = 2166136261;
+                foreach (var value in values)
+                {
+                    var text = value == null ? "" : Convert.ToString(value, CultureInfo.InvariantCulture);
+                    foreach (var c in text) { hash ^= c; hash *= 16777619; }
+                    hash ^= 0xff; hash *= 16777619;
+                }
+                return (int)hash;
+            }
+        }
+    }
+
+    internal readonly struct MembershipId : IEquatable<MembershipId>, IComparable<MembershipId>
+    {
+        internal readonly string PlayerGuid;
+        internal readonly ulong Epoch;
+
+        internal MembershipId(string playerGuid, ulong epoch)
+        {
+            PlayerGuid = InboxIdentity.Required(playerGuid, nameof(playerGuid));
+            Epoch = epoch;
+        }
+
+        public bool Equals(MembershipId other) => Epoch == other.Epoch &&
+            string.Equals(PlayerGuid, other.PlayerGuid, StringComparison.Ordinal);
+        public override bool Equals(object obj) => obj is MembershipId other && Equals(other);
+        public override int GetHashCode() => InboxIdentity.Hash(PlayerGuid, Epoch);
+        public int CompareTo(MembershipId other)
+        {
+            int byPlayer = string.Compare(PlayerGuid, other.PlayerGuid, StringComparison.Ordinal);
+            return byPlayer != 0 ? byPlayer : Epoch.CompareTo(other.Epoch);
+        }
+    }
+
+    internal readonly struct OccurrenceId : IEquatable<OccurrenceId>, IComparable<OccurrenceId>
+    {
+        internal readonly string EventId;
+        internal readonly string TriggerId;
+        private readonly IReadOnlyList<string> _subjectIds;
+        internal IReadOnlyList<string> SubjectIds => _subjectIds ?? Array.Empty<string>();
+
+        internal OccurrenceId(string eventId, string triggerId, IEnumerable<string> subjectIds)
+        {
+            EventId = InboxIdentity.Required(eventId, nameof(eventId));
+            TriggerId = InboxIdentity.Required(triggerId, nameof(triggerId));
+            if (subjectIds == null) throw new ArgumentNullException(nameof(subjectIds));
+            var copy = subjectIds.Select(s => InboxIdentity.Required(s, nameof(subjectIds))).ToArray();
+            if (copy.Length == 0) throw new ArgumentException("at least one subject is required", nameof(subjectIds));
+            Array.Sort(copy, StringComparer.Ordinal);
+            if (copy.Distinct(StringComparer.Ordinal).Count() != copy.Length)
+                throw new ArgumentException("duplicate subjects are not canonical", nameof(subjectIds));
+            _subjectIds = new ReadOnlyCollection<string>(copy);
+        }
+
+        public bool Equals(OccurrenceId other) =>
+            string.Equals(EventId, other.EventId, StringComparison.Ordinal) &&
+            string.Equals(TriggerId, other.TriggerId, StringComparison.Ordinal) &&
+            SubjectIds.SequenceEqual(other.SubjectIds, StringComparer.Ordinal);
+        public override bool Equals(object obj) => obj is OccurrenceId other && Equals(other);
+        public override int GetHashCode()
+        {
+            int hash = InboxIdentity.Hash(EventId, TriggerId);
+            foreach (var subject in SubjectIds) hash = InboxIdentity.Hash(hash, subject);
+            return hash;
+        }
+        public int CompareTo(OccurrenceId other)
+        {
+            int value = string.Compare(EventId, other.EventId, StringComparison.Ordinal);
+            if (value != 0) return value;
+            value = string.Compare(TriggerId, other.TriggerId, StringComparison.Ordinal);
+            if (value != 0) return value;
+            int count = Math.Min(SubjectIds.Count, other.SubjectIds.Count);
+            for (int i = 0; i < count; i++)
+            {
+                value = string.Compare(SubjectIds[i], other.SubjectIds[i], StringComparison.Ordinal);
+                if (value != 0) return value;
+            }
+            return SubjectIds.Count.CompareTo(other.SubjectIds.Count);
+        }
+    }
+
+    internal readonly struct HostOrderKey : IEquatable<HostOrderKey>, IComparable<HostOrderKey>
+    {
+        internal readonly ulong CampaignOrdinal;
+        internal readonly string TriggerId;
+        internal HostOrderKey(ulong campaignOrdinal, string triggerId)
+        {
+            CampaignOrdinal = campaignOrdinal;
+            TriggerId = InboxIdentity.Required(triggerId, nameof(triggerId));
+        }
+        public bool Equals(HostOrderKey other) => CampaignOrdinal == other.CampaignOrdinal &&
+            string.Equals(TriggerId, other.TriggerId, StringComparison.Ordinal);
+        public override bool Equals(object obj) => obj is HostOrderKey other && Equals(other);
+        public override int GetHashCode() => InboxIdentity.Hash(CampaignOrdinal, TriggerId);
+        public int CompareTo(HostOrderKey other)
+        {
+            int value = CampaignOrdinal.CompareTo(other.CampaignOrdinal);
+            return value != 0 ? value : string.Compare(TriggerId, other.TriggerId, StringComparison.Ordinal);
+        }
+    }
+
+    internal readonly struct CanonicalChoiceId : IEquatable<CanonicalChoiceId>, IComparable<CanonicalChoiceId>
+    {
+        internal readonly OccurrenceId Occurrence;
+        internal readonly string Value;
+        internal CanonicalChoiceId(OccurrenceId occurrence, string value)
+        {
+            Occurrence = occurrence;
+            Value = InboxIdentity.Required(value, nameof(value));
+        }
+        public bool Equals(CanonicalChoiceId other) => Occurrence.Equals(other.Occurrence) &&
+            string.Equals(Value, other.Value, StringComparison.Ordinal);
+        public override bool Equals(object obj) => obj is CanonicalChoiceId other && Equals(other);
+        public override int GetHashCode() => InboxIdentity.Hash(Occurrence.GetHashCode(), Value);
+        public int CompareTo(CanonicalChoiceId other)
+        {
+            int value = Occurrence.CompareTo(other.Occurrence);
+            return value != 0 ? value : string.Compare(Value, other.Value, StringComparison.Ordinal);
+        }
+    }
+
+    internal readonly struct CanonicalResultId : IEquatable<CanonicalResultId>, IComparable<CanonicalResultId>
+    {
+        internal readonly OccurrenceId Occurrence;
+        internal readonly string Value;
+        internal CanonicalResultId(OccurrenceId occurrence, string value)
+        {
+            Occurrence = occurrence;
+            Value = InboxIdentity.Required(value, nameof(value));
+        }
+        public bool Equals(CanonicalResultId other) => Occurrence.Equals(other.Occurrence) &&
+            string.Equals(Value, other.Value, StringComparison.Ordinal);
+        public override bool Equals(object obj) => obj is CanonicalResultId other && Equals(other);
+        public override int GetHashCode() => InboxIdentity.Hash(Occurrence.GetHashCode(), Value);
+        public int CompareTo(CanonicalResultId other)
+        {
+            int value = Occurrence.CompareTo(other.Occurrence);
+            return value != 0 ? value : string.Compare(Value, other.Value, StringComparison.Ordinal);
+        }
+    }
+
+    internal readonly struct CanonicalRewardItemId : IEquatable<CanonicalRewardItemId>, IComparable<CanonicalRewardItemId>
+    {
+        internal readonly OccurrenceId Occurrence;
+        internal readonly string SubjectId;
+        internal readonly string Value;
+        internal CanonicalRewardItemId(OccurrenceId occurrence, string subjectId, string value)
+        {
+            Occurrence = occurrence;
+            SubjectId = InboxIdentity.Required(subjectId, nameof(subjectId));
+            Value = InboxIdentity.Required(value, nameof(value));
+            if (!occurrence.SubjectIds.Contains(SubjectId, StringComparer.Ordinal))
+                throw new ArgumentException("reward subject is outside its occurrence namespace", nameof(subjectId));
+        }
+        public bool Equals(CanonicalRewardItemId other) => Occurrence.Equals(other.Occurrence) &&
+            string.Equals(SubjectId, other.SubjectId, StringComparison.Ordinal) &&
+            string.Equals(Value, other.Value, StringComparison.Ordinal);
+        public override bool Equals(object obj) => obj is CanonicalRewardItemId other && Equals(other);
+        public override int GetHashCode() => InboxIdentity.Hash(Occurrence.GetHashCode(), SubjectId, Value);
+        public int CompareTo(CanonicalRewardItemId other)
+        {
+            int value = Occurrence.CompareTo(other.Occurrence);
+            if (value != 0) return value;
+            value = string.Compare(SubjectId, other.SubjectId, StringComparison.Ordinal);
+            return value != 0 ? value : string.Compare(Value, other.Value, StringComparison.Ordinal);
+        }
+    }
+
+    internal enum InboxMessageKind : byte { TransportAck = 0x46, Lifecycle = 0x40 }
+    internal enum InboxLifecycle : byte { Queued, Open, Read, Dismissed }
+
+    internal sealed class InboxMessage
+    {
+        internal InboxMessageKind Kind { get; }
+        internal OccurrenceId Occurrence { get; }
+        internal CanonicalResultId ResultId { get; }
+        internal IReadOnlyList<CanonicalRewardItemId> RewardIds { get; }
+        internal MembershipId Membership { get; }
+        internal HostOrderKey Order { get; }
+        internal ulong LifecycleRevision { get; }
+        internal ulong TombstoneRevision { get; }
+        internal InboxLifecycle Lifecycle { get; }
+        internal CanonicalChoiceId ChoiceId { get; }
+
+        internal InboxMessage(InboxMessageKind kind, OccurrenceId occurrence, CanonicalResultId resultId,
+            IEnumerable<CanonicalRewardItemId> rewardIds, MembershipId membership, HostOrderKey order,
+            ulong lifecycleRevision, ulong tombstoneRevision, InboxLifecycle lifecycle, CanonicalChoiceId choiceId)
+        {
+            if (!Enum.IsDefined(typeof(InboxMessageKind), kind)) throw new ArgumentOutOfRangeException(nameof(kind));
+            if (!Enum.IsDefined(typeof(InboxLifecycle), lifecycle)) throw new ArgumentOutOfRangeException(nameof(lifecycle));
+            if (!resultId.Occurrence.Equals(occurrence)) throw new ArgumentException("foreign result namespace", nameof(resultId));
+            if (!string.Equals(order.TriggerId, occurrence.TriggerId, StringComparison.Ordinal))
+                throw new ArgumentException("foreign order namespace", nameof(order));
+            if (choiceId.Value != null && !choiceId.Occurrence.Equals(occurrence))
+                throw new ArgumentException("foreign choice namespace", nameof(choiceId));
+            var rewards = (rewardIds ?? throw new ArgumentNullException(nameof(rewardIds))).ToArray();
+            if (rewards.Any(r => !r.Occurrence.Equals(occurrence)))
+                throw new ArgumentException("foreign reward namespace", nameof(rewardIds));
+            if (rewards.Distinct().Count() != rewards.Length)
+                throw new ArgumentException("duplicate rewards are not canonical", nameof(rewardIds));
+            Array.Sort(rewards);
+            Kind = kind;
+            Occurrence = occurrence;
+            ResultId = resultId;
+            RewardIds = new ReadOnlyCollection<CanonicalRewardItemId>(rewards);
+            Membership = membership;
+            Order = order;
+            LifecycleRevision = lifecycleRevision;
+            TombstoneRevision = tombstoneRevision;
+            Lifecycle = lifecycle;
+            ChoiceId = choiceId;
+        }
+    }
+
+    internal sealed class InboxEntry
+    {
+        internal OccurrenceId Occurrence { get; }
+        internal MembershipId Membership { get; }
+        internal InboxLifecycle Lifecycle { get; }
+        internal CanonicalChoiceId Choice { get; }
+        internal ulong LifecycleRevision { get; }
+        internal ulong TombstoneRevision { get; }
+        internal InboxEntry(OccurrenceId occurrence, MembershipId membership, InboxLifecycle lifecycle,
+            CanonicalChoiceId choice, ulong lifecycleRevision, ulong tombstoneRevision)
+        {
+            Occurrence = occurrence; Membership = membership; Lifecycle = lifecycle; Choice = choice;
+            LifecycleRevision = lifecycleRevision; TombstoneRevision = tombstoneRevision;
+        }
+        internal InboxEntry WithLifecycle(InboxLifecycle lifecycle, ulong revision) =>
+            new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision);
+    }
+
+    internal sealed class HostLedger
+    {
+        private readonly IReadOnlyList<InboxEntry> _entries;
+        internal HostLedger(IEnumerable<InboxEntry> entries)
+        {
+            var copy = (entries ?? throw new ArgumentNullException(nameof(entries))).ToArray();
+            if (copy.GroupBy(e => Tuple.Create(e.Occurrence, e.Membership)).Any(g => g.Count() != 1))
+                throw new ArgumentException("duplicate ledger entry", nameof(entries));
+            _entries = new ReadOnlyCollection<InboxEntry>(copy);
+        }
+        internal InboxEntry Get(OccurrenceId occurrence, MembershipId member) =>
+            _entries.Single(e => e.Occurrence.Equals(occurrence) && e.Membership.Equals(member));
+        internal HostLedger Replace(InboxEntry replacement) => new HostLedger(_entries.Select(e =>
+            e.Occurrence.Equals(replacement.Occurrence) && e.Membership.Equals(replacement.Membership) ? replacement : e));
+        internal byte[] EncodeCanonical() => DurableInboxCodec.EncodeLedger(_entries);
+    }
+
+    internal enum InboxCommandKind { TransportAck, SetLifecycle }
+    internal sealed class InboxCommand
+    {
+        internal InboxCommandKind Kind { get; }
+        internal OccurrenceId Occurrence { get; }
+        internal MembershipId Membership { get; }
+        internal InboxLifecycle Lifecycle { get; }
+        internal ulong Revision { get; }
+        private InboxCommand(InboxCommandKind kind, OccurrenceId occurrence, MembershipId membership,
+            InboxLifecycle lifecycle, ulong revision)
+        { Kind = kind; Occurrence = occurrence; Membership = membership; Lifecycle = lifecycle; Revision = revision; }
+        internal static InboxCommand FromMessage(InboxMessage message)
+        {
+            if (message == null) throw new ArgumentNullException(nameof(message));
+            if (message.Kind != InboxMessageKind.TransportAck) throw new ArgumentException("message is not an ACK", nameof(message));
+            return new InboxCommand(InboxCommandKind.TransportAck, message.Occurrence, message.Membership,
+                message.Lifecycle, message.LifecycleRevision);
+        }
+        internal static InboxCommand SetLifecycle(OccurrenceId occurrence, MembershipId member,
+            InboxLifecycle lifecycle, ulong revision) =>
+            new InboxCommand(InboxCommandKind.SetLifecycle, occurrence, member, lifecycle, revision);
+    }
+
+    internal readonly struct ReduceResult
+    {
+        internal readonly HostLedger Ledger;
+        internal readonly bool Changed;
+        internal ReduceResult(HostLedger ledger, bool changed) { Ledger = ledger; Changed = changed; }
+    }
+}
