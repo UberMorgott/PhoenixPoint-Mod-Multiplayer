@@ -86,6 +86,37 @@ namespace Multiplayer.Network.Sync
         /// raises its brief with a null vehicle on purpose.</summary>
         internal static bool IsServable(int containers, int soldiers) => containers > 0 && soldiers > 0;
 
+        /// <summary>
+        /// THE AIRCRAFT THAT OPENED THE SCREEN COUNTS ITSELF FOREVER, AND THAT IS WHY NOTHING EVER CLOSED.
+        ///
+        /// <c>GeoMission.GetDeploymentSources</c>:1489-1492 adds <c>priorityContainer</c> UNCONDITIONALLY —
+        /// it never asks where that container is — and :1479-1486 returns it as the ONLY source for a
+        /// <c>DeployOnlyFromActiveVehicle</c> mission. The priority we hand it is
+        /// <c>UIStateRosterDeployment._initialContainer</c>, i.e. the aircraft the screen was opened for. So
+        /// after that aircraft flew off, every servability question above still counted it AND its soldiers,
+        /// <see cref="IsServable"/> stayed true forever, and neither the open screen nor its queued twin ever
+        /// went anywhere — the reported "another peer sent the aircraft away and nothing closed, nothing
+        /// disappeared". The mirror was right all along: <c>GeoVehicle.Travelling</c>:211-216 nulls
+        /// <c>CurrentSite</c> on take-off, so a departed aircraft is already out of
+        /// <c>GeoSite.Vehicles</c>:239 — only the priority arm smuggled it back in.
+        ///
+        /// THE GAME'S OWN MEMBERSHIP PREDICATE, not one of ours: <c>GeoSite.CanTransferBetweenContainer</c>
+        /// :1042-1045 is <c>Vehicles.Any(v =&gt; !v.Travelling &amp;&amp; v == container)</c> — exactly "is
+        /// this container docked here right now". The SITE itself is kept unconditionally: it is its own
+        /// container for a base-defense deployment (<c>GetDeploymentSources</c>:1494) and cannot leave.
+        ///
+        /// Dropping it is enough, and nothing else has to change: the game then answers with
+        /// <c>Site.Vehicles</c> + the Site, so with two aircraft present the departing one and its soldiers
+        /// simply fall out of <c>sources</c>/<c>pool</c> while the rest stay (the open screen survives and
+        /// loses those rows), and only the LAST departure empties both and closes it. PURE (RailCheck L354's
+        /// neighbours can execute it): no clock, no view, no session.
+        /// </summary>
+        internal static IGeoCharacterContainer StillAtSite(GeoSite site, IGeoCharacterContainer priority) =>
+            priority == null || site == null || ReferenceEquals(priority, site) ||
+            site.CanTransferBetweenContainer(priority)
+                ? priority
+                : null;
+
         /// <summary>The two numbers <see cref="IsServable"/> wants, taken from the GAME's own method on THIS
         /// peer's live graph. Returns false when they cannot be taken at all (no mission, no viewer faction),
         /// which is deliberately NOT "unservable": refusing on a question we could not ask would close
@@ -97,6 +128,7 @@ namespace Multiplayer.Network.Sync
             pool = null;
             var faction = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.ViewerFaction;
             if (mission == null || mission.Site == null || faction == null) return false;
+            priority = StillAtSite(mission.Site, priority);
             sources = mission.GetDeploymentSources(faction, priority) ?? new List<IGeoCharacterContainer>();
             pool = sources.SelectMany(s => s == null
                                                ? Enumerable.Empty<GeoCharacter>()
@@ -132,7 +164,11 @@ namespace Multiplayer.Network.Sync
                 if (containers == null || selected == null) return;
 
                 // THE GAME'S OWN TWO QUESTIONS, asked here and not re-implemented (see the class doc).
-                var priority = InitialContainerField.GetValue(__instance) as IGeoCharacterContainer;
+                // The priority is dropped first when it is no longer docked here (see StillAtSite) —
+                // otherwise the aircraft this screen was queued for counts itself back in and the re-ask
+                // below can never see that it left.
+                var priority = StillAtSite(mission.Site,
+                                           InitialContainerField.GetValue(__instance) as IGeoCharacterContainer);
                 // CALLED HERE, INLINE, and not through TryCount below: RailCheck L176 asserts THIS method
                 // reaches GeoMission.GetDeploymentSources itself, because factoring the question into a helper
                 // is the drift a1c11dd already paid for once on the resupply gate.
@@ -328,7 +364,12 @@ namespace Multiplayer.Network.Sync
             var state = s as UIStateRosterDeployment;
             if (state == null || ItemsField == null || SetUpInitial == null || ContextGetter == null) return false;
             var mission = state.Mission;
-            var priority = DeploymentRosterRefresh.InitialContainerField?.GetValue(state) as IGeoCharacterContainer;
+            // Dropped the moment it stops being docked here: it is handed to GeoMission.GetDeploymentSources
+            // (which re-adds it blind — DeploymentRosterRefresh.StillAtSite) AND to the roster module's own
+            // Init below as the container to show first, so a departed aircraft left in it kept both the
+            // count and the roster painting soldiers that had flown away.
+            var priority = DeploymentRosterRefresh.StillAtSite(
+                mission?.Site, DeploymentRosterRefresh.InitialContainerField?.GetValue(state) as IGeoCharacterContainer);
             if (!DeploymentRosterRefresh.TryCount(mission, priority, out var sources, out var pool)) return false;
 
             var containers = DeploymentRosterRefresh.ContainersField?.GetValue(state) as List<IGeoCharacterContainer>;
