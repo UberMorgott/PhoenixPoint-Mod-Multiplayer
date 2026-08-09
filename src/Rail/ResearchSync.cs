@@ -294,10 +294,10 @@ namespace Multiplayer.Network.Sync
                 if (module != null)
                 {
                     SetupQueueMethod?.Invoke(module, null);   // queue panel (right)
-                    ShowAvailableMethod?.Invoke(module, null); // available list (left) — a cancelled research
-                                                               // returns here, a queued one leaves; the queue
-                                                               // panel stays visible under any list tab, so
-                                                               // this is safe for the reorder-observe path too.
+                    // available list (left) — a cancelled research returns here, a queued one leaves; the
+                    // queue panel stays visible under any list tab. ONLY when that list is the one on
+                    // screen: see ShowingAvailableList.
+                    if (ShowingAvailableList(module)) ShowAvailableMethod?.Invoke(module, null);
                 }
                 return true;
             }
@@ -308,6 +308,59 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+
+        private static readonly System.Reflection.FieldInfo SelectedFilterField =
+            AccessTools.Field(typeof(UIModuleResearch), "_selectedButton");
+        private static bool _selectedFilterBindLogged;
+
+        /// <summary>
+        /// A REPAINT MAY NOT PRESS A TAB THE PLAYER DID NOT PRESS.
+        ///
+        /// THE REPORT (client, 2026-08-09): "the research screen traps the player — switching tabs inside it
+        /// cannot get back". Measured in multiplayer-2-prev4.log: the client sat in <c>UIStateResearch</c>
+        /// from 15:02:16 to 15:03:52 with <c>[MP][uirepaint] native rebuild UIStateResearch</c> firing every
+        /// one to five seconds throughout, because a live geoscape never stops shipping deltas.
+        ///
+        /// <c>UIModuleResearch.ShowAvailable</c> IS THE TAB, not a refresh: :297-305 does
+        /// <c>CompletedScrollRect.SetActive(false)</c>, <c>AvailableScrollRect.SetActive(true)</c> and
+        /// <c>SelectButton(AvailableFilterButton)</c> — it is the handler <c>SetupFilters</c>:289-290 wires
+        /// to the Available button's own click. Driving it from the mirror therefore RE-PRESSED that button
+        /// once per rail batch: a player who clicked "Researched" or "Alien Researches" was thrown back to
+        /// "Available" within a second, every second, for as long as the screen was open. Nothing in the log
+        /// said so, because a repaint doing exactly what it was told is not an error.
+        ///
+        /// SO THE LIST IS REPAINTED ONLY WHILE IT IS THE ONE ON SCREEN, asked of the module's own selection
+        /// field (<c>_selectedButton</c>, written by <c>SelectButton</c>:254-268 and by nothing else). The
+        /// two completed lists are deliberately left alone rather than repainted through their own handlers:
+        /// <c>ShowCompleted</c>:329 slams <c>verticalNormalizedPosition = 1f</c>, so re-driving them once a
+        /// second would replace a tab that jumps with a scroll bar that jumps. They are also the two lists a
+        /// mirror barely moves — a research completing while a peer reads the completed list re-reads itself
+        /// the next time that tab is clicked, which is also all vanilla ever does for them.
+        ///
+        /// The queue panel above is NOT gated: <c>SetupQueue</c> is read-direction only (it re-reads
+        /// <c>Research.Current</c> + the queue and rebuilds rows) and the queue stays visible under every
+        /// list tab, so it must keep repainting — that half is law 11 and stays whole.
+        /// </summary>
+        internal static bool ShowingAvailableList(UIModuleResearch module)
+        {
+            if (SelectedFilterField == null)
+            {
+                // Never silent, and it fails back to the OLD behaviour on purpose: a stale list is the bug
+                // class this repo fights, a jumping tab is merely rude.
+                if (!_selectedFilterBindLogged)
+                {
+                    _selectedFilterBindLogged = true;
+                    Debug.LogError("[Multiplayer][rail] UIModuleResearch._selectedButton did not bind — the " +
+                                   "mirror repaint cannot tell which research filter tab the player is on, so " +
+                                   "it keeps re-pressing Available on every rail batch (the tab will jump)");
+                }
+                return true;
+            }
+            // Before the first click _selectedButton is null and the Available list is what Init:183 left
+            // on screen, so null reads as Available.
+            var selected = SelectedFilterField.GetValue(module);
+            return selected == null || ReferenceEquals(selected, module.AvailableFilterButton);
+        }
 
         // ─── Harmony seams (the ONLY patches this subsystem owns, law 4) ───
 
