@@ -22,7 +22,7 @@ namespace RailCheck
     /// the resupply screen queues behind it. Keeping the order therefore has to happen BEFORE the queue.
     ///
     /// THIS IS NOT A QUORUM AND THE LAW ASSERTS THE DIFFERENCE, because the mod's hardest rule forbids one.
-    /// <c>_recheckFrames</c> is a monotone LOCAL countdown with a 600-frame ceiling; it reads no other peer,
+    /// <c>_recheckFrames</c> is a monotone LOCAL countdown with a 180-frame (3 s) ceiling; it reads no other peer,
     /// waits on no human action, and HOLDS rather than drops — the drain retries every tick, so the window
     /// is served the moment the verdict is in. Arm (a) is what keeps it honest: a flag that could stay true
     /// forever would fail it, because the flag it executes is the countdown itself.

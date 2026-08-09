@@ -175,15 +175,26 @@ namespace Multiplayer.Network.Sync
         /// <see cref="ArmArrivalRecheckPatch"/>.</summary>
         private static int _recheckFrames;
 
-        /// <summary>THE CEILING, named. ~10 s at 60 fps — two orders of magnitude over the measured gap (the
-        /// 2026-08-06 session's post-mission value-rail batch landed 2 frames / 445 ms after
-        /// <c>UIStateInitial.EnterState</c>) and still short enough that the screen can never appear
-        /// long after the player has moved on. Monotone: it only counts down, from one arming, so this can
-        /// never become an unbounded wait and it never reads another peer.</summary>
-        private const int RecheckFrames = 600;
+        /// <summary>THE CEILING, named — and it is now the ONLY thing that ends an empty re-ask. 3 s at 60 fps:
+        /// roughly 7x the slowest post-mission value-rail batch ever measured (445 ms after
+        /// <c>UIStateInitial.EnterState</c> on 2026-08-06; 180 ms in the 3-peer session of 2026-08-09), and
+        /// short enough that the windows this HOLDS (see <see cref="ResupplyVerdictPending"/>) are held for an
+        /// arrival beat rather than for a visible pause. Monotone: it only counts down, from one arming, so
+        /// this can never become an unbounded wait and it never reads another peer.
+        ///
+        /// IT WAS 600 (10 s) WITH AN EARLY DISARM, AND THE DISARM WAS DECORATIVE — deleted 2026-08-09. The
+        /// condition was "a rail seq has landed since arming AND 60 frames have passed", on the stated theory
+        /// that the seq term told an arrived post-mission batch from unrelated traffic. It does not: the host's
+        /// clock ships Timing/Wallet continuously, so in the live 3-peer session BOTH clients disarmed at
+        /// exactly frame 60 — the earliest frame the countdown allows — which is only possible if the seq term
+        /// was already true and contributed nothing. The effective window was therefore 1 s, not 10, reached
+        /// through a test that reads as if it proved something; a batch slower than that second would have lost
+        /// the screen for good with nothing but "disarmed early" in the log. One honest number beats a guard
+        /// that cannot fail.</summary>
+        private const int RecheckFrames = 180;
 
         /// <summary>Session/level teardown — a live count-down must not survive into the next geoscape.</summary>
-        internal static void Reset() { _recheckFrames = 0; _armedAtSeq = 0; }
+        internal static void Reset() { _recheckFrames = 0; }
 
         /// <summary>IS THE RESUPPLY VERDICT STILL OUT? Read by <c>EventPopup.CanCarryWindow</c>, which is why
         /// it is a property and not a private test: the popup-history drain starts replaying about a second
@@ -192,20 +203,10 @@ namespace Multiplayer.Network.Sync
         /// <c>_currentStateSwitchRequest == null</c>). So the order has to be kept BEFORE the queue, not in it.
         ///
         /// NOT A QUORUM, and the distinction is the mod's hardest rule. <see cref="_recheckFrames"/> is a
-        /// monotone LOCAL countdown with a 600-frame ceiling that reads no other peer and waits on no human
+        /// monotone LOCAL countdown with a 180-frame (3 s) ceiling that reads no other peer and waits on no human
         /// action; it HOLDS rather than drops (the drain retries every tick), and it ends by itself whatever
         /// anyone else does. A peer that went AFK changes nothing about when this clears.</summary>
         internal static bool ResupplyVerdictPending => _recheckFrames > 0;
-
-        /// <summary>The rail seq this peer had when the window was armed, so the tick can tell "nothing is
-        /// missing" from "nothing has ARRIVED yet" — see <see cref="ClientArrivalTick"/>.</summary>
-        private static uint _armedAtSeq;
-
-        /// <summary>Frames of geoscape that must pass before an empty verdict is believed, on top of a batch
-        /// having landed. A batch alone is not proof: the host's clock ships Timing/Wallet every geo hour, and
-        /// one of those landing 100 ms after arrival would otherwise disarm the window before the post-mission
-        /// writes it is waiting for. One second of arrived state and still nothing short = really whole.</summary>
-        private const int SettleFrames = 60;
 
         /// <summary>
         /// THE RESUPPLY SCREEN WAS RESTORED IN 76980f2 AND STILL DID NOT APPEAR, and this is the half that
@@ -268,7 +269,6 @@ namespace Multiplayer.Network.Sync
                         return;
 
                     _recheckFrames = RecheckFrames;
-                    _armedAtSeq = GenericApplier.LastSeq;
                     // THE GATE'S OWN ANSWER, at the instant UIStateInitial:125 asked it. Absence of the
                     // screen is not evidence of WHICH clause was false, and a whole session was spent
                     // arguing that from an empty log: 0 here proves the race (the host's post-mission
@@ -313,20 +313,15 @@ namespace Multiplayer.Network.Sync
                 if (!(geo.ViewerFaction is GeoPhoenixFaction phoenix)) { _recheckFrames = 0; return; }
                 if (!phoenix.GetMissingItems().Any())
                 {
+                    // NOTHING SHORT YET — KEEP ASKING TO THE CEILING. There is deliberately no early exit:
+                    // "the host's state has arrived" is not observable from here (the clock ships deltas
+                    // continuously, so any seq-moved test is true within a frame or two of every arrival and
+                    // proves nothing), and an exit that cannot fail is an exit that silently drops the screen
+                    // the day a batch is slower than it. The ceiling is the whole budget — see RecheckFrames.
                     if (lastFrame)
                         Debug.Log("[MP][replenish] post-mission re-ask expired with nothing missing — this " +
-                                  "squad really did come back whole, so there is no resupply screen to show.");
-                    // GIVE UP EARLY WHEN THE ANSWER IS IN. The window now HOLDS the popup history
-                    // (EventPopup.CanCarryWindow reads ResupplyVerdictPending), so a genuinely whole squad
-                    // would otherwise sit on every mirrored window for the full 10 s ceiling for nothing.
-                    // Two conditions, and the second is what makes the first safe — see SettleFrames.
-                    else if (GenericApplier.LastSeq != _armedAtSeq && RecheckFrames - _recheckFrames >= SettleFrames)
-                    {
-                        _recheckFrames = 0;
-                        Debug.Log("[MP][replenish] post-mission re-ask disarmed early — the host's state has " +
-                                  "landed (rail seq moved past " + _armedAtSeq + ") and a second of it says " +
-                                  "nothing is short. Any window this was holding can go through now.");
-                    }
+                                  "squad really did come back whole, so there is no resupply screen to show. " +
+                                  "Any window this was holding can go through now.");
                     return;
                 }
                 _recheckFrames = 0;

@@ -611,7 +611,7 @@ namespace Multiplayer.Network.Sync
             // _currentStateSwitchRequest is null, so a mirrored event that got in first owns the screen and
             // the resupply screen queues behind it. Keeping the order therefore has to happen before the
             // queue, which is here. Not a quorum — see ReplenishSync.ResupplyVerdictPending for why (a
-            // monotone local countdown with a 600-frame ceiling that reads no peer and waits on no human).
+            // monotone local countdown with a 180-frame (3 s) ceiling that reads no peer and waits on no human).
             if (ReplenishSync.ResupplyVerdictPending) return false;
             var view = geo?.View;
             if (view == null || !(SwitchQueryField?.GetValue(view) is GeoscapeViewSwitchQuery)) return false;
