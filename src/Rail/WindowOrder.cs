@@ -103,6 +103,7 @@ namespace Multiplayer.Network.Sync
         {
             if (request == null) throw new ArgumentNullException(nameof(request));
             _durable.Remove(request); _durable.Add(request, new DurableBinding { Occurrence = occurrence });
+            WindowQueueSync.TrackDurableNativeCarrier(request, occurrence);
         }
 
         internal static bool TryGetDurable(GeoscapeViewStateSwitchRequest request, out OccurrenceId occurrence)

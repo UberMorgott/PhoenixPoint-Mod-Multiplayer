@@ -80,7 +80,7 @@ namespace RailCheck
             var v2 = DurableInboxSaveCodec.Create(store.Ledger, Array.Empty<DurableInboxJournalRecord>(),
                 DurableInboxCanonicalState.Empty);
             DurableInboxRestore v2Restore = null; string v2Refusal = null;
-            if (v2.Schema != 3 || !DurableInboxSaveCodec.TryRestore(v2, null, out v2Restore, out v2Refusal) ||
+            if (v2.Schema != 4 || !DurableInboxSaveCodec.TryRestore(v2, null, out v2Restore, out v2Refusal) ||
                 !checkpoint.Equals(v2Restore.Ledger.Get(ordinary, member).Checkpoint))
                 yield return "L380 schema2-checkpoint-root-did-not-roundtrip: " + v2Refusal;
 

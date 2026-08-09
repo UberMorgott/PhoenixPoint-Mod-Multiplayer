@@ -73,6 +73,9 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     internal static class MissionOutcomeMirror
     {
+        internal static DurableCarrierLease BindTacticalHeldCarrier(DurableInboxStore store,
+            OccurrenceId occurrence, Action<TerminalReason> silentRemove) =>
+            DurableCarrierLease.Bind(store, occurrence, DurableCarrierClass.TacticalHeld, silentRemove);
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
 
         /// <summary>The last outcome the host announced, waiting for this peer's own <c>Complete</c> to be

@@ -13,6 +13,263 @@ namespace Multiplayer.Network.Sync
         void FinalizeRestore(OccurrenceId occurrence);
     }
 
+    internal enum TerminalReason : byte
+    {
+        Invalidated,
+        Superseded,
+        MissionCompleted,
+        Launched,
+        MembershipEnded,
+        LevelTeardown
+    }
+
+    internal enum DurableCarrierClass : byte
+    {
+        NativeCurrent,
+        NativePending,
+        ModQueued,
+        ModSuspended,
+        ModDeferred,
+        WireReplay,
+        TacticalHeld,
+        Deployment
+    }
+
+    internal interface IDurableOccurrenceCarrier
+    {
+        void RemoveWithoutCallback(TerminalReason reason);
+    }
+
+    /// <summary>A family-owned carrier registration. Dispose is normal consumption; terminal removal is silent.</summary>
+    internal sealed class DurableCarrierLease : IDurableOccurrenceCarrier, IDisposable
+    {
+        private readonly DurableInboxStore _store; private readonly OccurrenceId _occurrence;
+        private Action<TerminalReason> _silentRemove; private int _state; // 0 ready, 1 running, 2 success
+
+        private DurableCarrierLease(DurableInboxStore store, OccurrenceId occurrence,
+            DurableCarrierClass carrierClass, Action<TerminalReason> silentRemove)
+        {
+            _store = store ?? throw new ArgumentNullException(nameof(store));
+            _occurrence = occurrence; _silentRemove = silentRemove ?? throw new ArgumentNullException(nameof(silentRemove));
+            store.Carriers.Register(occurrence, carrierClass, this);
+        }
+
+        internal static DurableCarrierLease Bind(DurableInboxStore store, OccurrenceId occurrence,
+            DurableCarrierClass carrierClass, Action<TerminalReason> silentRemove)
+        {
+            if (store == null || !store.Ledger.Contains(occurrence))
+                throw new InvalidOperationException("authoritative occurrence must exist before carrier binding");
+            return new DurableCarrierLease(store, occurrence, carrierClass, silentRemove);
+        }
+        internal bool IsFinished => System.Threading.Volatile.Read(ref _state) == 2;
+
+        public void Dispose()
+        {
+            var spin = new System.Threading.SpinWait();
+            while (true)
+            {
+                int state = System.Threading.Volatile.Read(ref _state);
+                if (state == 2) return;
+                if (state == 1) { spin.SpinOnce(); continue; }
+                if (System.Threading.Interlocked.CompareExchange(ref _state, 1, 0) != 0) continue;
+                _store.Carriers.Unregister(_occurrence, this); _silentRemove = null;
+                System.Threading.Volatile.Write(ref _state, 2); return;
+            }
+        }
+
+        public void RemoveWithoutCallback(TerminalReason reason)
+        {
+            var spin = new System.Threading.SpinWait();
+            while (true)
+            {
+                int state = System.Threading.Volatile.Read(ref _state);
+                if (state == 2) return;
+                if (state == 1) { spin.SpinOnce(); continue; }
+                if (System.Threading.Interlocked.CompareExchange(ref _state, 1, 0) != 0) continue;
+                try
+                {
+                    _silentRemove(reason);
+                    _silentRemove = null;
+                    System.Threading.Volatile.Write(ref _state, 2); return;
+                }
+                catch
+                {
+                    System.Threading.Volatile.Write(ref _state, 0);
+                    throw;
+                }
+            }
+        }
+    }
+
+    /// <summary>Live presentation objects indexed by durable identity, never by their native queue position.</summary>
+    internal sealed class DurableCarrierRegistry
+    {
+        private sealed class Binding
+        {
+            internal DurableCarrierClass Class;
+            internal IDurableOccurrenceCarrier Carrier;
+        }
+
+        private readonly object _gate = new object();
+        private readonly Dictionary<OccurrenceId, List<Binding>> _byOccurrence =
+            new Dictionary<OccurrenceId, List<Binding>>();
+        private readonly Dictionary<OccurrenceId, TerminalReason> _sealed =
+            new Dictionary<OccurrenceId, TerminalReason>();
+        private readonly HashSet<OccurrenceId> _removing = new HashSet<OccurrenceId>();
+        private readonly Dictionary<OccurrenceId, int> _inFlight = new Dictionary<OccurrenceId, int>();
+        private bool _abandoned, _abandoning;
+        private int _activeCallbacks;
+
+        internal void Register(OccurrenceId occurrence, DurableCarrierClass carrierClass,
+            IDurableOccurrenceCarrier carrier)
+        {
+            if (!Enum.IsDefined(typeof(DurableCarrierClass), carrierClass))
+                throw new ArgumentOutOfRangeException(nameof(carrierClass));
+            if (carrier == null) throw new ArgumentNullException(nameof(carrier));
+            TerminalReason terminalReason;
+            bool abandonedRegistration = false;
+            lock (_gate)
+            {
+                if (_abandoned)
+                {
+                    terminalReason = TerminalReason.LevelTeardown; abandonedRegistration = true;
+                    _activeCallbacks = checked(_activeCallbacks + 1); goto Terminal;
+                }
+                if (_sealed.TryGetValue(occurrence, out terminalReason))
+                {
+                    int count; _inFlight.TryGetValue(occurrence, out count);
+                    _inFlight[occurrence] = checked(count + 1);
+                    _activeCallbacks = checked(_activeCallbacks + 1); goto Terminal;
+                }
+                List<Binding> bindings;
+                if (!_byOccurrence.TryGetValue(occurrence, out bindings))
+                    _byOccurrence.Add(occurrence, bindings = new List<Binding>());
+                var existing = bindings.FirstOrDefault(x => ReferenceEquals(x.Carrier, carrier));
+                if (existing == null) bindings.Add(new Binding { Class = carrierClass, Carrier = carrier });
+                else existing.Class = carrierClass;
+                return;
+            }
+        Terminal:
+            // Never publish a carrier after terminal removal started. Callback runs outside the registry lock,
+            // so a carrier may safely register another carrier during its own silent teardown.
+            bool lateFailed = false;
+            try { carrier.RemoveWithoutCallback(terminalReason); }
+            catch { lateFailed = true; }
+            finally
+            {
+                lock (_gate)
+                {
+                    if (lateFailed && !abandonedRegistration && !_abandoned)
+                    {
+                        List<Binding> failed;
+                        if (!_byOccurrence.TryGetValue(occurrence, out failed))
+                            _byOccurrence.Add(occurrence, failed = new List<Binding>());
+                        if (!failed.Any(x => ReferenceEquals(x.Carrier, carrier)))
+                            failed.Add(new Binding { Class = carrierClass, Carrier = carrier });
+                    }
+                    _activeCallbacks--;
+                    if (!abandonedRegistration)
+                    {
+                        int count = _inFlight[occurrence] - 1;
+                        if (count == 0) _inFlight.Remove(occurrence); else _inFlight[occurrence] = count;
+                    }
+                    System.Threading.Monitor.PulseAll(_gate);
+                }
+            }
+        }
+
+        internal void Unregister(OccurrenceId occurrence, IDurableOccurrenceCarrier carrier)
+        {
+            if (carrier == null) return;
+            lock (_gate)
+            {
+                List<Binding> bindings;
+                if (!_byOccurrence.TryGetValue(occurrence, out bindings)) return;
+                bindings.RemoveAll(x => ReferenceEquals(x.Carrier, carrier));
+                if (bindings.Count == 0) _byOccurrence.Remove(occurrence);
+            }
+        }
+
+        internal int Count(OccurrenceId occurrence)
+        { lock (_gate) { List<Binding> bindings; return _byOccurrence.TryGetValue(occurrence, out bindings) ? bindings.Count : 0; } }
+
+        internal void AbandonStore()
+        {
+            Binding[] carriers;
+            lock (_gate)
+            {
+                while (_abandoning) System.Threading.Monitor.Wait(_gate);
+                if (_abandoned) return;
+                _abandoning = true; _abandoned = true;
+                carriers = _byOccurrence.Values.SelectMany(x => x).ToArray(); _byOccurrence.Clear();
+                _activeCallbacks = checked(_activeCallbacks + carriers.Length);
+            }
+            foreach (var binding in carriers)
+            {
+                try { binding.Carrier.RemoveWithoutCallback(TerminalReason.LevelTeardown); } catch { }
+                finally { lock (_gate) { _activeCallbacks--; System.Threading.Monitor.PulseAll(_gate); } }
+            }
+            lock (_gate)
+            {
+                while (_activeCallbacks != 0 || _removing.Count != 0)
+                    System.Threading.Monitor.Wait(_gate);
+                _byOccurrence.Clear(); _abandoning = false; System.Threading.Monitor.PulseAll(_gate);
+            }
+        }
+
+        internal bool RemoveAll(OccurrenceId occurrence, TerminalReason reason, out string refusal)
+        {
+            if (!Enum.IsDefined(typeof(TerminalReason), reason))
+            { refusal = "unknown terminal reason"; return false; }
+            Binding[] snapshot;
+            lock (_gate)
+            {
+                if (_abandoned) { refusal = "carrier store is abandoned"; return false; }
+                TerminalReason sealedReason;
+                if (_sealed.TryGetValue(occurrence, out sealedReason) && sealedReason != reason)
+                { refusal = "terminal reason does not match the occurrence seal"; return false; }
+                _sealed[occurrence] = reason;
+                if (_removing.Contains(occurrence))
+                { refusal = "terminal carrier removal is already in progress"; return false; }
+                List<Binding> bindings;
+                int activeLate;
+                if (!_byOccurrence.TryGetValue(occurrence, out bindings) &&
+                    (!_inFlight.TryGetValue(occurrence, out activeLate) || activeLate == 0))
+                { refusal = null; return true; }
+                _removing.Add(occurrence);
+                snapshot = bindings == null ? Array.Empty<Binding>() : bindings.ToArray();
+                _byOccurrence.Remove(occurrence);
+                _activeCallbacks = checked(_activeCallbacks + snapshot.Length);
+            }
+            var failed = new List<Binding>();
+            foreach (var binding in snapshot)
+            {
+                try { binding.Carrier.RemoveWithoutCallback(reason); }
+                catch { failed.Add(binding); }
+                finally { lock (_gate) { _activeCallbacks--; System.Threading.Monitor.PulseAll(_gate); } }
+            }
+            int remaining;
+            lock (_gate)
+            {
+                int inFlight;
+                while (_inFlight.TryGetValue(occurrence, out inFlight) && inFlight != 0)
+                    System.Threading.Monitor.Wait(_gate);
+                List<Binding> current;
+                if (!_byOccurrence.TryGetValue(occurrence, out current) && failed.Count != 0)
+                    _byOccurrence.Add(occurrence, current = new List<Binding>());
+                if (current != null)
+                    foreach (var binding in failed.Where(x => !current.Any(y => ReferenceEquals(y.Carrier, x.Carrier))))
+                        current.Add(binding);
+                remaining = current == null ? 0 : current.Count;
+                _removing.Remove(occurrence);
+                System.Threading.Monitor.PulseAll(_gate);
+            }
+            refusal = remaining == 0 ? null : "one or more carriers refused silent removal";
+            return remaining == 0;
+        }
+
+    }
+
     /// <summary>
     /// Per-player durable scheduler.  The native request is only a carrier: lifecycle and the captured
     /// read position are committed before a priority carrier is allowed to replace an ordinary one.
@@ -23,13 +280,22 @@ namespace Multiplayer.Network.Sync
         private readonly DurableInboxStore _store;
         private readonly MembershipId _member;
         private readonly IDurableWindowCarrierAdapter _carrier;
+        private readonly DurableCarrierRegistry _registry;
 
         internal DurableInboxEngine(DurableInboxStore store, MembershipId member,
-            IDurableWindowCarrierAdapter carrier)
+            IDurableWindowCarrierAdapter carrier, DurableCarrierRegistry registry = null)
         {
             _store = store ?? throw new ArgumentNullException(nameof(store));
             _member = member;
             _carrier = carrier ?? throw new ArgumentNullException(nameof(carrier));
+            _registry = registry ?? store.Carriers;
+        }
+
+        internal bool RemoveAllCarriers(OccurrenceId occurrence, TerminalReason reason,
+            ulong committedRevision, out string refusal)
+        {
+            if (!_store.AuthorizeCarrierRemoval(occurrence, reason, committedRevision, out refusal)) return false;
+            return _registry.RemoveAll(occurrence, reason, out refusal);
         }
 
         internal bool TryPresentNext(bool geoscapeStarted, Type currentViewState)
@@ -181,7 +447,8 @@ namespace Multiplayer.Network.Sync
                 if (current.Lifecycle != InboxLifecycle.Suspended || current.LifecycleRevision < suspended.LifecycleRevision) return false;
                 ulong lifecycle = checked(current.LifecycleRevision + 1);
                 var removed = new InboxEntry(current.Occurrence, current.Membership, InboxLifecycle.Removed,
-                    current.Choice, lifecycle, Math.Max(current.TombstoneRevision, lifecycle), current.HostOrderKey);
+                    current.Choice, lifecycle, Math.Max(current.TombstoneRevision, lifecycle), current.HostOrderKey,
+                    terminalReason: TerminalReason.Invalidated);
                 var next = expected.Replace(removed).WithAuthority(checked(expected.CommittedRevision + 1), expected.Members);
                 try { if (_store.Commit(expected, next)) return false; } catch { }
             }

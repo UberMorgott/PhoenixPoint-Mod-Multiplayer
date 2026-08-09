@@ -277,18 +277,24 @@ namespace Multiplayer.Network.Sync
         internal CanonicalChoiceId Choice { get; }
         internal ulong LifecycleRevision { get; }
         internal ulong TombstoneRevision { get; }
+        internal TerminalReason? TerminalReason { get; }
         internal HostOrderKey HostOrderKey { get; }
         internal InboxSuspensionReason SuspensionReason { get; }
         internal InboxWindowCheckpoint Checkpoint { get; }
         internal InboxEntry(OccurrenceId occurrence, MembershipId membership, InboxLifecycle lifecycle,
             CanonicalChoiceId choice, ulong lifecycleRevision, ulong tombstoneRevision, HostOrderKey hostOrderKey,
             InboxSuspensionReason suspensionReason = InboxSuspensionReason.None,
-            InboxWindowCheckpoint checkpoint = null)
+            InboxWindowCheckpoint checkpoint = null, TerminalReason? terminalReason = null)
         {
             if (!string.Equals(hostOrderKey.TriggerId, occurrence.TriggerId, StringComparison.Ordinal))
                 throw new ArgumentException("foreign order namespace", nameof(hostOrderKey));
             Occurrence = occurrence; Membership = membership; Lifecycle = lifecycle; Choice = choice;
             LifecycleRevision = lifecycleRevision; TombstoneRevision = tombstoneRevision; HostOrderKey = hostOrderKey;
+            if (terminalReason.HasValue && !Enum.IsDefined(typeof(TerminalReason), terminalReason.Value))
+                throw new ArgumentOutOfRangeException(nameof(terminalReason));
+            if (terminalReason.HasValue && (lifecycle != InboxLifecycle.Removed || tombstoneRevision == 0))
+                throw new ArgumentException("only tombstones name a terminal reason", nameof(terminalReason));
+            TerminalReason = terminalReason;
             if (!Enum.IsDefined(typeof(InboxSuspensionReason), suspensionReason))
                 throw new ArgumentOutOfRangeException(nameof(suspensionReason));
             if ((lifecycle == InboxLifecycle.Suspended) != (suspensionReason != InboxSuspensionReason.None))
@@ -302,7 +308,8 @@ namespace Multiplayer.Network.Sync
             lifecycle == InboxLifecycle.Suspended
                 ? new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision,
                     HostOrderKey, SuspensionReason, Checkpoint)
-                : new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision, HostOrderKey);
+                : new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision, HostOrderKey,
+                    terminalReason: TerminalReason);
         internal InboxEntry Suspend(InboxSuspensionReason reason, InboxWindowCheckpoint checkpoint, ulong revision) =>
             new InboxEntry(Occurrence, Membership, InboxLifecycle.Suspended, Choice, revision, TombstoneRevision,
                 HostOrderKey, reason, checkpoint);
@@ -378,7 +385,8 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
                     entry.Lifecycle == InboxLifecycle.Removed) return entry;
                 var revision = checked(entry.LifecycleRevision + 1);
                 return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed, entry.Choice,
-                    revision, Math.Max(entry.TombstoneRevision, revision), entry.HostOrderKey);
+                    revision, Math.Max(entry.TombstoneRevision, revision), entry.HostOrderKey,
+                    terminalReason: TerminalReason.MembershipEnded);
             }).ToArray();
             return new HostLedger(migrated, committedRevision,
                 memberArray.Where(pair => pair.Value != MemberPresence.Disconnected));
@@ -462,7 +470,8 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
             }
         }
 
-        internal bool Tombstone(OccurrenceId occurrence, ulong revision)
+        internal bool Tombstone(OccurrenceId occurrence, ulong revision,
+            TerminalReason reason = TerminalReason.Invalidated)
         {
             lock (_authority)
             {
@@ -473,7 +482,8 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
                     if (revision <= entry.TombstoneRevision) return entry;
                     changed = true;
                     return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
-                        entry.Choice, Math.Max(entry.LifecycleRevision, revision), revision, entry.HostOrderKey);
+                        entry.Choice, Math.Max(entry.LifecycleRevision, revision), revision, entry.HostOrderKey,
+                        terminalReason: reason);
                 });
                 if (!changed) return false;
                 var committedRevision = checked(CommittedRevision + 1);
@@ -494,7 +504,8 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
                     {
                         var revision = checked(entry.LifecycleRevision + 1);
                         return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
-                            entry.Choice, revision, Math.Max(entry.TombstoneRevision, revision), entry.HostOrderKey);
+                            entry.Choice, revision, Math.Max(entry.TombstoneRevision, revision), entry.HostOrderKey,
+                            terminalReason: TerminalReason.MembershipEnded);
                     })
                     .ToArray();
                 var committedRevision = checked(CommittedRevision + 1);

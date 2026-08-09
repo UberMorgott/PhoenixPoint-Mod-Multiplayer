@@ -266,6 +266,9 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     internal static class DeploymentWindowClose
     {
+        internal static DurableCarrierLease BindDeploymentCarrier(DurableInboxStore store,
+            OccurrenceId occurrence, Action<TerminalReason> silentRemove) =>
+            DurableCarrierLease.Bind(store, occurrence, DurableCarrierClass.Deployment, silentRemove);
         private const BindingFlags All = BindingFlags.NonPublic | BindingFlags.Instance;
 
         private static readonly FieldInfo ItemsField = AccessTools.Field(typeof(UIStateRosterDeployment), "_deploymentItems");
@@ -338,6 +341,9 @@ namespace Multiplayer.Network.Sync
                           "left to deploy from (the aircraft left the site while the window waited in the " +
                           "queue), so serving it later would open an empty screen with a dead START MISSION " +
                           "button. The mission itself is untouched");
+                OccurrenceId durableOccurrence;
+                if (WindowOrder.TryGetDurable(pending[i], out durableOccurrence))
+                    WindowQueueSync.UntrackDurableNativeCarrier(pending[i], durableOccurrence);
                 pending.RemoveAt(i);
             }
         }

@@ -90,7 +90,7 @@ namespace Multiplayer.Network.Sync
     internal static class DurableInboxSaveCodec
     {
         internal const string Magic = "Multiplayer.DurableInbox/v1";
-        internal const int Schema = 3;
+        internal const int Schema = 4;
         private const int MaxCount = 65535;
         private const int MaxString = 4096;
 
@@ -135,7 +135,9 @@ namespace Multiplayer.Network.Sync
             restore = null; refusal = null;
             try
             {
-                if (root == null || root.Magic != Magic || (root.Schema != 1 && root.Schema != 2 && root.Schema != Schema)) throw new InvalidDataException("unknown durable inbox save root");
+                if (root == null || root.Magic != Magic ||
+                    (root.Schema != 1 && root.Schema != 2 && root.Schema != 3 && root.Schema != Schema))
+                    throw new InvalidDataException("unknown durable inbox save root");
                 if (root.Snapshot == null || root.Journal == null || root.Crc != ComputeRootCrc(root)) throw new InvalidDataException("durable inbox CRC mismatch");
                 HostLedger ledger; List<CanonicalChoiceId> choices; List<CanonicalResultId> results; List<CanonicalRewardItemId> rewards;
                 DecodeSnapshot(root.Snapshot, root.Schema, out ledger, out choices, out results, out rewards);
@@ -200,6 +202,11 @@ namespace Multiplayer.Network.Sync
                     WriteOccurrence(w, e.Occurrence); WriteMembership(w, e.Membership); w.Write((byte)e.Lifecycle);
                     WriteOptionalChoice(w, e.Choice); w.Write(e.LifecycleRevision); w.Write(e.TombstoneRevision);
                     w.Write(e.HostOrderKey.CampaignOrdinal); WriteString(w, e.HostOrderKey.TriggerId);
+                    if (e.TombstoneRevision != 0)
+                    {
+                        w.Write(e.TerminalReason.HasValue);
+                        if (e.TerminalReason.HasValue) w.Write((byte)e.TerminalReason.Value);
+                    }
                     w.Write((byte)e.SuspensionReason); WriteOptionalCheckpoint(w, e.Checkpoint);
                 }
                 WriteIdentities(w, choices ?? Enumerable.Empty<CanonicalChoiceId>(), (bw, x) => { WriteOccurrence(bw, x.Occurrence); WriteString(bw, x.Value); });
@@ -235,10 +242,12 @@ namespace Multiplayer.Network.Sync
                     var occurrence = ReadOccurrence(r); var member = ReadMembership(r); var lifecycle = ReadEnum<InboxLifecycle>(r);
                     var choice = ReadOptionalChoice(r, occurrence); ulong lifecycleRevision = r.ReadUInt64(); ulong tombstone = r.ReadUInt64();
                     var order = new HostOrderKey(r.ReadUInt64(), ReadString(r));
+                    TerminalReason? terminalReason = null;
+                    if (schema >= 4 && tombstone != 0 && r.ReadBoolean()) terminalReason = ReadEnum<TerminalReason>(r);
                     var reason = schema >= 2 ? ReadEnum<InboxSuspensionReason>(r) : InboxSuspensionReason.None;
                     var checkpoint = schema >= 2 ? ReadOptionalCheckpoint(r, schema) : null;
                     entries.Add(new InboxEntry(occurrence, member, lifecycle, choice, lifecycleRevision, tombstone, order,
-                        reason, checkpoint));
+                        reason, checkpoint, terminalReason));
                 }
                 choices = ReadIdentities(r, br => { var o = ReadOccurrence(br); return new CanonicalChoiceId(o, ReadString(br)); });
                 results = ReadIdentities(r, br => { var o = ReadOccurrence(br); return new CanonicalResultId(o, ReadString(br)); });
@@ -329,9 +338,9 @@ namespace Multiplayer.Network.Sync
             get { lock (Gate) return _activeStore; }
             set
             {
-                bool changed;
-                lock (Gate) { changed = !ReferenceEquals(_activeStore, value); _activeStore = value; }
-                if (changed) WindowQueueSync.ClearDurableRuntimeCarriers();
+                bool changed; DurableInboxStore old;
+                lock (Gate) { old = _activeStore; changed = !ReferenceEquals(old, value); _activeStore = value; }
+                if (changed) { WindowQueueSync.ClearDurableRuntimeCarriers(); old?.Carriers.AbandonStore(); }
             }
         }
         internal static DurableInboxRestore PendingRestore { get { lock (Gate) return _pendingRestore; } }
@@ -339,6 +348,7 @@ namespace Multiplayer.Network.Sync
 
         internal static IEnumerable<object> Append(IEnumerable<object> native)
         {
+            bool installed = false; IEnumerable<object> result;
             lock (Gate)
             {
             var values = (native ?? Enumerable.Empty<object>()).Where(x => !(x is DurableInboxSaveRoot)).ToList();
@@ -347,20 +357,27 @@ namespace Multiplayer.Network.Sync
             if (_activeStore == null && _pendingRoot != null)
             {
                 values.Add(_pendingRoot);
-                return values;
+                result = values;
             }
-            if (_activeStore == null) _activeStore = new DurableInboxStore(new HostLedger(Array.Empty<InboxEntry>()));
-            values.Add(_activeStore.CreateSaveRoot());
-            return values;
+            else
+            {
+                if (_activeStore == null)
+                { _activeStore = new DurableInboxStore(new HostLedger(Array.Empty<InboxEntry>())); installed = true; }
+                values.Add(_activeStore.CreateSaveRoot()); result = values;
             }
+            }
+            if (installed) WindowQueueSync.ClearDurableRuntimeCarriers();
+            return result;
         }
 
         internal static IEnumerable<object> Extract(IEnumerable<object> serialized)
         {
             // SetReadObjects runs before GeoLevelController.OnLevelStart/LevelCrt constructs stable subjects.
             // Never install here: Task 15 owns the started-Geoscape reconciliation edge.
+            object[] result; DurableInboxStore old;
             lock (Gate)
             {
+            old = _activeStore;
             _activeStore = null;
             _pendingRestore = null;
             _pendingRoot = null;
@@ -378,13 +395,16 @@ namespace Multiplayer.Network.Sync
             else _pendingRestore = new DurableInboxRestore(new HostLedger(Array.Empty<InboxEntry>()),
                 new HostLedger(Array.Empty<InboxEntry>()), DurableInboxCanonicalState.Empty, DurableInboxCanonicalState.Empty,
                 Array.Empty<DurableInboxJournalRecord>(), Array.Empty<OccurrenceId>());
-            return values.Where(x => !(x is DurableInboxSaveRoot)).ToArray();
+            result = values.Where(x => !(x is DurableInboxSaveRoot)).ToArray();
             }
+            WindowQueueSync.ClearDurableRuntimeCarriers(); old?.Carriers.AbandonStore();
+            return result;
         }
 
         // Task 15 calls this only after the fully-started Geoscape graph can answer stable-ID lookups.
         internal static bool ReconcileAndInstall(IDurableInboxStableResolver resolver, out string refusal)
         {
+            DurableInboxStore installed, old;
             lock (Gate)
             {
             refusal = null;
@@ -393,14 +413,18 @@ namespace Multiplayer.Network.Sync
             if (_pendingRoot != null && !DurableInboxSaveCodec.TryRestore(_pendingRoot, resolver, out resolved, out refusal))
                 return false;
             if (resolved == null) { refusal = "no pending durable inbox load"; return false; }
-            _activeStore = new DurableInboxStore(resolved.Ledger, resolved.Canonical, resolved.Journal,
+            installed = new DurableInboxStore(resolved.Ledger, resolved.Canonical, resolved.Journal,
                 resolved.SnapshotLedger, resolved.SnapshotCanonical);
-            _activeStore.SetUnservable(resolved.Quarantine);
+            installed.SetUnservable(resolved.Quarantine);
+            old = _activeStore;
+            _activeStore = installed;
             _pendingRestore = resolved;
             // Retain the validated durable material: an unavailable def/subject can become resolvable after
             // late mod/level initialization, and Task 15 may call this again to clear quarantine losslessly.
-            return true;
             }
+            WindowQueueSync.ClearDurableRuntimeCarriers();
+            old?.Carriers.AbandonStore();
+            return true;
         }
     }
 

@@ -9,8 +9,9 @@ namespace Multiplayer.Network.Sync
 {
     internal static class DurableInboxCodec
     {
-        private const byte Schema = 3;
-        private const uint LedgerMagic = 0x33495744; // DWI3, cannot alias the first four bytes of a framed ledger
+        private const byte Schema = 4;
+        private const uint LedgerMagic = 0x34495744; // DWI4, cannot alias the first four bytes of a framed ledger
+        private const uint LegacyLedgerMagic = 0x33495744; // DWI3
         private const uint LedgerTail = 0xCCA6A8BB;
         private const int MaxStringBytes = 4096;
         private const int MaxCollection = 1024;
@@ -62,7 +63,8 @@ namespace Multiplayer.Network.Sync
                 using (var reader = new BinaryReader(stream, StrictUtf8))
                 {
                     byte schema = reader.ReadByte();
-                    if (schema != 1 && schema != 2 && schema != Schema) throw new InvalidDataException("unknown schema");
+                    if (schema != 1 && schema != 2 && schema != 3 && schema != Schema)
+                        throw new InvalidDataException("unknown schema");
                     var kind = (InboxMessageKind)reader.ReadByte();
                     if (!Enum.IsDefined(typeof(InboxMessageKind), kind)) throw new InvalidDataException("unknown kind");
                     var occurrence = ReadOccurrence(reader);
@@ -121,6 +123,11 @@ namespace Multiplayer.Network.Sync
                     writer.Write((byte)entry.Lifecycle);
                     writer.Write(entry.LifecycleRevision);
                     writer.Write(entry.TombstoneRevision);
+                    if (entry.TombstoneRevision != 0)
+                    {
+                        writer.Write(entry.TerminalReason.HasValue);
+                        if (entry.TerminalReason.HasValue) writer.Write((byte)entry.TerminalReason.Value);
+                    }
                     writer.Write(entry.Choice.Value != null);
                     if (entry.Choice.Value != null)
                     {
@@ -156,15 +163,18 @@ namespace Multiplayer.Network.Sync
             try
             {
                 payload = payload ?? Array.Empty<byte>(); int ledgerSchema = 1; byte[] bodyPayload = payload;
-                if (payload.Length >= 17 && BitConverter.ToUInt32(payload, 0) == LedgerMagic)
+                if (payload.Length >= 17 && (BitConverter.ToUInt32(payload, 0) == LedgerMagic ||
+                    BitConverter.ToUInt32(payload, 0) == LegacyLedgerMagic))
                 {
                     int length = BitConverter.ToInt32(payload, 5);
                     bool framed = length >= 0 && length <= payload.Length - 17 && payload.Length == length + 17 &&
-                        BitConverter.ToUInt32(payload, payload.Length - 4) == LedgerTail;
+                        BitConverter.ToUInt32(payload, payload.Length - 4) == LedgerTail &&
+                        BitConverter.ToUInt32(payload, 9 + length) == Crc32.Compute(payload.Skip(9).Take(length).ToArray());
                     if (framed)
                     {
                         ledgerSchema = payload[4];
-                        if (ledgerSchema != Schema) throw new InvalidDataException("unknown ledger schema");
+                        if (ledgerSchema != 3 && ledgerSchema != Schema)
+                            throw new InvalidDataException("unknown ledger schema");
                         bodyPayload = new byte[length]; Buffer.BlockCopy(payload, 9, bodyPayload, 0, length);
                         if (BitConverter.ToUInt32(payload, 9 + length) != Crc32.Compute(bodyPayload))
                             throw new InvalidDataException("ledger CRC mismatch");
@@ -192,6 +202,17 @@ namespace Multiplayer.Network.Sync
                         byte rawLifecycle = reader.ReadByte();
                         if (!Enum.IsDefined(typeof(InboxLifecycle), rawLifecycle)) throw new InvalidDataException("invalid lifecycle");
                         ulong lifecycleRevision = reader.ReadUInt64(), tombstoneRevision = reader.ReadUInt64();
+                        TerminalReason? terminalReason = null;
+                        if (ledgerSchema >= 4 && tombstoneRevision != 0)
+                        {
+                            if (reader.ReadBoolean())
+                            {
+                                byte rawTerminal = reader.ReadByte();
+                                if (!Enum.IsDefined(typeof(TerminalReason), rawTerminal))
+                                    throw new InvalidDataException("invalid terminal reason");
+                                terminalReason = (TerminalReason)rawTerminal;
+                            }
+                        }
                         CanonicalChoiceId choice = default(CanonicalChoiceId);
                         if (reader.ReadBoolean())
                         {
@@ -210,8 +231,9 @@ namespace Multiplayer.Network.Sync
                                     ReadLooseString(reader), ReadLooseString(reader), reader.ReadInt32(), ReadLooseString(reader))
                                 : new InboxWindowCheckpoint(phase, selection, read);
                         }
-                        entries.Add(new InboxEntry(occurrence, membership, (InboxLifecycle)rawLifecycle, choice,
-                            lifecycleRevision, tombstoneRevision, new HostOrderKey(ordinal, orderTrigger), reason, checkpoint));
+                        entries.Add(new InboxEntry(occurrence, membership,
+                            (InboxLifecycle)rawLifecycle, choice, lifecycleRevision, tombstoneRevision,
+                            new HostOrderKey(ordinal, orderTrigger), reason, checkpoint, terminalReason));
                     }
                     if (stream.Position != stream.Length) throw new InvalidDataException("trailing ledger bytes");
                     ledger = ledgerSchema < Schema

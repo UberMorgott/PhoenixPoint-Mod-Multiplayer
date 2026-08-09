@@ -83,6 +83,9 @@ namespace Multiplayer.Network.Sync
         private DurableInboxCanonicalState _canonical;
         private readonly DurableInboxCanonicalState _snapshotCanonical;
         private readonly HashSet<OccurrenceId> _unservable;
+        private readonly Dictionary<OccurrenceId, KeyValuePair<ulong, TerminalReason>> _terminalBoundaries =
+            new Dictionary<OccurrenceId, KeyValuePair<ulong, TerminalReason>>();
+        internal DurableCarrierRegistry Carriers { get; }
 
         internal DurableInboxStore(HostLedger ledger, DurableInboxCanonicalState canonical = null,
             IEnumerable<DurableInboxJournalRecord> journal = null, HostLedger snapshot = null,
@@ -94,6 +97,7 @@ namespace Multiplayer.Network.Sync
             _snapshotCanonical = snapshotCanonical ?? _canonical;
             if (journal != null) _journal.AddRange(journal);
             _unservable = new HashSet<OccurrenceId>();
+            Carriers = new DurableCarrierRegistry();
         }
 
         internal HostLedger Ledger { get { lock (_gate) return _ledger; } }
@@ -111,6 +115,28 @@ namespace Multiplayer.Network.Sync
         internal bool IsServable(OccurrenceId occurrence) { lock (_gate) return !_unservable.Contains(occurrence); }
         internal void SetUnservable(IEnumerable<OccurrenceId> occurrences)
         { lock (_gate) { _unservable.Clear(); foreach (var occurrence in occurrences) _unservable.Add(occurrence); } }
+
+        internal bool AuthorizeCarrierRemoval(OccurrenceId occurrence, TerminalReason reason,
+            ulong tombstoneRevision, out string refusal)
+        {
+            lock (_gate)
+            {
+                var entries = _ledger.AllEntries.Where(x => x.Occurrence.Equals(occurrence)).ToArray();
+                if (tombstoneRevision == 0 || entries.Length == 0 || entries.Any(x =>
+                    x.Lifecycle != InboxLifecycle.Removed || x.TombstoneRevision != tombstoneRevision ||
+                    !x.TerminalReason.HasValue || x.TerminalReason.Value != reason))
+                { refusal = "terminal lifecycle has not been durably committed"; return false; }
+                KeyValuePair<ulong, TerminalReason> boundary;
+                if (_terminalBoundaries.TryGetValue(occurrence, out boundary))
+                {
+                    if (boundary.Key != tombstoneRevision || boundary.Value != reason)
+                    { refusal = "terminal revision or reason does not match the occurrence boundary"; return false; }
+                }
+                else _terminalBoundaries.Add(occurrence,
+                    new KeyValuePair<ulong, TerminalReason>(tombstoneRevision, reason));
+                refusal = null; return true;
+            }
+        }
 
         // Testable persistence seam. Returning false or throwing simulates a journal write failure.
         internal Func<DurableInboxJournalRecord, bool> WriteRecord { get; set; } = _ => true;

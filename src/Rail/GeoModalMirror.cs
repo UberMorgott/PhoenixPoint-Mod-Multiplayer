@@ -74,6 +74,9 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     internal static class GeoModalMirror
     {
+        internal static DurableCarrierLease BindQueuedCarrier(DurableInboxStore store,
+            OccurrenceId occurrence, Action<TerminalReason> silentRemove) =>
+            DurableCarrierLease.Bind(store, occurrence, DurableCarrierClass.ModQueued, silentRemove);
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
 
         private static readonly System.Reflection.FieldInfo SwitchQueryField =
@@ -86,6 +89,7 @@ namespace Multiplayer.Network.Sync
         /// <see cref="EventPopup.Reset"/>). The park queue DOES go: a parked raise names an entity in the
         /// graph that teardown just threw away.</summary>
         public static void Reset() { Seq.Reset(); Park.Clear(); }
+        internal static void ClearDurableCarrierState() => Park.Clear();
 
         // ─── THE PAYLOAD (host→all, surface 0xB7) ──────────────────────────
 
@@ -914,9 +918,12 @@ namespace Multiplayer.Network.Sync
 
         private struct Entry { public uint Seq; public GeoModalMirror.Raise P; public int Waited; }
         private readonly List<Entry> _q = new List<Entry>();
+        private readonly Dictionary<uint, DurableCarrierLease> _durable =
+            new Dictionary<uint, DurableCarrierLease>();
 
         internal int Count { get { return _q.Count; } }
-        internal void Clear() { _q.Clear(); }
+        internal void Clear()
+        { foreach (var lease in _durable.Values.ToArray()) lease.Dispose(); _durable.Clear(); _q.Clear(); }
 
         /// <summary>Park one raise at the TAIL. Returns null normally, or the reason string for the OLDEST
         /// entry this push evicted — the caller logs it, because a dropped window that says nothing is the
@@ -924,9 +931,27 @@ namespace Multiplayer.Network.Sync
         internal string Park(uint seq, GeoModalMirror.Raise p)
         {
             _q.Add(new Entry { Seq = seq, P = p });
+            var store = DurableInboxSaveBridge.ActiveStore;
+            var occurrence = DurableWindowRegistry.MatchPriorityOccurrence(store,
+                "Modal:" + (ModalType)p.ModalType, p.DurableTrigger, p.DurableSubject);
+            if (occurrence.HasValue && !_durable.ContainsKey(seq))
+            {
+                lock (_durable)
+                {
+                    if (!_durable.ContainsKey(seq))
+                    {
+                        var lease = GeoModalMirror.BindQueuedCarrier(store, occurrence.Value, _ =>
+                        { lock (_durable) { _q.RemoveAll(x => x.Seq == seq); _durable.Remove(seq); } });
+                        if (!lease.IsFinished) _durable.Add(seq, lease);
+                    }
+                }
+            }
             if (_q.Count <= MaxParked) return null;
             var lost = _q[0];
             _q.RemoveAt(0);
+            DurableCarrierLease evictedLease;
+            if (_durable.TryGetValue(lost.Seq, out evictedLease))
+            { _durable.Remove(lost.Seq); evictedLease.Dispose(); }
             return "parked-raise queue is FULL (" + MaxParked + ") — the oldest waiting raise of '" +
                    GeoModalMirror.NameOf(lost.P.Kind, (ModalType)lost.P.ModalType) + "' seq=" + lost.Seq +
                    " ('" + lost.P.Ref + "') is DROPPED unshown. Either the entities named by 0xB7 are not " +
@@ -945,12 +970,20 @@ namespace Multiplayer.Network.Sync
             while (_q.Count > 0)
             {
                 var head = _q[0];
-                if (resolved(head.P)) { _q.RemoveAt(0); show(head.P, head.Seq); continue; }
+                if (resolved(head.P)) { _q.RemoveAt(0); Complete(head.Seq); show(head.P, head.Seq); continue; }
                 head.Waited++;
                 if (head.Waited < MaxBatches) { _q[0] = head; return; }
                 _q.RemoveAt(0);
+                Complete(head.Seq);
                 expire(head.P, head.Seq, head.Waited);
             }
+        }
+
+        private void Complete(uint seq)
+        {
+            DurableCarrierLease lease;
+            if (!_durable.TryGetValue(seq, out lease)) return;
+            _durable.Remove(seq); lease.Dispose();
         }
     }
 

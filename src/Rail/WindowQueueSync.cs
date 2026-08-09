@@ -3,6 +3,7 @@ using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Base.Core;
 using HarmonyLib;
 using PhoenixPoint.Common.Utils;
@@ -80,6 +81,10 @@ namespace Multiplayer.Network.Sync
         private static readonly Dictionary<OccurrenceId, GeoscapeViewStateSwitchRequest> _durableSuspended =
             new Dictionary<OccurrenceId, GeoscapeViewStateSwitchRequest>();
         private static readonly object _durableCarrierGate = new object();
+        private static readonly ConditionalWeakTable<GeoscapeViewStateSwitchRequest, BoundNativeCarrier>
+            _boundNativeCarriers = new ConditionalWeakTable<GeoscapeViewStateSwitchRequest, BoundNativeCarrier>();
+        private static readonly HashSet<BoundNativeCarrier> _liveBoundNativeCarriers =
+            new HashSet<BoundNativeCarrier>();
         private static DurableInboxStore _durableCarrierStore;
         private static ulong _durableCarrierEpoch;
         private static readonly FieldInfo DurableEventStateField =
@@ -88,21 +93,129 @@ namespace Multiplayer.Network.Sync
             AccessTools.Field(typeof(UIStateGeoModal), "_handledByDialog");
 
         internal static void ClearDurableRuntimeCarriers()
-        { lock (_durableCarrierGate) { _durableSuspended.Clear(); _durableCarrierStore = null; _durableCarrierEpoch = 0; } }
+        {
+            BoundNativeCarrier[] carriers;
+            lock (_durableCarrierGate)
+            {
+                carriers = _liveBoundNativeCarriers.ToArray();
+                foreach (var carrier in carriers) _boundNativeCarriers.Remove(carrier.Request);
+                _liveBoundNativeCarriers.Clear();
+                _durableSuspended.Clear(); _durableCarrierStore = null; _durableCarrierEpoch = 0;
+            }
+            foreach (var carrier in carriers)
+            {
+                try { carrier.RemoveWithoutCallback(TerminalReason.LevelTeardown); } catch { }
+                carrier.Store.Carriers.Unregister(carrier.Occurrence, carrier);
+            }
+            EventPopup.ClearDurableCarrierState();
+            GeoModalMirror.ClearDurableCarrierState();
+        }
 
         private static void EnsureDurableCarrierSession(DurableInboxStore store)
         {
             string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
             ulong epoch = store?.Ledger.Members.Keys.Where(x => string.Equals(x.PlayerGuid, local,
                 StringComparison.OrdinalIgnoreCase)).Select(x => x.Epoch).DefaultIfEmpty(0UL).Max() ?? 0;
+            BoundNativeCarrier[] stale;
             lock (_durableCarrierGate)
             {
                 if (ReferenceEquals(_durableCarrierStore, store) && _durableCarrierEpoch == epoch) return;
+                stale = _liveBoundNativeCarriers.ToArray();
+                foreach (var carrier in stale) _boundNativeCarriers.Remove(carrier.Request);
+                _liveBoundNativeCarriers.Clear();
                 _durableSuspended.Clear(); _durableCarrierStore = store; _durableCarrierEpoch = epoch;
             }
+            foreach (var carrier in stale) carrier.Store.Carriers.Unregister(carrier.Occurrence, carrier);
         }
 
         internal static bool SuppressDurableCallback(bool durableSilentExit) => durableSilentExit;
+
+        internal static DurableCarrierLease BindNativePendingCarrier(DurableInboxStore store,
+            OccurrenceId occurrence, Action<TerminalReason> silentRemove) =>
+            DurableCarrierLease.Bind(store, occurrence, DurableCarrierClass.NativePending, silentRemove);
+        internal static DurableCarrierLease BindNativeCurrentCarrier(DurableInboxStore store,
+            OccurrenceId occurrence, Action<TerminalReason> silentRemove) =>
+            DurableCarrierLease.Bind(store, occurrence, DurableCarrierClass.NativeCurrent, silentRemove);
+        internal static DurableCarrierLease BindSuspendedCarrier(DurableInboxStore store,
+            OccurrenceId occurrence, Action<TerminalReason> silentRemove) =>
+            DurableCarrierLease.Bind(store, occurrence, DurableCarrierClass.ModSuspended, silentRemove);
+
+        internal static void TrackDurableNativeCarrier(GeoscapeViewStateSwitchRequest request,
+            OccurrenceId occurrence)
+        {
+            var store = DurableInboxSaveBridge.ActiveStore;
+            if (store == null || request == null) return;
+            BoundNativeCarrier carrier;
+            lock (_durableCarrierGate)
+            {
+                if (!_boundNativeCarriers.TryGetValue(request, out carrier))
+                {
+                    carrier = new BoundNativeCarrier(store, request, occurrence);
+                    _boundNativeCarriers.Add(request, carrier);
+                    _liveBoundNativeCarriers.Add(carrier);
+                }
+            }
+            store.Carriers.Register(occurrence, DurableCarrierClass.NativePending, carrier);
+        }
+
+        private static void MarkDurableNativeCurrent(GeoscapeViewStateSwitchRequest request,
+            OccurrenceId occurrence)
+        {
+            BoundNativeCarrier carrier;
+            lock (_durableCarrierGate) _boundNativeCarriers.TryGetValue(request, out carrier);
+            carrier?.Store.Carriers.Register(occurrence, DurableCarrierClass.NativeCurrent, carrier);
+        }
+
+        private static void MarkDurableSuspended(GeoscapeViewStateSwitchRequest request,
+            OccurrenceId occurrence)
+        {
+            BoundNativeCarrier carrier;
+            lock (_durableCarrierGate) _boundNativeCarriers.TryGetValue(request, out carrier);
+            carrier?.Store.Carriers.Register(occurrence, DurableCarrierClass.ModSuspended, carrier);
+        }
+
+        internal static void UntrackDurableNativeCarrier(GeoscapeViewStateSwitchRequest request,
+            OccurrenceId occurrence)
+        {
+            BoundNativeCarrier carrier;
+            lock (_durableCarrierGate)
+            {
+                if (!_boundNativeCarriers.TryGetValue(request, out carrier)) return;
+                _boundNativeCarriers.Remove(request);
+                _liveBoundNativeCarriers.Remove(carrier);
+            }
+            carrier.Store.Carriers.Unregister(occurrence, carrier);
+        }
+
+        private sealed class BoundNativeCarrier : IDurableOccurrenceCarrier
+        {
+            internal DurableInboxStore Store { get; }
+            internal OccurrenceId Occurrence => _occurrence;
+            internal GeoscapeViewStateSwitchRequest Request => _request;
+            private readonly GeoscapeViewStateSwitchRequest _request;
+            private readonly OccurrenceId _occurrence;
+            internal BoundNativeCarrier(DurableInboxStore store, GeoscapeViewStateSwitchRequest request,
+                OccurrenceId occurrence)
+            { Store = store; _request = request; _occurrence = occurrence; }
+
+            public void RemoveWithoutCallback(TerminalReason reason)
+            {
+                var view = GenericApplier.StartedGeoLevel()?.View;
+                var query = view == null ? null : SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
+                if (query != null && ReferenceEquals(WindowOrder.CurrentRequest(query), _request))
+                {
+                    _durableSilentExit = true;
+                    try { view.FinishQueriedState(); }
+                    finally { _durableSilentExit = false; }
+                }
+                var pending = query == null ? null : WindowOrder.RequestsField?.GetValue(query)
+                    as IList<GeoscapeViewStateSwitchRequest>;
+                if (pending != null) pending.Remove(_request);
+                lock (_durableCarrierGate) _durableSuspended.Remove(_occurrence);
+                lock (_durableCarrierGate)
+                { _boundNativeCarriers.Remove(_request); _liveBoundNativeCarriers.Remove(this); }
+            }
+        }
 
         internal static GeoscapeEventRecordState? BeginSilentEventExit(GeoscapeEventRecord record, bool silent)
         {
@@ -167,6 +280,7 @@ namespace Multiplayer.Network.Sync
             var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
             if (store == null || !TryLocalMember(store, out member)) return;
             EnsureDurableCarrierSession(store);
+            MarkDurableNativeCurrent(request, occurrence);
             new DurableInboxEngine(store, member,
                 new NativeCarrier(query, default(OccurrenceId), default(OccurrenceId), null, null))
                 .ConfirmNativePresented(occurrence);
@@ -192,10 +306,11 @@ namespace Multiplayer.Network.Sync
             {
                 var expected = store.Ledger; InboxEntry entry;
                 try { entry = expected.Get(occurrence, member); } catch { return; }
-                if (entry.Lifecycle == InboxLifecycle.Dismissed || entry.Lifecycle == InboxLifecycle.Removed) return;
+                if (entry.Lifecycle == InboxLifecycle.Dismissed || entry.Lifecycle == InboxLifecycle.Removed)
+                { UntrackDurableNativeCarrier(current, occurrence); return; }
                 var next = expected.Replace(entry.WithLifecycle(InboxLifecycle.Dismissed,
                     checked(entry.LifecycleRevision + 1))).WithAuthority(checked(expected.CommittedRevision + 1), expected.Members);
-                if (store.Commit(expected, next)) return;
+                if (store.Commit(expected, next)) { UntrackDurableNativeCarrier(current, occurrence); return; }
             }
         }
 
@@ -223,6 +338,7 @@ namespace Multiplayer.Network.Sync
                 try { view.FinishQueriedState(); } finally { _durableSilentExit = false; }
                 if (ReferenceEquals(WindowOrder.CurrentRequest(_query), _current)) return false;
                 lock (_durableCarrierGate) _durableSuspended[_ordinary] = _current;
+                MarkDurableSuspended(_current, _ordinary);
                 var pending = WindowOrder.RequestsField?.GetValue(_query) as IList<GeoscapeViewStateSwitchRequest>;
                 if (pending == null || !pending.Contains(_pending)) return false;
                 pending.Remove(_pending); pending.Insert(0, _pending);
@@ -251,6 +367,7 @@ namespace Multiplayer.Network.Sync
                         checkpoint.ContentPhase == "modal" && checkpoint.Selection == ((int)modal.ModalType).ToString() &&
                         ReferenceEquals((WindowOrder.CurrentRequest(_query)?.State as UIStateGeoModal)?.ModalData,
                             modal.ModalData));
+                if (restored) MarkDurableNativeCurrent(request, occurrence);
                 return restored;
             }
             public void Abandon(OccurrenceId occurrence)

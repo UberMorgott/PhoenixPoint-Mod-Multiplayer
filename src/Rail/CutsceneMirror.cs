@@ -43,6 +43,9 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     internal static class CutsceneMirror
     {
+        internal static DurableCarrierLease BindReplayCarrier(DurableInboxStore store,
+            OccurrenceId occurrence, Action<TerminalReason> silentRemove) =>
+            DurableCarrierLease.Bind(store, occurrence, DurableCarrierClass.WireReplay, silentRemove);
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
 
         /// <summary>Teardown only, exactly like <see cref="GeoModalMirror.Reset"/>: the seq stream is

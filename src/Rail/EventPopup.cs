@@ -57,6 +57,9 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     internal static class EventPopup
     {
+        internal static DurableCarrierLease BindDeferredCarrier(DurableInboxStore store,
+            OccurrenceId occurrence, Action<TerminalReason> silentRemove) =>
+            DurableCarrierLease.Bind(store, occurrence, DurableCarrierClass.ModDeferred, silentRemove);
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
 
         private static readonly System.Reflection.FieldInfo SwitchQueryField =
@@ -83,7 +86,15 @@ namespace Multiplayer.Network.Sync
         /// reload boundary (rca-3 contract: a host counter that restarts mid-session makes every following
         /// raise look stale to a client that kept its own high-water mark, and the windows vanish silently).</summary>
         public static void Reset()
-        { Seq.Reset(); _held.Clear(); _hostCurtained.Clear(); _unanswered.Clear(); _rewards.Clear(); }
+        {
+            Seq.Reset(); lock (_durableHeld) { foreach (var lease in _durableHeld.Values.ToArray()) lease.Dispose();
+            _durableHeld.Clear(); } _held.Clear(); _hostCurtained.Clear(); _unanswered.Clear(); _rewards.Clear();
+        }
+        internal static void ClearDurableCarrierState()
+        {
+            lock (_durableHeld)
+            { foreach (var lease in _durableHeld.Values.ToArray()) lease.Dispose(); _durableHeld.Clear(); _held.Clear(); }
+        }
 
         /// <summary>The HOST's OWN raises, parked behind the HOST's OWN curtain, in the order its sim made
         /// them. See <see cref="HostRaiseWaitsForReveal"/> for why this list has to exist at all.</summary>
@@ -175,6 +186,8 @@ namespace Multiplayer.Network.Sync
         /// <summary>Raises that ARRIVED but had nowhere to go yet, oldest first. See
         /// <see cref="ClientTick"/> for why this exists and why it is bounded.</summary>
         private static readonly List<KeyValuePair<uint, Raise>> _held = new List<KeyValuePair<uint, Raise>>();
+        private static readonly Dictionary<uint, DurableCarrierLease> _durableHeld =
+            new Dictionary<uint, DurableCarrierLease>();
 
         /// <summary>The last raise this peer was given per event id — the carrier a window needs to exist at
         /// all (a mirrored <c>GeoscapeEventRecord</c> holds no site and no context). Keyed by event id, so it
@@ -555,6 +568,9 @@ namespace Multiplayer.Network.Sync
 
             var entry = _held[0];
             _held.RemoveAt(0);
+            DurableCarrierLease heldLease;
+            lock (_durableHeld) if (_durableHeld.TryGetValue(entry.Key, out heldLease))
+            { _durableHeld.Remove(entry.Key); heldLease.Dispose(); }
             try
             {
                 Debug.Log("[MP][events] replaying HELD raise of '" + entry.Value.EventId + "' seq=" + entry.Key +
@@ -663,6 +679,11 @@ namespace Multiplayer.Network.Sync
             var geo = GeoLevel();
             var view = geo?.View;
             var q = view == null ? null : SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
+            var durableStore = DurableInboxSaveBridge.ActiveStore;
+            var durableOccurrence = new OccurrenceId("EventPopup", "raise:" + seq,
+                new[] { "event:" + p.EventId,
+                        string.IsNullOrEmpty(p.SiteRef) ? "site:none" : p.SiteRef,
+                        string.IsNullOrEmpty(p.VehicleRef) ? "vehicle:none" : p.VehicleRef });
             if (q == null || !CanCarryWindow(geo))
             {
                 // HELD, not dropped (2026-08-01). "This peer has no geoscape yet" is a TIMING fact, not a
@@ -681,20 +702,17 @@ namespace Multiplayer.Network.Sync
                     return true; // consumed: the seq must still advance or every later raise is refused
                 }
                 _held.Add(new KeyValuePair<uint, Raise>(seq, p));
+                TrackHeldCarrier(durableStore, durableOccurrence, seq);
                 Debug.LogWarning("[MP][events] raise of '" + p.EventId + "' HELD — this peer has no geoscape " +
                                  "ready to carry a window yet (no view, or its event system is still loading); " +
                                  "it will be replayed when one is (" + _held.Count + " waiting)");
                 return true;
             }
 
-            var durableStore = DurableInboxSaveBridge.ActiveStore;
-            var durableOccurrence = new OccurrenceId("EventPopup", "raise:" + seq,
-                new[] { "event:" + p.EventId,
-                        string.IsNullOrEmpty(p.SiteRef) ? "site:none" : p.SiteRef,
-                        string.IsNullOrEmpty(p.VehicleRef) ? "vehicle:none" : p.VehicleRef });
             if (durableStore == null || !durableStore.Ledger.Contains(durableOccurrence))
             {
                 if (_held.All(x => x.Key != seq)) _held.Add(new KeyValuePair<uint, Raise>(seq, p));
+                TrackHeldCarrier(durableStore, durableOccurrence, seq);
                 Debug.Log("[MP][events] raise of '" + p.EventId + "' waits for its host-authoritative durable occurrence");
                 return true;
             }
@@ -757,6 +775,20 @@ namespace Multiplayer.Network.Sync
             // see MissionArrivalNav. Armed from the RAISE, fired from the mission's ARRIVAL.
             MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
             return true;
+        }
+
+        private static void TrackHeldCarrier(DurableInboxStore store, OccurrenceId occurrence, uint seq)
+        {
+            if (store == null || !store.Ledger.Contains(occurrence)) return;
+            lock (_durableHeld)
+            {
+                if (_durableHeld.ContainsKey(seq)) return;
+                var lease = BindDeferredCarrier(store, occurrence, _ =>
+                {
+                    lock (_durableHeld) { _held.RemoveAll(x => x.Key == seq); _durableHeld.Remove(seq); }
+                });
+                if (!lease.IsFinished) _durableHeld.Add(seq, lease);
+            }
         }
 
         /// <summary>The host-resolved title/narrative applied to a PRIVATE COPY of the event data — never to
