@@ -361,6 +361,9 @@ namespace RailCheck
             Add(laws, () => L394_ACompactionNeedsProofNoDurableSourceCanNameIt.Check());
             Add(laws, () => L379_AHostOrderSurvivesTheNativeSaveBlob.Check());
             Add(laws, () => L383_ACanonicalResultNeverRebindsByListPosition.Check());
+            Add(laws, () => L378_WindowsPresentOnlyOnTheGeoscape.Check());
+            Add(laws, () => L393_EveryRoutedWindowFamilyHasAVerdict.Check());
+            Add(laws, () => L401_OnlyExactNativeRaisersArePriority.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             Add(laws, () => L377_AReceiptAdvancesNoInboxLifecycle.Check());
             laws.Sort(StringComparer.Ordinal);
@@ -4602,7 +4605,8 @@ namespace RailCheck
             if (inbound == null)
                 yield return "L49 inbound-gone: GeoModalMirror.HandleInbound did not resolve — nothing can consume " +
                              "0x" + SurfaceIds.GeoModalRaise.ToString("X2");
-            else if (!DeclaredTypes(mirror.Assembly).Where(t => t != mirror)
+            else if (!DurableWindowRegistry.RoutedPresentations.Any(r => Same(r.Handle.Method, inbound)) &&
+                     !DeclaredTypes(mirror.Assembly).Where(t => t != mirror)
                          .SelectMany(t => { try { return t.GetMethods(AllMembers).Cast<MethodBase>(); } catch { return Enumerable.Empty<MethodBase>(); } })
                          .Where(m => { try { return m.GetMethodBody() != null; } catch { return false; } })
                          .Any(m => Callees(m, mirror.Assembly).Any(c => Same(c, inbound))))

@@ -933,6 +933,7 @@ namespace Multiplayer.Network.Sync
     {
         private static void Postfix(ModalType modalType, object modalData, int priority)
         {
+            DurableWindowRegistry.CaptureModal(modalType, modalData);
             GeoWindowCoverage.AnnounceModal(modalType);
             GeoModalMirror.HostBroadcast(GeoModalMirror.StateKind.Modal, modalType, modalData, priority);
         }

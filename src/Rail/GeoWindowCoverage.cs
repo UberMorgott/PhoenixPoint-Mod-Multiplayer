@@ -222,6 +222,16 @@ namespace Multiplayer.Network.Sync
             return null;
         }
 
+        /// <summary>DWI taxonomy bridge. Unknown routed presentation families fail loudly in the closed
+        /// registry; legacy state coverage remains the source-level audit of native queue producers.</summary>
+        internal static DurableWindowDisposition DurableDispositionForRouter(string family) =>
+            DurableWindowRegistry.RouterDisposition(family);
+
+        /// <summary>Priority is never inferred from a modal number, state name, or caller boolean.</summary>
+        internal static bool IsRegisteredPriority(Type stateType, ModalType modal, object subject,
+                                                  NativeRaiserToken raiser) =>
+            DurableWindowRegistry.IsPriority(stateType, modal, subject, raiser);
+
         // ─── The SECOND axis: UIStateGeoModal is 43 windows wearing one type ───
 
         /// <summary>

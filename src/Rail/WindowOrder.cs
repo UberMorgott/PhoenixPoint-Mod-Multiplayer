@@ -254,15 +254,9 @@ namespace Multiplayer.Network.Sync
         ///
         /// DELIBERATELY A NAMED SET AND NOT A WEAKENING. Everything else keeps the hold exactly as it was:
         /// declared by NAME so that a new window is held by default, which is the recoverable direction.</summary>
-        private static readonly HashSet<string> NeverHeldAnswerStates = new HashSet<string>(StringComparer.Ordinal)
-        {
-            "UIStateAssetDeployment",   // "where do you want this?" — the direct answer to an acquisition
-        };
-
         internal static bool HoldsForOpenScreen(int priority, Type queuedState, Type currentViewState) =>
             (priority < TransitionPriority ||
              (queuedState != null && HeldTransitionStates.Contains(queuedState.Name))) &&
-            !(queuedState != null && NeverHeldAnswerStates.Contains(queuedState.Name)) &&
             currentViewState != null &&
             !MapStates.Contains(currentViewState.Name);
 

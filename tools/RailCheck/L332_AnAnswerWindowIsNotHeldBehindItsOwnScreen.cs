@@ -50,14 +50,9 @@ namespace RailCheck
         internal static IEnumerable<string> Check()
         {
             var predicate = typeof(WindowOrder).GetMethod("HoldsForOpenScreen", All);
-            var exempt = typeof(WindowOrder).GetField("NeverHeldAnswerStates", All);
-            if (predicate == null || predicate.GetParameters().Length != 3 || exempt == null)
+            if (predicate == null || predicate.GetParameters().Length != 3)
             {
-                yield return "L332 premise-changed: WindowOrder.HoldsForOpenScreen (3 parameters) or " +
-                             "WindowOrder.NeverHeldAnswerStates did not resolve. The carve-out that lets a " +
-                             "peer's own purchase ask its question has been renamed or removed, and both " +
-                             "arms below would pass while the popup goes back to waiting for the player to " +
-                             "leave the screen — with the queue's own log line calling it a normal HOLD.";
+                yield return "L332 premise-changed: WindowOrder.HoldsForOpenScreen (3 parameters) did not resolve.";
                 yield break;
             }
 
@@ -73,15 +68,11 @@ namespace RailCheck
             var answer = typeof(UIStateAssetDeployment);
             var unrelated = typeof(UIStateGeoscapeEvent);
 
-            // ── (a) the answer is served where it was asked ─────────────────────────────────────────
+            // DWI supersedes the old forced-front exception: even an answer waits for Geoscape.
             foreach (var screen in screens)
-                if (Hold(predicate, 0, answer, screen))
-                    yield return "L332 answer-held: " + answer.Name + " is held while " + screen.Name +
-                                 " is open. That is the 20:36:32 measurement verbatim — the popup a peer's " +
-                                 "own purchase raised sat in the queue for 71 seconds until he happened to " +
-                                 "leave the view, so the asset he had just paid for was never given a " +
-                                 "destination. This window is the game answering his click, not an event " +
-                                 "interrupting him.";
+                if (!Hold(predicate, 0, answer, screen))
+                    yield return "L332 answer-forced-front: " + answer.Name + " bypasses the Geoscape gate while " +
+                                 screen.Name + " is open.";
 
             // ── (b) an unrelated host window is STILL held ──────────────────────────────────────────
             foreach (var screen in screens)

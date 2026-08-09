@@ -851,6 +851,7 @@ namespace Multiplayer.Network.Sync
             internal string EventId;
             internal string SiteRef;
             internal string VehicleRef;
+            internal string HostTriggerId;
             internal float ResolvedAt;   // realtimeSinceStartup of the first tick the record read Completed
         }
 
@@ -941,6 +942,9 @@ namespace Multiplayer.Network.Sync
         internal static bool AnswerIsIn(string eventId, bool recordResolved)
             => eventId == null || recordResolved;
 
+        internal static string HostTrigger(string existing) =>
+            string.IsNullOrEmpty(existing) ? "arrival:" + Guid.NewGuid().ToString("N") : existing;
+
         /// <summary>Driven from <c>SyncEngine.Tick</c>. One decision per watched window per frame; every exit
         /// retires the watch or says why it is still waiting.</summary>
         internal static void Tick(NetworkEngine engine)
@@ -958,9 +962,8 @@ namespace Multiplayer.Network.Sync
                 try { Step(engine, geo, view, id, _watched[id]); }
                 catch (Exception ex)
                 {
-                    _watched.Remove(id);
-                    Debug.LogError("[MP][mission] arrival watch for '" + id + "' failed — this peer can still " +
-                                   "reach the mission from the aircraft's Launch button: " + ex);
+                    Debug.LogError("[MP][mission] arrival watch for '" + id + "' failed and remains armed for " +
+                                   "a retry — no durable occurrence or native carrier is discarded: " + ex);
                 }
             }
         }
@@ -1026,14 +1029,25 @@ namespace Multiplayer.Network.Sync
                 return;
             }
 
+            // DWI owns presentation. Arrival records a live priority candidate, but never navigates this peer.
+            // The durable scheduler will consume it only after DurableWindowRegistry.MayPresent admits the
+            // peer's own fully-started Geoscape map surface.
+            if (engine.IsHost)
+            {
+                w.HostTriggerId = HostTrigger(w.HostTriggerId);
+                var store = DurableInboxSaveBridge.ActiveStore;
+                if (store == null)
+                    throw new InvalidOperationException("durable inbox store is not installed");
+                var missionIdentity = DurableWindowRegistry.StableMissionSubject(mission);
+                var subjects = DurableWindowRegistry.MissionOccurrenceSubjects(w.SiteRef, w.VehicleRef, missionIdentity);
+                var occurrence = new OccurrenceId(w.EventId ?? "MissionOffer", w.HostTriggerId,
+                    subjects);
+                DurableWindowRegistry.EnqueuePriorityOccurrence(store, occurrence);
+            }
             _watched.Remove(key);
-            var container = IdentityResolver.Resolve(geo, w.VehicleRef, null) as GeoVehicle
-                            ?? view.GetVehicleOnSite(site);
-            view.LaunchMission(mission, container);
-            Debug.Log("[MP][mission] " + (engine.IsHost ? "HOST" : "CLIENT") + " squad screen opened for '" + key +
-                      "' at " + w.SiteRef + " from the MISSION'S ARRIVAL — " + because +
-                      " and this peer's own site now holds a runnable ActiveMission. Nothing here waited on a " +
-                      "dialog teardown, and nothing waited on another player.");
+            Debug.Log("[MP][mission] priority occurrence ready for '" + key + "' at " + w.SiteRef + " — " +
+                      because + "; presentation remains behind DurableWindowRegistry.MayPresent and no peer " +
+                      "was forced out of its current screen.");
         }
     }
 

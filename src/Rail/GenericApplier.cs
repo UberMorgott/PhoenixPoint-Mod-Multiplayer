@@ -127,7 +127,7 @@ namespace Multiplayer.Network.Sync
 
         internal static void MarkGeoscapeStarted() => _startedLevel = GeoLevel();
 
-        private static GeoLevelController StartedGeoLevel()
+        internal static GeoLevelController StartedGeoLevel()
         {
             var geo = GeoLevel();
             return geo != null && ReferenceEquals(geo, _startedLevel) ? geo : null;

@@ -139,10 +139,10 @@ namespace RailCheck
                              "QUEUES at int.MaxValue into a list GeoscapeViewSwitchQuery.GetRestorableData puts " +
                              "in the SAVE, so a second request is a deployment screen for a finished mission, " +
                              "waiting for the player after the battle.";
-            if (!Program.Callees(step, typeof(GeoscapeView).Assembly).Any(m => m.Name == "LaunchMission"))
-                yield return "L197 arrival-opens-nothing: MissionArrivalNav.Step never reaches " +
-                             "GeoscapeView.LaunchMission, so every arm above is about a watch that decides " +
-                             "correctly and then does nothing — green harness, missing screen.";
+            if (!Program.Callees(step, typeof(MissionArrivalNav).Assembly)
+                        .Any(m => m.Name == "EnqueuePriorityOccurrence"))
+                yield return "L197 arrival-records-nothing: MissionArrivalNav.Step does not record the durable " +
+                             "priority occurrence for the Geoscape-gated scheduler.";
 
             // ── (d) NO QUORUM: the pure decisions read no peer at all ────────────────
             var peerish = new[] { "NetworkEngine", "SessionManager", "PingTable", "PeerListEntry",

@@ -78,11 +78,7 @@ namespace Multiplayer.Network.Sync
                 || Multiplayer.Tactical.HintMirror.HandleInbound(_engine, peer, surfaceId, payload);
             Router.GeoscapeInbound = (peer, surfaceId, payload) =>
                 ManufactureSync.HandleInbound(_engine, peer, surfaceId, payload)
-                || EventPopup.HandleInbound(_engine, peer, surfaceId, payload)
-                || GeoModalMirror.HandleInbound(_engine, peer, surfaceId, payload)
-                || CutsceneMirror.HandleInbound(_engine, peer, surfaceId, payload)
-                || MissionOutcomeMirror.HandleInbound(_engine, peer, surfaceId, payload)
-                || MarketplaceSync.HandleInbound(_engine, peer, surfaceId, payload)
+                || DurableWindowRegistry.HandleRoutedPresentation(_engine, peer, surfaceId, payload)
                 // 0xC0 clock-phase probe (diagnostic band). Registered unconditionally so the id is CLAIMED
                 // whether MpDiag is on or off — an unclaimed surface would fall through to the value rail.
                 // Client-side inside, and it applies nothing: it logs one [MP][clockphase] line.
