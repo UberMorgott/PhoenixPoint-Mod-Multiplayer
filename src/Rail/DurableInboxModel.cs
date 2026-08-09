@@ -361,8 +361,8 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
         {
             lock (_authority)
             {
-                if (!_members.Remove(member)) return false;
-                Ledger = Ledger.EntriesFor(member)
+                if (!_members.ContainsKey(member)) return false;
+                var replacement = Ledger.EntriesFor(member)
                     .Where(entry => entry.Lifecycle != InboxLifecycle.Dismissed && entry.Lifecycle != InboxLifecycle.Removed)
                     .Aggregate(Ledger, (current, entry) =>
                     {
@@ -370,6 +370,8 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
                         return current.Replace(new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
                             entry.Choice, revision, Math.Max(entry.TombstoneRevision, revision)));
                     });
+                _members.Remove(member);
+                Ledger = replacement;
                 CommittedRevision++;
                 return true;
             }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text;
 using Base;
 using Base.Cameras;
@@ -296,14 +297,32 @@ namespace Multiplayer.UI
         /// switching its <c>VisualsRoot</c> off (:584, :609) — which takes its picking collider with it, so an
         /// unseen one is not pickable in the first place. None of the three carries a per-faction secret this
         /// could read, so there is nothing to ask them.
+        ///
+        /// THE GATE STAYS EXECUTABLE OUTSIDE THE PLAYER, and that is a property of THIS method, not of the law
+        /// that reads it: L344 arm (d) INVOKES it with <c>(null, null)</c>, because the default branch — the
+        /// one every GeoActor that is neither a site nor a craft takes — has no other way of being proven.
+        /// That is why <c>vehicle.IsVisible</c> is not written here but in <see cref="CraftFound"/>. It is
+        /// L113's landmine: <c>GeoVehicle.IsVisible</c> (GeoVehicle.cs:174-187) is the one line
+        /// <c>VisualsRoot.activeInHierarchy</c>, small enough that under <c>-c Release</c> the JIT inlines it
+        /// into its caller, and an inlined ECALL makes the WHOLE enclosing method fail to compile ("ECall
+        /// methods must be packaged into a system module") — arguments and branches irrelevant, so the gate
+        /// threw on an actor it was about to wave through. HARNESS-ONLY, honestly: in the player that ECall
+        /// resolves and the gate has always answered correctly. But the harness is the only place the default
+        /// is ever exercised, so the containment lives here rather than in a weakened law.
         /// </summary>
         private static bool Known(GeoLevelController geo, GeoActor actor)
         {
             var site = actor as GeoSite;
             if (site != null) return site.GetVisible(geo.ViewerFaction);
             var vehicle = actor as GeoVehicle;
-            return vehicle == null || vehicle.IsVisible;
+            return vehicle == null || CraftFound(vehicle);
         }
+
+        /// <summary>The craft half of <see cref="Known"/>, and it is a separate method for exactly one reason:
+        /// <c>GeoVehicle.IsVisible</c> is small enough to inline and its body is an ECall, which would take the
+        /// gate's own compilation down outside the player. Nothing else belongs in here.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static bool CraftFound(GeoVehicle vehicle) => vehicle.IsVisible;
 
         /// <summary>
         /// PINGING OPEN OCEAN IS REFUSED, AND THE PRESSER HEARS WHY. Nothing is sent, nothing is drawn, and

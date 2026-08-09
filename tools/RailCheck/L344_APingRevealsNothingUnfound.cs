@@ -108,9 +108,17 @@ namespace RailCheck
             foreach (var v in Scan(seam, "PingMarkers")) yield return v;
 
             // ── arm (c): the gate must ask the GAME, per viewer, and not a memory of its own.
-            var asksSite = Reaches(known, "GeoSite", "GetVisible");
-            var asksViewer = Reaches(known, "GeoLevelController", "get_ViewerFaction");
-            var asksCraft = Reaches(known, "GeoVehicle", "get_IsVisible");
+            // ONE HOP THROUGH THE SEAM'S OWN HELPERS, and the hop is not a loophole — it is forced by arm (d).
+            // GeoVehicle.IsVisible is `VisualsRoot.activeInHierarchy`, a one-line wrapper over an ECALL, and
+            // under -c Release the JIT inlines it into whatever calls it — which makes THAT method impossible
+            // to compile outside the player (L113's landmine). So the gate physically cannot both call it
+            // directly and be Invoke-able by arm (d); the engine question has to sit behind a NoInlining
+            // one-liner. A one-level IL walk read that containment as "the gate stopped asking the game" and
+            // turned red on the fix for its own sibling arm. The hop is scoped to methods DECLARED ON THE SEAM
+            // ITSELF, so the question still cannot be laundered through a cache, the rail, or the sender.
+            var asksSite = ReachesVia(known, seam, "GeoSite", "GetVisible");
+            var asksViewer = ReachesVia(known, seam, "GeoLevelController", "get_ViewerFaction");
+            var asksCraft = ReachesVia(known, seam, "GeoVehicle", "get_IsVisible");
             if (!asksSite || !asksViewer || !asksCraft)
                 yield return "L344 predicate-is-not-the-games: PingMarkers.Known must answer out of the " +
                              "game's own per-faction state — GeoSite.GetVisible (GeoSite.cs:387-390) asked " +
@@ -127,7 +135,7 @@ namespace RailCheck
             var passes = false;
             string threw = null;
             try { passes = (bool)known.Invoke(null, new object[] { null, null }); }
-            catch (Exception e) { threw = (e.InnerException ?? e).GetType().Name; }
+            catch (Exception e) { threw = (e.InnerException ?? e).GetType().Name; Console.Error.WriteLine("TEMP-TRACE L344 >>> " + e); }
 
             if (threw != null)
             {
@@ -205,6 +213,13 @@ namespace RailCheck
         private static bool Reaches(MethodBase caller, string declaringType, string calleeName)
             => CalleesOf(caller).Any(c => c.Name == calleeName &&
                                           (declaringType == null || c.DeclaringType?.Name == declaringType));
+
+        /// <summary><see cref="Reaches"/> plus ONE hop through a callee declared on <paramref name="seam"/>
+        /// itself. Deliberately not a full transitive closure: the arm asserts "this gate asks the game", and
+        /// a walk that wandered off the seam would let any helper anywhere satisfy it.</summary>
+        private static bool ReachesVia(MethodBase caller, Type seam, string declaringType, string calleeName)
+            => Reaches(caller, declaringType, calleeName) ||
+               CalleesOf(caller).Any(c => c.DeclaringType == seam && Reaches(c, declaringType, calleeName));
 
         private static IEnumerable<MethodBase> CalleesOf(MethodBase caller)
         {

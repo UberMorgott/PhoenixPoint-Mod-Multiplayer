@@ -86,7 +86,7 @@ namespace RailCheck
             using (var rd = new BinaryReader(ms, Encoding.UTF8))
             {
                 try { TacAbilityTargetCodec.Read(rd, null, unresolved); left = ms.Length - ms.Position; }
-                catch (Exception ex) { threw = (ex.InnerException ?? ex).GetType().Name; }
+                catch (Exception ex) { threw = (ex.InnerException ?? ex).GetType().Name; Console.Error.WriteLine("TEMP-TRACE L358 >>> " + ex); }
             }
             if (threw != null)
                 yield return "L358 address-misaligned: a target carrying a BODY-PART item address threw on decode (" +

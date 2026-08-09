@@ -904,10 +904,23 @@ namespace Multiplayer.Tactical
                 var slot = t.DamageReceiver as ItemSlot;
                 if (t.TacticalItem == null && slot != null)
                     foreach (var candidate in slot.GetAllDirectItems())
-                        if (candidate != null && candidate.IsVisible) { t.TacticalItem = candidate; break; }
+                        if (candidate != null && Attached(candidate)) { t.TacticalItem = candidate; break; }
             }
             return t;
         }
+
+        /// <summary>ONE LINE, AND IT IS A SEPARATE METHOD ON PURPOSE — the same containment
+        /// <c>TacticalActorKey.TieKey</c> uses, for the same reason. <c>Addon.IsVisible</c>:195-203 is
+        /// <c>_visualRootGameObject.activeSelf</c>, i.e. a one-line wrapper around an ECALL, and under
+        /// <c>-c Release</c> the JIT inlines it into whoever calls it — which makes THAT method impossible to
+        /// JIT outside the Unity player ("ECall methods must be packaged into a system module"), whatever its
+        /// arguments and whether or not the branch is even taken (L113). Inlined into <see cref="Read"/> it
+        /// took down every law that decodes a payload: L358 read it as the body-part address being
+        /// misaligned, and the codec round-trip law CRASHED, which aborts the whole run and proves nothing
+        /// after it. A wire codec is executed by the laws, so it has to stay compilable with no engine
+        /// present; the engine questions sit one call away.</summary>
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static bool Attached(TacticalItem item) => item.IsVisible;
 
         private static TacticalActorBase ResolveActor(int key, string field, TacticalLevelController tlc, List<string> unresolved)
         {

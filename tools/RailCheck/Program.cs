@@ -427,6 +427,7 @@ namespace RailCheck
             catch (Exception ex)
             {
                 _lawsCrashed++;
+                Console.Error.WriteLine("TEMP-TRACE >>> " + ex);
                 // An iterator's TargetSite is its compiler-generated state machine; walk out to the law type.
                 var t = ex.TargetSite == null ? null : ex.TargetSite.DeclaringType;
                 while (t != null && t.IsNested) t = t.DeclaringType;
