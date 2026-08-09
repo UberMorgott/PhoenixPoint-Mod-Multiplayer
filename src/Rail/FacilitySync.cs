@@ -18,7 +18,7 @@ using UnityEngine;
 namespace Multiplayer.Network.Sync
 {
     /// <summary>
-    /// Base-construction intent family (surface 0xB1, law 1): build / demolish-scrap / repair / power ride the
+    /// Base intent family (surface 0xB1, law 1): build / demolish-scrap / repair / power / rename ride the
     /// ONE generic <see cref="IntentRail"/>; the host executes the SAME native funnels the UI uses —
     /// GeoPhoenixBase.ConstructFacility (GeoPhoenixBase.cs:229, wallet take + place + under-construction),
     /// RemoveFacility (:277, scrap refund path = the UI demolish/cancel gesture) and RepairFacility
@@ -49,6 +49,7 @@ namespace Multiplayer.Network.Sync
         private const byte OpDemolish = 2;  // UI demolish/cancel-construction (scrap:true refund path)
         private const byte OpRepair = 3;
         private const byte OpTogglePower = 4;
+        private const byte OpRename = 5;      // the base's NAME — a site value, not a facility one
 
         // Blocked native body's own position derivation (UIModuleBaseLayout.ConstructFacility:459).
         private static readonly MethodInfo CoordByIdx =
@@ -62,6 +63,7 @@ namespace Multiplayer.Network.Sync
                 [OpDemolish] = HandleIntent,
                 [OpRepair] = HandleIntent,
                 [OpTogglePower] = HandleIntent,
+                [OpRename] = HandleIntent,
             };
             IntentRail.Register(SurfaceIds.GeoBaseIntent, "base", ops);
         }
@@ -166,6 +168,43 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>
+        /// RENAME gesture — model funnel (GeoPhoenixBase.RenameBase:991-993, a void that writes
+        /// Site.SiteName and nothing else; its ONLY caller is UIModuleBaseLayout.OnBaseRenamed:695, so
+        /// blocking it strands no native tail).
+        ///
+        /// THE OTHER HALF OF 21edc3b. That commit put the site's name on the value rail (the
+        /// GeoSite.Name -> SiteName alias in RailMeta), so a HOST rename now reaches every peer — and it
+        /// said in as many words that a CLIENT's own rename was "a local write nobody captures, so the
+        /// host's next delta reverts it". This is the capture. Nothing else was missing: the intent
+        /// family, the dedup, the reject and the mirror all existed; the rename simply had no seam.
+        ///
+        /// The blocked native tail (UIModuleBaseLayout.cs:696-697) re-reads BaseName.text and the tab
+        /// button from the UN-mutated model, so the client's screen keeps the OLD name for the
+        /// round-trip — which is the block-first posture, not a glitch: the new name appears when the
+        /// host's delta lands and the universal re-enter arm repaints
+        /// (UiEventMap.cs:529 UIStatePhoenixBaseLayout -> UIModuleBaseLayout.SetLeftSideInfo:605 ->
+        /// BaseName.text = PxBase.Site.Name:607).
+        /// </summary>
+        [HarmonyPatch(typeof(GeoPhoenixBase), nameof(GeoPhoenixBase.RenameBase))]
+        internal static class RenameCapturePatch
+        {
+            private static bool Prefix(GeoPhoenixBase __instance, string name)
+            {
+                if (IntentRail.ShouldRunNative()) return true;
+                try
+                {
+                    if (__instance?.Site == null || string.IsNullOrEmpty(name))
+                        return false; // law 3: never write locally — and nothing sendable either
+                    IntentRail.Send(SurfaceIds.GeoBaseIntent, OpRename,
+                        "rename site=" + __instance.Site.SiteId + " -> " + name, w =>
+                        { w.Write(__instance.Site.SiteId); w.Write(name); });
+                }
+                catch (Exception ex) { Debug.LogError("[MP][base] rename capture failed: " + ex); }
+                return false;
+            }
+        }
+
         // ─── HOST: apply through the SAME native funnels (dedup/decode/reject = IntentRail) ─────
 
         private static void HandleIntent(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
@@ -193,6 +232,21 @@ namespace Multiplayer.Network.Sync
                 px.ConstructFacility(def, pos);
                 Debug.Log("[MP][base] HOST built " + def.name + " @" + pos + " site=" + siteId +
                           " nonce=" + nonce + " peer=" + senderPeerId);
+                return;
+            }
+
+            if (op == OpRename)
+            {
+                // The same native funnel the host's own popup uses; the new name reaches every peer on the
+                // 0xAC value rail as GeoSite.SiteName (RailMeta alias, 21edc3b). No cost, no validation
+                // beyond non-empty: the game's own BaseNameValidator (UIModuleBaseLayout.cs:686-689)
+                // accepts every character, so the only refusable input is nothing at all.
+                string newName = r.ReadString();
+                if (string.IsNullOrWhiteSpace(newName))
+                { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "empty base name", "S#" + siteId); return; }
+                px.RenameBase(newName);
+                Debug.Log("[MP][base] HOST renamed site=" + siteId + " -> '" + newName +
+                          "' nonce=" + nonce + " peer=" + senderPeerId);
                 return;
             }
 
