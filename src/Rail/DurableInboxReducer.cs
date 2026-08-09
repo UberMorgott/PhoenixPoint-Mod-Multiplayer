@@ -4,6 +4,19 @@ namespace Multiplayer.Network.Sync
 {
     internal static class DurableInboxReducer
     {
+        internal static HostLedger CloneAndValidate(HostLedger ledger)
+        {
+            if (ledger == null) throw new ArgumentNullException(nameof(ledger));
+            var entries = new InboxEntry[ledger.AllEntries.Count];
+            for (int i = 0; i < entries.Length; i++)
+            {
+                var entry = ledger.AllEntries[i];
+                entries[i] = new InboxEntry(entry.Occurrence, entry.Membership, entry.Lifecycle, entry.Choice,
+                    entry.LifecycleRevision, entry.TombstoneRevision, entry.HostOrderKey);
+            }
+            return new HostLedger(entries, ledger.CommittedRevision, ledger.Members);
+        }
+
         internal static ReduceResult Apply(HostLedger ledger, InboxCommand command)
         {
             if (ledger == null) throw new ArgumentNullException(nameof(ledger));
