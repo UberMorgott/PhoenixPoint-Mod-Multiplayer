@@ -364,15 +364,18 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
                 if (!_members.ContainsKey(member)) return false;
                 var replacement = Ledger.EntriesFor(member)
                     .Where(entry => entry.Lifecycle != InboxLifecycle.Dismissed && entry.Lifecycle != InboxLifecycle.Removed)
-                    .Aggregate(Ledger, (current, entry) =>
+                    .Select(entry =>
                     {
                         var revision = checked(entry.LifecycleRevision + 1);
-                        return current.Replace(new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
-                            entry.Choice, revision, Math.Max(entry.TombstoneRevision, revision)));
-                    });
+                        return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
+                            entry.Choice, revision, Math.Max(entry.TombstoneRevision, revision));
+                    })
+                    .ToArray();
+                var committedRevision = checked(CommittedRevision + 1);
+                var ledger = replacement.Aggregate(Ledger, (current, entry) => current.Replace(entry));
+                Ledger = ledger;
                 _members.Remove(member);
-                Ledger = replacement;
-                CommittedRevision++;
+                CommittedRevision = committedRevision;
                 return true;
             }
         }
