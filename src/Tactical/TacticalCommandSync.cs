@@ -3553,6 +3553,7 @@ namespace Multiplayer.Tactical
                 var director = view.CameraDirector;
                 if (director != null)
                     foreach (var hint in TargetingCameraHints) director.RemoveHint(hint);
+                RestoreHealthbars(tlc);
                 if (ReferenceEquals(before, view.CurrentState)) return;   // already neutral — nothing to report
                 Debug.Log("[Multiplayer][tac] released this peer's UI from " + SafeActorName(actor) + " (" + why +
                           ") — it was held in " + (before == null ? "<none>" : before.GetType().Name) +
@@ -3563,6 +3564,43 @@ namespace Multiplayer.Tactical
                 Debug.LogWarning("[Multiplayer][tac] could not release this peer's UI from " +
                                  SafeActorName(actor) + " (" + why + "): " + ex.Message + ". The order still " +
                                  "plays; a local aim HUD may keep drawing over an actor the engine now owns.");
+            }
+        }
+
+        /// <summary>
+        /// AND THE HEAD HEALTH BARS COME BACK WITH IT — the same argument as the camera hints one seam up, for
+        /// the other thing <c>UIStateShoot</c> tears down and only <c>UIStateWaiting</c> ever put back.
+        ///
+        /// <c>UIStateShoot.HideUiIndicators</c>:622-636 runs on EnterState:437 and on every retarget (:685) and
+        /// does two things to EVERY actor on the map: <c>SuppressHealthbarUpdates(true)</c>, which is
+        /// <c>TacticalActorViewBase.enabled = false</c> (:390-393) and therefore stops the per-frame
+        /// <c>Update</c>:405-420 that is the ONLY writer of <c>UIActorElement.SetHidden</c>, and then hides the
+        /// element outright. The one undo is <c>RestoreUiIndicators</c>:638-647, and <c>ExitState</c>:1248
+        /// calls it only <c>if (!_abilityActivated)</c> — the flag <c>UIStateShoot</c>:1385 sets on the click.
+        /// So after a click the restore lives in exactly one place, <c>ShootAbilityFinishedExecutionHandler</c>
+        /// :1322, which is delivered through the <c>UIStateWaiting</c> that
+        /// <c>TacticalViewState.ActivateAbility</c>:273-275 creates — the state switch A9 suppresses.
+        ///
+        /// The result was PERMANENT and board-wide, not cosmetic on one soldier: with the component disabled
+        /// nothing polls <c>ShouldRenderUI</c> again, so from the first shot onward no actor on that peer had a
+        /// head bar or a status strip — the owner's "on the client, clicking my own soldier shows no HP bar".
+        ///
+        /// Written as the game's own three public calls rather than a reflected call to the private
+        /// <c>RestoreUiIndicators</c>: the state that hid them is already gone on the host's branch (its
+        /// release runs after <c>HandleActivate</c>), so there is no instance left to invoke it on. Idempotent
+        /// — <c>SetHidden(false)</c> is re-decided by the very next <c>Update</c> from
+        /// <c>ShouldRenderUI</c>, exactly as vanilla's own restore leaves it.</summary>
+        private static void RestoreHealthbars(TacticalLevelController tlc)
+        {
+            var map = tlc == null ? null : tlc.Map;
+            if (map == null) return;
+            foreach (var a in map.GetActors<TacticalActorBase>())
+            {
+                var view = a == null ? null : a.TacticalActorViewBase;
+                if (view == null || view.UIActorElement == null) continue;
+                view.SuppressHealthbarUpdates(suppress: false);
+                view.UIActorElement.SetHidden(hidden: false);
+                view.UpdateHealthbarPredictions(null);
             }
         }
 
@@ -3666,7 +3704,9 @@ namespace Multiplayer.Tactical
         internal static bool MirrorIsWaitingInLine(bool executing, bool enqueued) => !executing && enqueued;
 
         /// <summary>A mirrored order the engine ENQUEUED instead of playing, with the frames it has waited.
-        /// Live ability refs, so it is cleared with the battle exactly like <c>_mirrorSkipsCameraWait</c>.</summary>
+        /// Live ability refs, so it is cleared with the battle exactly like <c>_mirrorSkipsCameraWait</c>.
+        /// No longer only a watchdog: <see cref="MirrorStillQueuedFor"/> reads it so the settle for that very
+        /// order does not land on the actor before the order starts.</summary>
         private struct QueuedMirror
         {
             internal TacticalActor Actor;
@@ -3696,6 +3736,44 @@ namespace Multiplayer.Tactical
                 Name = ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name,
             });
         }
+
+        /// <summary>Does this actor hold a mirrored order the engine has taken but not STARTED — i.e. the
+        /// one-frame <c>EnqueueAction</c>-behind-<c>IdleAbility</c> handoff <see cref="ApplyActivate"/>
+        /// documents. Read off <see cref="_queuedMirrors"/>, which is pruned by <see cref="TickQueuedMirrors"/>
+        /// one call earlier in the same <see cref="ClientTick"/>, so it never answers for an order that has
+        /// since started, been cancelled, or run out its own ceiling.</summary>
+        private static bool MirrorStillQueuedFor(TacticalActor actor)
+        {
+            if (actor == null) return false;
+            for (int i = 0; i < _queuedMirrors.Count; i++)
+                if (ReferenceEquals(_queuedMirrors[i].Actor, actor)) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// MUST THE SETTLE WAIT — pure, so RailCheck executes the outcome instead of asserting a call.
+        ///
+        /// THE DEFECT (client log 2026-08-09, 46630 → 46804). The host answers a clicked order with a mirror
+        /// AND, in the SAME frame, a settle: activating the shot changes the actor's status set (StandBy comes
+        /// off), and a status-set change sends a settle. On the client both land in one frame, in that order —
+        /// and at that instant the mirrored shot has only been ENQUEUED behind <c>IdleAbility</c>, which
+        /// <c>HasExecutingAbility</c> reports as NOT executing (<c>TacticalActorBase</c>:695-704 ignores the
+        /// idle). So the hold below let the settle straight through and it reconciled statuses, traits, the
+        /// selected weapon and the transform UNDER a shot that had not started: measured as
+        /// "Soldier_2 is waiting for animation FF_FirstShot_AR timed out. Current animation: HL_IdleAlert_AR",
+        /// with <c>FireWeaponAtTargetCrt() started</c> arriving 2.97 s after the mirror while the host had
+        /// finished the whole burst 1.5 s earlier — the owner's "the soldier raises the weapon, drops it,
+        /// raises it again, and only fires once every other peer is done".
+        ///
+        /// A9 is what made this the norm rather than a rarity: before it, the acting peer had ALREADY played
+        /// its own click, so its actor really was executing when the settle arrived and the hold caught it.
+        ///
+        /// NOT A QUORUM and not a new wait: the thing waited on is this peer's own action channel, no peer is
+        /// consulted, and the bound is the one that was already here — <see cref="SettleMustBeForced"/> forces
+        /// the settle at the 10 s ceiling, and <see cref="TickQueuedMirrors"/> drops the queue entry at its own
+        /// 10 s ceiling, whichever comes first.</summary>
+        internal static bool SettleWaitsForTheOrderItLandedWith(bool executing, bool mirrorStillQueued)
+            => executing || mirrorStillQueued;
 
         /// <summary>Pumped from <see cref="ClientTick"/> — mirrors only ever queue on a receiving peer, and
         /// the host receives none. A record that starts is dropped silently; one that does not is named.</summary>
@@ -3874,7 +3952,11 @@ namespace Multiplayer.Tactical
                     (lost ?? (lost = new List<int>())).Add(kv.Key);
                     continue;
                 }
-                if (actor.HasExecutingAbility() && !kv.Value.Forced)
+                // EXECUTING **OR STILL IN LINE** — see SettleWaitsForTheOrderItLandedWith. A mirror that has
+                // been Activate()d but not started reads as "executing nothing", and the host's settle for the
+                // very same order lands in that window on every shot since A9.
+                if (SettleWaitsForTheOrderItLandedWith(actor.HasExecutingAbility(), MirrorStillQueuedFor(actor))
+                    && !kv.Value.Forced)
                 {
                     var held = kv.Value;
                     ++held.WaitedFrames;
@@ -3895,7 +3977,9 @@ namespace Multiplayer.Tactical
                     {
                         if (held.WaitedFrames % SettleWarnFrames == 0)
                             Debug.LogWarning("[Multiplayer][tac] holding the settle for " + actor.name + " — it has " +
-                                             "been executing an ability for " + (held.WaitedFrames / 60) + "s. The " +
+                                             "been " + (actor.HasExecutingAbility() ? "executing an ability"
+                                                                                    : "holding a mirrored order that has not started") +
+                                             " for " + (held.WaitedFrames / 60) + "s. The " +
                                              "correction is still pending, not lost.");
                         continue;
                     }
