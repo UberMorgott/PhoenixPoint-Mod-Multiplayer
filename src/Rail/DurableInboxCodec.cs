@@ -11,12 +11,13 @@ namespace Multiplayer.Network.Sync
         private const byte Schema = 1;
         private const int MaxStringBytes = 4096;
         private const int MaxCollection = 1024;
+        private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
 
         internal static byte[] Encode(InboxMessage message)
         {
             if (message == null) throw new ArgumentNullException(nameof(message));
             using (var stream = new MemoryStream())
-            using (var writer = new BinaryWriter(stream, Encoding.UTF8))
+            using (var writer = new BinaryWriter(stream, StrictUtf8))
             {
                 writer.Write(Schema);
                 writer.Write((byte)message.Kind);
@@ -55,7 +56,7 @@ namespace Multiplayer.Network.Sync
             try
             {
                 using (var stream = new MemoryStream(payload, false))
-                using (var reader = new BinaryReader(stream, Encoding.UTF8))
+                using (var reader = new BinaryReader(stream, StrictUtf8))
                 {
                     if (reader.ReadByte() != Schema) throw new InvalidDataException("unknown schema");
                     var kind = (InboxMessageKind)reader.ReadByte();
@@ -91,7 +92,7 @@ namespace Multiplayer.Network.Sync
         internal static byte[] EncodeLedger(IEnumerable<InboxEntry> entries)
         {
             using (var stream = new MemoryStream())
-            using (var writer = new BinaryWriter(stream, Encoding.UTF8))
+            using (var writer = new BinaryWriter(stream, StrictUtf8))
             {
                 var ordered = entries.OrderBy(e => e.Occurrence).ThenBy(e => e.Membership).ToArray();
                 WriteCount(writer, ordered.Length);
@@ -133,7 +134,7 @@ namespace Multiplayer.Network.Sync
 
         private static void WriteString(BinaryWriter writer, string value)
         {
-            var bytes = Encoding.UTF8.GetBytes(InboxIdentity.Required(value, nameof(value)));
+            var bytes = StrictUtf8.GetBytes(InboxIdentity.Required(value, nameof(value)));
             if (bytes.Length > MaxStringBytes) throw new ArgumentOutOfRangeException(nameof(value), "string exceeds codec bound");
             writer.Write((ushort)bytes.Length);
             writer.Write(bytes);

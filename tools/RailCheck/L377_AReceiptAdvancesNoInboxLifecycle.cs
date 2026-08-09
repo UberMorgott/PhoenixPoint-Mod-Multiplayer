@@ -76,6 +76,25 @@ namespace RailCheck
                 !expectedLifecycle.EncodeCanonical().SequenceEqual(lifecycle.Ledger.EncodeCanonical()))
                 yield return "L377 lifecycle-not-narrow: explicit lifecycle did not change only that peer at its named occurrence";
 
+            var sameState = DurableInboxReducer.Apply(ledger,
+                InboxCommand.SetLifecycle(occurrence, member, InboxLifecycle.Open, 8));
+            if (!sameState.Changed || sameState.Ledger.Get(occurrence, member).LifecycleRevision != 8)
+                yield return "L377 same-lifecycle-revision-not-advanced";
+            var delayed = DurableInboxReducer.Apply(sameState.Ledger,
+                InboxCommand.SetLifecycle(occurrence, member, InboxLifecycle.Read, 7));
+            if (delayed.Changed || delayed.Ledger.Get(occurrence, member).Lifecycle != InboxLifecycle.Open)
+                yield return "L377 delayed-transition-beat-newer-same-state-revision";
+
+            var dismissed = ledger.Get(sibling, otherMember);
+            if (DurableInboxReducer.Apply(ledger,
+                    InboxCommand.SetLifecycle(sibling, otherMember, InboxLifecycle.Open, 7)).Changed ||
+                DurableInboxReducer.Apply(ledger,
+                    InboxCommand.SetLifecycle(sibling, member, InboxLifecycle.Read, 2)).Changed ||
+                DurableInboxReducer.Apply(ledger,
+                    InboxCommand.SetLifecycle(occurrence, member, (InboxLifecycle)0x7f, 4)).Changed ||
+                ledger.Get(sibling, otherMember).Lifecycle != dismissed.Lifecycle)
+                yield return "L377 reducer-accepted-illegal-lifecycle-transition";
+
             // POSITIVE CONTROL: the pre-fix ACK-as-read mutation must be observable by the byte comparison above.
             var ackAsRead = DurableInboxReducer.Apply(ledger,
                 InboxCommand.SetLifecycle(occurrence, member, InboxLifecycle.Read, 4));
@@ -180,6 +199,17 @@ namespace RailCheck
             }
             catch (ArgumentException) { accepted = false; }
             if (accepted) yield return "L377 codec-accepted-foreign-canonical-namespace";
+
+            accepted = true;
+            try
+            {
+                DurableInboxCodec.Encode(new InboxMessage(message.Kind, message.Occurrence,
+                    new CanonicalResultId(message.Occurrence, "\uD800"), message.RewardIds,
+                    message.Membership, message.Order, message.LifecycleRevision,
+                    message.TombstoneRevision, message.Lifecycle, message.ChoiceId));
+            }
+            catch (System.Text.EncoderFallbackException) { accepted = false; }
+            if (accepted) yield return "L377 codec-accepted-malformed-utf16";
         }
 
         private static IEnumerable<string> EnvelopeContract()
