@@ -375,17 +375,17 @@ namespace Multiplayer.Network
         {
             NoteProgress(); // flag edge (native load started / finished)
 
-            // THE PUMP'S WINDOW CLOSES ON THIS LINE, AND THIS IS THE LAST FRAME THAT CAN PUBLISH ITS 100.
-            // 98fa85e put the terminal 100 in the pump's `LoadingProgress == null` branch — which NEVER RUNS:
-            // Player.log has 46 + 45 + … "phase-2 pump: slot=0 pct=NN" samples across three loads and not one
-            // "LoadingProgress null → data loaded" line, because the curtain reaches Playing/Loaded FIRST and
-            // routes here. Clearing _loadingLevel drops LoadPhaseStarted, which drops HostEntryLoad in the
-            // same statement, so the pump's whole `if (InPhase2 || HostEntryLoad)` block is skipped from the
-            // very next frame and the branch holding the 100 is unreachable. The last number the other peers
-            // ever saw stayed whatever the eased fillAmount had reached — measured 80 and 62 on the host's own
-            // geoscape loads. Publishing HERE covers the host (whose window is HostEntryLoad only, never
-            // InPhase2 — see HostEntryLoad) and the client alike, and the older branch stays for the case it
-            // was written for: LoadingProgress ending while the curtain is still up.
+            // THE PUMP'S WINDOW CLOSES ON THIS LINE, AND THIS IS THE ONLY PLACE ITS 100 CAN BE PUBLISHED.
+            // 98fa85e put the terminal 100 in the pump's `LoadingProgress == null` arm, which is unreachable:
+            // Base.Levels/Level.cs nulls `Level.LoadingProgress` at :146 and then, with no yield in between,
+            // runs `OnScenesLoaded()`:148 → `SetState(State.Loaded)`:206 — the transition CurtainShowPatch
+            // (patched onto LevelSwitchCurtainController.OnLevelStateChanged) answers by calling THIS method
+            // with null. No Update tick exists between the two, so the pump never sees a null LoadingProgress
+            // on a live level; the 2026-08-09 soak agrees, 26/29/29 pump samples and zero "LoadingProgress
+            // null" lines on host + both clients. The last number the other peers ever saw therefore stayed
+            // whatever the eased fillAmount had reached — 80 on the host's geoscape load, 62 on the next.
+            // Publish before the clear, while both window flags still read true: covers the HOST (whose
+            // window is HostEntryLoad only, never InPhase2 — see HostEntryLoad) and the client alike.
             // Done is NOT reported here — only OnReachedPlaying does that, so the reveal barrier is untouched.
             if (level == null && _lastReportedLoadPct >= 0 && (InPhase2 || HostEntryLoad))
             {
@@ -2579,26 +2579,14 @@ namespace Multiplayer.Network
                         else PublishHostEntryLoad(pct);
                     }
                 }
-                else if (_lastReportedLoadPct >= 0)
-                {
-                    // Native DATA load finished (LoadingProgress went null) — but the peer is NOT yet
-                    // playable: scene instantiate/init still runs until Loaded→Playing. Done is reported
-                    // ONLY at OnReachedPlaying (curtain-liftable), so the all-loaded reveal can never fire
-                    // while a peer is still initializing (that early RevealAll opened the curtain gate
-                    // before the slow peer was actually in — the barrier bug, live RCA 2026-07-11).
-                    // PUBLISH THE 100 FIRST. The bar above ships the native widget's EASED fillAmount, which
-                    // is always chasing lp.Progress from behind — so when LoadingProgress goes null the ease
-                    // is abandoned mid-flight and the last number the other peers ever saw was whatever it
-                    // had reached: measured 80 on every geoscape load and 94 on every tactical one, never
-                    // 100. The data load genuinely IS complete here (that is what null means), so this is
-                    // the true final sample, not a cosmetic round-up. 100 painted from tracker.IsDone
-                    // (LoadOverlayController.cs:204) does not cover it — that fires together with the
-                    // reveal, so the player never sees the bar fill.
-                    if (InPhase2) ReportLoadProgress(100);
-                    else PublishHostEntryLoad(100);
-                    _lastReportedLoadPct = -1;
-                    Debug.Log("[Multiplayer] phase-2 pump: LoadingProgress null → data loaded (published 100), awaiting Playing");
-                }
+                // THERE IS NO `else if (lp == null)` ARM, AND THERE CANNOT BE ONE. `Level.LoadingProgress`
+                // is nulled in exactly one place — Base.Levels/Level.cs:146 — and the two lines after it,
+                // with NO yield in between, are `OnScenesLoaded()`:148 → `SetState(State.Loaded)`:206, the
+                // transition CurtainShowPatch answers with `SetLoadingLevel(null)`. So no Update tick can
+                // ever run while `_loadingLevel` is non-null and its `LoadingProgress` is null: that arm was
+                // unreachable by construction, which is why the terminal 100 that 98fa85e put inside it was
+                // never published on any peer (three loads, 26/29/29 pump samples, 0 "LoadingProgress null"
+                // lines across host + both clients, 2026-08-09 soak). The publish lives in SetLoadingLevel.
             }
 
             // THERE IS NO TIMED RELEASE, AND THAT IS THE RULE, NOT AN OMISSION (user ruling 2026-08-05).
