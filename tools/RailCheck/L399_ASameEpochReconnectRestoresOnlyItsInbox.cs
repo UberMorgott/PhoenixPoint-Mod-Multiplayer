@@ -30,8 +30,24 @@ namespace RailCheck
             if (host.Reconnect(new MembershipId("player", 5)).Any())
                 yield return "L399 unknown-new-epoch-was-granted-history";
 
-            // POSITIVE CONTROL: reconnect must not mint or duplicate an entry.
-            if (host.Ledger.EntryCount != 3) yield return "L399 control-not-red: reconnect changed committed ledger cardinality";
+            var revision = host.CommittedRevision;
+            var rebuilt = new HostInboxSequencer(host.Ledger);
+            if (rebuilt.CommittedRevision != revision ||
+                !rebuilt.Reconnect(member).Select(entry => entry.Occurrence).SequenceEqual(expectedOrder))
+                yield return "L399 reconstruction-lost-membership-revision-or-host-order";
+            var next = new OccurrenceId("event", "after-reconstruction", new[] { "subject" });
+            if (!rebuilt.CreateOccurrence(next) || rebuilt.CommittedRevision != revision + 1 ||
+                !rebuilt.Reconnect(member).Last().Occurrence.Equals(next))
+                yield return "L399 reconstructed-authority-did-not-continue";
+            if (!host.Ledger.EncodeCanonical().SequenceEqual(
+                new HostLedger(host.Ledger.AllEntries.Reverse(), host.Ledger.CommittedRevision,
+                    host.Ledger.Members).EncodeCanonical()))
+                yield return "L399 canonical-ledger-changed-with-incidental-list-order";
+
+            // POSITIVE CONTROL: reconnect must not mint or duplicate an entry, and identity order opposes host order.
+            if (host.Ledger.EntryCount != 3 || own.CompareTo(shared) <= 0)
+                yield return "L399 control-not-red: fixture-cannot-detect-reconnect-mutation-or-order-loss";
         }
     }
+
 }

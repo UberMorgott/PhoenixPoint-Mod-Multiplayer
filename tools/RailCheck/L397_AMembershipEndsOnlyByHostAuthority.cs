@@ -74,6 +74,28 @@ namespace RailCheck
                 maxHost.Ledger.Get(maxOccurrences[3], maxMember).LifecycleRevision != ulong.MaxValue)
                 yield return "L397 terminal-max-control-was-rewritten";
 
+            var maxLedger = new HostLedger(
+                new[] { new InboxEntry(maxOccurrences[0], maxMember, InboxLifecycle.Queued,
+                    default(CanonicalChoiceId), 1, 0, ulong.MaxValue) }, ulong.MaxValue,
+                new[] { new KeyValuePair<MembershipId, MemberPresence>(maxMember, MemberPresence.Active) });
+            foreach (var operation in new System.Func<HostInboxSequencer, bool>[]
+            {
+                sequencer => sequencer.Enroll(new MembershipId("other", 1), MemberPresence.Active),
+                sequencer => sequencer.CreateOccurrence(new OccurrenceId("event", "new", new[] { "subject" })),
+                sequencer => sequencer.ApplyLifecycle(maxMember, maxOccurrences[0], InboxLifecycle.Open, 2),
+                sequencer => sequencer.Tombstone(maxOccurrences[0], 2)
+            })
+            {
+                var sequencer = new HostInboxSequencer(maxLedger);
+                var before = sequencer.Ledger.EncodeCanonical();
+                var overflowed = false;
+                try { operation(sequencer); }
+                catch (System.OverflowException) { overflowed = true; }
+                if (!overflowed || sequencer.CommittedRevision != ulong.MaxValue ||
+                    !before.SequenceEqual(sequencer.Ledger.EncodeCanonical()))
+                    yield return "L397 rejected-overflow-changed-authority";
+            }
+
             // POSITIVE CONTROL: no Steam id, roster slot, ACK, readiness, or quorum input exists on the authority methods.
             foreach (var method in typeof(HostInboxSequencer).GetMethods(System.Reflection.BindingFlags.Instance |
                          System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public))

@@ -240,39 +240,55 @@ namespace Multiplayer.Network.Sync
         internal CanonicalChoiceId Choice { get; }
         internal ulong LifecycleRevision { get; }
         internal ulong TombstoneRevision { get; }
+        internal ulong HostOrderKey { get; }
         internal InboxEntry(OccurrenceId occurrence, MembershipId membership, InboxLifecycle lifecycle,
-            CanonicalChoiceId choice, ulong lifecycleRevision, ulong tombstoneRevision)
+            CanonicalChoiceId choice, ulong lifecycleRevision, ulong tombstoneRevision, ulong hostOrderKey = 0)
         {
             Occurrence = occurrence; Membership = membership; Lifecycle = lifecycle; Choice = choice;
-            LifecycleRevision = lifecycleRevision; TombstoneRevision = tombstoneRevision;
+            LifecycleRevision = lifecycleRevision; TombstoneRevision = tombstoneRevision; HostOrderKey = hostOrderKey;
         }
         internal InboxEntry WithLifecycle(InboxLifecycle lifecycle, ulong revision) =>
-            new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision);
+            new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision, HostOrderKey);
     }
 
     internal sealed class HostLedger
     {
         private readonly IReadOnlyList<InboxEntry> _entries;
-        internal HostLedger(IEnumerable<InboxEntry> entries)
+        private readonly IReadOnlyDictionary<MembershipId, MemberPresence> _members;
+        internal HostLedger(IEnumerable<InboxEntry> entries, ulong committedRevision = 0,
+            IEnumerable<KeyValuePair<MembershipId, MemberPresence>> members = null)
         {
             var copy = (entries ?? throw new ArgumentNullException(nameof(entries))).ToArray();
             if (copy.GroupBy(e => Tuple.Create(e.Occurrence, e.Membership)).Any(g => g.Count() != 1))
                 throw new ArgumentException("duplicate ledger entry", nameof(entries));
+            if (copy.GroupBy(e => e.Occurrence).Any(g => g.Select(e => e.HostOrderKey).Distinct().Count() != 1))
+                throw new ArgumentException("occurrence has inconsistent host order", nameof(entries));
+            if (copy.Any(e => e.HostOrderKey > committedRevision))
+                throw new ArgumentException("host order exceeds committed revision", nameof(entries));
+            var memberCopy = members == null
+                ? copy.Select(e => e.Membership).Distinct().ToDictionary(m => m, m => MemberPresence.Disconnected)
+                : members.ToDictionary(pair => pair.Key, pair => pair.Value);
             _entries = new ReadOnlyCollection<InboxEntry>(copy);
+            _members = new ReadOnlyDictionary<MembershipId, MemberPresence>(memberCopy);
+            CommittedRevision = committedRevision;
         }
         internal int EntryCount => _entries.Count;
+        internal ulong CommittedRevision { get; }
         internal IReadOnlyList<InboxEntry> AllEntries => _entries;
+        internal IReadOnlyDictionary<MembershipId, MemberPresence> Members => _members;
         internal IReadOnlyList<InboxEntry> EntriesFor(MembershipId member) => new ReadOnlyCollection<InboxEntry>(
-            _entries.Where(e => e.Membership.Equals(member)).ToArray());
+            _entries.Where(e => e.Membership.Equals(member)).OrderBy(e => e.HostOrderKey).ThenBy(e => e.Occurrence).ToArray());
         internal bool Contains(OccurrenceId occurrence) => _entries.Any(e => e.Occurrence.Equals(occurrence));
         internal InboxEntry Get(OccurrenceId occurrence, MembershipId member) =>
             _entries.Single(e => e.Occurrence.Equals(occurrence) && e.Membership.Equals(member));
-        internal HostLedger Add(IEnumerable<InboxEntry> additions) => new HostLedger(_entries.Concat(additions));
+        internal HostLedger Add(IEnumerable<InboxEntry> additions) => new HostLedger(_entries.Concat(additions), CommittedRevision, _members);
         internal HostLedger Replace(InboxEntry replacement) => new HostLedger(_entries.Select(e =>
-            e.Occurrence.Equals(replacement.Occurrence) && e.Membership.Equals(replacement.Membership) ? replacement : e));
+            e.Occurrence.Equals(replacement.Occurrence) && e.Membership.Equals(replacement.Membership) ? replacement : e), CommittedRevision, _members);
         internal HostLedger ReplaceOccurrence(OccurrenceId occurrence, Func<InboxEntry, InboxEntry> replace) =>
-            new HostLedger(_entries.Select(e => e.Occurrence.Equals(occurrence) ? replace(e) : e));
-        internal byte[] EncodeCanonical() => DurableInboxCodec.EncodeLedger(_entries);
+            new HostLedger(_entries.Select(e => e.Occurrence.Equals(occurrence) ? replace(e) : e), CommittedRevision, _members);
+        internal HostLedger WithAuthority(ulong revision, IEnumerable<KeyValuePair<MembershipId, MemberPresence>> members) =>
+            new HostLedger(_entries, revision, members);
+        internal byte[] EncodeCanonical() => DurableInboxCodec.EncodeLedger(_entries, CommittedRevision, _members);
     }
 
 internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeoscape }
@@ -289,17 +305,22 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
         internal HostInboxSequencer(HostLedger ledger)
         {
             Ledger = ledger ?? throw new ArgumentNullException(nameof(ledger));
+            foreach (var pair in ledger.Members) _members.Add(pair.Key, pair.Value);
             foreach (var entry in ledger.AllEntries) _occurrences.Add(entry.Occurrence);
+            CommittedRevision = ledger.CommittedRevision;
         }
 
         internal bool Enroll(MembershipId member, MemberPresence presence)
         {
             lock (_authority)
             {
-                if (!Enum.IsDefined(typeof(MemberPresence), presence)) return false;
-                if (_members.ContainsKey(member)) { _members[member] = presence; return false; }
+                if (!Enum.IsDefined(typeof(MemberPresence), presence) || _members.ContainsKey(member)) return false;
+                var committedRevision = checked(CommittedRevision + 1);
+                var members = new Dictionary<MembershipId, MemberPresence>(_members) { [member] = presence };
+                var ledger = Ledger.WithAuthority(committedRevision, members);
                 _members.Add(member, presence);
-                CommittedRevision++;
+                Ledger = ledger;
+                CommittedRevision = committedRevision;
                 return true;
             }
         }
@@ -309,7 +330,10 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
             lock (_authority)
             {
                 if (!_members.ContainsKey(member) || !Enum.IsDefined(typeof(MemberPresence), presence)) return false;
+                var members = new Dictionary<MembershipId, MemberPresence>(_members) { [member] = presence };
+                var ledger = Ledger.WithAuthority(CommittedRevision, members);
                 _members[member] = presence;
+                Ledger = ledger;
                 return true;
             }
         }
@@ -318,10 +342,14 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
         {
             lock (_authority)
             {
-                if (!_occurrences.Add(occurrence)) return false;
-                Ledger = Ledger.Add(_members.Keys.Select(member => new InboxEntry(occurrence, member,
-                    InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0)));
-                CommittedRevision++;
+                if (_occurrences.Contains(occurrence)) return false;
+                var committedRevision = checked(CommittedRevision + 1);
+                var additions = _members.Keys.Select(member => new InboxEntry(occurrence, member,
+                    InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, committedRevision)).ToArray();
+                var ledger = new HostLedger(Ledger.AllEntries.Concat(additions), committedRevision, _members);
+                _occurrences.Add(occurrence);
+                Ledger = ledger;
+                CommittedRevision = committedRevision;
                 return true;
             }
         }
@@ -333,9 +361,11 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
                 if (!_members.ContainsKey(member)) return false;
                 var result = DurableInboxReducer.Apply(Ledger,
                     InboxCommand.SetLifecycle(occurrence, member, lifecycle, revision));
-                Ledger = result.Ledger;
-                if (result.Changed) CommittedRevision++;
-                return result.Changed;
+                if (!result.Changed) return false;
+                var committedRevision = checked(CommittedRevision + 1);
+                Ledger = result.Ledger.WithAuthority(committedRevision, _members);
+                CommittedRevision = committedRevision;
+                return true;
             }
         }
 
@@ -345,15 +375,18 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
             {
                 if (!_occurrences.Contains(occurrence)) return false;
                 var changed = false;
-                Ledger = Ledger.ReplaceOccurrence(occurrence, entry =>
+                var ledger = Ledger.ReplaceOccurrence(occurrence, entry =>
                 {
                     if (revision <= entry.TombstoneRevision) return entry;
                     changed = true;
                     return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
-                        entry.Choice, Math.Max(entry.LifecycleRevision, revision), revision);
+                        entry.Choice, Math.Max(entry.LifecycleRevision, revision), revision, entry.HostOrderKey);
                 });
-                if (changed) CommittedRevision++;
-                return changed;
+                if (!changed) return false;
+                var committedRevision = checked(CommittedRevision + 1);
+                Ledger = ledger.WithAuthority(committedRevision, _members);
+                CommittedRevision = committedRevision;
+                return true;
             }
         }
 
@@ -368,11 +401,14 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
                     {
                         var revision = checked(entry.LifecycleRevision + 1);
                         return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
-                            entry.Choice, revision, Math.Max(entry.TombstoneRevision, revision));
+                            entry.Choice, revision, Math.Max(entry.TombstoneRevision, revision), entry.HostOrderKey);
                     })
                     .ToArray();
                 var committedRevision = checked(CommittedRevision + 1);
-                var ledger = replacement.Aggregate(Ledger, (current, entry) => current.Replace(entry));
+                var members = new Dictionary<MembershipId, MemberPresence>(_members);
+                members.Remove(member);
+                var ledger = replacement.Aggregate(Ledger, (current, entry) => current.Replace(entry))
+                    .WithAuthority(committedRevision, members);
                 Ledger = ledger;
                 _members.Remove(member);
                 CommittedRevision = committedRevision;

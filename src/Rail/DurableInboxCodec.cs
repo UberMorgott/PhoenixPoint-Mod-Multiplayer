@@ -89,15 +89,26 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        internal static byte[] EncodeLedger(IEnumerable<InboxEntry> entries)
+        internal static byte[] EncodeLedger(IEnumerable<InboxEntry> entries, ulong committedRevision,
+            IEnumerable<KeyValuePair<MembershipId, MemberPresence>> members)
         {
             using (var stream = new MemoryStream())
             using (var writer = new BinaryWriter(stream, StrictUtf8))
             {
-                var ordered = entries.OrderBy(e => e.Occurrence).ThenBy(e => e.Membership).ToArray();
+                writer.Write(committedRevision);
+                var orderedMembers = members.OrderBy(pair => pair.Key).ToArray();
+                WriteCount(writer, orderedMembers.Length);
+                foreach (var pair in orderedMembers)
+                {
+                    WriteString(writer, pair.Key.PlayerGuid);
+                    writer.Write(pair.Key.Epoch);
+                    writer.Write((byte)pair.Value);
+                }
+                var ordered = entries.OrderBy(e => e.HostOrderKey).ThenBy(e => e.Occurrence).ThenBy(e => e.Membership).ToArray();
                 WriteCount(writer, ordered.Length);
                 foreach (var entry in ordered)
                 {
+                    writer.Write(entry.HostOrderKey);
                     WriteOccurrence(writer, entry.Occurrence);
                     WriteString(writer, entry.Membership.PlayerGuid);
                     writer.Write(entry.Membership.Epoch);
