@@ -43,9 +43,31 @@ namespace RailCheck
     ///   (e) premise — the private native members the repaint drives must still resolve.
     ///   (f) POSITIVE CONTROL, EXECUTED — the same shapes over <see cref="FakeSeam.AlwaysServable"/> MUST come
     ///       back red on (a).
+    ///   (g) <c>counts-a-container-that-left</c> — ADDED 2026-08-09, because arms (a)-(f) were ALL GREEN while
+    ///       the screen never closed at all. They proved the verdict over numbers handed to them and never
+    ///       once proved the numbers. <c>GeoMission.GetDeploymentSources</c>:1489-1492 adds
+    ///       <c>priorityContainer</c> UNCONDITIONALLY — it never asks where it is — so
+    ///       <c>_initialContainer</c>, the aircraft the screen was opened for, kept itself and its five
+    ///       soldiers in <c>sources</c>/<c>pool</c> after take-off and <c>IsServable</c> was handed 1/5
+    ///       forever. Measured (multiplayer-2.log 2026-08-09): squad screen opened 02:42:15.905 "1
+    ///       container(s), 5 soldier(s)", the aircraft left at 02:42:18.746 (<c>nav re-seed V#1 → 1 leg(s)</c>),
+    ///       the repaint ran 8 ms later and again at 02:42:19.836 — and NEITHER <c>closing the current
+    ///       window</c> nor <c>DROPPED the queued</c> was ever printed, both of which are unconditional. The
+    ///       player was still on that screen at 02:44:13. So every route into
+    ///       <c>GetDeploymentSources</c> must first put its priority through
+    ///       <see cref="DeploymentRosterRefresh.StillAtSite"/>, and that must ask the GAME
+    ///       (<c>GeoSite.CanTransferBetweenContainer</c>:1042-1045), never a predicate of ours.
+    ///   (h) <c>sweep-throws-with-no-view</c> — EXECUTED, and the one arm here that runs production code end
+    ///       to end: <see cref="DeploymentWindowClose.DropUnservableQueued"/> is called with no level at all,
+    ///       which is what RailCheck always has, and MUST NOT THROW. It used to: the pending list is read
+    ///       reflectively off <c>GeoscapeView</c>, so <c>GetValue(null)</c> was a <c>TargetException</c> on
+    ///       every repaint taken in tactical or mid-load — 106 on the host and 3 on each client in one soak,
+    ///       all caught and logged by the caller, none of them red anywhere a law could see.
     ///
     /// Falsify: <c>IsServable => true</c> → (a); delete the postfix's <c>IsServable</c> call → (b); drop the
-    /// <c>SetUpInitialDeployment</c> invoke → (c); remove the Table key → (d).
+    /// <c>SetUpInitialDeployment</c> invoke → (c); remove the Table key → (d); delete any of the three
+    /// <c>StillAtSite</c> calls, or make it stop asking the site → (g); drop the <c>view == null</c> guard in
+    /// <c>DropUnservableQueued</c> → (h).
     /// </summary>
     internal static class L354_AnEmptySquadScreenIsNotServed
     {
@@ -118,6 +140,51 @@ namespace RailCheck
                 yield return "L354 premise-changed: UIStateRosterDeployment.SetUpInitialDeployment no longer " +
                              "resolves — the repaint cannot re-run the game's own enrol pass, so tick boxes and " +
                              "the START MISSION gate keep the values they had before the aircraft left.";
+
+            // ── (g) the COUNT itself: nothing may reach GetDeploymentSources with a stale priority ───
+            var still = refresh.GetMethod("StillAtSite", All);
+            var prefix = refresh.GetMethod("Prefix", All);
+            var counter = refresh.GetMethod("TryCount", All);
+            if (still == null || prefix == null || counter == null)
+                yield return "L354 premise-changed: DeploymentRosterRefresh.StillAtSite / .Prefix / .TryCount no " +
+                             "longer resolve whole. StillAtSite is the only thing standing between " +
+                             "GetDeploymentSources:1489-1492 — which adds the priority container blind — and a " +
+                             "squad screen that counts an aircraft that flew away three minutes ago.";
+            else
+            {
+                foreach (var route in new[] { counter, prefix, repaint })
+                    if (!Program.Callees(route, mod).Any(c => c != null && c.Name == "StillAtSite"))
+                        yield return "L354 counts-a-container-that-left: " + route.DeclaringType.Name + "." +
+                                     route.Name + " reaches GeoMission.GetDeploymentSources without putting its " +
+                                     "priority through StillAtSite first. That method adds the priority container " +
+                                     "UNCONDITIONALLY (GeoMission.cs:1489-1492), so the aircraft the screen was " +
+                                     "opened for counts itself and its soldiers forever — IsServable is handed 1/5 " +
+                                     "for an empty site, the open screen never sheds the departed squad and never " +
+                                     "closes, and every arm above stays green while it happens (measured " +
+                                     "2026-08-09 02:42:15→02:44:13).";
+                if (!CalleeNames(still).Contains("CanTransferBetweenContainer"))
+                    yield return "L354 asks-its-own-question: StillAtSite no longer calls " +
+                                 "GeoSite.CanTransferBetweenContainer:1042-1045. \"Is this container docked here\" " +
+                                 "is the game's own predicate and re-implementing it is the drift a1c11dd already " +
+                                 "paid for once — GeoVehicle.Travelling:211-216 nulls CurrentSite on take-off and " +
+                                 "that is the only fact this decision rests on.";
+            }
+
+            // ── (h) the sweep survives having no geoscape at all, EXECUTED ──────────────────────────
+            var sweepThrew = default(Exception);
+            // TargetException ONLY, and deliberately: that is the defect — a reflective read with a null
+            // target. Any other throw here is RailCheck having no Unity runtime rather than a claim about
+            // production, and turning the harness permanently red over the harness is how a law gets muted.
+            try { DeploymentWindowClose.DropUnservableQueued(); }
+            catch (TargetException ex) { sweepThrew = ex; }
+            catch { }
+            if (sweepThrew != null)
+                yield return "L354 sweep-throws-with-no-view: DropUnservableQueued threw with no geoscape level — " +
+                             sweepThrew.GetType().Name + ". OpenUiRepaint drives it from EVERY flush, including " +
+                             "the ones taken in tactical and mid-load, and the pending list it reads lives on " +
+                             "GeoscapeView (GeoscapeViewSwitchQuery:15, built per view at GeoscapeView.cs:335) — " +
+                             "so with no view the reflective read is GetValue(null). It threw 112 times in one " +
+                             "soak, caught and logged by the caller, and no law was any the wiser.";
 
             // ── (f) POSITIVE CONTROL ────────────────────────────────────────────────────────────────
             if (!Table(FakeSeam.AlwaysServable, "control").Any())

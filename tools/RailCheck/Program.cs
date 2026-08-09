@@ -332,6 +332,7 @@ namespace RailCheck
             Add(laws, () => L349_AHeldWindowWaitsForTheResupplyVerdict.Check());
             Add(laws, () => L350_ADepartedBriefIsGoneEverywhere.Check());
             Add(laws, () => L351_ADeclinedBriefDestroysNothing.Check());
+            Add(laws, () => L370_BackingOutOfTheSquadScreenDestroysNothing.Check());
             Add(laws, () => L352_ThePerPeerAnswerStaysHomeAndStillLands.Check());
             Add(laws, () => L354_AnEmptySquadScreenIsNotServed.Check());
             Add(laws, () => L355_ALaunchedMissionDoesNotArmASecondCountdown.Check());

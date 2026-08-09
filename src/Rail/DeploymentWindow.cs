@@ -313,6 +313,19 @@ namespace Multiplayer.Network.Sync
         internal static void DropUnservableQueued()
         {
             var view = View();
+            // NO VIEW, NO QUEUE — a proof, not an optimisation. The pending list is
+            // GeoscapeViewSwitchQuery._viewStateSwitchRequests:15, and the query itself is constructed
+            // per GeoscapeView (GeoscapeView.cs:138 + :335), so with no geoscape level there is no list
+            // in existence to sweep. A window raised for the geoscape crosses a battle as SERIALISED
+            // restore data (GeoscapeView.GetStateSwitchInstanceData:1298-1300 →
+            // GeoscapeViewSwitchQuery.RestoreData:39-56, replayed at GeoscapeView.cs:349) and is rebuilt
+            // into the NEXT view, where the next flush sweeps it. Without this line the reflective read
+            // below is GetValue(null) = TargetException on every repaint taken while this peer is in
+            // tactical or mid-load: 106 on the host and 3 on each client in the 2026-08-09 02:35-02:55
+            // soak, every one next to a [Multiplayer][tac] line or a level-load boundary. It was caught
+            // and logged by the caller (OpenUiRepaint.RepaintOpenGeoscapeScreen), so nothing downstream
+            // was lost — but 112 red lines for a sweep that had nothing to do is how a real one hides.
+            if (view == null) return;
             var query = WindowQueueSync.SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
             if (query == null || WindowOrder.RequestsField == null) return;
             if (!(WindowOrder.RequestsField.GetValue(query) is IList<GeoscapeViewStateSwitchRequest> pending)) return;

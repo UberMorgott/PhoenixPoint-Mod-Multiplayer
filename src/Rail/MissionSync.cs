@@ -1050,7 +1050,13 @@ namespace Multiplayer.Network.Sync
     ///
     /// Blocking is also the RIGHT co-op semantic, not merely the safe one: backing out of a screen is a
     /// navigation gesture, and one peer declining to launch must not cancel the mission for the others.
-    /// A host that really means to cancel still does, natively, and it reaches every client as the
+    ///
+    /// AND SINCE 2026-08-09 THAT SEMANTIC IS ROLE-SYMMETRIC, because the role was never the point — see
+    /// <see cref="Runs"/>. The gate used to wave the HOST through wholesale, so the very deletion `0b1549c`
+    /// closed at the mission BRIEF walked straight back in through the squad screen's Back button on the one
+    /// peer that is always present. What is refused is now the GESTURE (<see cref="BackingOutOfSquadScreen"/>)
+    /// rather than the peer: a host that really means to retire a mission still does, natively, through every
+    /// other caller — expiry, KeepEncounter, Complete, a destroyed site — and it reaches every client as the
     /// ordinary structural destroy.
     ///
     /// Discovered, not enumerated: <c>Cancel</c> is VIRTUAL with seven overrides in the shipped assembly
@@ -1082,19 +1088,66 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>PURE (RailCheck L370). Does the GAME'S OWN <c>Cancel</c> run?
+        ///
+        /// THE HOST ARM IS THE 2026-08-09 FIX, and it is the same rule <see cref="PerPeerModalAnswer.Runs"/>
+        /// already applies one funnel over. `0b1549c` made a DECLINED BRIEF per-peer and left the sibling
+        /// caller — the squad screen's own Back button — waving the host through, so the identical deletion
+        /// simply arrived one screen later. Measured in the 3-peer soak of 2026-08-09: the host opened the
+        /// squad screen for S#42 at 02:42:13.537 and backed out; both clients logged
+        /// <c>[MP][site] repaint S#42 … activeMission=none</c> at 02:42:17.501/.502, and the host then refused
+        /// a client's launch at 02:44:02.782 with "the host's site has no ActiveMission AT ALL". One player
+        /// leaving a screen deleted the mission for the team, exactly as before, through the door the brief
+        /// fix did not cover.
+        ///
+        /// THE TERM IS THE GESTURE, NOT THE ROLE. A host that really means to retire a mission still does —
+        /// expiry, <c>ShowMissionBriefing</c>:1891's KeepEncounter arm, <c>Complete</c>, a destroyed site —
+        /// because only ONE caller is navigation: <c>UIStateRosterDeployment.ToPreviousScreen</c>:256, which
+        /// runs <c>_mission.Cancel()</c> as its first statement (:258) while its own screen is still the
+        /// current view state. That is what <see cref="BackingOutOfSquadScreen"/> asks.
+        ///
+        /// NO QUORUM AND NO WAIT (P13): refusing a deletion makes nobody depend on anybody. The declining
+        /// peer still leaves — L91 arm (d) pins the reason, that ToPreviousScreen's own
+        /// <c>ResetViewState</c>/<c>SwitchToPreviousState</c> + <c>FinishQueriedState</c> sit BESIDE the call
+        /// we block and never inside it — and every other peer keeps a mission it can still fly.</summary>
+        internal static bool Runs(bool inSession, bool applying, bool isHost, bool backingOutOfSquadScreen)
+            => !inSession || applying || (isHost && !backingOutOfSquadScreen);
+
+        /// <summary>Is this cancel the SQUAD SCREEN'S BACK BUTTON? <c>ToPreviousScreen</c> is wired to the
+        /// close button (UIStateRosterDeployment.cs:99), the back button (:148) and the Cancel key
+        /// (<c>OnCancel</c>:248-253), and all three reach <c>_mission.Cancel()</c> at :258 — BEFORE the state
+        /// is popped, so the screen is still <c>GeoscapeView.CurrentViewState</c>:193 and still holds this
+        /// very mission (<c>Mission</c>:58). Asking the live screen rather than setting a scope flag keeps
+        /// this at the one funnel that already owns the concern instead of adding a second one.</summary>
+        private static bool BackingOutOfSquadScreen(GeoMission mission) =>
+            mission != null &&
+            GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.View?.CurrentViewState
+                is UIStateRosterDeployment dep && ReferenceEquals(dep.Mission, mission);
+
         private static bool Prefix(GeoMission __instance)
         {
             var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
-            if (SyncApplyScope.Active) return true;                                      // an apply may reach it
+            bool inSession = engine != null && engine.IsActiveSession;
+            bool host = inSession && engine.IsHost;
+            // Only asked inside a session: the probe walks the live view, and solo must cost nothing.
+            bool backingOut = inSession && BackingOutOfSquadScreen(__instance);
+            if (Runs(inSession, SyncApplyScope.Active, host, backingOut)) return true;
 
-            // Never silent (the dominant bug class): say whose cancel was refused and why. Log-once per
-            // site — cancelling is a per-mission gesture, not a per-frame one.
+            // Never silent (the dominant bug class): say WHOSE cancel was refused and by WHICH arm — the two
+            // are different bugs when this is next read. Log-once per site+role; cancelling is a per-mission
+            // gesture, not a per-frame one.
             string who = IdentityResolver.RootRef(__instance?.Site) ?? "S#?";
-            if (_logged.Add(who))
-                Debug.Log("[MP][mission] CLIENT cancel of the mission at " + who + " BLOCKED — it deletes shared " +
-                          "campaign state (Site.ActiveMission/DestroySite) the host owns; backing out of the " +
-                          "deployment screen is navigation, not a cancellation for every peer");
+            if (_logged.Add(who + (host ? "|host" : "|client")))
+                Debug.Log("[MP][mission] " + (host ? "HOST" : "CLIENT") + " cancel of the mission at " + who +
+                          " BLOCKED — it deletes shared campaign state (Site.ActiveMission/DestroySite, " +
+                          "GeoMission.cs:253-265) every peer is playing" + (host
+                              ? ", and this one came from the squad screen's own Back button " +
+                                "(UIStateRosterDeployment.ToPreviousScreen:256), which is NAVIGATION. The host " +
+                                "leaves the screen as it always did and the mission stays flyable for everyone; " +
+                                "a host that really means to retire a mission still can, through every other " +
+                                "caller"
+                              : "; backing out of the deployment screen is navigation, not a cancellation for " +
+                                "every peer"));
             return false;
         }
     }
