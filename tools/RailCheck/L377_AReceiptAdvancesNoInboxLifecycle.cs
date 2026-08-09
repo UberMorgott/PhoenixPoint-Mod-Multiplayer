@@ -95,6 +95,20 @@ namespace RailCheck
                 ledger.Get(sibling, otherMember).Lifecycle != dismissed.Lifecycle)
                 yield return "L377 reducer-accepted-illegal-lifecycle-transition";
 
+            var dismissedBefore = ledger.EncodeCanonical();
+            var dismissedToQueued = DurableInboxReducer.Apply(ledger,
+                InboxCommand.SetLifecycle(sibling, otherMember, InboxLifecycle.Queued, 7));
+            if (dismissedToQueued.Changed ||
+                !dismissedBefore.SequenceEqual(dismissedToQueued.Ledger.EncodeCanonical()))
+                yield return "L377 dismissed-returned-to-queued-or-mutated-ledger";
+
+            var readBefore = ledger.EncodeCanonical();
+            var readToOpen = DurableInboxReducer.Apply(ledger,
+                InboxCommand.SetLifecycle(occurrence, otherMember, InboxLifecycle.Open, 6));
+            if (readToOpen.Changed ||
+                !readBefore.SequenceEqual(readToOpen.Ledger.EncodeCanonical()))
+                yield return "L377 read-returned-to-open-or-mutated-ledger";
+
             // POSITIVE CONTROL: the pre-fix ACK-as-read mutation must be observable by the byte comparison above.
             var ackAsRead = DurableInboxReducer.Apply(ledger,
                 InboxCommand.SetLifecycle(occurrence, member, InboxLifecycle.Read, 4));
@@ -200,6 +214,17 @@ namespace RailCheck
             catch (ArgumentException) { accepted = false; }
             if (accepted) yield return "L377 codec-accepted-foreign-canonical-namespace";
 
+            var replacementMessage = new InboxMessage(message.Kind, message.Occurrence,
+                new CanonicalResultId(message.Occurrence, "�"), message.RewardIds,
+                message.Membership, message.Order, message.LifecycleRevision,
+                message.TombstoneRevision, message.Lifecycle, message.ChoiceId);
+            var replacementBytes = DurableInboxCodec.Encode(replacementMessage);
+            InboxMessage replacementDecoded;
+            if (!DurableInboxCodec.TryDecode(replacementBytes, out replacementDecoded, out refusal) ||
+                !replacementMessage.ResultId.Equals(replacementDecoded.ResultId) ||
+                !replacementBytes.SequenceEqual(DurableInboxCodec.Encode(replacementDecoded)))
+                yield return "L377 replacement-text-did-not-round-trip-byte-exactly";
+
             accepted = true;
             try
             {
@@ -209,7 +234,7 @@ namespace RailCheck
                     message.TombstoneRevision, message.Lifecycle, message.ChoiceId));
             }
             catch (System.Text.EncoderFallbackException) { accepted = false; }
-            if (accepted) yield return "L377 codec-accepted-malformed-utf16";
+            if (accepted) yield return "L377 codec-accepted-malformed-utf16-or-collided-with-replacement-text";
         }
 
         private static IEnumerable<string> EnvelopeContract()
