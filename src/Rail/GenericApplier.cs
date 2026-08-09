@@ -118,6 +118,21 @@ namespace Multiplayer.Network.Sync
             return level == null ? null : level.GetComponent<GeoLevelController>();
         }
 
+        /// <summary>The geoscape level whose own INITIALIZATION has finished. Latched by
+        /// <see cref="GeoscapeStartedPatch"/>; see it for why "the level object exists" is a different and
+        /// insufficient question. Latched as the LEVEL INSTANCE rather than a bool, so a teardown needs no
+        /// reset: a new geoscape is a new <see cref="GeoLevelController"/> and cannot match a stale latch,
+        /// and a destroyed one is never reference-equal to what <see cref="GeoLevel"/> returns.</summary>
+        private static GeoLevelController _startedLevel;
+
+        internal static void MarkGeoscapeStarted() => _startedLevel = GeoLevel();
+
+        private static GeoLevelController StartedGeoLevel()
+        {
+            var geo = GeoLevel();
+            return geo != null && ReferenceEquals(geo, _startedLevel) ? geo : null;
+        }
+
         /// <summary>Returns true when the surface was consumed (GeoRail, either direction).</summary>
         public static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
         {
@@ -195,7 +210,7 @@ namespace Multiplayer.Network.Sync
 
         private static void ApplyDelta(NetworkEngine engine, byte[] payload)
         {
-            var geo = GeoLevel();
+            var geo = StartedGeoLevel();
             if (geo == null) { MissedNoLevel(); return; } // mid-load — see MissedNoLevel for what that costs
 
             using (var ms = new MemoryStream(payload))
@@ -305,7 +320,7 @@ namespace Multiplayer.Network.Sync
         /// Anything else → logged once (the visible opt-out).</summary>
         private static void ApplyStructural(NetworkEngine engine, byte[] payload)
         {
-            var geo = GeoLevel();
+            var geo = StartedGeoLevel();
             if (geo == null) { MissedNoLevel(); return; } // mid-load — see MissedNoLevel for what that costs
 
             using (var ms = new MemoryStream(payload))
@@ -884,6 +899,28 @@ namespace Multiplayer.Network.Sync
                             // it would make every later create re-ask for it forever.
                             if (IdentityResolver.IsRefAddressableType(field.ValueType)) NoteRefDrop(path);
                             return;
+                        }
+                        // REDUCED-DTO twin, the third coercion beside FactionRef below and the wrapper
+                        // re-wrap in RailField.SetValue. At the DTO-twin swap above the HOST walked the
+                        // game's own *InstanceData, so the wire carries the reduction the game RECORDS — a
+                        // def as its string Id — while this field was retyped to the rich LIVE type
+                        // (RailMeta.LiveTypeWins). Convert it the way the game's own ProcessInstanceData
+                        // does. On the live-table path the wire already carries the rich value, so the test
+                        // is false and nothing runs.
+                        // Unresolvable → keep the client's live value (same L-C shape as Unresolved above):
+                        // before this the raw reduced value reached SetValue and threw, which the per-field
+                        // catch turned into ONE warning and a member that never mirrored again.
+                        if (v != null && !field.ValueType.IsInstanceOfType(v))
+                        {
+                            var live = RailMeta.LiveFromReduced(field.ValueType, v);
+                            if (live == null)
+                            {
+                                LogMissDrop(path, "reduced twin value '" + v + "' does not resolve onto " +
+                                                  field.ValueType.Name + " at " + path + "." + field.Name +
+                                                  " — live value kept");
+                                return;
+                            }
+                            v = live;
                         }
                         // FactionRef twin: the wire carries the faction's DEF; the live member holds the
                         // GeoFaction. Unknown def → keep the live value (same L-C shape as Unresolved).
@@ -1903,9 +1940,9 @@ namespace Multiplayer.Network.Sync
             catch { return 1f; }
         }
 
-        /// <summary>A batch arrived while this peer had NO GEOSCAPE LEVEL, so it was thrown away. Set at the
-        /// two <c>geo == null</c> returns, cleared by <see cref="ClientMissedBatchTick"/> once the level is
-        /// live.
+        /// <summary>A batch arrived while this peer had NO STARTED GEOSCAPE LEVEL, so it was thrown away.
+        /// Set at the two <see cref="StartedGeoLevel"/> returns, cleared by
+        /// <see cref="ClientMissedBatchTick"/> once the level is live.
         ///
         /// WHY IT HAS TO EXIST AT ALL. Those two returns used to be a SILENT swallow: no line, no counter,
         /// and — because <c>_lastSeq</c> is marked only AFTER the guard — no seq movement either, so the loss
@@ -1930,8 +1967,9 @@ namespace Multiplayer.Network.Sync
             if (_missedNoLevel) return;   // one line per window, not one per discarded batch
             _missedNoLevel = true;
             Debug.LogWarning("[Multiplayer][rail] GenericApplier: a host batch was DISCARDED — this peer has " +
-                             "no geoscape level yet (mid-load). It will ask for the whole state back the " +
-                             "moment the level is live; until then every further batch is dropped silently.");
+                             "no STARTED geoscape level yet (mid-load: the level object may already exist " +
+                             "while its graph is still being built). It will ask for the whole state back " +
+                             "the moment the level is live; until then every further batch is dropped silently.");
         }
 
         /// <summary>The one non-reactive resync trigger: THE LEVEL BECAME LIVE. Driven from SyncEngine.Tick
@@ -1942,7 +1980,7 @@ namespace Multiplayer.Network.Sync
         {
             if (!_missedNoLevel) return;
             if (engine == null || engine.IsHost || !engine.IsActiveSession) { _missedNoLevel = false; return; }
-            if (GeoLevel() == null) return;
+            if (StartedGeoLevel() == null) return; // same predicate the discard used, or the resend lands in the hole it is answering
             // Cleared even when the throttle eats the request: a full resend that went out in the last 5 s
             // carries this peer's missing state too, which is the same reason the full window is global.
             _missedNoLevel = false;
@@ -2078,5 +2116,41 @@ namespace Multiplayer.Network.Sync
             }
             catch { return null; }
         }
+    }
+
+    /// <summary>THE LEVEL IS BUILT, not merely present. <c>GameUtl.CurrentLevel()</c> answers a DIFFERENT
+    /// question from the one the applier's discard gate has to ask, and the gap between the two answers is
+    /// many frames wide: <c>GeoLevelController.LevelCrt</c> is a coroutine that keeps CONSTRUCTING the graph
+    /// long after the level object exists — every faction's <c>Research</c> and <c>ManufactureQueue</c> are
+    /// built inside <c>GeoFaction.OnLevelStart</c> → <c>SetupStartingComponents</c> (GeoFaction.cs:409/:566
+    /// → :779 <c>InitManufacturing</c> / :798 <c>SetupResearch</c>), which that coroutine only reaches at
+    /// GeoLevelController.cs:653.
+    ///
+    /// A batch landing inside that window is the worst shape this rail has: the ROOT resolves (the faction
+    /// object is already there), so nothing discards the batch — and then every entry under a still-null
+    /// sub-object is dropped one by one by "entity not found", which requests NOTHING. Measured 2026-08-09
+    /// (D:/PP-Instance2/Player.log:872-944, all inside second 65): 423 drops in one batch —
+    /// <c>F#….ManufactureQueue</c>, <c>F#….Research</c> and every <c>F#….Research.AllResearchesArray#…</c>
+    /// under them — followed by two <c>CRC backstop: root DIVERGED</c> on that faction. The peer whose level
+    /// OBJECT had not appeared yet took the geo==null path for the identical window, discarded the batches
+    /// and got all of them back. Widening that same gate is the whole fix; the CRC path needed no change,
+    /// it was the backstop doing its job over a hole this closes upstream.
+    ///
+    /// <c>ModManager.OnGeoscapeStart</c> (GeoLevelController.cs:757) is the game's OWN "the geoscape is
+    /// built" callback and the LAST line of that init block — the same seam this mod already trusts to know
+    /// a campaign is savable (<c>NewCampaignInterceptPatch.GeoscapeReadyPatch</c>). No frame counts, no
+    /// polled private field, and it stays correct when another mod makes the init slower.
+    ///
+    /// NOT A QUORUM (P13): what is waited on is THIS peer's own load, which ends by itself — no peer, and no
+    /// person, is asked to act.
+    ///
+    /// Takes no parameter on purpose: the game calls it as <c>OnGeoscapeStart(this)</c> from the level that
+    /// is starting, so the current level IS the argument, and binding by parameter name is one more way to
+    /// fail silently.</summary>
+    [HarmonyPatch(typeof(PhoenixPoint.Modding.ModManager), "OnGeoscapeStart")]
+    internal static class GeoscapeStartedPatch
+    {
+        [HarmonyPostfix]
+        public static void Postfix() => GenericApplier.MarkGeoscapeStarted();
     }
 }

@@ -1231,6 +1231,75 @@ namespace Multiplayer.Network.Sync
             return null;
         }
 
+        /// <summary>WRITE half of the REDUCED-DTO coercion — the half <see cref="LiveTypeWins"/> shipped
+        /// without, beside <see cref="WrapperField"/>'s re-wrap and <see cref="FactionByDef"/>.
+        ///
+        /// The retype alone is enough while BOTH peers walk the LIVE table: the host reads the rich member
+        /// and the DefRef/Enum codec carries it whole. It is NOT enough at the DTO-TWIN seam
+        /// (<c>GenericApplier</c>'s bridged swap), because there the ENCODER walked the game's own
+        /// <c>*InstanceData</c> with the DTO's own direct table — so the wire carries the REDUCTION the game
+        /// records, a def as its string Id (GeoHaven.cs:1525 <c>AssignedResearch.Id</c>) or an enum as its
+        /// underlying int (GeoScavengingSite.cs:119 <c>(int)_scavengingType</c>), while the field it lands on
+        /// was retyped to the rich live type. Measured 2026-08-09 on both clients:
+        /// <c>apply failed S#60.SerializationData.HavenData.AssignedResearchId: Object of type 'System.String'
+        /// cannot be converted to type 'ResearchDef'</c> — one warning line, and a haven's assigned research
+        /// that never mirrored at all. Generic by shape, not by member: this is the inverse of the reduction
+        /// <see cref="LiveTypeWins"/> licenses, so it closes every present and future member of that shape,
+        /// not the one that exposed it.
+        ///
+        /// ONE arm, not two: <see cref="LiveTypeWins"/> licenses two reductions and the ENUM one already
+        /// lands, because a DTO's underlying int arrives as <see cref="LeafKind.Int64"/> and
+        /// <c>DecodeLeaf</c> hands every numeric arm to <c>Coerce</c>, whose <c>declared.IsEnum</c> branch
+        /// IS <c>Enum.ToObject</c>. The def reduction is the one with no inverse anywhere: its wire form is
+        /// a String, and the String arm returns the raw string untouched by design.
+        ///
+        /// Null = the reduction did not resolve; the caller keeps the client's live value (boundary-law L-C),
+        /// exactly like <see cref="FactionByDef"/>. Never the raw reduced value, never a throw.</summary>
+        internal static object LiveFromReduced(Type liveT, object v)
+        {
+            if (v == null || liveT.IsInstanceOfType(v)) return v;
+            return v is string s && typeof(BaseDef).IsAssignableFrom(liveT) ? DefByReducedId(liveT, s) : null;
+        }
+
+        private static readonly Dictionary<Type, Dictionary<string, BaseDef>> _defsByReducedId =
+            new Dictionary<Type, Dictionary<string, BaseDef>>();
+
+        /// <summary>The def a reduced DTO string names. The rail's OWN def mechanism runs first — the
+        /// <see cref="LeafKind.DefRef"/> lookup, <c>DefRepository.GetDef</c> by Guid (see DecodeLeaf) — and
+        /// then the game's OTHER def reduction: the def's own <c>Id</c> member. Those are two different
+        /// strings and only the repository knows both — <c>GeoHaven</c> records <c>AssignedResearch.Id</c>
+        /// (:1525) and looks it back up BY ID (<c>Research.GetResearchById</c>, Research.cs:763), so
+        /// <c>GetDef</c> alone can never resolve one.
+        ///
+        /// Def-type agnostic, and indexed off the same single source both rungs read
+        /// (<c>DefRepository.GetAllDefs(type, inherited)</c>): any def type declaring a string <c>Id</c>
+        /// resolves through it, and one declaring none simply misses VISIBLY (null → the caller keeps the
+        /// live value) instead of throwing at the write.
+        /// ponytail: the per-type index is built once. A def minted AFTER that (DefRepository.CreateDef /
+        /// CreateRuntimeDef, which TFTV does use) is not in it and misses — clear the map on def-graph
+        /// change if a runtime def is ever recorded through a reduced DTO member.</summary>
+        internal static BaseDef DefByReducedId(Type defType, string id)
+        {
+            if (string.IsNullOrEmpty(id)) return null;
+            var repo = GameUtl.GameComponent<DefRepository>();
+            if (repo == null) return null; // pre-init — do NOT cache
+            var byGuid = repo.GetDef(id);
+            if (byGuid != null && defType.IsInstanceOfType(byGuid)) return byGuid;
+            if (!_defsByReducedId.TryGetValue(defType, out var map))
+            {
+                map = new Dictionary<string, BaseDef>(StringComparer.Ordinal);
+                var idFi = HarmonyLib.AccessTools.Field(defType, "Id");
+                if (idFi != null && idFi.FieldType == typeof(string))
+                    foreach (var d in repo.GetAllDefs(defType, inherited: true))
+                    {
+                        var key = idFi.GetValue(d) as string;
+                        if (!string.IsNullOrEmpty(key) && !map.ContainsKey(key)) map[key] = d;
+                    }
+                _defsByReducedId[defType] = map;
+            }
+            return map.TryGetValue(id, out var hit) ? hit : null;
+        }
+
         // ─── Type shape helpers ─────────────────────────────────────────────
         internal static Type[] GenericInterfaceArgs(Type t, Type genericDef)
         {
