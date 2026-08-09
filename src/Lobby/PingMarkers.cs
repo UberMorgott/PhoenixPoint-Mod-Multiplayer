@@ -594,24 +594,29 @@ namespace Multiplayer.UI
         /// else will ever see (the same reason <c>UIStateVehicleSelected.cs:714</c> instantiates its
         /// selection marker from the prefab rather than asking the pool for one).
         ///
+        /// <c>_Color</c> IS THE WAVES' COLOUR AND <c>_TintColor</c> IS NOT — READ OUT OF THE PREFAB, 2026-08-09.
+        /// The third guess at this property is the one that finally got measured, and it corrects the second:
+        /// <c>sharedassets0.assets</c> path_id 2466 is the shader object <c>Unlit/Colored, Animated Mask</c>
+        /// that <c>Pulse1</c>'s material <c>UI_GeoLocation_OngoingBattle_Pulse</c> actually references, and its
+        /// declared property table is exactly five entries — <c>_MainTex</c>, <c>_MaskTex</c>,
+        /// <c>_MaskTexRot</c>, <c>_MaskScale</c>, <c>_Color</c>. There is NO <c>_TintColor</c> on it. The
+        /// "byte 68715084" table quoted by <c>0594532</c> (and by law L251 arm (e)) — <c>_TintColor</c>,
+        /// <c>_Cutout</c>, <c>_InvFade</c>, <c>_SrcMode</c>/<c>_DstMode</c>, <c>_Tiling</c> — is some other,
+        /// particle shader's; it was read from a name occurrence, not from the object this material points at.
+        /// The <c>_TintColor</c> write below is kept only because L251 arm (e) asserts its presence; on this
+        /// prefab it is a no-op, and the line that paints is <c>_Color</c>.
+        ///
+        /// AND <c>_Color</c> IS ANIMATED, WHICH IS WHY WRITING IT ONCE CHANGED NOTHING — see
+        /// <see cref="LateUpdate"/>, which is what makes this method's write survive.
+        ///
+        /// THE ALPHA IS NOT OURS TO SET. The clip fades each wave out through the same <c>_Color</c>, so the
+        /// tint replaces RGB only and hands the animator's own alpha straight back; an empty block (nothing
+        /// written yet, first frame) seeds opaque.
+        ///
         /// <c>MaterialPropertyBlock</c>, never <c>renderer.material</c>: the block writes per-renderer
         /// without instancing a material — so there is no clone to leak when the marker is destroyed — and a
-        /// property the shader does not declare is silently IGNORED rather than logged as an error.
-        ///
-        /// <c>_TintColor</c> IS THE WAVES' COLOUR, AND THAT IS MEASURED, NOT GUESSED (2026-08-09). The waves
-        /// are <c>Pulse1</c>/<c>Pulse2</c> — MESH renderers on <c>Unlit/Colored, Animated Mask</c>, per this
-        /// method's own live log — and that shader's property table was read straight out of the shipped
-        /// asset (<c>PhoenixPointWin64_Data/sharedassets0.assets</c>, byte 68715084 — the file's ONLY
-        /// occurrence of the shader name): <c>_TintColor</c> "Tint Color", <c>_MainTex</c> "Particle Texture",
-        /// <c>_Cutout</c>, <c>_InvFade</c> "Soft Particles Factor", <c>_SrcMode</c>/<c>_DstMode</c>,
-        /// <c>_Tiling</c>. So the <c>_TintColor</c> line below is the one that paints the waves, and it was
-        /// already there — the claim in <c>dbf5dbc</c> that "a property block reaches only the renderer's
-        /// material, which is why the waves stayed stock red" was an inference, and the
-        /// <c>ParticleSystem.main.startColor</c> code it justified could never have coloured anything on this
-        /// prefab. That code is deleted rather than kept: it said the waves were coloured somewhere they are
-        /// not. <c>_Color</c> stays as the belt for the tactical beacon's own shaders.
-        /// ponytail: if a Pulse ever draws dark instead of green, the shader multiplies the tint by
-        /// <c>_MainTex</c> and the fix is a lighter colour, not another property.
+        /// property the shader does not declare is silently IGNORED rather than logged as an error, which is
+        /// exactly why the wrong property name cost two commits and left nothing in the log.
         /// </summary>
         private static void Tint(GameObject go, bool mine)
         {
@@ -625,8 +630,14 @@ namespace Multiplayer.UI
             {
                 if (r == null) continue;
                 r.GetPropertyBlock(block);
-                block.SetColor("_TintColor", colour);   // the waves (Unlit/Colored, Animated Mask)
-                block.SetColor("_Color", colour);       // belt: ignored where undeclared
+                // RGB from us, ALPHA from whatever wrote the block last — which on the waves is the clip's
+                // own streamed fade curve. isEmpty (not a zero test) is the "nothing written yet" answer:
+                // an alpha that has legitimately faded to 0 must stay 0, or the wave flashes back to full
+                // at the exact instant it is meant to be gone. MaterialPropertyBlock.HasColor does not
+                // exist on Unity 2019.4.31f1 (this build); isEmpty does.
+                float a = block.isEmpty ? 1f : block.GetColor("_Color").a;
+                block.SetColor("_Color", new Color(colour.r, colour.g, colour.b, a));  // the waves
+                block.SetColor("_TintColor", colour);   // no-op here; L251 arm (e) asserts the write exists
                 r.SetPropertyBlock(block);
                 var mat = r.sharedMaterial;
                 if (seen != null)
@@ -636,19 +647,19 @@ namespace Multiplayer.UI
 
             if (seen == null) return;
             _loggedTint = true;
-            // The renderer TYPE and the animator count are in this line because the previous version of it
-            // was read as proof of things it never measured: it printed only names and shaders, and "they
-            // are MeshRenderers" and "nothing animates them" were both inferred from that. If a Pulse turns
-            // out to be a ParticleSystemRenderer the answer is the particle start colour (vertex colour
-            // multiplies the tint); if the animator count is non-zero the answer is the re-assert below.
+            // The renderer TYPE and the two counts are in this line because the version before it printed
+            // only names and shaders, and "they are MeshRenderers" and "nothing animates them" were both
+            // INFERRED from that and both fed into a wrong fix. They are now measured (see LateUpdate), so
+            // this line is the runtime falsification of that measurement: the live build must show
+            // MeshRenderer, animators>=1 and particleSystems=0, or the prefab is not the one that was read.
             Debug.Log("[Multiplayer] ping marker tinted " + (mine ? "OWN green" : "PEER blue") +
-                      " over _TintColor/_Color on " + seen.Count + " renderer(s): " +
-                      string.Join(", ", seen.ToArray()) + "; animators=" +
+                      " on _Color (RGB only — the clip owns the alpha) over " + seen.Count +
+                      " renderer(s): " + string.Join(", ", seen.ToArray()) + "; animators=" +
                       go.GetComponentsInChildren<Animator>(true).Length +
                       ", particleSystems=" + go.GetComponentsInChildren<ParticleSystem>(true).Length +
-                      " (logged once per run). The tint is now RE-ASSERTED in LateUpdate — a marker still " +
-                      "drawing stock red with animators=0 and particleSystems=0 means the shader multiplies " +
-                      "_TintColor by its _MainTex and the answer is a lighter colour, not another property.");
+                      " (logged once per run). Re-asserted every LateUpdate, because the clip " +
+                      "GeoLocationOngoingBattle_Pulse animates _Color on Pulse1/Pulse2 with a CONSTANT " +
+                      "rgb curve of (1,0,0) — that constant is the red, and it is rewritten every frame.");
         }
 
         /// <summary>Reused across frames; assigned lazily inside <see cref="Tint"/>, never here — a
@@ -657,20 +668,29 @@ namespace Multiplayer.UI
         private static MaterialPropertyBlock _block;
 
         /// <summary>
-        /// THE TINT IS RE-ASSERTED EVERY FRAME, AND THAT IS WHY THE ONE-SHOT TINT LOOKED INERT.
-        /// <see cref="Tint"/> ran ONCE at birth and its own log proves the write landed on all five
-        /// renderers of the haven-defence prefab — <c>Pulse1&lt;Unlit/Colored, Animated Mask&gt;</c> among
-        /// them, live, 2026-08-09 — and the waves still drew stock red. So the write is not what fails:
-        /// something overwrites it AFTER us, every frame, which is exactly what the prefab exists to do
-        /// (its whole content is an animation). Unity drives an animated material property through the
-        /// renderer's MaterialPropertyBlock — the same channel <see cref="Tint"/> writes — so an Animator
-        /// on this prefab clobbers our colour on every tick and a birth-time write can never survive.
+        /// AN ANIMATOR REPAINTS THE WAVES RED EVERY FRAME — MEASURED IN THE PREFAB, NOT INFERRED FROM THE
+        /// SYMPTOM (2026-08-09). This is why a birth-time <see cref="Tint"/> was inert even though its own
+        /// log proved the write reached all five renderers on all three peers.
         ///
-        /// LATE-Update, not Update: animation is evaluated BETWEEN the two, so a write in Update loses the
-        /// same race every frame and a write here always wins. This is also mechanism-agnostic — anything
-        /// that repaints the marker per frame (an Animator, the prefab's own controller, a material swap)
-        /// loses to a per-frame re-assert, which is why it is preferred over disabling the Animator: the
-        /// waves ARE the animation, and the owner asked for expanding waves.
+        /// The chain, read out of <c>sharedassets0.assets</c>: <c>Pulse1</c> (path_id 12014) and
+        /// <c>Pulse2</c> (12097) are <c>Transform + MeshFilter + MeshRenderer</c> — no ParticleSystem
+        /// anywhere, so <c>dbf5dbc</c>'s deleted <c>ParticleSystem.main.startColor</c> really was aimed at
+        /// nothing. Their PARENT is <c>OngoingBattle_Pulse</c>, which carries the <c>Animator</c>
+        /// (controller <c>GeoLocationOngoingBattleAnimController</c>, one clip
+        /// <c>GeoLocationOngoingBattle_Pulse</c>, 122 frames @60 Hz). That clip's 10 generic bindings are
+        /// two Transform-scale curves (typeID 4, the expansion) and EIGHT material-property curves
+        /// (typeID 23 = Renderer, customType 22 = material property) on <c>Pulse1</c>/<c>Pulse2</c>, whose
+        /// attribute hashes 0x4DAF8B71/0x5DAF8B71/0x6DAF8B71/0x7DAF8B71 share the low 28 bits of
+        /// <c>crc32("_Color")</c> = 0x2DAF8B71 — the four channels of <c>_Color</c>, one per top nibble.
+        /// Of those curves the two ALPHAS are streamed (the fade) and the six RGB entries are CONSTANT with
+        /// the data <c>[1,0,0, 1,0,0]</c>: the wave colour is a constant curve holding PURE RED, re-applied
+        /// by the Animator on every evaluation. That constant is the red on screen.
+        ///
+        /// Unity applies an animated material property through the renderer's MaterialPropertyBlock — the
+        /// same channel <see cref="Tint"/> writes — so the only way our colour survives is to write it
+        /// AFTER the animator each frame. LateUpdate, not Update: Unity evaluates animation between the
+        /// two. Disabling the Animator is not the alternative it looks like — the scale curves in the same
+        /// clip ARE the expanding waves the owner asked for.
         /// Cost: <see cref="LifetimeSeconds"/>-lived markers, a handful at a time, ≤5 SetPropertyBlock each.
         /// </summary>
         private void LateUpdate()
