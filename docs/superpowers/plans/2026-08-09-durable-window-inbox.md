@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:executing-plans`. Execute Tasks 1-18 strictly in order; never parallelize edits to shared files.
 
-**Goal:** Replace ephemeral Geoscape window delivery with a host-authoritative, campaign-save-persisted, per-player durable inbox that survives tactical play, reconnect, and save/load while retaining native rendering, immediate open-UI repaint, and progress when every other player is AFK.
+**Goal:** Replace ephemeral Geoscape window delivery with a host-authoritative, campaign-save-persisted, per-player durable inbox for actively enrolled players that survives tactical play and native campaign save/load while retaining native rendering, immediate open-UI repaint, and progress when every other player is AFK. Disconnect ends the current epoch; reconnect enrolls a new epoch without prior windows.
 
 **Architecture:** A pure reducer owns occurrence identity, membership-epoch entitlements, lifecycle revisions, shared effect/launch transactions, total order, and tombstones. A campaign save root appended at Phoenix Point's native save-provider seam carries an immutable snapshot plus journal. Existing window classes become capture/presentation carriers indexed by occurrence. DWI reuses surface `0xB9` with reserved inner op/message values and bounded snapshot pages; `SyncProtocol` remains the existing three-argument envelope encoder and continues minting its cross-surface ordinal internally.
 
@@ -74,7 +74,7 @@
 | DWI-01 creation-set entitlement | L376 | 2 | serialized membership + `CreateOccurrence` |
 | DWI-02 ACK is not lifecycle | L377 | 1 | codec + reducer ACK transition |
 | DWI-03 display gate | L378 | 5 | `MayPresent` + native arrival gate |
-| DWI-04 durable host order | L379 | 4 | native save blob + reconnect snapshot reconstruction |
+| DWI-04 durable host order | L379 | 4 | native save blob + retransmit reconstruction |
 | DWI-05 preempt/resume | L380 | 6 | scheduler + checkpointed carrier swap |
 | DWI-06 exactly-once shared choice/effect | L381 | 8 | durable effect transaction/recovery |
 | DWI-07 per-player locked-result retention | L382 | 8 | lifecycle + open repaint |
@@ -86,7 +86,7 @@
 | DWI-13 source departure | L388 | 12 | source callback/revalidation + repaint/teardown |
 | DWI-14 linked completion cleanup | L389 | 13 | `OnMissionRewardApplied` adapter + generation links |
 | DWI-15 sole carrier survives failure | L390 | 9 | store fault between successor/effect and teardown |
-| DWI-16 revisions/reconnect | L391 | 2 | reducer monotonicity/tombstone precedence |
+| DWI-16 active-epoch revisions/save-load | L391 | 2 | reducer monotonicity/tombstone precedence |
 | DWI-17 tactical checkpoint/restore | L392 | 15 | `LevelTeardown` + loaded ledger + started Geoscape |
 | DWI-18 exhaustive taxonomy | L393 | 5 | router-derived family table |
 | DWI-19 compaction proof | L394 | 3 | save/journal/cursor/replay references |
@@ -94,7 +94,7 @@
 | DWI-21 Deferred Back | L396 | 11 | deployment Back capture + revision gate |
 | DWI-22 durable membership/no ACK | L397 | 2 | enrollment/removal reducer |
 | DWI-23 no late-join history | L398 | 2 | enrollment/create transaction order |
-| DWI-24 same-epoch reconnect | L399 | 16 | paged snapshot reconciliation |
+| DWI-24 reconnect creates clean epoch | L399 | 16 | paged enrollment snapshot reconciliation |
 | DWI-25 enrollment/create serialization | L400 | 2 | one host transaction sequencer |
 | DWI-26 exact priority registry | L401 | 5 | closed raiser token + patched modal comparison |
 
@@ -126,9 +126,9 @@
 
 **Files:** modify model/reducer; create L376, L391, L397-L400; modify Program/count.
 
-- [ ] RED laws execute one sequencer for enrollment, creation, reconnect, and authoritative removal. L376 must include enrolled active, disconnected, loading, tactical, and non-Geoscape epochs; retransmit dedupes; a new trigger is distinct; later epochs receive none.
-- [ ] Implement `Enroll`, `CreateOccurrence`, `ApplyLifecycle`, `EndMembership`, and same-epoch `Reconnect`. `CreateOccurrence` snapshots only committed epochs. Disconnect/AFK/pause/load/tactical are not removal. Revisions are monotonic, terminal states never regress, and tombstone beats peer update.
-- [ ] Positive controls reject Steam/slot identity, backlog scan on join, disconnect-as-removal, stale epoch/revision, and any ACK/quorum input.
+- [ ] RED laws execute one sequencer for enrollment, creation, disconnect-driven epoch end, reconnect enrollment, and authoritative removal. L376 must include enrolled active, loading, tactical, and non-Geoscape epochs but exclude disconnected ended epochs; retransmit dedupes; a new trigger is distinct; later epochs receive none.
+- [ ] Implement `Enroll`, `CreateOccurrence`, `ApplyLifecycle`, and `EndMembership`. `CreateOccurrence` snapshots only committed active epochs. Disconnect calls host-serialized `EndMembership`; reconnect mints and enrolls a new epoch with no prior entitlements. AFK/pause/load/tactical/non-Geoscape presence alone is not removal. Revisions are monotonic, terminal states never regress, and tombstone beats peer update.
+- [ ] Positive controls reject Steam/slot identity, backlog scan on join, disconnect retained as passive presence, stale epoch/revision, and any ACK/quorum input.
 - [ ] Verify. Commit `feat(inbox): serialize membership entitlement and revisions`.
 
 ### Task 3: Campaign ledger store and compaction proof
@@ -180,7 +180,7 @@
 
 - [ ] Model `Unanswered -> EffectPending(effectToken, canonical choice/result/rewards, winner) -> EffectApplied -> ChoiceLocked`. Persist `EffectPending` before native effect; native replay is idempotent by occurrence-scoped effect token; persist `EffectApplied/ChoiceLocked` after success. Startup/save-load recovery replays only pending tokens and never double grants.
 - [ ] RED injects crash/exception after pending commit, after native effect, and before response delivery. Retry/recovery applies one effect and returns the stored result. Invalid answer leaves `Unanswered`.
-- [ ] All open copies repaint immediately through `UiEventMap.Fire -> OpenUiRepaint -> EventPopup.RepaintDialog`; queued/suspended copies update first. Winner/losers/offline peers retain independent result entitlements.
+- [ ] All open copies repaint immediately through `UiEventMap.Fire -> OpenUiRepaint -> EventPopup.RepaintDialog`; queued/suspended copies update first. Winner/losers and actively enrolled peers outside the display gate retain independent result entitlements.
 - [ ] Verify. Commit `feat(inbox): recover shared effects exactly once`.
 
 ### Task 9: Local offer Cancel and atomic shared Start
@@ -203,7 +203,7 @@
 
 **Files:** modify reducer/engine, `DeploymentWindow.cs`, `WindowOrder.cs`; create L396; modify Program/count.
 
-- [ ] RED proves Back commits `Deferred` before local navigation, never calls mission Cancel, and cannot reopen in the same tick. Reconnect alone retains deferral.
+- [ ] RED proves Back commits `Deferred` before local navigation, never calls mission Cancel, and cannot reopen in the same tick. Transport churn within an active connection does not clear deferral; disconnect ends the epoch, so a later reconnect has no old deferral to restore.
 - [ ] Only explicit local re-entry or a newer material preparation revision requeues. Terminal transitions use Task 7 removal. Verify. Commit `feat(inbox): defer preparation without cancelling mission`.
 
 ### Task 12: Source departure revalidation
@@ -239,13 +239,13 @@
 - [ ] On load, extract/save-root snapshot before native `SetReadObjects`, install resolved ledger after level objects exist, then allow only this peer's started-Geoscape reconciliation. Preserve the existing load-completion barrier; never use it for campaign decisions.
 - [ ] Late pre-save replay cannot reopen tombstoned content. Verify. Commit `feat(inbox): restore checkpoints across level boundaries`.
 
-### Task 16: Paged reconnect snapshot/delta over existing 0xB9
+### Task 16: Paged enrollment snapshot/delta over existing 0xB9
 
 **Files:** modify codec/engine, `WindowQueueSync.cs`, `SyncEngineStub.cs`, `SessionManager.cs`; strengthen L377/L391/L399; no `SurfaceIds` or `SyncProtocol` behavior change.
 
 - [ ] Add router dispatch on existing `0xB9` by `SyncKind` plus reserved op `0x40-0x46`; preserve existing ops 1/2. Add a structural law that fails on any new DWI surface constant or change to the three-argument envelope contract.
 - [ ] RED reconstructs a snapshot larger than 64 KiB using 48 KiB pages; delivers pages reordered/duplicated, interrupts with a gap, retransmits, supersedes an incomplete snapshot, and applies atomically only when complete. ACK/cursor affects retransmission only.
-- [ ] Same PlayerGuid+epoch reconnect restores exact lifecycle and creates no epoch/history; stale epoch/revision is rejected. Verify. Commit `feat(inbox): reconcile paged snapshots on window surface`.
+- [ ] Reconnect with the same PlayerGuid host-serially ends any stale prior epoch, mints/enrolls a new epoch, receives zero prior backlog, and pages only occurrences created after that enrollment. Stale prior-epoch pages/revisions are rejected. Native campaign save/load continuity remains covered by Task 4/15 and must not be implemented by reconnect restore. Verify. Commit `feat(inbox): reconcile paged enrollment snapshots on window surface`.
 
 ### Task 17: Capture migration and exhaustive family teardown
 
@@ -260,7 +260,7 @@
 
 **Files:** all L376-L401 and relevant existing laws; then `docs/laws.md`, `README.md`, design status line only.
 
-- [ ] Run integrated production scenarios: tactical accrual/reconnect; priority resume; shared-effect crash recovery; local Cancel/shared Start; collaborative edit/Deferred Back/failed then successful launch; partial/last source departure; completion outcome ordering; >64 KiB reconnect snapshot; save/load with reordered definitions.
+- [ ] Run integrated production scenarios: tactical accrual for an active epoch; disconnect teardown plus clean reconnect enrollment; priority resume; shared-effect crash recovery; local Cancel/shared Start; collaborative edit/Deferred Back/failed then successful launch; partial/last source departure; completion outcome ordering; >64 KiB post-enrollment snapshot; save/load with reordered definitions.
 - [ ] Required existing PASS set: L84, L93, L101, L106, L107, L109, L114, L117, L124, L135, L141, L144, L163, L164, L171, L175, L176, L183, L194, L195, L197, L260, L261, L337, L350, L351, L352, L354, L355, L370.
 - [ ] Run exact integrity/build/RailCheck chain. The audited baseline is `files=192, inline=60` (252 registered laws); after exactly 26 new file-backed laws, the expected final count is `files=218, inline=60` (278 registered laws). Every L376-L401 is registered exactly once with a positive control.
 - [ ] Commit integrated law fixes as `test(inbox): enforce durable lifecycle integration`.

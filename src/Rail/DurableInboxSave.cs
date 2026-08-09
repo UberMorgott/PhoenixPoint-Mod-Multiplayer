@@ -244,7 +244,9 @@ namespace Multiplayer.Network.Sync
                 results = ReadIdentities(r, br => { var o = ReadOccurrence(br); return new CanonicalResultId(o, ReadString(br)); });
                 rewards = ReadIdentities(r, br => { var o = ReadOccurrence(br); return new CanonicalRewardItemId(o, ReadString(br), ReadString(br)); });
                 if (ms.Position != ms.Length) throw new InvalidDataException("trailing snapshot bytes");
-                ledger = new HostLedger(entries, revision, members);
+                ledger = schema < Schema
+                    ? LegacyMembershipMigration.EndDisconnected(entries, revision, members)
+                    : new HostLedger(entries, revision, members);
             }
         }
 

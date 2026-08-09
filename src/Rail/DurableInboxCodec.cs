@@ -214,7 +214,9 @@ namespace Multiplayer.Network.Sync
                             lifecycleRevision, tombstoneRevision, new HostOrderKey(ordinal, orderTrigger), reason, checkpoint));
                     }
                     if (stream.Position != stream.Length) throw new InvalidDataException("trailing ledger bytes");
-                    ledger = new HostLedger(entries, revision, members);
+                    ledger = ledgerSchema < Schema
+                        ? LegacyMembershipMigration.EndDisconnected(entries, revision, members)
+                        : new HostLedger(entries, revision, members);
                     return true;
                 }
             }

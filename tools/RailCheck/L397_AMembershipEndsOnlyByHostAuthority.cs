@@ -1,10 +1,12 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
+using System.Text;
 using Multiplayer.Network.Sync;
 
 namespace RailCheck
 {
-    /// <summary>L397 / DWI-22 — durable membership ends only by authoritative removal.</summary>
+    /// <summary>L397 / DWI-22 — disconnect host-serially ends an epoch; passive local state does not.</summary>
     internal static class L397_AMembershipEndsOnlyByHostAuthority
     {
         internal static IEnumerable<string> Check()
@@ -15,7 +17,22 @@ namespace RailCheck
             var removed = new OccurrenceId("event", "removed", new[] { "subject" });
             var host = new HostInboxSequencer(new HostLedger(new InboxEntry[0]));
             host.Enroll(member, MemberPresence.Active);
-            foreach (var presence in new[] { MemberPresence.Disconnected, MemberPresence.Loading, MemberPresence.Tactical, MemberPresence.NonGeoscape })
+            var beforeDisconnectedPresence = host.CommittedRevision;
+            if (host.SetPresence(member, MemberPresence.Disconnected) ||
+                host.CommittedRevision != beforeDisconnectedPresence || !host.Ledger.Members.ContainsKey(member))
+                yield return "L397 active-epoch-accepted-disconnected-as-passive-presence";
+            var currentDisconnectedRejected = false;
+            try
+            {
+                new HostLedger(new InboxEntry[0], 0,
+                    new[] { new KeyValuePair<MembershipId, MemberPresence>(new MembershipId("current-player", 1),
+                        MemberPresence.Disconnected) });
+            }
+            catch (System.ArgumentException) { currentDisconnectedRejected = true; }
+            if (!currentDisconnectedRejected)
+                yield return "L397 current-ledger-accepted-disconnected-membership";
+            foreach (var failure in LegacyDisconnectedSaveMigration()) yield return failure;
+            foreach (var presence in new[] { MemberPresence.Loading, MemberPresence.Tactical, MemberPresence.NonGeoscape, MemberPresence.Active })
                 if (!host.SetPresence(member, presence)) yield return "L397 ordinary-presence-change-ended-membership";
             host.CreateOccurrence(queued);
             host.CreateOccurrence(dismissed);
@@ -25,8 +42,9 @@ namespace RailCheck
             host.Tombstone(removed, ulong.MaxValue);
             if (host.Reconnect(member).Count != 3) yield return "L397 retained-member-lost-entitlement";
 
+            // The connection owner routes disconnect through this host-serialized epoch-end operation.
             if (!host.EndMembership(member) || host.Reconnect(member).Count != 0)
-                yield return "L397 authoritative-removal-did-not-end-membership";
+                yield return "L397 disconnect-did-not-end-membership-epoch";
             var queuedEntry = host.Ledger.Get(queued, member);
             var dismissedEntry = host.Ledger.Get(dismissed, member);
             var removedEntry = host.Ledger.Get(removed, member);
@@ -36,7 +54,20 @@ namespace RailCheck
                 removedEntry.Lifecycle != InboxLifecycle.Removed || removedEntry.LifecycleRevision != ulong.MaxValue || removedEntry.TombstoneRevision != ulong.MaxValue)
                 yield return "L397 terminal-entitlement-was-rewritten-or-revision-wrapped";
 
-            var maxMember = new MembershipId("campaign-player-guid", 10);
+            var whileDisconnected = new OccurrenceId("event", "while-disconnected", new[] { "subject" });
+            host.CreateOccurrence(whileDisconnected);
+            if (host.Ledger.EntriesFor(member).Any(entry => entry.Occurrence.Equals(whileDisconnected)))
+                yield return "L397 ended-disconnected-epoch-received-new-occurrence";
+            var rejoined = new MembershipId("campaign-player-guid", 10);
+            if (!host.Enroll(rejoined, MemberPresence.Active) || host.Reconnect(rejoined).Any())
+                yield return "L397 reconnect-did-not-enroll-clean-new-epoch";
+            var afterEnrollment = new OccurrenceId("event", "after-reconnect-enrollment", new[] { "subject" });
+            host.CreateOccurrence(afterEnrollment);
+            if (host.Reconnect(rejoined).Count != 1 ||
+                !host.Reconnect(rejoined)[0].Occurrence.Equals(afterEnrollment))
+                yield return "L397 new-epoch-did-not-receive-only-post-enrollment-occurrence";
+
+            var maxMember = new MembershipId("campaign-player-guid", 11);
             var maxHost = new HostInboxSequencer(new HostLedger(new InboxEntry[0]));
             maxHost.Enroll(maxMember, MemberPresence.Active);
             var maxOccurrences = new[]
@@ -105,6 +136,66 @@ namespace RailCheck
                         parameter.Name.ToLowerInvariant().Contains("ack") || parameter.Name.ToLowerInvariant().Contains("ready") ||
                         parameter.Name.ToLowerInvariant().Contains("quorum"))
                         yield return "L397 forbidden-human-or-connection-identity-input: " + method.Name;
+        }
+
+        private static IEnumerable<string> LegacyDisconnectedSaveMigration()
+        {
+            var member = new MembershipId("legacy-player", 3);
+            var queued = new OccurrenceId("event", "legacy-queued", new[] { "subject" });
+            var dismissed = new OccurrenceId("event", "legacy-dismissed", new[] { "subject" });
+            var removed = new OccurrenceId("event", "legacy-removed", new[] { "subject" });
+            var entries = new[]
+            {
+                new InboxEntry(queued, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0,
+                    new HostOrderKey(3, queued.TriggerId)),
+                new InboxEntry(dismissed, member, InboxLifecycle.Dismissed, default(CanonicalChoiceId), 7, 0,
+                    new HostOrderKey(4, dismissed.TriggerId)),
+                new InboxEntry(removed, member, InboxLifecycle.Removed, default(CanonicalChoiceId), 8, 8,
+                    new HostOrderKey(5, removed.TriggerId))
+            };
+            var activeLedger = new HostLedger(entries, 9,
+                new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active) });
+            var legacyRoot = DurableInboxSaveCodec.CreateSchema1ForMigrationTest(activeLedger);
+            SetFirstSnapshotPresence(legacyRoot, member, MemberPresence.Disconnected);
+            DurableInboxRestore restored; string refusal;
+            if (!DurableInboxSaveCodec.TryRestore(legacyRoot, null, out restored, out refusal))
+            {
+                yield return "L397 legacy-disconnected-save-refused-instead-of-ending-epoch: " + refusal;
+                yield break;
+            }
+            var queuedAfter = restored.Ledger.Get(queued, member);
+            var dismissedAfter = restored.Ledger.Get(dismissed, member);
+            var removedAfter = restored.Ledger.Get(removed, member);
+            if (restored.Ledger.Members.ContainsKey(member) || queuedAfter.Lifecycle != InboxLifecycle.Removed ||
+                queuedAfter.LifecycleRevision != 2 || queuedAfter.TombstoneRevision != 2)
+                yield return "L397 legacy-disconnected-epoch-was-resurrected-or-not-terminalized";
+            if (dismissedAfter.Lifecycle != InboxLifecycle.Dismissed || dismissedAfter.LifecycleRevision != 7 ||
+                dismissedAfter.TombstoneRevision != 0 || removedAfter.Lifecycle != InboxLifecycle.Removed ||
+                removedAfter.LifecycleRevision != 8 || removedAfter.TombstoneRevision != 8)
+                yield return "L397 legacy-terminal-entry-was-rewritten";
+            var sequencer = new HostInboxSequencer(restored.Ledger);
+            var later = new OccurrenceId("event", "after-legacy-load", new[] { "subject" });
+            sequencer.CreateOccurrence(later);
+            if (sequencer.Reconnect(member).Any() ||
+                sequencer.Ledger.EntriesFor(member).Any(entry => entry.Occurrence.Equals(later)))
+                yield return "L397 ended-legacy-epoch-received-later-entitlement";
+
+            var currentRoot = DurableInboxSaveCodec.Create(activeLedger, new DurableInboxJournalRecord[0],
+                DurableInboxCanonicalState.Empty);
+            SetFirstSnapshotPresence(currentRoot, member, MemberPresence.Disconnected);
+            if (DurableInboxSaveCodec.TryRestore(currentRoot, null, out restored, out refusal))
+                yield return "L397 current-schema-disconnected-payload-was-migrated-instead-of-rejected";
+        }
+
+        private static void SetFirstSnapshotPresence(DurableInboxSaveRoot root, MembershipId member,
+            MemberPresence presence)
+        {
+            var guidBytes = Encoding.UTF8.GetBytes(member.PlayerGuid);
+            var presenceOffset = 8 + 4 + 2 + guidBytes.Length + 8;
+            root.Snapshot[presenceOffset] = (byte)presence;
+            var crc = typeof(DurableInboxSaveCodec).GetMethod("ComputeRootCrc",
+                BindingFlags.Static | BindingFlags.NonPublic);
+            root.Crc = (uint)crc.Invoke(null, new object[] { root });
         }
     }
 }

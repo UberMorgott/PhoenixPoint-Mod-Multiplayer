@@ -322,9 +322,14 @@ namespace Multiplayer.Network.Sync
                 throw new ArgumentException("occurrence has inconsistent host order", nameof(entries));
             if (copy.Any(e => e.HostOrderKey.CampaignOrdinal > committedRevision))
                 throw new ArgumentException("host order exceeds committed revision", nameof(entries));
+            // Schema-less ledgers have no explicit presence, so their inferred enrolled members resume at the
+            // neutral Loading gate. Explicit Disconnected is invalid here; pre-v3 decoders end it through
+            // LegacyMembershipMigration before constructing the current ledger.
             var memberCopy = members == null
-                ? copy.Select(e => e.Membership).Distinct().ToDictionary(m => m, m => MemberPresence.Disconnected)
+                ? copy.Select(e => e.Membership).Distinct().ToDictionary(m => m, m => MemberPresence.Loading)
                 : members.ToDictionary(pair => pair.Key, pair => pair.Value);
+            if (memberCopy.Values.Any(value => !MemberPresenceRules.IsEnrolled(value)))
+                throw new ArgumentException("invalid enrolled member presence", nameof(members));
             _entries = new ReadOnlyCollection<InboxEntry>(copy);
             _members = new ReadOnlyDictionary<MembershipId, MemberPresence>(memberCopy);
             CommittedRevision = committedRevision;
@@ -350,6 +355,36 @@ namespace Multiplayer.Network.Sync
 
 internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeoscape }
 
+    internal static class MemberPresenceRules
+    {
+        internal static bool IsEnrolled(MemberPresence presence) =>
+            Enum.IsDefined(typeof(MemberPresence), presence) && presence != MemberPresence.Disconnected;
+    }
+
+    internal static class LegacyMembershipMigration
+    {
+        // Called only by pre-v3 decoders. A legacy passive Disconnected member represents an epoch that
+        // has ended under DWI-22; never resurrect it as Loading or Active.
+        internal static HostLedger EndDisconnected(IEnumerable<InboxEntry> entries, ulong committedRevision,
+            IEnumerable<KeyValuePair<MembershipId, MemberPresence>> members)
+        {
+            var entryArray = (entries ?? throw new ArgumentNullException(nameof(entries))).ToArray();
+            var memberArray = (members ?? throw new ArgumentNullException(nameof(members))).ToArray();
+            var ended = new HashSet<MembershipId>(memberArray
+                .Where(pair => pair.Value == MemberPresence.Disconnected).Select(pair => pair.Key));
+            var migrated = entryArray.Select(entry =>
+            {
+                if (!ended.Contains(entry.Membership) || entry.Lifecycle == InboxLifecycle.Dismissed ||
+                    entry.Lifecycle == InboxLifecycle.Removed) return entry;
+                var revision = checked(entry.LifecycleRevision + 1);
+                return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed, entry.Choice,
+                    revision, Math.Max(entry.TombstoneRevision, revision), entry.HostOrderKey);
+            }).ToArray();
+            return new HostLedger(migrated, committedRevision,
+                memberArray.Where(pair => pair.Value != MemberPresence.Disconnected));
+        }
+    }
+
     internal sealed class HostInboxSequencer
     {
         // ponytail: one authority lock; split only if measured host inbox contention warrants it.
@@ -371,7 +406,7 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
         {
             lock (_authority)
             {
-                if (!Enum.IsDefined(typeof(MemberPresence), presence) || _members.ContainsKey(member)) return false;
+                if (!MemberPresenceRules.IsEnrolled(presence) || _members.ContainsKey(member)) return false;
                 var committedRevision = checked(CommittedRevision + 1);
                 var members = new Dictionary<MembershipId, MemberPresence>(_members) { [member] = presence };
                 var ledger = Ledger.WithAuthority(committedRevision, members);
@@ -386,7 +421,7 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
         {
             lock (_authority)
             {
-                if (!_members.ContainsKey(member) || !Enum.IsDefined(typeof(MemberPresence), presence)) return false;
+                if (!_members.ContainsKey(member) || !MemberPresenceRules.IsEnrolled(presence)) return false;
                 var members = new Dictionary<MembershipId, MemberPresence>(_members) { [member] = presence };
                 var ledger = Ledger.WithAuthority(CommittedRevision, members);
                 _members[member] = presence;

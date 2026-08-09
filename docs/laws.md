@@ -368,6 +368,13 @@ on the inline side. Nothing is missing and no row is invented — verified 2026-
 - L85, L86 — ISSUED 2026-08-07 (`L85_RestartedHostStreamIsApplied.cs`, `L86_AnnouncedBoundaryHoldsItsAnnouncer.cs`). Taken from the never-issued block on purpose: five agents were minting laws in one tree that day and three successive max+1 picks collided.
 - L87–L90 — never issued. No file, no method, no citation anywhere in the repo.
 - L374, L375 — ISSUED 2026-08-09 as ROWS ONLY: no `L<n>_<Name>.cs`, no `Add(laws, () => …)`, `tools/law-count.txt` NOT bumped, and neither was falsified (no build in the session that wrote them). Written by an agent whose file scope was `GenericApplier.cs`/`RailMeta.cs`/`DiffEngine.cs`/`docs/laws.md`, with `tools/RailCheck/` owned elsewhere — so the rows carry the assertion and the evidence, and the executable half is outstanding work, not an oversight. `tools/law-integrity.ps1` does not read this file, so the rows break nothing; they also defend nothing until the files exist. Renumber if a parallel agent took 374/375 first.
+
+## Durable-window inbox allocation clarification (2026-08-10)
+
+- The approved DWI allocation remains exactly `DWI-01..DWI-26 -> L376..L401`; no L402/L403 is created by this clarification.
+- Network disconnect now ends the active membership epoch. Reconnect of the same durable player identity is a fresh host-serialized enrollment with a new epoch, zero prior backlog, and entitlement only to occurrences created after that enrollment.
+- Within the existing allocation, DWI-16/L391 covers monotonic lifecycle/tombstone rules for an active epoch and native campaign save/load; DWI-22/L397 covers disconnect-driven epoch end without ACK/quorum; DWI-23/L398 covers zero pre-enrollment history; DWI-24/L399 covers clean reconnect enrollment and stale prior-epoch rejection; DWI-25/L400 keeps the enrollment/create serialization boundary.
+- Native campaign save/load durability remains distinct: it reconstructs the saved campaign ledger and lifecycle for epochs present in that save. It is not evidence that an ended network membership epoch should be restored on reconnect.
 - inline laws have no `L<n>_<Name>.cs`; grep `Program.cs` for the id string.
 
 ## Attention

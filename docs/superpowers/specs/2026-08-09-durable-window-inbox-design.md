@@ -11,12 +11,12 @@
 
 ## Goals
 
-- Deliver every eligible campaign window durably to every session player, including windows raised while that player is tactical, disconnected, loading, or viewing a non-Geoscape tab.
+- Deliver every eligible campaign window durably to every actively enrolled session player, including windows raised while that player is tactical, loading, or viewing a non-Geoscape tab.
 - Show inbox windows only while that player is on Geoscape.
 - Preserve local reading pace without duplicating shared campaign effects.
 - Make priority mission/deployment flow interrupt ordinary reading safely, then resume the suspended window unchanged.
 - Keep mission offers and preparation screens consistent with live vehicle, mission, soldier, and equipment state.
-- Survive reconnect and save/load without treating a transport ACK as delivery, viewing, or dismissal.
+- Survive native campaign save/load without treating a transport ACK as delivery, viewing, or dismissal. A disconnect ends the current membership epoch; reconnect enrolls a fresh epoch without the prior epoch's inbox.
 
 ## Non-goals
 
@@ -48,8 +48,8 @@
 
 | Kind | Canonical identity | Owner / priority | Delivery and display | Decision and local terminal event | Global invalidation | Restore and teardown |
 |---|---|---|---|---|---|---|
-| Ordinary notice | full occurrence tuple; captured notice/result phase | host / ordinary | entitlement to each player in the creation membership set; Geoscape gate only | no shared decision; successful native presentation marks `Read`; native acknowledge/close then marks `Dismissed` and releases that entitlement | explicit subject unservability or explicit predecessor supersession only | queued/read survive reconnect; open becomes `Suspended(LevelTeardown)` before level loss and resumes from checkpoint; terminal teardown removes every carrier without callbacks |
-| Shared-choice | full occurrence tuple plus canonical choice and reward-item identities scoped to it | host; first host-serialized valid answer wins / ordinary unless explicitly registered priority | creation-set entitlement; Geoscape gate only; every entitled player retains the locked result | answer controls may act only while `Unanswered`; no dismiss before the locked result is successfully presented; presenting it marks `Read`, native acknowledge/close marks `Dismissed` and releases only that player's entitlement | explicit subject unservability or explicit predecessor supersession; never another player's answer/read | queued/open/suspended result and lock restore exactly; teardown removes carriers without applying choice/reward/callback |
+| Ordinary notice | full occurrence tuple; captured notice/result phase | host / ordinary | entitlement to each actively enrolled player in the creation membership set; Geoscape gate only | no shared decision; successful native presentation marks `Read`; native acknowledge/close then marks `Dismissed` and releases that entitlement | explicit subject unservability or explicit predecessor supersession only | queued/read survive native campaign save/load; open becomes `Suspended(LevelTeardown)` before level loss and resumes from checkpoint; disconnect removes the ending epoch's carriers without callbacks |
+| Shared-choice | full occurrence tuple plus canonical choice and reward-item identities scoped to it | host; first host-serialized valid answer wins / ordinary unless explicitly registered priority | actively enrolled creation-set entitlement; Geoscape gate only; every entitled player retains the locked result | answer controls may act only while `Unanswered`; no dismiss before the locked result is successfully presented; presenting it marks `Read`, native acknowledge/close marks `Dismissed` and releases only that player's entitlement | explicit subject unservability or explicit predecessor supersession; never another player's answer/read | queued/open/suspended result and lock restore across native campaign save/load; disconnect removes the ending epoch's carriers without applying choice/reward/callback |
 | Registered priority native interrupt | full occurrence tuple and an exact priority-registry match below | host / priority interrupt | creation-set entitlement; Geoscape gate only; may preempt only an ordinary window already open there | successful native content/result presentation marks `Read`; the registered family's native acknowledge/Cancel then marks `Dismissed`; a supported Start follows the exceptional-offer transition below | authoritative subject expiry/destruction or loss of its last valid source | queued/read restore; open becomes suspended before preemption/level teardown and restores its checkpoint; invalidation removes queued/open/suspended/read/tactical-held carriers and closes native UI without Cancel callback |
 | Exceptional mission offer | full occurrence tuple plus mission and live deployment-source identities | host / priority interrupt | creation-set entitlement; Geoscape gate only | successful brief presentation marks `Read`; Cancel marks only that player `Dismissed` and releases its entitlement; first valid Start creates a successor occurrence and is the only shared decision; no generic dismiss path | mission expiry/destruction, or revalidation proving no valid source remains (including a mission uniquely bound to a departed source) | queued/read restore; open becomes suspended before preemption/level teardown and restores its checkpoint; successor commit or invalidation removes every obsolete offer carrier without `GeoMission.Cancel` |
 | DeploymentPreparing | successor occurrence identity plus mission and current live-source set | host / highest deployment interrupt | new entitlement for every durable player/membership epoch enrolled when Start is serialized, including players who dismissed the predecessor offer; Geoscape gate only | edits and first valid launch are host-serialized; Back enters `Deferred` and is nonterminal; successful launch or global invalidation marks `Removed` and releases every entitlement | mission expiry/destruction/completion, successful launch, or revalidation proving no valid source remains | queued/open/suspended/deferred/tactical-held state restores from current campaign facts; source loss prunes/repaints; terminal teardown closes every carrier without Cancel/back callbacks |
@@ -74,7 +74,7 @@
 
 - Stable occurrence identity is the normalized tuple:
   - `event identity` — stable definition/modal family identity;
-  - `trigger identity` — host-minted stable identity for this raise/trigger, persisted across reconnect and save/load;
+- `trigger identity` — host-minted stable identity for this raise/trigger, persisted across native campaign save/load;
   - `subject identity` — stable referenced mission/site/vehicle/faction/character/reward subject set.
 - Presentation sequence, connection id, native object identity, queue index, timestamps alone, and transport nonce are not occurrence identity.
 - Repeated raises of the same event for the same subject require distinct trigger identities.
@@ -94,7 +94,7 @@
   - local presentation checkpoint needed to restore an interrupted native window unchanged;
   - local Cancel for an exceptional mission offer;
   - monotonically increasing lifecycle revision under the player's current membership/session epoch.
-- The host replicates peer-owned lifecycle records durably for reconnect/save continuity but does not choose them on the peer's behalf.
+- The host persists peer-owned lifecycle records for native campaign save/load continuity while that membership epoch remains enrolled, but does not choose them on the peer's behalf. Disconnect ends the epoch and removes its lifecycle records from active delivery.
 - The host serializes and validates each `(durable player, membership epoch, occurrence)` transition. Duplicate revisions are idempotent; stale epochs/revisions and illegal regressions are rejected; `Dismissed`/`Removed` never regress; a global tombstone always wins over any peer update.
 - A transport ACK proves only receipt of bytes. It never means queued, opened, read, answered, or dismissed.
 
@@ -120,11 +120,11 @@
 - `Open -> Read` only at the exact presentation event specified by the taxonomy row.
 - `Read|Open -> Dismissed` only at the exact local event allowed by the taxonomy row.
 - `Open -> Deferred` on Back from `DeploymentPreparing`; shared preparation remains active and the display gate must not reopen it in the same tick.
-- `Deferred -> Queued` only on explicit local re-entry to that preparation or a newer host priority revision that materially changes its live preparation facts; reconnect alone does not clear deferral.
+- `Deferred -> Queued` only on explicit local re-entry to that preparation or a newer host priority revision that materially changes its live preparation facts; connection transport events do not mutate deferral within an active epoch.
 - `Queued|Open|Suspended|Deferred|Read -> Removed` on host global invalidation, successful launch, or explicit obsolete completion.
 - `Dismissed` and `Removed` are terminal for that occurrence/player pair.
 - Native suspension/terminal teardown never invokes choice, dismiss, Cancel/back, completion, reward, or launch callbacks. The durable checkpoint/terminal transition commits before the carrier closes.
-- Reconnect and save/load restore these states idempotently; they do not infer a terminal state from absence of a native window.
+- Native campaign save/load restores these states idempotently for epochs still enrolled in the saved campaign state; it does not infer a terminal state from absence of a native window. Network reconnect never restores an ended epoch.
 
 ### Shared choice
 
@@ -157,7 +157,7 @@
 
 ## Ordering, priority, and preemption
 
-- Host assigns a deterministic total order at occurrence creation. Reconnect, retransmit, and save/load preserve it.
+- Host assigns a deterministic total order at occurrence creation. Retransmit and native campaign save/load preserve it.
 - Normal selection is the earliest eligible queued occurrence by `(priority class, host order key)`.
 - Only exact matches in the native priority registry are priority interrupts; `DeploymentPreparing` is the highest deployment interrupt. They sit ahead of ordinary windows in each entitled player's inbox, but never override the Geoscape display gate or force navigation from another tab/screen.
 - On Geoscape, a priority interrupt may preempt an ordinary current-open window:
@@ -182,15 +182,15 @@
 - Registered priority ambush/deployment interrupts may interrupt an ordinary open event window on Geoscape, not arbitrary non-Geoscape work.
 - Tactical accrual is unconditional; tactical never renders or dismisses a Geoscape occurrence.
 
-## Reconnect, tactical, and save/load
+## Membership, tactical, reconnect, and save/load
 
-- At occurrence creation, the entitlement set is the durable player identities and membership epochs already enrolled in the campaign session, including disconnected/loading/tactical peers. A later connection id or roster slot never creates a new identity.
+- At occurrence creation, the entitlement set is the durable player identities and membership epochs actively enrolled in the campaign session, including loading/tactical/non-Geoscape peers. A disconnected epoch is no longer enrolled and receives no new entitlement. A connection id or roster slot is never durable identity.
 - A newly joined durable player/new membership epoch receives no occurrence created before successful enrollment, regardless of whether that occurrence is active, unread, a locked shared result, a mission offer, or `DeploymentPreparing`. Entitlement begins exclusively with occurrences created after enrollment; no join path scans or grants the pre-existing campaign backlog.
 - Enrollment and occurrence creation share one host-serialized transaction order. Enrollment becomes effective only when the host durably commits the new `(durable player identity, membership epoch)` to the session membership set. An occurrence transaction snapshots that committed set when it durably creates the occurrence and entitlements. Therefore create-before-enroll excludes the new epoch, while enroll-before-create includes it; retries preserve the committed order and identities. This boundary requires no quorum or human acknowledgement.
-- Reconnect/resume of the same durable player identity and same membership epoch is not enrollment or late join. It restores that epoch's existing queued/open/suspended/deferred/read lifecycle and inbox entitlements idempotently, without creating a new epoch or granting historical occurrences that were never entitled to it.
-- Authoritative campaign removal ends a membership epoch without human acknowledgement: the host marks that epoch's nonterminal entitlements `Removed(reason=MembershipEnded)` and excludes it from compaction blockers. Disconnect, AFK, pause, load, tactical play, or ordinary reconnect never constitute permanent removal.
-- Reconnect requests an inbox snapshot/delta keyed by stable player/membership epoch and occurrence identities; delivery is idempotent and lifecycle revisions reject stale prior-session updates.
-- A reconnecting peer resumes its exact queued/open/suspended/deferred/read state. If native UI cannot be restored immediately, the durable state remains and is served when the display gate opens.
+- A disconnect host-serially ends that player's current membership epoch without human acknowledgement: the host marks its nonterminal entitlements `Removed(reason=MembershipEnded)`, removes its open/queued/suspended/deferred/tactical-held carriers, and excludes the epoch from later creation snapshots and compaction blockers. AFK, pause, loading, tactical play, or a non-Geoscape screen do not end membership while the connection remains active.
+- Reconnect is a fresh host-serialized enrollment with the same durable player identity and a newly minted membership epoch. It restores none of the ended epoch's queued/open/suspended/deferred/read lifecycle and receives no pre-enrollment occurrence of any category. Only occurrences created after the new enrollment grant it entitlement.
+- Enrollment delivery may use an idempotent paged snapshot/delta keyed by the new membership epoch and occurrence identities. That snapshot contains only post-enrollment entitlements; stale prior-epoch pages and lifecycle revisions are rejected.
+- Native campaign save/load is distinct from network reconnect: it persists and reconstructs the campaign ledger, host order, locks, identities, and lifecycle/checkpoints for membership epochs present in the saved campaign state. Loading a save does not itself invent a reconnect entitlement or scan historical occurrences.
 - Tactical entry commits `Open -> Suspended(reason=LevelTeardown)` and its exact checkpoint before native Geoscape teardown. Native teardown invokes no choice/dismiss/Cancel/back/completion/reward/launch callback.
 - Tactical return waits only for this peer's own level/load readiness, then reconciles host backlog plus peer lifecycle. Only after a fully started Geoscape exists may `Suspended(reason=LevelTeardown) -> Open` and native restoration occur. This is a load barrier, never a quorum.
 - Save data persists active occurrences, terminal tombstones needed for dedupe, total order, shared locks, mission/preparation linkage, player membership epochs/entitlements, monotonic lifecycle revisions, and peer lifecycle/checkpoints.
@@ -236,17 +236,17 @@
 - If the shared effect succeeds but response delivery fails, persist `ChoiceLocked` and resend the confirmed result; never apply twice.
 - If Start cannot create `DeploymentPreparing`, retain the mission offer and report failure; do not consume its sole carrier.
 - If launch fails validation, remain `Preparing`, repaint current facts, and expose the refusal. Never wait for another player.
-- If subject identity cannot resolve after load/reconnect, quarantine the occurrence as unservable and request authoritative reconciliation; do not bind by display text or list index.
+- If subject identity cannot resolve after native campaign load or active-epoch reconciliation, quarantine the occurrence as unservable and request authoritative reconciliation; do not bind by display text or list index.
 - Unknown taxonomy, impossible state transition, order collision, or entitlement loss is loud telemetry plus reconciliation, never silent dismissal.
 
 ## Executable law/test matrix
 
 | ID | Executable assertion | Required positive/negative controls |
 |---|---|---|
-| DWI-01 | One host raise grants one stable occurrence entitlement to every durable player/membership epoch enrolled when creation is serialized, including tactical/disconnected/non-Geoscape peers. | retransmit dedupes; a new trigger for same event+subject remains distinct; epochs enrolled later receive none |
+| DWI-01 | One host raise grants one stable occurrence entitlement to every durable player/membership epoch actively enrolled when creation is serialized, including tactical/loading/non-Geoscape peers but excluding ended disconnected epochs. | retransmit dedupes; a new trigger for same event+subject remains distinct; epochs enrolled later receive none |
 | DWI-02 | Transport ACK changes no queued/open/read/dismissed state. | explicit lifecycle message does change only that peer |
 | DWI-03 | Native presentation is impossible outside a fully started Geoscape display gate. | tactical and personnel-tab accrual survives; Geoscape return serves it |
-| DWI-04 | Host order survives reconnect and save/load byte-for-byte/logically unchanged. | out-of-order delivery still displays host order |
+| DWI-04 | Host order survives retransmit and native campaign save/load byte-for-byte/logically unchanged. | out-of-order delivery still displays host order |
 | DWI-05 | Priority ambush/deployment preempts an ordinary open Geoscape window without invoking its callback. | ordinary resumes same occurrence/checkpoint; invalidated suspended window does not resume |
 | DWI-06 | Shared choice accepts exactly one first valid answer and applies one effect/reward. | concurrent loser cannot charge/grant; all open copies repaint locked result |
 | DWI-07 | Choice lock does not terminate another player's entitlement. | winner and losers independently retain result until local read/dismiss |
@@ -258,15 +258,15 @@
 | DWI-13 | Linked vehicle departure prunes that source and repaints every open preparation; only loss of the last valid/uniquely bound source globally removes queued, open, suspended, deferred, and tactical-held copies without Cancel. | another valid source preserves the occurrence; unrelated departure leaves it unchanged |
 | DWI-14 | Mission completion terminalizes and removes only explicitly linked predecessor generations before creating any new outcome. | cleanup by mission id alone fails; a new completion outcome remains deliverable |
 | DWI-15 | No last carrier is deleted before successor/effect persistence succeeds. | injected persistence failure preserves retryable offer/window and causes no duplicate effect |
-| DWI-16 | Reconnect restores each player's own lifecycle under the durable identity/membership epoch and accepts only monotonic host-validated revisions. | stale epoch/revision cannot regress `Dismissed`/`Removed`; tombstone beats peer update; ACK changes nothing |
+| DWI-16 | During an active membership epoch and across native campaign save/load, each player's lifecycle accepts only monotonic host-validated revisions. | stale/ended epoch or stale revision cannot regress `Dismissed`/`Removed`; tombstone beats peer update; ACK changes nothing |
 | DWI-17 | Tactical entry durably commits `Open -> Suspended(LevelTeardown)` before callback-free native teardown; started-Geoscape reconciliation restores the exact checkpoint. | late pre-save wire replay cannot reopen invalidated/completed occurrence |
 | DWI-18 | Every mirrored campaign-window family is classified by registered native state/modal/raiser; local-answer windows are explicitly local-only. | unknown family fails coverage loudly rather than inferring priority, dropping, or displaying ephemerally; classified nonmatches remain ordinary |
-| DWI-19 | Compaction occurs only when entitlements are terminal and no save/journal/cursor/replay source can name a tombstoned occurrence. | one unread disconnected player keeps it durable; unprovable replay absence preserves terminal identity without TTL |
+| DWI-19 | Compaction occurs only when entitlements are terminal and no save/journal/cursor/replay source can name a tombstoned occurrence. | one unread actively enrolled player keeps it durable; ending a disconnected epoch terminalizes its entitlements, but unprovable replay absence still preserves terminal identity without TTL |
 | DWI-20 | Teardown and repaint cover native current, native pending, mod queued/suspended/deferred, and tactical-held carriers. | deleting only current-open fails the law |
 | DWI-21 | Back from preparation commits `Deferred` without mission Cancel and cannot reopen in the same tick. | explicit local re-entry or a newer qualifying priority revision may requeue it |
-| DWI-22 | Membership creation, enrollment, reconnect, and authoritative removal use durable identity plus membership epoch without human ACK or quorum. | disconnect/AFK never ends membership; removed epoch cannot block compaction |
+| DWI-22 | Enrollment and host-serialized membership removal use durable identity plus membership epoch without human ACK or quorum; disconnect ends the current epoch, while AFK/pause/loading/tactical/non-Geoscape presence alone does not. | ended epoch cannot receive new occurrences or block compaction; reconnect must enroll a new epoch |
 | DWI-23 | A newly enrolled durable player/new membership epoch receives no pre-enrollment occurrence of any category or lifecycle, including active/unread notices, locked shared results, mission offers, and `DeploymentPreparing`; only later creations grant entitlement. | joining with a nonempty backlog grants zero historical entitlements; the next creation includes the epoch |
-| DWI-24 | Reconnect/resume of the same durable identity and membership epoch restores exactly that player's existing inbox and lifecycle rather than taking the late-join path. | reconnect creates no epoch, duplicates no occurrence, and grants no occurrence that never entitled that epoch |
+| DWI-24 | Reconnect of the same durable identity takes the new-enrollment path with a new membership epoch, restores no prior-epoch inbox/lifecycle, and receives only occurrences created after host-serialized enrollment. | reconnect with a nonempty campaign backlog grants zero historical entitlements; stale prior-epoch pages are rejected; the next creation includes the new epoch |
 | DWI-25 | Membership enrollment and occurrence creation are host-serialized at the durable enrollment commit boundary. | create-before-enroll excludes the epoch; enroll-before-create includes it; concurrent retries preserve that committed order without ACK/quorum |
 | DWI-26 | Priority is assigned only by an exact native-registry state/modal/subject/raiser match and honors its exclusions. | all four registered families classify priority; `priority=0`, `int.MaxValue`, `UIStateGeoModal`, `MandatoryMission`, names/tags, mission outcomes/interceptions/cutscenes/game-over, and unknown patched triples do not silently classify priority |
 
@@ -300,7 +300,7 @@
 - Host raises research completion, a shared-choice event, then an ambush offer.
 - All three receive ordered durable entitlements. Carol may see them; Alice and Bob render nothing tactical.
 - Bob disconnects before any presentation; ACK history is irrelevant.
-- After tactical return Alice sees the priority ambush first, then the ordinary sequence. Bob reconnects later and receives his own unread lifecycle in the same host order.
+- After tactical return Alice sees the priority ambush first, then the ordinary sequence. Bob's disconnect ends his epoch and unread carriers. When he reconnects, the host enrolls a new epoch with no prior windows; only later occurrences are delivered to it.
 
 ### Priority preemption and unchanged resume
 
@@ -312,11 +312,11 @@
 
 ### Shared first answer wins, per-player result retention
 
-- Alice and Bob have the same shared-choice occurrence open; Carol is offline.
+- Alice and Bob have the same shared-choice occurrence open; Carol remains actively enrolled but is outside the Geoscape display gate.
 - Bob answers B milliseconds before Alice answers A.
 - Host locks B once, applies its cost/reward once, and rejects A as stale.
 - Alice and Bob immediately repaint to locked result B but dismiss independently.
-- Carol reconnects and receives result B as unread; Bob's dismissal cannot consume Carol's entitlement.
+- Carol later returns to Geoscape and receives result B as unread; Bob's dismissal cannot consume Carol's entitlement. If Carol disconnects first, her ending epoch's result carrier is removed and a reconnect does not restore it.
 
 ### Mission Start, collaborative preparation, Back, launch, no quorum
 
