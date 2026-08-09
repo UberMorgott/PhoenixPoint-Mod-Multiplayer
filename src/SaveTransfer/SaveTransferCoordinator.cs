@@ -1911,7 +1911,7 @@ namespace Multiplayer.Network
             // 3. Build the scene binding from the in-memory data source.
             var serializedParam = new Base.Levels.LevelSerializedParam(
                 levelParams.Value,
-                new Base.Levels.BinaryDataLevelSerializedDataSource(blob, ext));
+                Multiplayer.Network.Sync.DurableInboxSaveBlobTransit.OpenExactReadSavegameBinaryBlob(blob, ext));
             var binding = meta.LevelScene.CreateSceneBinding(serializedParam);
 
             _pendingResult = new LoadLevelGameResult(binding);

@@ -127,6 +127,50 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        internal static bool TryDecodeLedger(byte[] payload, out HostLedger ledger, out string refusal)
+        {
+            ledger = null; refusal = null;
+            try
+            {
+                using (var stream = new MemoryStream(payload ?? Array.Empty<byte>(), false))
+                using (var reader = new BinaryReader(stream, StrictUtf8))
+                {
+                    ulong revision = reader.ReadUInt64();
+                    var members = new List<KeyValuePair<MembershipId, MemberPresence>>();
+                    for (int i = 0, count = ReadCount(reader); i < count; i++)
+                    {
+                        var member = new MembershipId(ReadString(reader), reader.ReadUInt64());
+                        byte raw = reader.ReadByte();
+                        if (!Enum.IsDefined(typeof(MemberPresence), (int)raw)) throw new InvalidDataException("invalid member presence");
+                        members.Add(new KeyValuePair<MembershipId, MemberPresence>(member, (MemberPresence)raw));
+                    }
+                    var entries = new List<InboxEntry>();
+                    for (int i = 0, count = ReadCount(reader); i < count; i++)
+                    {
+                        ulong ordinal = reader.ReadUInt64(); string orderTrigger = ReadString(reader);
+                        var occurrence = ReadOccurrence(reader);
+                        var membership = new MembershipId(ReadString(reader), reader.ReadUInt64());
+                        byte rawLifecycle = reader.ReadByte();
+                        if (!Enum.IsDefined(typeof(InboxLifecycle), rawLifecycle)) throw new InvalidDataException("invalid lifecycle");
+                        ulong lifecycleRevision = reader.ReadUInt64(), tombstoneRevision = reader.ReadUInt64();
+                        CanonicalChoiceId choice = default(CanonicalChoiceId);
+                        if (reader.ReadBoolean())
+                        {
+                            var choiceOccurrence = ReadOccurrence(reader);
+                            choice = new CanonicalChoiceId(choiceOccurrence, ReadString(reader));
+                            if (!choiceOccurrence.Equals(occurrence)) throw new InvalidDataException("foreign choice namespace");
+                        }
+                        entries.Add(new InboxEntry(occurrence, membership, (InboxLifecycle)rawLifecycle, choice,
+                            lifecycleRevision, tombstoneRevision, new HostOrderKey(ordinal, orderTrigger)));
+                    }
+                    if (stream.Position != stream.Length) throw new InvalidDataException("trailing ledger bytes");
+                    ledger = new HostLedger(entries, revision, members);
+                    return true;
+                }
+            }
+            catch (Exception ex) { refusal = ex.Message; return false; }
+        }
+
         private static void WriteOccurrence(BinaryWriter writer, OccurrenceId occurrence)
         {
             WriteString(writer, occurrence.EventId);

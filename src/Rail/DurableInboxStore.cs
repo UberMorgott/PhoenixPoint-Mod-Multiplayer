@@ -79,10 +79,21 @@ namespace Multiplayer.Network.Sync
         private readonly object _gate = new object();
         private readonly List<DurableInboxJournalRecord> _journal = new List<DurableInboxJournalRecord>();
         private HostLedger _ledger;
+        private readonly HostLedger _snapshot;
+        private DurableInboxCanonicalState _canonical;
+        private readonly DurableInboxCanonicalState _snapshotCanonical;
+        private readonly HashSet<OccurrenceId> _unservable;
 
-        internal DurableInboxStore(HostLedger ledger)
+        internal DurableInboxStore(HostLedger ledger, DurableInboxCanonicalState canonical = null,
+            IEnumerable<DurableInboxJournalRecord> journal = null, HostLedger snapshot = null,
+            DurableInboxCanonicalState snapshotCanonical = null)
         {
             _ledger = DurableInboxReducer.CloneAndValidate(ledger ?? throw new ArgumentNullException(nameof(ledger)));
+            _snapshot = DurableInboxReducer.CloneAndValidate(snapshot ?? ledger);
+            _canonical = canonical ?? DurableInboxCanonicalState.Empty;
+            _snapshotCanonical = snapshotCanonical ?? _canonical;
+            if (journal != null) _journal.AddRange(journal);
+            _unservable = new HashSet<OccurrenceId>();
         }
 
         internal HostLedger Ledger { get { lock (_gate) return _ledger; } }
@@ -91,11 +102,23 @@ namespace Multiplayer.Network.Sync
             get { lock (_gate) return new ReadOnlyCollection<DurableInboxJournalRecord>(_journal.ToArray()); }
         }
 
+        internal DurableInboxSaveRoot CreateSaveRoot()
+        {
+            lock (_gate) return DurableInboxSaveCodec.Create(_snapshot, _journal, _snapshotCanonical);
+        }
+
+        internal DurableInboxCanonicalState Canonical { get { lock (_gate) return _canonical; } }
+        internal bool IsServable(OccurrenceId occurrence) { lock (_gate) return !_unservable.Contains(occurrence); }
+        internal void SetUnservable(IEnumerable<OccurrenceId> occurrences)
+        { lock (_gate) { _unservable.Clear(); foreach (var occurrence in occurrences) _unservable.Add(occurrence); } }
+
         // Testable persistence seam. Returning false or throwing simulates a journal write failure.
         internal Func<DurableInboxJournalRecord, bool> WriteRecord { get; set; } = _ => true;
         internal Func<HostLedger, bool> ValidateCandidate { get; set; } = _ => true;
 
-        internal bool Commit(HostLedger expected, HostLedger next)
+        internal bool Commit(HostLedger expected, HostLedger next) => CommitWithCanonical(expected, next, null);
+
+        internal bool CommitWithCanonical(HostLedger expected, HostLedger next, DurableInboxCanonicalState nextCanonical)
         {
             if (expected == null) throw new ArgumentNullException(nameof(expected));
             if (next == null) throw new ArgumentNullException(nameof(next));
@@ -110,8 +133,14 @@ namespace Multiplayer.Network.Sync
                 try
                 {
                     candidate = DurableInboxReducer.CloneAndValidate(next);
+                    var canonicalCandidate = nextCanonical ?? _canonical;
+                    if (canonicalCandidate.Choices.Select(x => x.Occurrence)
+                        .Concat(canonicalCandidate.Results.Select(x => x.Occurrence))
+                        .Concat(canonicalCandidate.Rewards.Select(x => x.Occurrence))
+                        .Any(x => !candidate.Contains(x))) return false;
                     if (!(ValidateCandidate ?? (_ => true))(candidate)) return false;
-                    record = new DurableInboxJournalRecord(candidate.CommittedRevision, candidate.EncodeCanonical(),
+                    record = new DurableInboxJournalRecord(candidate.CommittedRevision,
+                        DurableInboxSaveCodec.EncodeJournalCandidate(candidate, canonicalCandidate),
                         candidate.AllEntries.Select(entry => entry.Occurrence));
                     if (!(WriteRecord ?? (_ => true))(record)) return false;
                 }
@@ -122,6 +151,7 @@ namespace Multiplayer.Network.Sync
 
                 _journal.Add(record);
                 _ledger = candidate;
+                _canonical = nextCanonical ?? _canonical;
                 return true;
             }
         }

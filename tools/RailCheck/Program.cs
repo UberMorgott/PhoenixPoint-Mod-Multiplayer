@@ -359,6 +359,8 @@ namespace RailCheck
             Add(laws, () => L399_ASameEpochReconnectRestoresOnlyItsInbox.Check());
             Add(laws, () => L400_EnrollmentAndCreationShareOneOrder.Check());
             Add(laws, () => L394_ACompactionNeedsProofNoDurableSourceCanNameIt.Check());
+            Add(laws, () => L379_AHostOrderSurvivesTheNativeSaveBlob.Check());
+            Add(laws, () => L383_ACanonicalResultNeverRebindsByListPosition.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             Add(laws, () => L377_AReceiptAdvancesNoInboxLifecycle.Check());
             laws.Sort(StringComparer.Ordinal);
