@@ -167,8 +167,8 @@ namespace Multiplayer.UI
             /// the tactical beacon shaft. Never a pooled object: nothing here is the game's to reclaim.</summary>
             public GameObject Beacon;
             /// <summary>Whose ping this is, from the VIEWER's side — true only on the peer that pressed the
-            /// key. The marker's tint is written once at birth, but the arrow is redrawn every frame, so it
-            /// needs the answer kept.</summary>
+            /// key. Kept because both the arrow and (since the LateUpdate re-assert) the marker's tint are
+            /// redrawn every frame.</summary>
             public bool Mine;
             /// <summary>TACTICAL OBJECT PING ONLY: the pinged model, repainted whole. Null on every other
             /// shape, and null on an actor whose model could not be painted (then <see cref="Beacon"/> is
@@ -616,7 +616,10 @@ namespace Multiplayer.UI
         private static void Tint(GameObject go, bool mine)
         {
             var colour = mine ? Own : Peer;
-            var block = new MaterialPropertyBlock();
+            // Lazily, never in a static initializer: `new MaterialPropertyBlock()` is a Unity ECALL and this
+            // type's cctor must stay engine-free (see the note on _loggedTint). Reused because Tint now runs
+            // every frame per live marker.
+            var block = _block ?? (_block = new MaterialPropertyBlock());
             List<string> seen = _loggedTint ? null : new List<string>();
             foreach (var r in go.GetComponentsInChildren<Renderer>(true))
             {
@@ -627,17 +630,56 @@ namespace Multiplayer.UI
                 r.SetPropertyBlock(block);
                 var mat = r.sharedMaterial;
                 if (seen != null)
-                    seen.Add(r.gameObject.name + "<" + (mat == null || mat.shader == null ? "no-shader" : mat.shader.name) + ">");
+                    seen.Add(r.gameObject.name + "<" + (mat == null || mat.shader == null ? "no-shader" : mat.shader.name) +
+                             "/" + r.GetType().Name + ">");
             }
 
             if (seen == null) return;
             _loggedTint = true;
+            // The renderer TYPE and the animator count are in this line because the previous version of it
+            // was read as proof of things it never measured: it printed only names and shaders, and "they
+            // are MeshRenderers" and "nothing animates them" were both inferred from that. If a Pulse turns
+            // out to be a ParticleSystemRenderer the answer is the particle start colour (vertex colour
+            // multiplies the tint); if the animator count is non-zero the answer is the re-assert below.
             Debug.Log("[Multiplayer] ping marker tinted " + (mine ? "OWN green" : "PEER blue") +
                       " over _TintColor/_Color on " + seen.Count + " renderer(s): " +
-                      string.Join(", ", seen.ToArray()) + " (logged once per run). The waves are the Pulse* " +
-                      "entries and their shader declares _TintColor, so those two are the ones that must " +
-                      "change colour; a Pulse drawing stock red means the shader multiplies the tint by its " +
-                      "_MainTex and the answer is a lighter colour, not another property name.");
+                      string.Join(", ", seen.ToArray()) + "; animators=" +
+                      go.GetComponentsInChildren<Animator>(true).Length +
+                      ", particleSystems=" + go.GetComponentsInChildren<ParticleSystem>(true).Length +
+                      " (logged once per run). The tint is now RE-ASSERTED in LateUpdate — a marker still " +
+                      "drawing stock red with animators=0 and particleSystems=0 means the shader multiplies " +
+                      "_TintColor by its _MainTex and the answer is a lighter colour, not another property.");
+        }
+
+        /// <summary>Reused across frames; assigned lazily inside <see cref="Tint"/>, never here — a
+        /// <c>new MaterialPropertyBlock()</c> in a field initializer would put a Unity ECALL back into this
+        /// type's static constructor and abort RailCheck's out-of-Unity pass (see <see cref="_loggedTint"/>).</summary>
+        private static MaterialPropertyBlock _block;
+
+        /// <summary>
+        /// THE TINT IS RE-ASSERTED EVERY FRAME, AND THAT IS WHY THE ONE-SHOT TINT LOOKED INERT.
+        /// <see cref="Tint"/> ran ONCE at birth and its own log proves the write landed on all five
+        /// renderers of the haven-defence prefab — <c>Pulse1&lt;Unlit/Colored, Animated Mask&gt;</c> among
+        /// them, live, 2026-08-09 — and the waves still drew stock red. So the write is not what fails:
+        /// something overwrites it AFTER us, every frame, which is exactly what the prefab exists to do
+        /// (its whole content is an animation). Unity drives an animated material property through the
+        /// renderer's MaterialPropertyBlock — the same channel <see cref="Tint"/> writes — so an Animator
+        /// on this prefab clobbers our colour on every tick and a birth-time write can never survive.
+        ///
+        /// LATE-Update, not Update: animation is evaluated BETWEEN the two, so a write in Update loses the
+        /// same race every frame and a write here always wins. This is also mechanism-agnostic — anything
+        /// that repaints the marker per frame (an Animator, the prefab's own controller, a material swap)
+        /// loses to a per-frame re-assert, which is why it is preferred over disabling the Animator: the
+        /// waves ARE the animation, and the owner asked for expanding waves.
+        /// Cost: <see cref="LifetimeSeconds"/>-lived markers, a handful at a time, ≤5 SetPropertyBlock each.
+        /// </summary>
+        private void LateUpdate()
+        {
+            for (int i = 0; i < _live.Count; i++)
+            {
+                var beacon = _live[i].Beacon;
+                if (beacon != null) Tint(beacon, _live[i].Mine);
+            }
         }
 
         /// <summary>THE SHADER IDS ARE NOT CACHED, AND MUST NOT BE. They used to be two
