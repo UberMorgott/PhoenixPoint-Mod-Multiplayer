@@ -10,9 +10,11 @@ namespace Multiplayer.Network.Sync
             if (command == null) throw new ArgumentNullException(nameof(command));
             if (command.Kind == InboxCommandKind.TransportAck) return new ReduceResult(ledger, false);
 
-            var current = ledger.Get(command.Occurrence, command.Membership);
-            if (command.Revision <= current.LifecycleRevision ||
-                !Enum.IsDefined(typeof(InboxLifecycle), command.Lifecycle))
+            InboxEntry current;
+            try { current = ledger.Get(command.Occurrence, command.Membership); }
+            catch (InvalidOperationException) { return new ReduceResult(ledger, false); }
+            if (command.Revision <= current.LifecycleRevision || current.Lifecycle == InboxLifecycle.Removed ||
+                !Enum.IsDefined(typeof(InboxLifecycle), command.Lifecycle) || command.Lifecycle == InboxLifecycle.Removed)
                 return new ReduceResult(ledger, false);
 
             bool sameLifecycle = current.Lifecycle == command.Lifecycle;

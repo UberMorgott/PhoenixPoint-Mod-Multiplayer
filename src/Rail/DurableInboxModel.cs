@@ -187,7 +187,7 @@ namespace Multiplayer.Network.Sync
     }
 
     internal enum InboxMessageKind : byte { TransportAck = 0x46, Lifecycle = 0x40 }
-    internal enum InboxLifecycle : byte { Queued, Open, Read, Dismissed }
+    internal enum InboxLifecycle : byte { Queued, Open, Read, Dismissed, Removed }
 
     internal sealed class InboxMessage
     {
@@ -260,11 +260,99 @@ namespace Multiplayer.Network.Sync
                 throw new ArgumentException("duplicate ledger entry", nameof(entries));
             _entries = new ReadOnlyCollection<InboxEntry>(copy);
         }
+        internal int EntryCount => _entries.Count;
+        internal IReadOnlyList<InboxEntry> AllEntries => _entries;
+        internal IReadOnlyList<InboxEntry> EntriesFor(MembershipId member) => new ReadOnlyCollection<InboxEntry>(
+            _entries.Where(e => e.Membership.Equals(member)).OrderBy(e => e.Occurrence).ToArray());
+        internal bool Contains(OccurrenceId occurrence) => _entries.Any(e => e.Occurrence.Equals(occurrence));
         internal InboxEntry Get(OccurrenceId occurrence, MembershipId member) =>
             _entries.Single(e => e.Occurrence.Equals(occurrence) && e.Membership.Equals(member));
+        internal HostLedger Add(IEnumerable<InboxEntry> additions) => new HostLedger(_entries.Concat(additions));
         internal HostLedger Replace(InboxEntry replacement) => new HostLedger(_entries.Select(e =>
             e.Occurrence.Equals(replacement.Occurrence) && e.Membership.Equals(replacement.Membership) ? replacement : e));
+        internal HostLedger ReplaceOccurrence(OccurrenceId occurrence, Func<InboxEntry, InboxEntry> replace) =>
+            new HostLedger(_entries.Select(e => e.Occurrence.Equals(occurrence) ? replace(e) : e));
         internal byte[] EncodeCanonical() => DurableInboxCodec.EncodeLedger(_entries);
+    }
+
+internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeoscape }
+
+    internal sealed class HostInboxSequencer
+    {
+        private readonly Dictionary<MembershipId, MemberPresence> _members = new Dictionary<MembershipId, MemberPresence>();
+        private readonly HashSet<OccurrenceId> _occurrences = new HashSet<OccurrenceId>();
+        internal HostLedger Ledger { get; private set; }
+        internal ulong CommittedRevision { get; private set; }
+
+        internal HostInboxSequencer(HostLedger ledger)
+        {
+            Ledger = ledger ?? throw new ArgumentNullException(nameof(ledger));
+            foreach (var entry in ledger.AllEntries) _occurrences.Add(entry.Occurrence);
+        }
+
+        internal bool Enroll(MembershipId member, MemberPresence presence)
+        {
+            if (!Enum.IsDefined(typeof(MemberPresence), presence)) return false;
+            if (_members.ContainsKey(member)) { _members[member] = presence; return false; }
+            _members.Add(member, presence);
+            CommittedRevision++;
+            return true;
+        }
+
+        internal bool SetPresence(MembershipId member, MemberPresence presence)
+        {
+            if (!_members.ContainsKey(member) || !Enum.IsDefined(typeof(MemberPresence), presence)) return false;
+            _members[member] = presence;
+            return true;
+        }
+
+        internal bool CreateOccurrence(OccurrenceId occurrence)
+        {
+            if (!_occurrences.Add(occurrence)) return false;
+            Ledger = Ledger.Add(_members.Keys.Select(member => new InboxEntry(occurrence, member,
+                InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0)));
+            CommittedRevision++;
+            return true;
+        }
+
+        internal bool ApplyLifecycle(MembershipId member, OccurrenceId occurrence, InboxLifecycle lifecycle, ulong revision)
+        {
+            if (!_members.ContainsKey(member)) return false;
+            var result = DurableInboxReducer.Apply(Ledger,
+                InboxCommand.SetLifecycle(occurrence, member, lifecycle, revision));
+            Ledger = result.Ledger;
+            if (result.Changed) CommittedRevision++;
+            return result.Changed;
+        }
+
+        internal bool Tombstone(OccurrenceId occurrence, ulong revision)
+        {
+            if (!_occurrences.Contains(occurrence)) return false;
+            var changed = false;
+            Ledger = Ledger.ReplaceOccurrence(occurrence, entry =>
+            {
+                if (revision <= entry.TombstoneRevision) return entry;
+                changed = true;
+                return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
+                    entry.Choice, Math.Max(entry.LifecycleRevision, revision), revision);
+            });
+            if (changed) CommittedRevision++;
+            return changed;
+        }
+
+        internal bool EndMembership(MembershipId member)
+        {
+            if (!_members.Remove(member)) return false;
+            Ledger = Ledger.EntriesFor(member).Aggregate(Ledger, (current, entry) =>
+                current.Replace(new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
+                    entry.Choice, entry.LifecycleRevision + 1, Math.Max(entry.TombstoneRevision, entry.LifecycleRevision + 1))));
+            CommittedRevision++;
+            return true;
+        }
+
+        internal IReadOnlyList<InboxEntry> Reconnect(MembershipId member) => _members.ContainsKey(member)
+            ? Ledger.EntriesFor(member)
+            : (IReadOnlyList<InboxEntry>)Array.Empty<InboxEntry>();
     }
 
     internal enum InboxCommandKind { TransportAck, SetLifecycle }
