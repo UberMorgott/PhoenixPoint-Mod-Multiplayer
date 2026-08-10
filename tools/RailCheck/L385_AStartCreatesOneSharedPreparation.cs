@@ -11,9 +11,9 @@ namespace RailCheck
     {
         internal static IEnumerable<string> Check()
         {
-            var a=new MembershipId("a",1); var b=new MembershipId("b",1); var offer=new OccurrenceId("Modal:GeoAmbushBrief","offer",new[]{"m"});
+            var a=new MembershipId("a"); var b=new MembershipId("b"); var offer=new OccurrenceId("Modal:GeoAmbushBrief","offer",new[]{"m"});
             var prep=new OccurrenceId("DeploymentPreparing","prep",new[]{"m"}); var order=new HostOrderKey(1,offer.TriggerId);
-            var members=new[]{new KeyValuePair<MembershipId,MemberPresence>(a,MemberPresence.Active),new KeyValuePair<MembershipId,MemberPresence>(b,MemberPresence.NonGeoscape)};
+            var members=new[]{a,b};
             DurableInboxStore Make()=>new DurableInboxStore(new HostLedger(new[]{
                 new InboxEntry(offer,a,InboxLifecycle.Dismissed,default(CanonicalChoiceId),2,0,order),
                 new InboxEntry(offer,b,InboxLifecycle.Open,default(CanonicalChoiceId),1,0,order)},1,members));
@@ -56,8 +56,6 @@ namespace RailCheck
                 new HostOrderKey(2,prep.TriggerId),predecessor:offer)},2,members); }
             catch(ArgumentException){danglingRejected=true;}
             if(!danglingRejected) yield return "L385 host-ledger-accepted-a-dangling-predecessor-link";
-            var late=new MembershipId("late",2); var seq=new HostInboxSequencer(store.Ledger); seq.Enroll(late,MemberPresence.Active);
-            if(seq.Ledger.AllEntries.Any(x=>x.Occurrence.Equals(prep)&&x.Membership.Equals(late))) yield return "L385 late-epoch-received-preparation-backlog";
             // POSITIVE CONTROL: inheriting the predecessor dismissal would dismiss A's fresh successor.
             if(p.Single(x=>x.Membership.Equals(a)).Lifecycle==InboxLifecycle.Dismissed) yield return "L385 control-not-red: predecessor-state-was-inherited";
         }

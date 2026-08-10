@@ -116,7 +116,6 @@ namespace Multiplayer.Network.Sync
         private static readonly HashSet<BoundNativeCarrier> _liveBoundNativeCarriers =
             new HashSet<BoundNativeCarrier>();
         private static DurableInboxStore _durableCarrierStore;
-        private static ulong _durableCarrierEpoch;
         private static readonly FieldInfo DurableEventStateField =
             AccessTools.Field(typeof(GeoscapeEventRecord), "_state");
         private static readonly FieldInfo DurableModalHandledField =
@@ -130,7 +129,7 @@ namespace Multiplayer.Network.Sync
                 carriers = _liveBoundNativeCarriers.ToArray();
                 foreach (var carrier in carriers) _boundNativeCarriers.Remove(carrier.Request);
                 _liveBoundNativeCarriers.Clear();
-                _durableSuspended.Clear(); _durableCarrierStore = null; _durableCarrierEpoch = 0;
+                _durableSuspended.Clear(); _durableCarrierStore = null;
             }
             foreach (var carrier in carriers)
             {
@@ -143,17 +142,14 @@ namespace Multiplayer.Network.Sync
 
         private static void EnsureDurableCarrierSession(DurableInboxStore store)
         {
-            string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
-            ulong epoch = store?.Ledger.Members.Keys.Where(x => string.Equals(x.PlayerGuid, local,
-                StringComparison.OrdinalIgnoreCase)).Select(x => x.Epoch).DefaultIfEmpty(0UL).Max() ?? 0;
             BoundNativeCarrier[] stale;
             lock (_durableCarrierGate)
             {
-                if (ReferenceEquals(_durableCarrierStore, store) && _durableCarrierEpoch == epoch) return;
+                if (ReferenceEquals(_durableCarrierStore, store)) return;
                 stale = _liveBoundNativeCarriers.ToArray();
                 foreach (var carrier in stale) _boundNativeCarriers.Remove(carrier.Request);
                 _liveBoundNativeCarriers.Clear();
-                _durableSuspended.Clear(); _durableCarrierStore = store; _durableCarrierEpoch = epoch;
+                _durableSuspended.Clear(); _durableCarrierStore = store;
             }
             foreach (var carrier in stale) carrier.Store.Carriers.Unregister(carrier.Occurrence, carrier);
         }
@@ -283,8 +279,8 @@ namespace Multiplayer.Network.Sync
             if (store == null) return false;
             EnsureDurableCarrierSession(store);
             string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
-            var memberships = store.Ledger.Members.Keys.Where(x =>
-                string.Equals(x.PlayerGuid, local, StringComparison.OrdinalIgnoreCase)).OrderByDescending(x => x.Epoch).ToArray();
+            var memberships = store.Ledger.Members.Where(x =>
+                string.Equals(x.PlayerGuid, local, StringComparison.OrdinalIgnoreCase)).ToArray();
             if (memberships.Length == 0) return false;
             var carrier = new NativeCarrier(query, ordinary, priority, current, pending);
             return new DurableInboxEngine(store, memberships[0], carrier).TryPreempt(ordinary, priority,
@@ -319,8 +315,8 @@ namespace Multiplayer.Network.Sync
         internal static bool TryLocalMember(DurableInboxStore store, out MembershipId member)
         {
             string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
-            var found = store.Ledger.Members.Keys.Where(x => string.Equals(x.PlayerGuid, local,
-                StringComparison.OrdinalIgnoreCase)).OrderByDescending(x => x.Epoch).ToArray();
+            var found = store.Ledger.Members.Where(x => string.Equals(x.PlayerGuid, local,
+                StringComparison.OrdinalIgnoreCase)).ToArray();
             member = found.Length == 0 ? default(MembershipId) : found[0]; return found.Length != 0;
         }
 

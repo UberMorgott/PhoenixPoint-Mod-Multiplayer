@@ -352,12 +352,7 @@ namespace RailCheck
             Add(laws, () => L369_ABaseRenameReachesTheMirror.Check());
             Add(laws, () => L371_AMidSessionParityDiffIsSaidOutLoud.Check());
             Add(laws, () => L372_OneDeploymentCapForTheScreenAndTheValidator.Check());
-            Add(laws, () => L376_ACreationEntitlesEveryCommittedEpoch.Check());
             Add(laws, () => L391_ALifecycleRevisionNeverRunsBackward.Check());
-            Add(laws, () => L397_AMembershipEndsOnlyByHostAuthority.Check());
-            Add(laws, () => L398_ALateEnrollmentReceivesNoHistory.Check());
-            Add(laws, () => L399_ASameEpochReconnectRestoresOnlyItsInbox.Check());
-            Add(laws, () => L400_EnrollmentAndCreationShareOneOrder.Check());
             Add(laws, () => L394_ACompactionNeedsProofNoDurableSourceCanNameIt.Check());
             Add(laws, () => L395_TerminalRemovalReachesEveryCarrier.Check());
             Add(laws, () => L396_BackDefersPreparationWithoutCancelling.Check());

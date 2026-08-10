@@ -19,11 +19,11 @@ namespace RailCheck
 
         internal static IEnumerable<string> Check()
         {
-            var member = new MembershipId("player", 7);
+            var member = new MembershipId("player");
             var occurrence = new OccurrenceId("DeploymentPreparing", "back", new[] { "S#4", "M#4" });
             var predecessor = new OccurrenceId("Modal:GeoScavengeBrief", "offer", new[] { "S#4", "M#4" });
             var order = new HostOrderKey(1, occurrence.TriggerId);
-            var members = new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active) };
+            var members = new[] { member };
             DurableInboxStore Make(InboxLifecycle lifecycle = InboxLifecycle.Open, ulong preparation = 3) =>
                 new DurableInboxStore(new HostLedger(new[] {
                     new InboxEntry(predecessor, member, InboxLifecycle.Removed, default(CanonicalChoiceId), 1, 1,
@@ -52,12 +52,6 @@ namespace RailCheck
                 InboxCommand.SetLifecycle(occurrence, member, InboxLifecycle.Queued, 100));
             if (genericRequeue.Changed || genericRequeue.Ledger.Get(occurrence, member).Lifecycle != InboxLifecycle.Deferred)
                 yield return "L396 generic-lifecycle-message-bypassed-explicit-reentry-and-material-revision-gates";
-            var presenceChurn = new HostInboxSequencer(store.Ledger);
-            if (!presenceChurn.SetPresence(member, MemberPresence.Tactical) ||
-                !presenceChurn.SetPresence(member, MemberPresence.Active) ||
-                presenceChurn.Ledger.Get(occurrence, member).Lifecycle != InboxLifecycle.Deferred)
-                yield return "L396 active-membership-presence-churn-cleared-local-deferral";
-
             if (!store.InstallPreparationEdit(new PreparationEditDelta(occurrence, 4, 3, new[] { "U#1" })) ||
                 store.Ledger.Get(occurrence, member).Lifecycle != InboxLifecycle.Queued)
                 yield return "L396 newer-material-preparation-revision-did-not-requeue";
@@ -85,9 +79,9 @@ namespace RailCheck
                 explicitStore.Ledger.Get(occurrence, member).Lifecycle != InboxLifecycle.Queued)
                 yield return "L396 exact-later-native-raiser-did-not-requeue-and-bind-the-deferred-occurrence";
 
-            var otherMember = new MembershipId("other", 7);
-            var twoMembers = new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active),
-                new KeyValuePair<MembershipId, MemberPresence>(otherMember, MemberPresence.NonGeoscape) };
+            var otherMember = new MembershipId("other");
+            var twoMembers = new[] { member,
+                otherMember };
             var perPlayer = new DurableInboxStore(new HostLedger(new[] {
                 new InboxEntry(predecessor, member, InboxLifecycle.Removed, default(CanonicalChoiceId), 1, 1,
                     new HostOrderKey(1, predecessor.TriggerId), terminalReason: TerminalReason.Superseded,
@@ -126,12 +120,6 @@ namespace RailCheck
                 .Concat(new[] { secondOffer, ambiguousEntry }), 3, members));
             if (DeploymentWindowClose.TryReenterDeferredForMission(ambiguous, member, "M#4", out rebound))
                 yield return "L396 ambiguous-occurrence-was-guessed-instead-of-requiring-one-exact-predecessor";
-
-            var authority = new HostInboxSequencer(Make(InboxLifecycle.Deferred).Ledger);
-            if (!authority.EndMembership(member) || authority.Reconnect(member).Count != 0 ||
-                authority.Ledger.Get(occurrence, member).Lifecycle != InboxLifecycle.Removed ||
-                authority.Ledger.Get(occurrence, member).TerminalReason != TerminalReason.MembershipEnded)
-                yield return "L396 ended-epoch-restored-an-old-deferral-on-reconnect";
 
             DurableInboxRestore restored; string saveRefusal;
             var savedDeferred = Make(InboxLifecycle.Deferred);

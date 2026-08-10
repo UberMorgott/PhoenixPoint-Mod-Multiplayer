@@ -11,14 +11,14 @@ namespace RailCheck
     {
         internal static IEnumerable<string> Check()
         {
-            var a = new MembershipId("a", 1); var b = new MembershipId("b", 1);
+            var a = new MembershipId("a"); var b = new MembershipId("b");
             var o = new OccurrenceId("Modal:GeoAmbushBrief", "cancel-local", new[] { "mission" });
             var order = new HostOrderKey(1, o.TriggerId);
             var store = new DurableInboxStore(new HostLedger(new[] {
                 new InboxEntry(o,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0,order),
                 new InboxEntry(o,b,InboxLifecycle.Read,default(CanonicalChoiceId),1,0,order)},1,
-                new[] { new KeyValuePair<MembershipId,MemberPresence>(a,MemberPresence.Active),
-                    new KeyValuePair<MembershipId,MemberPresence>(b,MemberPresence.Active)}));
+                new[] { a,
+                    b}));
             if (!WindowQueueSync.CancelDurableMissionOffer(store,a,o) ||
                 store.Ledger.Get(o,a).Lifecycle != InboxLifecycle.Dismissed ||
                 store.Ledger.Get(o,b).Lifecycle != InboxLifecycle.Read)
@@ -30,7 +30,7 @@ namespace RailCheck
                     new HostOrderKey(1,arbitrary.TriggerId)),
                 new InboxEntry(prep,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0,
                     new HostOrderKey(2,prep.TriggerId))},2,
-                new[] { new KeyValuePair<MembershipId,MemberPresence>(a,MemberPresence.Active)}));
+                new[] { a}));
             if (WindowQueueSync.CancelDurableMissionOffer(arbitraryStore,a,arbitrary) ||
                 WindowQueueSync.CancelDurableMissionOffer(arbitraryStore,a,prep) ||
                 arbitraryStore.Ledger.AllEntries.Any(x=>x.Lifecycle==InboxLifecycle.Dismissed))
@@ -39,7 +39,7 @@ namespace RailCheck
             var multi=new DurableInboxStore(new HostLedger(new[]{
                 new InboxEntry(o,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0,order),
                 new InboxEntry(o2,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0,new HostOrderKey(2,o2.TriggerId))},2,
-                new[]{new KeyValuePair<MembershipId,MemberPresence>(a,MemberPresence.Active)}));
+                new[]{a}));
             if(!WindowQueueSync.DurableMissionOfferBindingMatches(multi,a,o,"mission")||
                 !WindowQueueSync.DurableMissionOfferBindingMatches(multi,a,o2,"mission")||
                 WindowQueueSync.DurableMissionOfferBindingMatches(multi,a,o,"foreign"))

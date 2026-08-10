@@ -31,9 +31,9 @@ namespace RailCheck
             if (CallsNamed(step, "LaunchMission"))
                 yield return "L378 mission-arrival-bypasses-task6-scheduler-with-direct-carrier";
 
-            var member = new MembershipId("arrival-player", 4);
+            var member = new MembershipId("arrival-player");
             var initial = new HostLedger(Array.Empty<InboxEntry>(), 9,
-                new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.NonGeoscape) });
+                new[] { member });
             var store = new DurableInboxStore(initial);
             var occurrence = new OccurrenceId("mission-offer", "event|S#4|M#9", new[] { "S#4", "V#2" });
             if (!DurableWindowRegistry.EnqueuePriorityOccurrence(store, occurrence) ||

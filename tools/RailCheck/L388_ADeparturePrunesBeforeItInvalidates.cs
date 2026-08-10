@@ -26,16 +26,16 @@ namespace RailCheck
 
         internal static IEnumerable<string> Check()
         {
-            var a = new MembershipId("a", 1); var b = new MembershipId("b", 1);
-            var c = new MembershipId("c", 1); var d = new MembershipId("d", 1);
+            var a = new MembershipId("a"); var b = new MembershipId("b");
+            var c = new MembershipId("c"); var d = new MembershipId("d");
             var occurrence = new OccurrenceId("DeploymentPreparing", "depart", new[] { "S#7", "M#7" });
             var order = new HostOrderKey(1, occurrence.TriggerId);
             var checkpoint = new InboxWindowCheckpoint("deployment", "U#1", "read");
             var members = new[] {
-                new KeyValuePair<MembershipId, MemberPresence>(a, MemberPresence.Active),
-                new KeyValuePair<MembershipId, MemberPresence>(b, MemberPresence.Active),
-                new KeyValuePair<MembershipId, MemberPresence>(c, MemberPresence.NonGeoscape),
-                new KeyValuePair<MembershipId, MemberPresence>(d, MemberPresence.NonGeoscape) };
+                a,
+                b,
+                c,
+                d };
             DurableInboxStore Make() => new DurableInboxStore(new HostLedger(new[] {
                 new InboxEntry(occurrence, a, InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0, order),
                 new InboxEntry(occurrence, b, InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0, order),
@@ -270,20 +270,20 @@ namespace RailCheck
             var maxPrepEntry=new InboxEntry(occurrence,a,InboxLifecycle.Open,default(CanonicalChoiceId),2,0,order,
                 preparationRevision:ulong.MaxValue);
             var maxPrep=new DurableInboxStore(new HostLedger(new[]{maxPrepEntry},1,
-                new[]{new KeyValuePair<MembershipId,MemberPresence>(a,MemberPresence.Active)}));
+                new[]{a}));
             var maxDelta=new SourceRevalidationBatchDelta(2,"V#1",1,new[]{new SourceRevalidationItem(
                 occurrence,false,0,0)});
             if(maxPrep.InstallSourceRevalidationBatch(maxDelta,out refusal)||maxPrep.Ledger.CommittedRevision!=1)
                 yield return "L388 preparation-max-boundary-wrapped-or-partially-committed";
             var maxLocal=new DurableInboxStore(new HostLedger(new[]{new InboxEntry(occurrence,a,
                 InboxLifecycle.Open,default(CanonicalChoiceId),2,0,order)},ulong.MaxValue,
-                new[]{new KeyValuePair<MembershipId,MemberPresence>(a,MemberPresence.Active)}));
+                new[]{a}));
             if(maxLocal.InstallSourceRevalidationBatch(new SourceRevalidationBatchDelta(2,"V#1",1,new[]{
                 new SourceRevalidationItem(occurrence,false,1,0)}),out refusal))
                 yield return "L388 local-ledger-max-boundary-wrapped";
             var maxLifecycle=new DurableInboxStore(new HostLedger(new[]{new InboxEntry(occurrence,a,
                 InboxLifecycle.Open,default(CanonicalChoiceId),ulong.MaxValue,0,order)},1,
-                new[]{new KeyValuePair<MembershipId,MemberPresence>(a,MemberPresence.Active)}));
+                new[]{a}));
             if(maxLifecycle.InstallSourceRevalidationBatch(new SourceRevalidationBatchDelta(2,"V#1",1,new[]{
                 new SourceRevalidationItem(occurrence,true,0,0)}),out refusal)||
                 maxLifecycle.Ledger.Get(occurrence,a).Lifecycle!=InboxLifecycle.Open)

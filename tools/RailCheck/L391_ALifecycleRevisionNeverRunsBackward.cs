@@ -9,11 +9,10 @@ namespace RailCheck
     {
         internal static IEnumerable<string> Check()
         {
-            var member = new MembershipId("player", 7);
+            var member = new MembershipId("player");
             var occurrence = new OccurrenceId("event", "trigger", new[] { "subject" });
             var tombstoned = new OccurrenceId("event", "tombstoned-before-save", new[] { "subject" });
-            var host = new HostInboxSequencer(new HostLedger(new InboxEntry[0]));
-            host.Enroll(member, MemberPresence.Active);
+            var host = new HostInboxSequencer(Seeded(member));
             host.CreateOccurrence(occurrence);
             host.CreateOccurrence(tombstoned);
             if (!host.ApplyLifecycle(member, occurrence, InboxLifecycle.Open, 2))
@@ -45,27 +44,19 @@ namespace RailCheck
                 afterLoad.ApplyLifecycle(member, tombstoned, InboxLifecycle.Dismissed, 99))
                 yield return "L391 tombstone-did-not-beat-peer-update-after-save-load";
 
-            if (!afterLoad.EndMembership(member))
-                yield return "L391 active-epoch-end-refused";
-            var endedRoot = new DurableInboxStore(afterLoad.Ledger).CreateSaveRoot();
-            DurableInboxRestore endedRestore;
-            if (!DurableInboxSaveCodec.TryRestore(endedRoot, null, out endedRestore, out refusal))
-                yield return "L391 ended-epoch-save-root-refused: " + refusal;
-            else
-            {
-                var endedAfterLoad = new HostInboxSequencer(
-                    new DurableInboxStore(endedRestore.Ledger, endedRestore.Canonical, endedRestore.Journal,
-                        endedRestore.SnapshotLedger, endedRestore.SnapshotCanonical).Ledger);
-                if (endedAfterLoad.Reconnect(member).Any() ||
-                    endedAfterLoad.ApplyLifecycle(member, occurrence, InboxLifecycle.Open, 99))
-                    yield return "L391 ended-epoch-revision-accepted-after-save-load";
-            }
-
             // POSITIVE CONTROL: a newer valid revision must be observable before save/load and terminal mutation.
-            var control = new HostInboxSequencer(new HostLedger(new InboxEntry[0]));
-            control.Enroll(member, MemberPresence.Active); control.CreateOccurrence(occurrence);
+            var control = new HostInboxSequencer(Seeded(member));
+            control.CreateOccurrence(occurrence);
             if (!control.ApplyLifecycle(member, occurrence, InboxLifecycle.Open, 2))
                 yield return "L391 control-not-red: revision gate rejected its valid mutation";
+        }
+
+        /// <summary>Membership is derived from entries, so a member exists exactly by owning one.</summary>
+        private static HostLedger Seeded(MembershipId member)
+        {
+            var seed = new OccurrenceId("event", "seed", new[] { "subject" });
+            return new HostLedger(new[] { new InboxEntry(seed, member, InboxLifecycle.Queued,
+                default(CanonicalChoiceId), 1, 0, new HostOrderKey(1, seed.TriggerId)) }, 1);
         }
     }
 }

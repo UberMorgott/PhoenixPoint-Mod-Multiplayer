@@ -20,7 +20,7 @@ namespace Multiplayer.Network.Sync
     /// Geoscape EVENT-WINDOW answer family (surface 0xB4, law 1): the client's choice click is BLOCKED
     /// at its presentation seam (<see cref="EventChoiceClientLock"/>, block-first per
     /// <see cref="IntentRail.ShouldRunNative"/>) and relayed here as
-    /// <c>answer(fullOccurrence, membershipEpoch, expectedRevision, eventId, choiceIndex)</c>; the HOST runs the same native funnel the local click would
+    /// <c>answer(fullOccurrence, membership, expectedRevision, eventId, choiceIndex)</c>; the HOST runs the same native funnel the local click would
     /// have — <c>GeoscapeEvent.CompleteEvent</c> (GeoscapeEvent.cs:86) — and the outcome reaches every
     /// peer as ordinary 0xAC deltas: the record's own leaves (<c>_state</c>/<c>_selectedChoice</c>/
     /// <c>_completedAt</c>, docs/rail-baseline.txt:240-247) plus whatever roots the reward touched
@@ -44,7 +44,7 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     public static class EventSync
     {
-        internal const byte OpAnswer = 1;       // DWI2 + full occurrence + membership epoch + expected revision + eventId + choiceIndex
+        internal const byte OpAnswer = 1;       // DWI2 + full occurrence + membership + expected revision + eventId + choiceIndex
         internal const byte OpSetVariable = 2;  // [name:string][value:i32]
         private const uint DurableAnswerMagic = 0x32495744; // DWI2
 
@@ -53,7 +53,7 @@ namespace Multiplayer.Network.Sync
         {
             w.Write(DurableAnswerMagic); w.Write(occurrence.EventId); w.Write(occurrence.TriggerId);
             w.Write(occurrence.SubjectIds.Count); foreach (var subject in occurrence.SubjectIds) w.Write(subject);
-            w.Write(membership.PlayerGuid); w.Write(membership.Epoch); w.Write(expectedRevision);
+            w.Write(membership.PlayerGuid); w.Write(expectedRevision);
             w.Write(eventId); w.Write(index);
         }
 
@@ -68,7 +68,7 @@ namespace Multiplayer.Network.Sync
             if (count <= 0 || count > 64) throw new InvalidDataException("durable answer subject count");
             var subjects = new string[count]; for (int i = 0; i < count; i++) subjects[i] = ReadBoundedString(r);
             occurrence = new OccurrenceId(kind, trigger, subjects);
-            membership = new MembershipId(ReadBoundedString(r), r.ReadUInt64()); expectedRevision = r.ReadUInt64();
+            membership = new MembershipId(ReadBoundedString(r)); expectedRevision = r.ReadUInt64();
             eventId = ReadBoundedString(r); index = r.ReadInt32();
             if (r.BaseStream.Position != r.BaseStream.Length) throw new InvalidDataException("durable answer trailing bytes");
             return true;
@@ -98,7 +98,7 @@ namespace Multiplayer.Network.Sync
             w.Write(d.Occurrence.EventId); w.Write(d.Occurrence.TriggerId); w.Write(d.Occurrence.SubjectIds.Count);
             foreach (var subject in d.Occurrence.SubjectIds) w.Write(subject);
             w.Write(d.EffectToken.Value); w.Write(d.Choice.Value); w.Write(d.Result.Value);
-            w.Write(d.Winner.PlayerGuid); w.Write(d.Winner.Epoch); w.Write((byte)d.Phase);
+            w.Write(d.Winner.PlayerGuid); w.Write((byte)d.Phase);
             w.Write(d.EffectSteps.Count); foreach (var step in d.EffectSteps)
             { w.Write(step.Key); w.Write(step.Operation); w.Write(step.BeforeFact); w.Write(step.AfterFact); w.Write((byte)step.State); }
             w.Write(d.SharedRevision);
@@ -113,7 +113,7 @@ namespace Multiplayer.Network.Sync
             var subjects = new string[subjectsCount]; for (int i = 0; i < subjects.Length; i++) subjects[i] = ReadBoundedString(r);
             var occurrence = new OccurrenceId(eventKind, trigger, subjects);
             var token = new EffectToken(occurrence, ReadBoundedString(r)); var choice = new CanonicalChoiceId(occurrence, ReadBoundedString(r));
-            var result = new CanonicalResultId(occurrence, ReadBoundedString(r)); var winner = new MembershipId(ReadBoundedString(r), r.ReadUInt64());
+            var result = new CanonicalResultId(occurrence, ReadBoundedString(r)); var winner = new MembershipId(ReadBoundedString(r));
             var phase = (SharedChoicePhase)r.ReadByte(); int stepCount = r.ReadInt32();
             if (stepCount < 0 || stepCount > 256) throw new InvalidDataException("decision step count");
             var steps = new DurableEffectStep[stepCount]; for (int i = 0; i < steps.Length; i++)
@@ -297,7 +297,7 @@ namespace Multiplayer.Network.Sync
         private static MembershipId DurableMember(DurableInboxStore store, string player, OccurrenceId occurrence) =>
             store == null ? default(MembershipId) : store.Ledger.AllEntries.Where(x => x.Occurrence.Equals(occurrence) &&
                 string.Equals(x.Membership.PlayerGuid, player, StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(x => x.Membership.Epoch).Select(x => x.Membership).FirstOrDefault();
+                .Select(x => x.Membership).FirstOrDefault();
 
         private static bool TryDurableOrdinaryAnswer(OccurrenceId occurrence, MembershipId winner, string eventId,
             int index, int choiceCount, GeoscapeEventRecord record, GeoscapeEvent ev, GeoEventChoice choice,
@@ -343,7 +343,7 @@ namespace Multiplayer.Network.Sync
             if (accepted)
             {
                 Debug.Log("[MP][events] durable choice locked '" + eventId + "' token=" + stored.EffectToken.Value +
-                    " winner=" + stored.Winner.PlayerGuid + "/" + stored.Winner.Epoch);
+                    " winner=" + stored.Winner.PlayerGuid);
             }
             return true;
         }

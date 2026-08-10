@@ -1820,9 +1820,8 @@ namespace Multiplayer.Network.Sync
             if (!EventPopup.TryGetDurableOccurrence(ev, out occurrence) || store == null)
             { Debug.LogWarning("[MP][events] answer dropped — dialog has no exact durable occurrence"); return false; }
             string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
-            var entry = store.Ledger.AllEntries.Where(x => x.Occurrence.Equals(occurrence) &&
-                string.Equals(x.Membership.PlayerGuid, local, StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(x => x.Membership.Epoch).FirstOrDefault();
+            var entry = store.Ledger.AllEntries.FirstOrDefault(x => x.Occurrence.Equals(occurrence) &&
+                string.Equals(x.Membership.PlayerGuid, local, StringComparison.OrdinalIgnoreCase));
             if (entry == null) { Debug.LogWarning("[MP][events] answer dropped — no active local entitlement"); return false; }
             IntentRail.Send(SurfaceIds.GeoEventIntent, EventSync.OpAnswer, "answer '" + id + "' choice=" + index,
                             w => EventSync.WriteDurableAnswer(w, occurrence, entry.Membership,

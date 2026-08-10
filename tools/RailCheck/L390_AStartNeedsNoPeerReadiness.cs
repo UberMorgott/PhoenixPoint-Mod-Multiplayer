@@ -18,18 +18,18 @@ namespace RailCheck
                 yield return "L390 start-acquired-peer-readiness-state";
             if(typeof(MissionSync).GetMethod("StartDurableOffer",BindingFlags.Static|BindingFlags.NonPublic)==null)
                 yield return "L390 terminal-delta-production-funnel-is-unwired";
-            var member=new MembershipId("afk",1); var offer=new OccurrenceId("Modal:GeoAmbushBrief","o",new[]{"m"});
+            var member=new MembershipId("afk"); var offer=new OccurrenceId("Modal:GeoAmbushBrief","o",new[]{"m"});
             var prep=new OccurrenceId("DeploymentPreparing","p",new[]{"m"});
             var store=new DurableInboxStore(new HostLedger(new[]{new InboxEntry(offer,member,InboxLifecycle.Open,
                 default(CanonicalChoiceId),1,0,new HostOrderKey(1,offer.TriggerId))},1,
-                new[]{new KeyValuePair<MembershipId,MemberPresence>(member,MemberPresence.NonGeoscape)}));
+                new[]{member}));
             var carrier=new Carrier(); store.Carriers.Register(offer,DurableCarrierClass.NativeCurrent,carrier); int deltas=0; string refusal;
             if(!new DurableMissionOfferEngine(store,_=>deltas++).TryStart(offer,prep,_=>true,out refusal)||
                 carrier.Removed!=1||deltas!=1||refusal!=null)
                 yield return "L390 committed-start-did-not-close-and-repaint-terminal-predecessor";
             var retryStore=new DurableInboxStore(new HostLedger(new[]{new InboxEntry(offer,member,InboxLifecycle.Open,
                 default(CanonicalChoiceId),1,0,new HostOrderKey(1,offer.TriggerId))},1,
-                new[]{new KeyValuePair<MembershipId,MemberPresence>(member,MemberPresence.NonGeoscape)}));
+                new[]{member}));
             var flaky=new Carrier{Throws=1}; retryStore.Carriers.Register(offer,DurableCarrierClass.NativeCurrent,flaky);
             int retryDeltas=0; var retryEngine=new DurableMissionOfferEngine(retryStore,d=>retryDeltas++);
             if(retryEngine.TryStart(offer,prep,_=>true,out refusal)||retryDeltas!=1||retryStore.Journal.Count!=1||

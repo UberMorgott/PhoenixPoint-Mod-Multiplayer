@@ -33,23 +33,18 @@ namespace Multiplayer.Network.Sync
     internal readonly struct MembershipId : IEquatable<MembershipId>, IComparable<MembershipId>
     {
         internal readonly string PlayerGuid;
-        internal readonly ulong Epoch;
 
-        internal MembershipId(string playerGuid, ulong epoch)
+        internal MembershipId(string playerGuid)
         {
             PlayerGuid = InboxIdentity.Required(playerGuid, nameof(playerGuid));
-            Epoch = epoch;
         }
 
-        public bool Equals(MembershipId other) => Epoch == other.Epoch &&
+        public bool Equals(MembershipId other) =>
             string.Equals(PlayerGuid, other.PlayerGuid, StringComparison.Ordinal);
         public override bool Equals(object obj) => obj is MembershipId other && Equals(other);
-        public override int GetHashCode() => InboxIdentity.Hash(PlayerGuid, Epoch);
-        public int CompareTo(MembershipId other)
-        {
-            int byPlayer = string.Compare(PlayerGuid, other.PlayerGuid, StringComparison.Ordinal);
-            return byPlayer != 0 ? byPlayer : Epoch.CompareTo(other.Epoch);
-        }
+        public override int GetHashCode() => InboxIdentity.Hash(PlayerGuid);
+        public int CompareTo(MembershipId other) =>
+            string.Compare(PlayerGuid, other.PlayerGuid, StringComparison.Ordinal);
     }
 
     internal readonly struct OccurrenceId : IEquatable<OccurrenceId>, IComparable<OccurrenceId>
@@ -186,7 +181,7 @@ namespace Multiplayer.Network.Sync
         }
     }
 
-    internal enum InboxMessageKind : byte { TransportAck = 0x46, Lifecycle = 0x40 }
+    internal enum InboxMessageKind : byte { TransportAck = 0x46 }
     // Append-only: values 0..5 already exist in campaign saves and on the wire.
     internal enum InboxLifecycle : byte { Queued, Open, Read, Dismissed, Removed, Suspended, Deferred }
     internal enum InboxSuspensionReason : byte { None, PriorityPreemption, LevelTeardown }
@@ -458,9 +453,9 @@ namespace Multiplayer.Network.Sync
     internal sealed class HostLedger
     {
         private readonly IReadOnlyList<InboxEntry> _entries;
-        private readonly IReadOnlyDictionary<MembershipId, MemberPresence> _members;
+        private readonly IReadOnlyCollection<MembershipId> _members;
         internal HostLedger(IEnumerable<InboxEntry> entries, ulong committedRevision = 0,
-            IEnumerable<KeyValuePair<MembershipId, MemberPresence>> members = null)
+            IEnumerable<MembershipId> members = null)
         {
             var copy = (entries ?? throw new ArgumentNullException(nameof(entries))).ToArray();
             if (copy.GroupBy(e => Tuple.Create(e.Occurrence, e.Membership)).Any(g => g.Count() != 1))
@@ -487,22 +482,16 @@ namespace Multiplayer.Network.Sync
                     !copy.Any(e => e.Occurrence.Equals(successors[0]) && e.Predecessor.HasValue && e.Predecessor.Value.Equals(predecessorGroup.Key)))
                     throw new ArgumentException("dangling or inconsistent supersession linkage", nameof(entries));
             }
-            // Schema-less ledgers have no explicit presence, so their inferred enrolled members resume at the
-            // neutral Loading gate. Explicit Disconnected is invalid here; pre-v3 decoders end it through
-            // LegacyMembershipMigration before constructing the current ledger.
-            var memberCopy = members == null
-                ? copy.Select(e => e.Membership).Distinct().ToDictionary(m => m, m => MemberPresence.Loading)
-                : members.ToDictionary(pair => pair.Key, pair => pair.Value);
-            if (memberCopy.Values.Any(value => !MemberPresenceRules.IsEnrolled(value)))
-                throw new ArgumentException("invalid enrolled member presence", nameof(members));
+            // Membership is derived, never enrolled: an entry for a player IS that player's membership.
+            var memberCopy = new HashSet<MembershipId>(members ?? copy.Select(e => e.Membership));
             _entries = new ReadOnlyCollection<InboxEntry>(copy);
-            _members = new ReadOnlyDictionary<MembershipId, MemberPresence>(memberCopy);
+            _members = memberCopy;
             CommittedRevision = committedRevision;
         }
         internal int EntryCount => _entries.Count;
         internal ulong CommittedRevision { get; }
         internal IReadOnlyList<InboxEntry> AllEntries => _entries;
-        internal IReadOnlyDictionary<MembershipId, MemberPresence> Members => _members;
+        internal IReadOnlyCollection<MembershipId> Members => _members;
         internal IReadOnlyList<InboxEntry> EntriesFor(MembershipId member) => new ReadOnlyCollection<InboxEntry>(
             _entries.Where(e => e.Membership.Equals(member)).OrderBy(e => e.HostOrderKey).ThenBy(e => e.Occurrence).ToArray());
         internal bool Contains(OccurrenceId occurrence) => _entries.Any(e => e.Occurrence.Equals(occurrence));
@@ -513,49 +502,16 @@ namespace Multiplayer.Network.Sync
             e.Occurrence.Equals(replacement.Occurrence) && e.Membership.Equals(replacement.Membership) ? replacement : e), CommittedRevision, _members);
         internal HostLedger ReplaceOccurrence(OccurrenceId occurrence, Func<InboxEntry, InboxEntry> replace) =>
             new HostLedger(_entries.Select(e => e.Occurrence.Equals(occurrence) ? replace(e) : e), CommittedRevision, _members);
-        internal HostLedger WithAuthority(ulong revision, IEnumerable<KeyValuePair<MembershipId, MemberPresence>> members) =>
+        internal HostLedger WithAuthority(ulong revision, IEnumerable<MembershipId> members) =>
             new HostLedger(_entries, revision, members);
         internal byte[] EncodeCanonical() => DurableInboxCodec.EncodeLedger(_entries, CommittedRevision, _members);
-    }
-
-internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeoscape }
-
-    internal static class MemberPresenceRules
-    {
-        internal static bool IsEnrolled(MemberPresence presence) =>
-            Enum.IsDefined(typeof(MemberPresence), presence) && presence != MemberPresence.Disconnected;
-    }
-
-    internal static class LegacyMembershipMigration
-    {
-        // Called only by pre-v3 decoders. A legacy passive Disconnected member represents an epoch that
-        // has ended under DWI-22; never resurrect it as Loading or Active.
-        internal static HostLedger EndDisconnected(IEnumerable<InboxEntry> entries, ulong committedRevision,
-            IEnumerable<KeyValuePair<MembershipId, MemberPresence>> members)
-        {
-            var entryArray = (entries ?? throw new ArgumentNullException(nameof(entries))).ToArray();
-            var memberArray = (members ?? throw new ArgumentNullException(nameof(members))).ToArray();
-            var ended = new HashSet<MembershipId>(memberArray
-                .Where(pair => pair.Value == MemberPresence.Disconnected).Select(pair => pair.Key));
-            var migrated = entryArray.Select(entry =>
-            {
-                if (!ended.Contains(entry.Membership) || entry.Lifecycle == InboxLifecycle.Dismissed ||
-                    entry.Lifecycle == InboxLifecycle.Removed) return entry;
-                var revision = checked(entry.LifecycleRevision + 1);
-                return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed, entry.Choice,
-                    revision, Math.Max(entry.TombstoneRevision, revision), entry.HostOrderKey,
-                    terminalReason: TerminalReason.MembershipEnded, predecessor: entry.Predecessor);
-            }).ToArray();
-            return new HostLedger(migrated, committedRevision,
-                memberArray.Where(pair => pair.Value != MemberPresence.Disconnected));
-        }
     }
 
     internal sealed class HostInboxSequencer
     {
         // ponytail: one authority lock; split only if measured host inbox contention warrants it.
         private readonly object _authority = new object();
-        private readonly Dictionary<MembershipId, MemberPresence> _members = new Dictionary<MembershipId, MemberPresence>();
+        private readonly HashSet<MembershipId> _members = new HashSet<MembershipId>();
         private readonly HashSet<OccurrenceId> _occurrences = new HashSet<OccurrenceId>();
         internal HostLedger Ledger { get; private set; }
         internal ulong CommittedRevision { get; private set; }
@@ -563,37 +519,9 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
         internal HostInboxSequencer(HostLedger ledger)
         {
             Ledger = ledger ?? throw new ArgumentNullException(nameof(ledger));
-            foreach (var pair in ledger.Members) _members.Add(pair.Key, pair.Value);
+            foreach (var member in ledger.Members) _members.Add(member);
             foreach (var entry in ledger.AllEntries) _occurrences.Add(entry.Occurrence);
             CommittedRevision = ledger.CommittedRevision;
-        }
-
-        internal bool Enroll(MembershipId member, MemberPresence presence)
-        {
-            lock (_authority)
-            {
-                if (!MemberPresenceRules.IsEnrolled(presence) || _members.ContainsKey(member)) return false;
-                var committedRevision = checked(CommittedRevision + 1);
-                var members = new Dictionary<MembershipId, MemberPresence>(_members) { [member] = presence };
-                var ledger = Ledger.WithAuthority(committedRevision, members);
-                _members.Add(member, presence);
-                Ledger = ledger;
-                CommittedRevision = committedRevision;
-                return true;
-            }
-        }
-
-        internal bool SetPresence(MembershipId member, MemberPresence presence)
-        {
-            lock (_authority)
-            {
-                if (!_members.ContainsKey(member) || !MemberPresenceRules.IsEnrolled(presence)) return false;
-                var members = new Dictionary<MembershipId, MemberPresence>(_members) { [member] = presence };
-                var ledger = Ledger.WithAuthority(CommittedRevision, members);
-                _members[member] = presence;
-                Ledger = ledger;
-                return true;
-            }
         }
 
         internal bool CreateOccurrence(OccurrenceId occurrence)
@@ -603,7 +531,7 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
                 if (_occurrences.Contains(occurrence)) return false;
                 var committedRevision = checked(CommittedRevision + 1);
                 var order = new HostOrderKey(committedRevision, occurrence.TriggerId);
-                var additions = _members.Keys.Select(member => new InboxEntry(occurrence, member,
+                var additions = _members.Select(member => new InboxEntry(occurrence, member,
                     InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, order)).ToArray();
                 var ledger = new HostLedger(Ledger.AllEntries.Concat(additions), committedRevision, _members);
                 _occurrences.Add(occurrence);
@@ -617,7 +545,7 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
         {
             lock (_authority)
             {
-                if (!_members.ContainsKey(member)) return false;
+                if (!_members.Contains(member)) return false;
                 var result = DurableInboxReducer.Apply(Ledger,
                     InboxCommand.SetLifecycle(occurrence, member, lifecycle, revision));
                 if (!result.Changed) return false;
@@ -651,37 +579,10 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
             }
         }
 
-        internal bool EndMembership(MembershipId member)
-        {
-            lock (_authority)
-            {
-                if (!_members.ContainsKey(member)) return false;
-                var replacement = Ledger.EntriesFor(member)
-                    .Where(entry => entry.Lifecycle != InboxLifecycle.Dismissed && entry.Lifecycle != InboxLifecycle.Removed)
-                    .Select(entry =>
-                    {
-                        var revision = checked(entry.LifecycleRevision + 1);
-                        return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
-                            entry.Choice, revision, Math.Max(entry.TombstoneRevision, revision), entry.HostOrderKey,
-                            terminalReason: TerminalReason.MembershipEnded, predecessor: entry.Predecessor);
-                    })
-                    .ToArray();
-                var committedRevision = checked(CommittedRevision + 1);
-                var members = new Dictionary<MembershipId, MemberPresence>(_members);
-                members.Remove(member);
-                var ledger = replacement.Aggregate(Ledger, (current, entry) => current.Replace(entry))
-                    .WithAuthority(committedRevision, members);
-                Ledger = ledger;
-                _members.Remove(member);
-                CommittedRevision = committedRevision;
-                return true;
-            }
-        }
-
         internal IReadOnlyList<InboxEntry> Reconnect(MembershipId member)
         {
             lock (_authority)
-                return _members.ContainsKey(member)
+                return _members.Contains(member)
                     ? Ledger.EntriesFor(member)
                     : (IReadOnlyList<InboxEntry>)Array.Empty<InboxEntry>();
         }

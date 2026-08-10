@@ -386,7 +386,7 @@ namespace Multiplayer.Network.Sync
             {
                 IntentRail.Send(SurfaceIds.GeoMissionIntent, OpStartDurableOffer,
                     "start durable offer " + offer.TriggerId, w =>
-                    { WriteOccurrence(w, offer); WriteBounded(w,member.PlayerGuid); w.Write(member.Epoch); });
+                    { WriteOccurrence(w, offer); WriteBounded(w,member.PlayerGuid); });
                 return true;
             }
             var preparation = new OccurrenceId("DeploymentPreparing", "deployment:" + offer.TriggerId,
@@ -439,7 +439,7 @@ namespace Multiplayer.Network.Sync
             byte op, BinaryReader r)
         {
             OccurrenceId offer; MembershipId member;
-            try { offer = ReadOccurrence(r); member = new MembershipId(ReadBounded(r), r.ReadUInt64());
+            try { offer = ReadOccurrence(r); member = new MembershipId(ReadBounded(r));
                 if (r.BaseStream.Position != r.BaseStream.Length) throw new InvalidDataException("trailing durable Start bytes"); }
             catch (Exception ex) { RejectDurableStart(senderPeerId, null, "malformed bounded request: " + ex.Message); return; }
             var store = DurableInboxSaveBridge.ActiveStore;
@@ -450,8 +450,8 @@ namespace Multiplayer.Network.Sync
             if (!string.Equals(sender.PlayerGuid.ToString("D"), member.PlayerGuid, StringComparison.OrdinalIgnoreCase))
             { RejectDurableStart(senderPeerId, siteRef, "membership identity does not belong to the sender"); return; }
             if (store == null) { RejectDurableStart(senderPeerId, siteRef, "durable inbox store is unavailable"); return; }
-            if (!store.Ledger.Members.ContainsKey(member))
-            { RejectDurableStart(senderPeerId, siteRef, "membership epoch is not enrolled"); return; }
+            if (!store.Ledger.Members.Contains(member))
+            { RejectDurableStart(senderPeerId, siteRef, "membership is not a ledger member"); return; }
             if (!store.Ledger.AllEntries.Any(x => x.Occurrence.Equals(offer) && x.Membership.Equals(member)))
             { RejectDurableStart(senderPeerId, siteRef, "offer entitlement is absent"); return; }
             var geo = GenericApplier.StartedGeoLevel();

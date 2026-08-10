@@ -18,14 +18,14 @@ namespace RailCheck
     {
         internal static IEnumerable<string> Check()
         {
-            var member = new MembershipId("player", 7);
+            var member = new MembershipId("player");
             var first = new OccurrenceId("event", "trigger-b", new[] { "subject" });
             var second = new OccurrenceId("event", "trigger-a", new[] { "subject" });
             var snapshot = new HostLedger(new[]
             {
                 new InboxEntry(first, member, InboxLifecycle.Open, default(CanonicalChoiceId), 3, 0, new HostOrderKey(3, first.TriggerId)),
                 new InboxEntry(second, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 3, 0, new HostOrderKey(3, second.TriggerId))
-            }, 3, new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Tactical) });
+            }, 3, new[] { member });
             var store = new DurableInboxStore(snapshot);
             var expected = store.Ledger;
             if (!store.Commit(expected, expected.WithAuthority(4, expected.Members)))

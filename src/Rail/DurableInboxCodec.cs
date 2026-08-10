@@ -43,7 +43,6 @@ namespace Multiplayer.Network.Sync
                     WriteString(writer, reward.Value);
                 }
                 WriteString(writer, message.Membership.PlayerGuid);
-                writer.Write(message.Membership.Epoch);
                 writer.Write(message.Order.CampaignOrdinal);
                 WriteString(writer, message.Order.TriggerId);
                 writer.Write(message.LifecycleRevision);
@@ -79,7 +78,7 @@ namespace Multiplayer.Network.Sync
                     var rewards = new CanonicalRewardItemId[ReadCount(reader)];
                     for (int i = 0; i < rewards.Length; i++)
                         rewards[i] = new CanonicalRewardItemId(ReadOccurrence(reader), ReadString(reader), ReadString(reader));
-                    var membership = new MembershipId(ReadString(reader), reader.ReadUInt64());
+                    var membership = new MembershipId(ReadString(reader));
                     var order = new HostOrderKey(reader.ReadUInt64(), ReadString(reader));
                     ulong lifecycleRevision = reader.ReadUInt64();
                     ulong tombstoneRevision = reader.ReadUInt64();
@@ -103,21 +102,16 @@ namespace Multiplayer.Network.Sync
         }
 
         internal static byte[] EncodeLedger(IEnumerable<InboxEntry> entries, ulong committedRevision,
-            IEnumerable<KeyValuePair<MembershipId, MemberPresence>> members)
+            IEnumerable<MembershipId> members)
         {
             byte[] body;
             using (var stream = new MemoryStream())
             using (var writer = new BinaryWriter(stream, StrictUtf8))
             {
                 writer.Write(committedRevision);
-                var orderedMembers = members.OrderBy(pair => pair.Key).ToArray();
+                var orderedMembers = members.OrderBy(member => member).ToArray();
                 WriteCount(writer, orderedMembers.Length);
-                foreach (var pair in orderedMembers)
-                {
-                    WriteString(writer, pair.Key.PlayerGuid);
-                    writer.Write(pair.Key.Epoch);
-                    writer.Write((byte)pair.Value);
-                }
+                foreach (var member in orderedMembers) WriteString(writer, member.PlayerGuid);
                 var ordered = entries.OrderBy(e => e.HostOrderKey).ThenBy(e => e.Occurrence).ThenBy(e => e.Membership).ToArray();
                 WriteCount(writer, ordered.Length);
                 foreach (var entry in ordered)
@@ -126,7 +120,6 @@ namespace Multiplayer.Network.Sync
                     WriteString(writer, entry.HostOrderKey.TriggerId);
                     WriteOccurrence(writer, entry.Occurrence);
                     WriteString(writer, entry.Membership.PlayerGuid);
-                    writer.Write(entry.Membership.Epoch);
                     writer.Write((byte)entry.Lifecycle);
                     writer.Write(entry.LifecycleRevision);
                     writer.Write(entry.TombstoneRevision);
@@ -310,20 +303,15 @@ namespace Multiplayer.Network.Sync
                 {
                     bool extended = ledgerSchema >= 2;
                     ulong revision = reader.ReadUInt64();
-                    var members = new List<KeyValuePair<MembershipId, MemberPresence>>();
+                    var members = new List<MembershipId>();
                     for (int i = 0, count = ReadCount(reader); i < count; i++)
-                    {
-                        var member = new MembershipId(ReadString(reader), reader.ReadUInt64());
-                        byte raw = reader.ReadByte();
-                        if (!Enum.IsDefined(typeof(MemberPresence), (int)raw)) throw new InvalidDataException("invalid member presence");
-                        members.Add(new KeyValuePair<MembershipId, MemberPresence>(member, (MemberPresence)raw));
-                    }
+                        members.Add(new MembershipId(ReadString(reader)));
                     var entries = new List<InboxEntry>();
                     for (int i = 0, count = ReadCount(reader); i < count; i++)
                     {
                         ulong ordinal = reader.ReadUInt64(); string orderTrigger = ReadString(reader);
                         var occurrence = ReadOccurrence(reader);
-                        var membership = new MembershipId(ReadString(reader), reader.ReadUInt64());
+                        var membership = new MembershipId(ReadString(reader));
                         byte rawLifecycle = reader.ReadByte();
                         if (!Enum.IsDefined(typeof(InboxLifecycle), rawLifecycle)) throw new InvalidDataException("invalid lifecycle");
                         ulong lifecycleRevision = reader.ReadUInt64(), tombstoneRevision = reader.ReadUInt64();
@@ -370,9 +358,7 @@ namespace Multiplayer.Network.Sync
                             supersededBy, predecessor, preparationRevision, preparationAuthorityRevision));
                     }
                     if (stream.Position != stream.Length) throw new InvalidDataException("trailing ledger bytes");
-                    ledger = ledgerSchema < LedgerSchema
-                        ? LegacyMembershipMigration.EndDisconnected(entries, revision, members)
-                        : new HostLedger(entries, revision, members);
+                    ledger = new HostLedger(entries, revision, members);
                     return true;
                 }
             }

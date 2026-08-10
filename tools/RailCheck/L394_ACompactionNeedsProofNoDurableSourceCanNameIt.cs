@@ -14,8 +14,8 @@ namespace RailCheck
     {
         internal static IEnumerable<string> Check()
         {
-            var a = new MembershipId("player-a", 4);
-            var b = new MembershipId("player-b", 8);
+            var a = new MembershipId("player-a");
+            var b = new MembershipId("player-b");
             var occurrence = new OccurrenceId("event", "trigger", new[] { "subject" });
             var order = new HostOrderKey(1, occurrence.TriggerId);
             InboxEntry Entry(MembershipId member, InboxLifecycle lifecycle, ulong tombstone = 0) =>

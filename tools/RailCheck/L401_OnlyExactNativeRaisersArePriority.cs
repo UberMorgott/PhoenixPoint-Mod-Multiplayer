@@ -122,9 +122,9 @@ namespace RailCheck
             string manufacturedSubject = DurableWindowRegistry.AssetSubject(bind);
             if (string.IsNullOrEmpty(manufacturedSubject))
                 yield return "L401 manufactured-aircraft-with-null-character-was-dropped";
-            var manufacturedMember = new MembershipId("manufacturer", 2);
+            var manufacturedMember = new MembershipId("manufacturer");
             var manufacturedStore = new DurableInboxStore(new HostLedger(Array.Empty<InboxEntry>(), 1,
-                new[] { new KeyValuePair<MembershipId, MemberPresence>(manufacturedMember, MemberPresence.Active) }));
+                new[] { manufacturedMember }));
             var raiseState = new NativeRaiserToken.RaiseState { Before = 0, TriggerId = "asset:raise-one" };
             var manufacturedOccurrence = new OccurrenceId("AssetDestination", raiseState.TriggerId,
                 new[] { manufacturedSubject });

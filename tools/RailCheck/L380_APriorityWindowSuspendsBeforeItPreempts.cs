@@ -14,7 +14,7 @@ namespace RailCheck
     {
         internal static IEnumerable<string> Check()
         {
-            var member = new MembershipId("reader", 2);
+            var member = new MembershipId("reader");
             var ordinary = new OccurrenceId("ordinary", "ordinary-17", new[] { "site" });
             var priority = new OccurrenceId("ambush", "ambush-4", new[] { "mission" });
             var entries = new[] { Entry(ordinary, member, InboxLifecycle.Open, 1),
@@ -49,7 +49,7 @@ namespace RailCheck
             var collisionEntry = new InboxEntry(ordinary, member, InboxLifecycle.Open, default(CanonicalChoiceId),
                 1, 0, new HostOrderKey(1, ordinary.TriggerId));
             var collisionCurrent = new HostLedger(new[] { collisionEntry }, 0x02D2,
-                new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active) }).EncodeCanonical();
+                new[] { member }).EncodeCanonical();
             var collisionLegacy = new byte[collisionCurrent.Length - 37];
             Buffer.BlockCopy(collisionCurrent, 9, collisionLegacy, 0, collisionLegacy.Length);
             HostLedger collisionDecoded; string collisionRefusal;
@@ -57,7 +57,7 @@ namespace RailCheck
                 collisionDecoded.CommittedRevision != 0x02D2)
                 yield return "L380 legacy-revision-02d2-collided-with-new-framing: " + collisionRefusal;
             var magicCurrent = new HostLedger(new[] { collisionEntry }, 0x33495744,
-                new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active) }).EncodeCanonical();
+                new[] { member }).EncodeCanonical();
             var magicLegacy = new byte[magicCurrent.Length - 37];
             Buffer.BlockCopy(magicCurrent, 9, magicLegacy, 0, magicLegacy.Length);
             HostLedger magicDecoded; string magicRefusal;
@@ -70,7 +70,7 @@ namespace RailCheck
                 yield return "L380 unknown-canonical-schema-was-accepted";
 
             var legacyLedger = new HostLedger(new[] { Entry(ordinary, member, InboxLifecycle.Open, 1) }, 2,
-                new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active) });
+                new[] { member });
             DurableInboxRestore legacy; string legacyRefusal;
             var legacyRoot = DurableInboxSaveCodec.CreateSchema1ForMigrationTest(legacyLedger);
             if (!DurableInboxSaveCodec.TryRestore(legacyRoot, null, out legacy, out legacyRefusal) ||
@@ -143,7 +143,7 @@ namespace RailCheck
             var multiEntries = new[] { Entry(ordinary, member, InboxLifecycle.Open, 1),
                 Entry(otherOpen, member, InboxLifecycle.Open, 2), Entry(priority, member, InboxLifecycle.Queued, 3) };
             var multiStore = new DurableInboxStore(new HostLedger(multiEntries, 3,
-                new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active) }));
+                new[] { member }));
             var multiCarrier = new Carrier(multiStore, ordinary, checkpoint);
             if (new DurableInboxEngine(multiStore, member, multiCarrier).TryPresentNext(true,
                     typeof(UIStateNothingSelected)) || multiCarrier.Presented != 0)
@@ -242,13 +242,13 @@ namespace RailCheck
             var modalOccurrence = new OccurrenceId("Modal:" + ModalType.GeoAmbushBrief, "modal-trigger",
                 new[] { "mission-stable" });
             if (DurableWindowRegistry.MatchPriorityOccurrence(new DurableInboxStore(new HostLedger(
-                    Array.Empty<InboxEntry>(), 1, new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active) })),
+                    Array.Empty<InboxEntry>(), 1, new[] { member })),
                     modalOccurrence.EventId, modalOccurrence.TriggerId, "mission-stable").HasValue)
                 yield return "L380 request-before-ledger-priority-modal-was-not-parked";
             var modalStore = new DurableInboxStore(new HostLedger(new[] { new InboxEntry(modalOccurrence, member,
                 InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0,
                 new HostOrderKey(1, modalOccurrence.TriggerId)) }, 1,
-                new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active) }));
+                new[] { member }));
             if (!DurableWindowRegistry.MatchPriorityOccurrence(modalStore, modalOccurrence.EventId,
                     modalOccurrence.TriggerId, "mission-stable").HasValue ||
                 DurableWindowRegistry.MatchPriorityOccurrence(modalStore, modalOccurrence.EventId,
@@ -262,10 +262,10 @@ namespace RailCheck
 
         private static DurableInboxStore Store(InboxEntry[] entries, MembershipId member) =>
             new DurableInboxStore(new HostLedger(entries, 2,
-                new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active) }));
+                new[] { member }));
         private static byte[] legacyCanonical(InboxEntry entry, MembershipId member) =>
             new HostLedger(new[] { entry }, 2,
-                new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active) }).EncodeCanonical();
+                new[] { member }).EncodeCanonical();
         private static InboxEntry Entry(OccurrenceId o, MembershipId m, InboxLifecycle lifecycle, ulong ordinal) =>
             new InboxEntry(o, m, lifecycle, default(CanonicalChoiceId), 1, 0, new HostOrderKey(ordinal, o.TriggerId));
         private static void DismissPriority(DurableInboxStore store, OccurrenceId occurrence, MembershipId member)

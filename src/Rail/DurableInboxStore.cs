@@ -183,7 +183,7 @@ namespace Multiplayer.Network.Sync
                     x.HostOrderKey, terminalReason: TerminalReason.Superseded, supersededBy: successor,
                     predecessor: x.Predecessor)).ToArray();
                 var retained = _ledger.AllEntries.Where(x => !x.Occurrence.Equals(offer));
-                var fresh = _ledger.Members.Keys.Select(member => new InboxEntry(successor, member,
+                var fresh = _ledger.Members.Select(member => new InboxEntry(successor, member,
                     InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, successorOrder,
                     predecessor: offer));
                 var next = new HostLedger(retained.Concat(terminal).Concat(fresh), revision, _ledger.Members);
@@ -210,7 +210,7 @@ namespace Multiplayer.Network.Sync
                     x.Choice, Math.Max(x.LifecycleRevision + 1, delta.TombstoneRevision), delta.TombstoneRevision,
                     x.HostOrderKey, terminalReason: delta.Reason, supersededBy: delta.Preparation,
                     predecessor: x.Predecessor));
-                var fresh = _ledger.Members.Keys.Select(m => new InboxEntry(delta.Preparation, m,
+                var fresh = _ledger.Members.Select(m => new InboxEntry(delta.Preparation, m,
                     InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, delta.Order, predecessor: delta.Offer));
                 var next = new HostLedger(_ledger.AllEntries.Where(x => !x.Occurrence.Equals(delta.Offer))
                     .Concat(terminal).Concat(fresh), localRevision, _ledger.Members);

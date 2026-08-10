@@ -11,7 +11,7 @@ namespace RailCheck
         internal static IEnumerable<string> Check()
         {
             var occurrence = new OccurrenceId("event", "trigger", new[] { "soldier", "site" });
-            var member = new MembershipId("player", 1);
+            var member = new MembershipId("player");
             var choice = new CanonicalChoiceId(occurrence, "choice-stable-b");
             var result = new CanonicalResultId(occurrence, "result-stable-a");
             var reward = new CanonicalRewardItemId(occurrence, "soldier", "reward-stable-c");

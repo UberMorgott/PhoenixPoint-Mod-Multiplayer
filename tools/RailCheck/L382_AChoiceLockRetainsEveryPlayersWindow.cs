@@ -15,15 +15,15 @@ namespace RailCheck
                 EventPopup.IsAuthoritativeRewardSender(null, 42))
                 yield return "L382 peer-accepted-decision-or-reward-from-non-host-sender";
             var o = new OccurrenceId("event", "raise:382", new[] { "site" });
-            var winner = new MembershipId("winner", 4); var loser = new MembershipId("loser", 7);
+            var winner = new MembershipId("winner"); var loser = new MembershipId("loser");
             var entries = new[] {
                 new InboxEntry(o, winner, InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0, new HostOrderKey(1, o.TriggerId)),
                 new InboxEntry(o, loser, InboxLifecycle.Suspended, default(CanonicalChoiceId), 3, 0,
                     new HostOrderKey(1, o.TriggerId), InboxSuspensionReason.PriorityPreemption,
                     new InboxWindowCheckpoint("choices", "", "2")) };
             var store = new DurableInboxStore(new HostLedger(entries, 3, new[] {
-                new KeyValuePair<MembershipId, MemberPresence>(winner, MemberPresence.Active),
-                new KeyValuePair<MembershipId, MemberPresence>(loser, MemberPresence.Tactical) }));
+                winner,
+                loser }));
             int repaints = 0;
             bool applied = false;
             var engine = new DurableSharedChoiceEngine(store, new DelegateDurableChoiceEffect(_ => applied = true,
@@ -48,8 +48,8 @@ namespace RailCheck
                 yield return "L382 positive-control-current-only-removal-did-not-shrink-entitlements";
 
             var peer = new DurableInboxStore(new HostLedger(entries, 3, new[] {
-                new KeyValuePair<MembershipId, MemberPresence>(winner, MemberPresence.Active),
-                new KeyValuePair<MembershipId, MemberPresence>(loser, MemberPresence.Tactical) }));
+                winner,
+                loser }));
             SharedChoiceDecision decoded;
             decision = decision.WithRewardPayload(new byte[] { 7, 8, 9 });
             using (var ms = new MemoryStream())

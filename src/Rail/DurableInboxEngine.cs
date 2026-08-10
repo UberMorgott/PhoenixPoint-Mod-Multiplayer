@@ -897,8 +897,7 @@ namespace Multiplayer.Network.Sync
                 var existing = canonical.Decisions.SingleOrDefault(x => x.Occurrence.Equals(occurrence));
                 if (existing != null) return Recover(existing, out decision);
                 var ledger = _store.Ledger;
-                MemberPresence presence;
-                if (!ledger.Members.TryGetValue(winner, out presence) || !MemberPresenceRules.IsEnrolled(presence) ||
+                if (!ledger.Members.Contains(winner) ||
                     !ledger.AllEntries.Any(x => x.Occurrence.Equals(occurrence) && x.Membership.Equals(winner))) return false;
                 bool valid;
                 try { valid = validate(); } catch { return false; }
@@ -949,8 +948,8 @@ namespace Multiplayer.Network.Sync
                 var canonical = _store.Canonical;
                 var existing = canonical.Decisions.SingleOrDefault(x => x.Occurrence.Equals(occurrence));
                 if (existing != null) { decision = existing; return existing.Phase == SharedChoicePhase.ChoiceLocked; }
-                var ledger = _store.Ledger; MemberPresence presence;
-                if (!ledger.Members.TryGetValue(winner, out presence) || !MemberPresenceRules.IsEnrolled(presence) ||
+                var ledger = _store.Ledger;
+                if (!ledger.Members.Contains(winner) ||
                     !ledger.AllEntries.Any(x => x.Occurrence.Equals(occurrence) && x.Membership.Equals(winner))) return false;
                 bool valid; try { valid = validate(); } catch { return false; } if (!valid) return false;
                 var token = new EffectToken(occurrence, "effect:" + occurrence.TriggerId);

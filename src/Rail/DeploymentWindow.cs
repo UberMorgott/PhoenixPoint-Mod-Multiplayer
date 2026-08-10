@@ -347,7 +347,7 @@ namespace Multiplayer.Network.Sync
         {
             occurrence = default(OccurrenceId);
             if (store == null || string.IsNullOrEmpty(stableMissionSubject) ||
-                !store.Ledger.Members.ContainsKey(member)) return false;
+                !store.Ledger.Members.Contains(member)) return false;
             var matches = store.Ledger.EntriesFor(member).Where(x => x.Lifecycle == InboxLifecycle.Deferred &&
                 string.Equals(x.Occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal) &&
                 x.Occurrence.SubjectIds.Contains(stableMissionSubject, StringComparer.Ordinal) &&
@@ -381,7 +381,7 @@ namespace Multiplayer.Network.Sync
         {
             occurrence = default(OccurrenceId);
             if (store == null || string.IsNullOrEmpty(stableMissionSubject) ||
-                !store.Ledger.Members.ContainsKey(member)) return false;
+                !store.Ledger.Members.Contains(member)) return false;
             OccurrenceId found;
             if (!TryFindDeferredForMission(store, member, stableMissionSubject, out found) ||
                 !new DurableInboxEngine(store, member, LifecycleCarrier)
@@ -423,8 +423,8 @@ namespace Multiplayer.Network.Sync
             ClientInfo client;
             if (engine?.Session == null || !engine.Session.Clients.TryGetValue(senderPeerId, out client)) return false;
             string player = client.PlayerGuid.ToString("D");
-            var active = store.Ledger.Members.Keys.Where(x => string.Equals(x.PlayerGuid, player,
-                StringComparison.OrdinalIgnoreCase)).OrderByDescending(x => x.Epoch).ToArray();
+            var active = store.Ledger.Members.Where(x => string.Equals(x.PlayerGuid, player,
+                StringComparison.OrdinalIgnoreCase)).ToArray();
             if (active.Length != 1) return false;
             return AuthorizePreparationMember(store, active[0], context);
         }
@@ -432,7 +432,7 @@ namespace Multiplayer.Network.Sync
         internal static bool AuthorizePreparationMember(DurableInboxStore store, MembershipId member,
             DurablePreparationEditContext context)
         {
-            if (store == null || !store.Ledger.Members.ContainsKey(member)) return false;
+            if (store == null || !store.Ledger.Members.Contains(member)) return false;
             InboxEntry entry;
             try { entry = store.Ledger.Get(context.Occurrence, member); }
             catch (InvalidOperationException) { return false; }

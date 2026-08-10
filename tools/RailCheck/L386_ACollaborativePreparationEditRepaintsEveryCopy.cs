@@ -15,12 +15,12 @@ namespace RailCheck
         private const BindingFlags All=BindingFlags.Static|BindingFlags.Instance|BindingFlags.Public|BindingFlags.NonPublic;
         internal static IEnumerable<string> Check()
         {
-            var a=new MembershipId("a",1);var b=new MembershipId("b",1);
+            var a=new MembershipId("a");var b=new MembershipId("b");
             var occurrence=new OccurrenceId("DeploymentPreparing","prep-edit",new[]{"S#8","M#8"});
             var order=new HostOrderKey(1,occurrence.TriggerId);
             var checkpoint=new InboxWindowCheckpoint("deployment","U#4","roster");
-            var members=new[]{new KeyValuePair<MembershipId,MemberPresence>(a,MemberPresence.Active),
-                new KeyValuePair<MembershipId,MemberPresence>(b,MemberPresence.NonGeoscape)};
+            var members=new[]{a,
+                b};
             DurableInboxStore Make()=>new DurableInboxStore(new HostLedger(new[]{
                 new InboxEntry(occurrence,a,InboxLifecycle.Open,default(CanonicalChoiceId),2,0,order),
                 new InboxEntry(occurrence,b,InboxLifecycle.Suspended,default(CanonicalChoiceId),2,0,order,
@@ -62,7 +62,6 @@ namespace RailCheck
             var wrongOccurrence=new OccurrenceId("DeploymentPreparing","foreign",new[]{"S#9"});
             if(!DeploymentWindowClose.AuthorizePreparationMember(host,a,new DurablePreparationEditContext(occurrence,1))||
                 DeploymentWindowClose.AuthorizePreparationMember(host,b,new DurablePreparationEditContext(occurrence,1))||
-                DeploymentWindowClose.AuthorizePreparationMember(host,new MembershipId("a",2),new DurablePreparationEditContext(occurrence,1))||
                 DeploymentWindowClose.AuthorizePreparationMember(host,a,new DurablePreparationEditContext(wrongOccurrence,1))||
                 DeploymentWindowClose.AuthorizePreparationMember(host,a,new DurablePreparationEditContext(occurrence,0)))
                 yield return "L386 sender-membership-open-entitlement-or-exact-revision-was-not-authorized-strictly";

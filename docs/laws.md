@@ -371,10 +371,12 @@ on the inline side. Nothing is missing and no row is invented — verified 2026-
 
 ## Durable-window inbox allocation clarification (2026-08-10)
 
-- The approved DWI allocation remains exactly `DWI-01..DWI-26 -> L376..L401`; no L402/L403 is created by this clarification.
-- Network disconnect now ends the active membership epoch. Reconnect of the same durable player identity is a fresh host-serialized enrollment with a new epoch, zero prior backlog, and entitlement only to occurrences created after that enrollment.
-- Within the existing allocation, DWI-16/L391 covers monotonic lifecycle/tombstone rules for an active epoch and native campaign save/load; DWI-22/L397 covers disconnect-driven epoch end without ACK/quorum; DWI-23/L398 covers zero pre-enrollment history; DWI-24/L399 covers clean reconnect enrollment and stale prior-epoch rejection; DWI-25/L400 keeps the enrollment/create serialization boundary.
-- Native campaign save/load durability remains distinct: it reconstructs the saved campaign ledger and lifecycle for epochs present in that save. It is not evidence that an ended network membership epoch should be restored on reconnect.
+- The approved DWI allocation was `DWI-01..DWI-26 -> L376..L401`; no L402/L403 was created.
+- WITHDRAWN 2026-08-10, same day: the membership-epoch design below was never wired and has been removed. `L376`, `L397`, `L398`, `L399` and `L400` are DELETED — see the commit `refactor(inbox): remove epoch bookkeeping no session path reaches`. Do not reissue these numbers; `L<n>` numbering is sparse by design.
+- Why: reconnect does not exist in this mod. There is no session-restore path — the only mention anywhere in `src/Lobby` + `src/Transport` is a chat string (`SessionLifecycle.FormatReconnectedNotice`). `Enroll`/`EndMembership` had zero production callers, membership is DERIVED from the entries themselves, and `MemberPresence` was a five-valued enum holding exactly one value in production. The owner's decision is that if reconnect is ever added, all windows reset — everything routes through the host anyway, so there is no history to restore.
+- `MembershipId` is now the player guid alone. There is no epoch, on the wire, in a save, or in memory.
+- DWI-16/L391 SURVIVES and still covers monotonic lifecycle/tombstone rules across native campaign save/load; its enrollment scaffolding was replaced by seeding the ledger with a real entry, and its `EndMembership` arm was dropped with it.
+- Native campaign save/load durability remains a distinct concern from any of the above.
 - inline laws have no `L<n>_<Name>.cs`; grep `Program.cs` for the id string.
 
 ## Attention

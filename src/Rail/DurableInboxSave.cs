@@ -152,7 +152,7 @@ namespace Multiplayer.Network.Sync
             using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms))
             {
                 w.Write(ledger.CommittedRevision); WriteCount(w, ledger.Members.Count);
-                foreach (var pair in ledger.Members.OrderBy(x => x.Key)) { WriteMembership(w, pair.Key); w.Write((byte)pair.Value); }
+                foreach (var member in ledger.Members.OrderBy(x => x)) WriteMembership(w, member);
                 WriteCount(w, ledger.AllEntries.Count);
                 foreach (var e in ledger.AllEntries.OrderBy(x => x.HostOrderKey).ThenBy(x => x.Occurrence))
                 {
@@ -259,7 +259,7 @@ namespace Multiplayer.Network.Sync
             {
                 w.Write(ledger.CommittedRevision);
                 WriteCount(w, ledger.Members.Count);
-                foreach (var pair in ledger.Members.OrderBy(x => x.Key)) { WriteMembership(w, pair.Key); w.Write((byte)pair.Value); }
+                foreach (var member in ledger.Members.OrderBy(x => x)) WriteMembership(w, member);
                 WriteCount(w, ledger.AllEntries.Count);
                 foreach (var e in ledger.AllEntries.OrderBy(x => x.HostOrderKey).ThenBy(x => x.Occurrence))
                 {
@@ -306,8 +306,8 @@ namespace Multiplayer.Network.Sync
             using (var ms = new MemoryStream(bytes, false)) using (var r = new BinaryReader(ms))
             {
                 ulong revision = r.ReadUInt64();
-                var members = new List<KeyValuePair<MembershipId, MemberPresence>>();
-                for (int i = 0, n = ReadCount(r); i < n; i++) members.Add(new KeyValuePair<MembershipId, MemberPresence>(ReadMembership(r), ReadEnum<MemberPresence>(r)));
+                var members = new List<MembershipId>();
+                for (int i = 0, n = ReadCount(r); i < n; i++) members.Add(ReadMembership(r));
                 var entries = new List<InboxEntry>();
                 for (int i = 0, n = ReadCount(r); i < n; i++)
                 {
@@ -335,9 +335,7 @@ namespace Multiplayer.Network.Sync
                 rewards = ReadIdentities(r, br => { var o = ReadOccurrence(br); return new CanonicalRewardItemId(o, ReadString(br), ReadString(br)); });
                 decisions = schema >= 5 ? ReadIdentities(r, br => ReadDecision(br, schema)) : new List<SharedChoiceDecision>();
                 if (ms.Position != ms.Length) throw new InvalidDataException("trailing snapshot bytes");
-                ledger = schema < 4
-                    ? LegacyMembershipMigration.EndDisconnected(entries, revision, members)
-                    : new HostLedger(entries, revision, members);
+                ledger = new HostLedger(entries, revision, members);
             }
         }
 
@@ -381,8 +379,8 @@ namespace Multiplayer.Network.Sync
         private static string ReadString(BinaryReader r) { int n = r.ReadUInt16(); if (n == 0 || n > MaxString) throw new InvalidDataException("invalid string"); var b = r.ReadBytes(n); if (b.Length != n) throw new EndOfStreamException(); return System.Text.Encoding.UTF8.GetString(b); }
         private static void WriteOccurrence(BinaryWriter w, OccurrenceId o) { WriteString(w, o.EventId); WriteString(w, o.TriggerId); WriteCount(w, o.SubjectIds.Count); foreach (var s in o.SubjectIds) WriteString(w, s); }
         private static OccurrenceId ReadOccurrence(BinaryReader r) { string e = ReadString(r), t = ReadString(r); int n = ReadCount(r); var s = new string[n]; for (int i = 0; i < n; i++) s[i] = ReadString(r); return new OccurrenceId(e, t, s); }
-        private static void WriteMembership(BinaryWriter w, MembershipId m) { WriteString(w, m.PlayerGuid); w.Write(m.Epoch); }
-        private static MembershipId ReadMembership(BinaryReader r) => new MembershipId(ReadString(r), r.ReadUInt64());
+        private static void WriteMembership(BinaryWriter w, MembershipId m) { WriteString(w, m.PlayerGuid); }
+        private static MembershipId ReadMembership(BinaryReader r) => new MembershipId(ReadString(r));
         private static void WriteOptionalChoice(BinaryWriter w, CanonicalChoiceId c) { bool has = c.Value != null; w.Write(has); if (has) WriteString(w, c.Value); }
         private static CanonicalChoiceId ReadOptionalChoice(BinaryReader r, OccurrenceId o) => r.ReadBoolean() ? new CanonicalChoiceId(o, ReadString(r)) : default(CanonicalChoiceId);
         private static void WriteDecision(BinaryWriter w, SharedChoiceDecision d)
