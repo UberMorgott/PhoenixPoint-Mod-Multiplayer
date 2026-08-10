@@ -1870,7 +1870,20 @@ namespace Multiplayer.Network
             // LevelCrt aborts → empty globe, no UI. We do NOT call PrepareLoadGame directly: it is a
             // private IEnumerator coroutine that ALSO does IronmanSave() + tactical content reads
             // (cs:625-637), i.e. far more than field-setting — so we replicate ONLY the field set.
-            ApplyPrepareLoadGameState(game.SaveManager, meta);
+            //
+            // AND IT MUST BE UNDONE IF THE PREPARE FAILS. Everything below (the geoscape-section read, the
+            // level-params read, CreateSceneBinding) can throw on a blob this peer cannot parse, and the
+            // caller treats a failed prepare as "stay in your own campaign" (ClientLoadCrt:1821 aborts the
+            // curtain and plays on). Without a restore the live SaveManager keeps the REMOTE save's
+            // identity — LatestLoad/GameId/Difficulty/Ironman/DLC — and this peer's very next save is
+            // written under someone else's campaign id. The undo is a coroutine `finally`, so it covers the
+            // throw AND every `yield break` past this point.
+            var undoIdentity = ApplyPrepareLoadGameState(game.SaveManager, meta);
+            SavegameContentSection restoreSection = null;
+            IEnumerable<object> restoreObjects = null;
+            var prepared = false;
+            try
+            {
 
             // 1c. Tactical transfer save (co-op mission entry): also read the embedded "Geoscape" section
             // into PhoenixSaveManager._currentGeoscapeSection — the native LoadGame path does this in
@@ -1896,6 +1909,8 @@ namespace Multiplayer.Network
                         yield return Timing.Current.Call(serializer.Serializer.Read(
                             geoObjects, slice, ext, ms, disposeStream: false, section: geoSection.SectionName));
                     }
+                    restoreSection = geoSection;
+                    restoreObjects = geoSection.ContentObjects;
                     geoSection.ContentObjects = geoObjects.Value;
                     Debug.Log("[Multiplayer] co-op load: geoscape return snapshot " +
                               (geoObjects.Value != null ? "captured from transfer blob"
@@ -1915,7 +1930,21 @@ namespace Multiplayer.Network
             var binding = meta.LevelScene.CreateSceneBinding(serializedParam);
 
             _pendingResult = new LoadLevelGameResult(binding);
+            prepared = true;
             Debug.Log("[Multiplayer] PrepareEntryFromBlobCrt: _pendingResult ready");
+
+            }
+            finally
+            {
+                if (!prepared)
+                {
+                    if (restoreSection != null) restoreSection.ContentObjects = restoreObjects;
+                    undoIdentity?.Invoke();
+                    Debug.LogError("[Multiplayer] PrepareEntryFromBlobCrt: prepare did NOT complete — restored this " +
+                                   "peer's own SaveManager identity (LatestLoad/GameId/Difficulty/Ironman/DLC) and the " +
+                                   "geoscape return section, so its next save is written under its OWN campaign.");
+                }
+            }
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -2751,9 +2780,12 @@ namespace Multiplayer.Network
         // The DLC array is the load-bearing one (empty → empty geoscape); the rest keep save/ironman
         // bookkeeping consistent. EnabledDlc/GameId/DifficultyDef live on PPSavegameMetaData (the
         // concrete runtime type the serializer produces), not the SavegameMetaData base.
-        private static void ApplyPrepareLoadGameState(PhoenixSaveManager saveManager, SavegameMetaData meta)
+        // RETURNS THE UNDO, and returns it because this write is speculative: it happens BEFORE the load it
+        // belongs to is known to succeed, on a SaveManager the peer is still using for its own campaign.
+        // Null = nothing was written (nothing to undo).
+        private static Action ApplyPrepareLoadGameState(PhoenixSaveManager saveManager, SavegameMetaData meta)
         {
-            if (saveManager == null) return;
+            if (saveManager == null) return null;
             try
             {
                 var pp = meta as PPSavegameMetaData;
@@ -2761,7 +2793,7 @@ namespace Multiplayer.Network
                 {
                     Debug.LogError("[Multiplayer] co-op load: metadata is not PPSavegameMetaData; " +
                                    "cannot apply PrepareLoadGame state (EnabledDlc/GameId/Difficulty).");
-                    return;
+                    return null;
                 }
 
                 var t = typeof(PhoenixSaveManager);
@@ -2786,15 +2818,43 @@ namespace Multiplayer.Network
                     Debug.LogWarning("[Multiplayer] co-op load: PrepareLoadGame field '_enabledDlc' not found " +
                                      "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
 
+                // Snapshot BEFORE the write — these four fields plus IsIronmanMode ARE the identity of the
+                // campaign this peer is still playing. The native LatestLoad setter is null-safe (it maps
+                // null → PPGameId.Invalid, cs:70-78) but leaves IsIronmanMode alone, so that one is restored
+                // explicitly rather than left holding the remote save's ironman flag.
+                var ironmanProp = AccessTools.Property(t, "IsIronmanMode");
+                var prevLatestLoad = latestLoadProp?.GetValue(saveManager, null);
+                var prevGameId = currentGameIdField?.GetValue(saveManager);
+                var prevDifficulty = currentDifficultyField?.GetValue(saveManager);
+                var prevDlc = enabledDlcField?.GetValue(saveManager);
+                var prevIronman = ironmanProp?.GetValue(saveManager, null);
+
                 latestLoadProp?.SetValue(saveManager, pp, null);
                 currentGameIdField?.SetValue(saveManager, pp.GameId);
                 currentDifficultyField?.SetValue(saveManager, pp.DifficultyDef);
                 enabledDlcField?.SetValue(saveManager, pp.EnabledDlc ?? new EntitlementDef[0]);
+
+                return () =>
+                {
+                    try
+                    {
+                        latestLoadProp?.SetValue(saveManager, prevLatestLoad, null);
+                        currentGameIdField?.SetValue(saveManager, prevGameId);
+                        currentDifficultyField?.SetValue(saveManager, prevDifficulty);
+                        enabledDlcField?.SetValue(saveManager, prevDlc);
+                        ironmanProp?.SetValue(saveManager, prevIronman, null);
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogError("[Multiplayer] co-op load: failed to RESTORE PrepareLoadGame state: " + e);
+                    }
+                };
             }
             catch (Exception e)
             {
                 Debug.LogError("[Multiplayer] co-op load: failed to apply PrepareLoadGame state: " + e);
             }
+            return null;
         }
 
         private static bool TryGetGame(out PhoenixGame game, out PhoenixSaveManager saveManager)
