@@ -10,10 +10,31 @@ namespace Multiplayer.Util
     /// rail display and the client smart-Join parser so both speak the SAME format.
     /// Crockford alphabet excludes I, L, O, U to avoid 0/O and 1/I/L confusion; decode is
     /// case-insensitive and tolerant of dashes / surrounding whitespace.
+    ///
+    /// A CHECK SYMBOL RIDES ALONG, exactly as <see cref="InviteCode"/> and <c>UnifiedCode</c> already do.
+    /// Without it every 10-symbol string over the alphabet decoded to SOME IPv4:port, so a single mistyped
+    /// character silently became a different, arbitrary endpoint and the player got a connect timeout with
+    /// nothing naming the typo. Codes are session-ephemeral (minted per host session, pasted immediately),
+    /// and two builds that disagree about the format cannot play together anyway — the parity/version gate
+    /// refuses the join — so nothing durable is invalidated by the extra symbol.
     /// </summary>
     public static class ConnectCode
     {
         private const string Alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford base32 (32 chars)
+
+        /// <summary>10 data symbols (48 bits of endpoint, 2 bits of padding) + 1 check symbol.</summary>
+        public const int DataSymbols = 10;
+        public const int TotalSymbols = DataSymbols + 1;
+
+        // Weighted checksum over the data symbols, mod 32 — byte-for-byte InviteCode.Checksum's scheme, so
+        // there is one notion of "check symbol" in this codebase and not two. Odd weights are invertible
+        // mod 32, so EVERY single-symbol substitution changes it; the weighting catches most transpositions.
+        private static int Checksum(int[] sym)
+        {
+            int sum = 0;
+            for (int i = 0; i < DataSymbols; i++) sum += sym[i] * (2 * i + 1);
+            return sum & 0x1F;
+        }
 
         public static string Encode(IPEndPoint pub)
         {
@@ -27,8 +48,8 @@ namespace Multiplayer.Util
             data[4] = (byte)((pub.Port >> 8) & 0xFF);
             data[5] = (byte)(pub.Port & 0xFF);
 
-            var sb = new StringBuilder(10);
-            int buffer = 0, bits = 0;
+            var sym = new int[TotalSymbols];
+            int pos = 0, buffer = 0, bits = 0;
             foreach (var b in data)
             {
                 buffer = (buffer << 8) | b;
@@ -36,15 +57,19 @@ namespace Multiplayer.Util
                 while (bits >= 5)
                 {
                     bits -= 5;
-                    sb.Append(Alphabet[(buffer >> bits) & 0x1F]);
+                    sym[pos++] = (buffer >> bits) & 0x1F;
                 }
             }
             if (bits > 0)
-                sb.Append(Alphabet[(buffer << (5 - bits)) & 0x1F]); // pad final partial symbol
+                sym[pos++] = (buffer << (5 - bits)) & 0x1F; // pad final partial symbol
+            sym[DataSymbols] = Checksum(sym);
 
-            // Group as 4-2-4 → "7F3B-21-K9" style (10 symbols → groups of 4,2,4).
+            var sb = new StringBuilder(TotalSymbols);
+            for (int i = 0; i < TotalSymbols; i++) sb.Append(Alphabet[sym[i]]);
+
+            // Group as 4-3-4 → "7F3B-21K-9M4" style (11 symbols → groups of 4,3,4).
             var raw = sb.ToString();
-            return raw.Substring(0, 4) + "-" + raw.Substring(4, 2) + "-" + raw.Substring(6, 4);
+            return raw.Substring(0, 4) + "-" + raw.Substring(4, 3) + "-" + raw.Substring(7, 4);
         }
 
         public static IPEndPoint Decode(string code)
@@ -52,15 +77,23 @@ namespace Multiplayer.Util
             if (string.IsNullOrWhiteSpace(code)) return null;
 
             var clean = code.Trim().Replace("-", "").Replace(" ", "").ToUpperInvariant();
-            if (clean.Length != 10) return null;
+            if (clean.Length != TotalSymbols) return null;
+
+            var sym = new int[TotalSymbols];
+            for (int i = 0; i < TotalSymbols; i++)
+            {
+                var s = Alphabet.IndexOf(clean[i]);
+                if (s < 0) return null; // illegal symbol
+                sym[i] = s;
+            }
+            if (sym[DataSymbols] != Checksum(sym)) return null; // wrong check symbol → a typo, not an endpoint
 
             int buffer = 0, bits = 0;
             var outBytes = new byte[6];
             int outPos = 0;
-            foreach (var c in clean)
+            for (int i = 0; i < DataSymbols; i++)
             {
-                var idx = Alphabet.IndexOf(c);
-                if (idx < 0) return null; // illegal symbol
+                var idx = sym[i];
                 buffer = (buffer << 5) | idx;
                 bits += 5;
                 if (bits >= 8)
