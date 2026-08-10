@@ -150,7 +150,7 @@ namespace Multiplayer.Network.Sync
             {
                 __state = null;
                 var mission = (target.Actor as GeoSite)?.ActiveMission;
-                var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+                var store = DurableInboxSession.ActiveStore; MembershipId member;
                 string subject = DurableWindowRegistry.StableMissionSubject(mission);
                 if (store == null || string.IsNullOrEmpty(subject) ||
                     !WindowQueueSync.TryLocalMember(store, out member) ||
@@ -251,7 +251,7 @@ namespace Multiplayer.Network.Sync
         private static OccurrenceId? EnqueueCapturedPriority(string family, string stableTrigger, params string[] subjects)
         {
             var engine = NetworkEngine.Instance;
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             if (engine == null || !engine.IsActiveSession || !engine.IsHost || store == null) return null;
             var occurrence = new OccurrenceId(family, stableTrigger, subjects);
             for (int attempt = 0; attempt != 32; attempt++)

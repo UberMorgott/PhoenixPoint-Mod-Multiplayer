@@ -142,8 +142,8 @@ namespace RailCheck
             var oldStore = new DurableInboxStore(new HostLedger(new[] { swapEntry }, 1));
             int swapRemoved = 0;
             EventPopup.BindDeferredCarrier(oldStore, swapOccurrence, _ => swapRemoved++);
-            DurableInboxSaveBridge.ActiveStore = oldStore;
-            DurableInboxSaveBridge.ActiveStore = new DurableInboxStore(new HostLedger(Array.Empty<InboxEntry>()));
+            DurableInboxSession.ActiveStore = oldStore;
+            DurableInboxSession.ActiveStore = new DurableInboxStore(new HostLedger(Array.Empty<InboxEntry>()));
             if (swapRemoved != 1 || oldStore.Carriers.Count(swapOccurrence) != 0)
                 yield return "L395 store-swap-retained-old-carrier-or-lease";
             // The store's real teardown edge is GeoLevelController.OnLevelEnd.  Drive the production
@@ -152,19 +152,43 @@ namespace RailCheck
                     BindingFlags.NonPublic)?.GetMethod("Prefix", BindingFlags.NonPublic | BindingFlags.Static);
             if (teardown == null) { yield return "L395 premise-changed: level-teardown-prefix-disappeared"; yield break; }
             var teardownStore = new DurableInboxStore(new HostLedger(new[] { swapEntry }, 1)); int teardownRemoved = 0;
-            DurableInboxSaveBridge.ActiveStore = teardownStore;
+            DurableInboxSession.ActiveStore = teardownStore;
             EventPopup.BindDeferredCarrier(teardownStore, swapOccurrence, _ => teardownRemoved++);
             teardown.Invoke(null, null);
             if (teardownRemoved != 1 || teardownStore.Carriers.Count(swapOccurrence) != 0 ||
-                DurableInboxSaveBridge.ActiveStore != null)
+                DurableInboxSession.ActiveStore != null)
                 yield return "L395 level-teardown-retained-the-store-or-its-carriers";
 
             // The only creation seam is the geoscape-start callback, and it is gated on an active co-op
             // session: no session must mint no store, or every solo campaign grows a phantom inbox.
-            DurableInboxSaveBridge.OpenSessionStore();
-            if (DurableInboxSaveBridge.ActiveStore != null)
+            DurableInboxSession.OpenSessionStore();
+            if (DurableInboxSession.ActiveStore != null)
                 yield return "L395 session-store-was-opened-without-an-active-co-op-session";
-            DurableInboxSaveBridge.ActiveStore = null;
+
+            // ...and the POSITIVE half, or the arm above passes for the wrong reason. Without these two the
+            // whole lifecycle can rot silently: gut OpenSessionStore to a no-op, or unhook it from the
+            // geoscape callback, and every other arm here still reads green while no peer ever gets an
+            // inbox. This store used to be born as a SIDE EFFECT of writing a save (the old
+            // Append lazily minted it), which is exactly the shape that must not come back.
+            var opener = typeof(DurableInboxSession).GetMethod("OpenSessionStore",
+                BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Public);
+            if (opener == null) { yield return "L395 premise-changed: session-creation-seam-disappeared"; yield break; }
+            if (!Program.Callees(opener, typeof(DurableInboxSession).Assembly)
+                    .Any(c => c.Name == ".ctor" && c.DeclaringType?.Name == "DurableInboxStore"))
+                yield return "L395 session-store-open-mints-nothing: OpenSessionStore no longer constructs a " +
+                             "DurableInboxStore, so an active co-op session gets no inbox and every window " +
+                             "the geoscape queues for this peer is dropped on the floor";
+
+            var geoscapeStarted = typeof(GenericApplier).Assembly.GetTypes()
+                .FirstOrDefault(t => t.Name == "GeoscapeStartedPatch");
+            if (geoscapeStarted == null) { yield return "L395 premise-changed: geoscape-start-patch-disappeared"; yield break; }
+            if (!geoscapeStarted.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
+                    .Any(m => Program.Callees(m, typeof(DurableInboxSession).Assembly)
+                                     .Any(c => c.Name == "OpenSessionStore")))
+                yield return "L395 creation-seam-is-not-wired: the geoscape-start callback no longer opens the " +
+                             "session store — the inbox would then only appear if something else happened to " +
+                             "mint it, which is the save-side-effect birth this replaced";
+            DurableInboxSession.ActiveStore = null;
             foreach (var failure in StoreAbandonBarrier(memberA)) yield return failure;
         }
 
@@ -174,7 +198,7 @@ namespace RailCheck
             var entry = new InboxEntry(occurrence, member, InboxLifecycle.Queued,
                 default(CanonicalChoiceId), 1, 0, new HostOrderKey(1, occurrence.TriggerId));
             var oldStore = new DurableInboxStore(new HostLedger(new[] { entry }, 1));
-            DurableInboxSaveBridge.ActiveStore = oldStore;
+            DurableInboxSession.ActiveStore = oldStore;
             int firstRemoved = 0, lateRemoved = 0, futureRemoved = 0;
             using (var entered = new ManualResetEventSlim(false))
             using (var release = new ManualResetEventSlim(false))
@@ -182,7 +206,7 @@ namespace RailCheck
                 EventPopup.BindDeferredCarrier(oldStore, occurrence, _ =>
                 { Interlocked.Increment(ref firstRemoved); entered.Set(); release.Wait(); });
                 var replacement = new DurableInboxStore(new HostLedger(Array.Empty<InboxEntry>()));
-                var swap = Task.Run(() => DurableInboxSaveBridge.ActiveStore = replacement);
+                var swap = Task.Run(() => DurableInboxSession.ActiveStore = replacement);
                 if (!entered.Wait(5000)) { release.Set(); yield return "L395 abandoned-store-cleanup-never-entered"; yield break; }
                 var late = Task.Run(() => CutsceneMirror.BindReplayCarrier(oldStore, occurrence,
                     _ => Interlocked.Increment(ref lateRemoved)));
@@ -195,7 +219,7 @@ namespace RailCheck
                     oldStore.Carriers.Count(occurrence) != 0)
                     yield return "L395 abandoned-store-admitted-late-or-future-carrier";
             }
-            DurableInboxSaveBridge.ActiveStore = null;
+            DurableInboxSession.ActiveStore = null;
         }
 
         private static IEnumerable<string> InFlightSealBarrier(DurableInboxStore store, MembershipId member,

@@ -119,7 +119,7 @@ namespace Multiplayer.Network.Sync
         internal static GeoscapeViewStateSwitchRequest DurablePriorityHead(
             IList<GeoscapeViewStateSwitchRequest> pending)
         {
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             if (pending == null || store == null) return pending == null || pending.Count == 0 ? null : pending[0];
             return pending.Select((request, index) =>
             {

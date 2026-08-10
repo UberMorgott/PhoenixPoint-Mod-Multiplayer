@@ -127,7 +127,7 @@ namespace Multiplayer.Network.Sync
             {
                 progressed = false; SourceRevalidationBatchDelta[] pending;
                 lock (SourceDeltaGate) pending = ScheduledSourceDeltas.ToArray();
-                var store = DurableInboxSaveBridge.ActiveStore;
+                var store = DurableInboxSession.ActiveStore;
                 if (store == null) return applied;
                 foreach (var delta in pending)
                 {
@@ -182,7 +182,7 @@ namespace Multiplayer.Network.Sync
                 { Debug.LogWarning("[MP][inbox] malformed preparation-edit StateDelta refused: " + why); return true; }
                 if (engine == null || engine.IsHost || engine.Session == null ||
                     !IsAuthoritativeTransitionSender(engine.Session.HostPeerId, senderPeerId)) return true;
-                var clientStore = DurableInboxSaveBridge.ActiveStore;
+                var clientStore = DurableInboxSession.ActiveStore;
                 if (clientStore != null) ApplyPreparationEditDelta(clientStore, edit, applied =>
                 {
                     var geo = GenericApplier.StartedGeoLevel(); var touched = new HashSet<object>();
@@ -207,7 +207,7 @@ namespace Multiplayer.Network.Sync
             if (!DurableInboxCodec.TryDecodeDeploymentTransition(payload, out delta, out decodeRefusal)) return false;
             if (engine == null || engine.IsHost || engine.Session == null ||
                 !IsAuthoritativeTransitionSender(engine.Session.HostPeerId, senderPeerId)) return true;
-            var store = DurableInboxSaveBridge.ActiveStore; if (store == null) return true;
+            var store = DurableInboxSession.ActiveStore; if (store == null) return true;
             if (store.InstallDeploymentTransition(delta))
             {
                 string refusal;
@@ -245,7 +245,7 @@ namespace Multiplayer.Network.Sync
 
         internal static void CaptureVehicleDeparture(GeoVehicle vehicle)
         {
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             var geo = GenericApplier.StartedGeoLevel();
             var network = NetworkEngine.Instance;
             if (geo == null || vehicle == null || vehicle.CurrentSite == null ||
@@ -293,7 +293,7 @@ namespace Multiplayer.Network.Sync
             if (!DepartureGenerationRail.TryAdvance(capture.VehicleIdentity, out departureWatermark)) return;
             DiffEngine.FlushNow(); // the exact generation rides the ordinary vehicle rail snapshot
             if (capture.Bindings.Count == 0) return; // ordinary departure still advanced the shared generation
-            var store = DurableInboxSaveBridge.ActiveStore; var geo = GenericApplier.StartedGeoLevel();
+            var store = DurableInboxSession.ActiveStore; var geo = GenericApplier.StartedGeoLevel();
             if (store == null || geo == null) return;
             var plans = capture.Bindings.Select(binding => new SourceRevalidationPlan(binding.Occurrence,
                 capture.VehicleIdentity, binding.Before,
@@ -354,7 +354,7 @@ namespace Multiplayer.Network.Sync
         internal static bool TryResolveDurableMissionOffer(GeoMission mission, out DurableInboxStore store,
             out MembershipId member, out OccurrenceId offer)
         {
-            store = DurableInboxSaveBridge.ActiveStore; member = default(MembershipId); offer = default(OccurrenceId);
+            store = DurableInboxSession.ActiveStore; member = default(MembershipId); offer = default(OccurrenceId);
             if (store == null || mission == null || !WindowQueueSync.TryLocalMember(store, out member)) return false;
             var localMember = member;
             string subject = DurableWindowRegistry.StableMissionSubject(mission);
@@ -442,7 +442,7 @@ namespace Multiplayer.Network.Sync
             try { offer = ReadOccurrence(r); member = new MembershipId(ReadBounded(r));
                 if (r.BaseStream.Position != r.BaseStream.Length) throw new InvalidDataException("trailing durable Start bytes"); }
             catch (Exception ex) { RejectDurableStart(senderPeerId, null, "malformed bounded request: " + ex.Message); return; }
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             ClientInfo sender;
             string siteRef = offer.SubjectIds.FirstOrDefault(x => x.StartsWith("S#", StringComparison.Ordinal));
             if (engine?.Session == null || !engine.Session.Clients.TryGetValue(senderPeerId, out sender))
@@ -1431,7 +1431,7 @@ namespace Multiplayer.Network.Sync
             if (engine.IsHost)
             {
                 w.HostTriggerId = HostTrigger(w.HostTriggerId);
-                var store = DurableInboxSaveBridge.ActiveStore;
+                var store = DurableInboxSession.ActiveStore;
                 if (store == null)
                     throw new InvalidOperationException("durable inbox store is not installed");
                 var missionIdentity = DurableWindowRegistry.StableMissionSubject(mission);

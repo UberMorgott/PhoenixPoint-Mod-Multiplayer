@@ -711,7 +711,7 @@ namespace Multiplayer.Network.Sync
                 DurablePreparationEditEngine preparationEngine = null;
                 if (hasPreparation)
                 {
-                    preparationEngine = new DurablePreparationEditEngine(DurableInboxSaveBridge.ActiveStore,
+                    preparationEngine = new DurablePreparationEditEngine(DurableInboxSession.ActiveStore,
                         delta =>
                         {
                             var touched = new HashSet<object> { character, storage };

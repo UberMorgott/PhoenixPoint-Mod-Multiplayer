@@ -187,8 +187,8 @@ namespace RailCheck
             var ordinaryRequest = new GeoscapeViewStateSwitchRequest(new UIStateGeoModal(ModalType.GeoAmbushOutcome), 99);
             var priorityRequest = new GeoscapeViewStateSwitchRequest(new UIStateGeoModal(ModalType.GeoAmbushBrief), 0);
             WindowOrder.BindDurable(ordinaryRequest, ordinary); WindowOrder.BindDurable(priorityRequest, priority);
-            var previousActiveStore = DurableInboxSaveBridge.ActiveStore;
-            DurableInboxSaveBridge.ActiveStore = store;
+            var previousActiveStore = DurableInboxSession.ActiveStore;
+            DurableInboxSession.ActiveStore = store;
             var nativePending = new List<GeoscapeViewStateSwitchRequest> { ordinaryRequest, priorityRequest };
             if (!ReferenceEquals(WindowOrder.DurablePriorityHead(nativePending), priorityRequest))
                 yield return "L380 priority-behind-native-head-was-not-selected-by-global-durable-order";
@@ -258,7 +258,7 @@ namespace RailCheck
                 DurableWindowRegistry.MatchPriorityOccurrence(modalStore, modalOccurrence.EventId,
                     modalOccurrence.TriggerId, "wrong-subject").HasValue)
                 yield return "L380 ledger-before-request-modal-did-not-match-exact-family-trigger-and-subject";
-            DurableInboxSaveBridge.ActiveStore = previousActiveStore;
+            DurableInboxSession.ActiveStore = previousActiveStore;
 
             // POSITIVE CONTROL: any answer/dismiss callback here would make preemption authoritative locally.
             if (carrier.CallbackCount != 0) yield return "L380 control-not-red: callback-ran";

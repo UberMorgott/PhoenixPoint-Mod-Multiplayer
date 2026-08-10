@@ -202,14 +202,14 @@ namespace RailCheck
                 reentrant.Ledger.AllEntries.Where(x=>x.Occurrence.Equals(sibling)).Any(x=>x.PreparationRevision!=0))
                 yield return "L388 reentrant-departure-entered-the-active-atomic-writer";
 
-            var buffered=BatchStore();var oldActive=DurableInboxSaveBridge.ActiveStore;
+            var buffered=BatchStore();var oldActive=DurableInboxSession.ActiveStore;
             try
             {
                 DepartureGenerationRail.Clear();ulong ordinaryGeneration,dwiGeneration;
                 if(!DepartureGenerationRail.TryAdvance("V#1",out ordinaryGeneration)||ordinaryGeneration!=1||
                     !DepartureGenerationRail.TryAdvance("V#1",out dwiGeneration)||dwiGeneration!=2)
                     yield return "L388 ordinary-departure-did-not-advance-the-same-host-generation-as-dwi";
-                DurableInboxSaveBridge.ActiveStore=buffered;
+                DurableInboxSession.ActiveStore=buffered;
                 int sourceRepaints=0;MissionSync.SourceRevalidationRepaintProbe=()=>sourceRepaints++;
                 var newer=new SourceRevalidationBatchDelta(25,"V#1",2,new[]{new SourceRevalidationItem(
                     occurrence,false,2,20)});
@@ -250,7 +250,7 @@ namespace RailCheck
                     buffered.Ledger.Get(occurrence,a).PreparationAuthorityRevision!=40)
                     yield return "L388 duplicate-blocked-or-reapplied-before-a-newer-delta";
             }
-            finally { MissionSync.SourceRevalidationRepaintProbe=null;DurableInboxSaveBridge.ActiveStore=oldActive;
+            finally { MissionSync.SourceRevalidationRepaintProbe=null;DurableInboxSession.ActiveStore=oldActive;
                 MissionSync.ClearScheduledSourceRevalidationDeltas(); DepartureGenerationRail.Clear(); }
 
             DepartureGenerationRail.Clear(); GenericApplier.ClearDepartureWatermarks(); ulong saturated;

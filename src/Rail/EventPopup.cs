@@ -67,7 +67,7 @@ namespace Multiplayer.Network.Sync
         internal static bool TryFindDurableOccurrence(string eventId, out OccurrenceId occurrence)
         {
             occurrence = default(OccurrenceId);
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             if (store == null || string.IsNullOrEmpty(eventId)) return false;
             var found = store.Ledger.AllEntries.Where(x => x.Occurrence.EventId == "EventPopup" &&
                 x.Occurrence.SubjectIds.Contains("event:" + eventId, StringComparer.Ordinal) &&
@@ -362,7 +362,7 @@ namespace Multiplayer.Network.Sync
                     Priority = QueuedPriority(view, ev),
                 };
                 uint seq = Seq.Next(SurfaceIds.GeoEventRaise);
-                var store = DurableInboxSaveBridge.ActiveStore;
+                var store = DurableInboxSession.ActiveStore;
                 if (store != null)
                 {
                     var occurrence = new OccurrenceId("EventPopup", "raise:" + seq,
@@ -560,7 +560,7 @@ namespace Multiplayer.Network.Sync
                         {
                             var decision = EventSync.ReadDecision(r);
                             if (r.BaseStream.Position != r.BaseStream.Length) throw new InvalidDataException("decision trailing bytes");
-                            var store = DurableInboxSaveBridge.ActiveStore;
+                            var store = DurableInboxSession.ActiveStore;
                             if (store == null || !store.InstallAuthoritativeDecision(decision))
                                 throw new InvalidDataException("authoritative decision could not install");
                             UiEventMap.FireDurableChoice(GeoLevel());
@@ -750,7 +750,7 @@ namespace Multiplayer.Network.Sync
             var geo = GeoLevel();
             var view = geo?.View;
             var q = view == null ? null : SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
-            var durableStore = DurableInboxSaveBridge.ActiveStore;
+            var durableStore = DurableInboxSession.ActiveStore;
             var durableOccurrence = new OccurrenceId("EventPopup", "raise:" + seq,
                 new[] { "event:" + p.EventId,
                         string.IsNullOrEmpty(p.SiteRef) ? "site:none" : p.SiteRef,
@@ -1209,7 +1209,7 @@ namespace Multiplayer.Network.Sync
 
         private static bool DurableChoiceLocked(GeoscapeEvent ev)
         {
-            OccurrenceId occurrence; var store = DurableInboxSaveBridge.ActiveStore;
+            OccurrenceId occurrence; var store = DurableInboxSession.ActiveStore;
             return store != null && TryGetDurableOccurrence(ev, out occurrence) && store.Canonical.Decisions.Any(x =>
                 x.Occurrence.Equals(occurrence) && x.Phase == SharedChoicePhase.ChoiceLocked);
         }
@@ -1662,7 +1662,7 @@ namespace Multiplayer.Network.Sync
 
         internal static void HostRebroadcastLockedDecisions()
         {
-            var engine = NetworkEngine.Instance; var store = DurableInboxSaveBridge.ActiveStore;
+            var engine = NetworkEngine.Instance; var store = DurableInboxSession.ActiveStore;
             if (engine == null || !engine.IsActiveSession || !engine.IsHost || store == null ||
                 Time.realtimeSinceStartup < _nextDurableDecisionReplay) return;
             _nextDurableDecisionReplay = Time.realtimeSinceStartup + 1f;
@@ -1816,7 +1816,7 @@ namespace Multiplayer.Network.Sync
             // asking it to click its own answer a second time (EventPopup.ConsumeOwnAnswer).
             EventPopup.NoteOwnAnswer(ev, index);
             OccurrenceId occurrence;
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             if (!EventPopup.TryGetDurableOccurrence(ev, out occurrence) || store == null)
             { Debug.LogWarning("[MP][events] answer dropped — dialog has no exact durable occurrence"); return false; }
             string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");

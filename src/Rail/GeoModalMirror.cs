@@ -616,7 +616,7 @@ namespace Multiplayer.Network.Sync
         {
             if (!string.IsNullOrEmpty(p.DurableTrigger))
             {
-                var store = DurableInboxSaveBridge.ActiveStore;
+                var store = DurableInboxSession.ActiveStore;
                 if (!DurableWindowRegistry.MatchPriorityOccurrence(store, "Modal:" + (ModalType)p.ModalType,
                     p.DurableTrigger, p.DurableSubject).HasValue)
                     return true;
@@ -776,7 +776,7 @@ namespace Multiplayer.Network.Sync
             q.QueryStateSwitch(request);
             if (!string.IsNullOrEmpty(p.DurableTrigger))
             {
-                var occurrence = DurableWindowRegistry.MatchPriorityOccurrence(DurableInboxSaveBridge.ActiveStore,
+                var occurrence = DurableWindowRegistry.MatchPriorityOccurrence(DurableInboxSession.ActiveStore,
                     "Modal:" + (ModalType)p.ModalType, p.DurableTrigger, p.DurableSubject);
                 if (occurrence.HasValue && occurrence.Value.EventId != null)
                     WindowOrder.BindDurable(request, occurrence.Value);
@@ -931,7 +931,7 @@ namespace Multiplayer.Network.Sync
         internal string Park(uint seq, GeoModalMirror.Raise p)
         {
             _q.Add(new Entry { Seq = seq, P = p });
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             var occurrence = DurableWindowRegistry.MatchPriorityOccurrence(store,
                 "Modal:" + (ModalType)p.ModalType, p.DurableTrigger, p.DurableSubject);
             if (occurrence.HasValue && !_durable.ContainsKey(seq))

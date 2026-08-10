@@ -299,7 +299,7 @@ namespace Multiplayer.Network.Sync
         internal static bool TryCapturePreparationEditContext(out DurablePreparationEditContext context)
         {
             context = default(DurablePreparationEditContext);
-            var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+            var store = DurableInboxSession.ActiveStore; MembershipId member;
             if (store == null || !WindowQueueSync.TryLocalMember(store, out member)) return false;
             var view = GenericApplier.StartedGeoLevel()?.View;
             var query = view == null ? null : WindowQueueSync.SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
@@ -331,7 +331,7 @@ namespace Multiplayer.Network.Sync
             occurrence = default(OccurrenceId); member = default(MembershipId); deferredLifecycleRevision = 0;
             DurablePreparationEditContext context;
             if (!TryCapturePreparationEditContext(out context)) return false;
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             if (store == null || !WindowQueueSync.TryLocalMember(store, out member) ||
                 !new DurableInboxEngine(store, member, LifecycleCarrier).TryDeferPreparation(context.Occurrence)) return false;
             InboxEntry deferred;
@@ -360,7 +360,7 @@ namespace Multiplayer.Network.Sync
             string stableMissionSubject, out OccurrenceId occurrence)
         {
             occurrence = default(OccurrenceId);
-            var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+            var store = DurableInboxSession.ActiveStore; MembershipId member;
             if (store == null || !WindowQueueSync.TryLocalMember(store, out member)) return false;
             var candidates = store.Ledger.EntriesFor(member).Where(x =>
                 (x.Lifecycle == InboxLifecycle.Deferred || x.Lifecycle == InboxLifecycle.Queued ||
@@ -392,7 +392,7 @@ namespace Multiplayer.Network.Sync
 
         internal static bool RestoreFailedBack(OccurrenceId occurrence, MembershipId member, ulong deferredRevision)
         {
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             bool restored = store != null && new DurableInboxEngine(store, member, LifecycleCarrier)
                 .TryRestoreDeferredAfterFailedBack(occurrence, deferredRevision);
             return restored;
@@ -400,7 +400,7 @@ namespace Multiplayer.Network.Sync
 
         internal static bool RequiresPreparationContextForSender(NetworkEngine engine, ulong senderPeerId)
         {
-            var store = DurableInboxSaveBridge.ActiveStore; ClientInfo client;
+            var store = DurableInboxSession.ActiveStore; ClientInfo client;
             if (store == null || engine?.Session == null ||
                 !engine.Session.Clients.TryGetValue(senderPeerId, out client)) return false;
             string player = client.PlayerGuid.ToString("D");
@@ -412,7 +412,7 @@ namespace Multiplayer.Network.Sync
         internal static bool AuthorizePreparationContext(NetworkEngine engine, ulong senderPeerId,
             DurablePreparationEditContext context, bool hostLocal)
         {
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             if (store == null) return false;
             if (hostLocal)
             {

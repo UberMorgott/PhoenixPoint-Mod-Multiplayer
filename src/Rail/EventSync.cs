@@ -239,7 +239,7 @@ namespace Multiplayer.Network.Sync
                 !SenderOwnsMembership(sender.PlayerGuid.ToString("D"), addressedMember))
             { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "answer membership does not belong to sender", true, RecordScope); return; }
             InboxEntry addressedEntry = null;
-            try { addressedEntry = DurableInboxSaveBridge.ActiveStore?.Ledger.Get(addressed, addressedMember); }
+            try { addressedEntry = DurableInboxSession.ActiveStore?.Ledger.Get(addressed, addressedMember); }
             catch (InvalidOperationException) { }
             if (addressedEntry == null || addressedEntry.LifecycleRevision != expectedRevision)
             { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "stale occurrence lifecycle revision", true, RecordScope); return; }
@@ -311,7 +311,7 @@ namespace Multiplayer.Network.Sync
                     "external transition not covered by campaign-checkpoint idempotence");
                 return true;
             }
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             if (store == null || !store.Ledger.Contains(occurrence)) return false;
 
             string choiceValue = index < 0 ? "choice:none" : choice?.Text?.LocalizationKey;
@@ -373,7 +373,7 @@ namespace Multiplayer.Network.Sync
             var network = NetworkEngine.Instance;
             if (network == null || !network.IsActiveSession || !network.IsHost) return false;
             if (EventPopup.StartsMission(choice)) return false;
-            OccurrenceId occurrence; var store = DurableInboxSaveBridge.ActiveStore;
+            OccurrenceId occurrence; var store = DurableInboxSession.ActiveStore;
             if (store == null || !EventPopup.TryGetDurableOccurrence(ev, out occurrence))
             { Debug.LogError("[MP][events] host-local answer blocked — no exact durable occurrence"); return true; }
             string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
@@ -397,7 +397,7 @@ namespace Multiplayer.Network.Sync
         {
             var network = NetworkEngine.Instance;
             var geo = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>();
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             if (network == null || !network.IsActiveSession || !network.IsHost || geo?.EventSystem == null || store == null)
                 return 0;
             // A decision left short of ChoiceLocked means the host died between committing the arbitration

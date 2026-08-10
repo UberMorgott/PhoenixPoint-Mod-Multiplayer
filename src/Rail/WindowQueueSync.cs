@@ -169,7 +169,7 @@ namespace Multiplayer.Network.Sync
         internal static void TrackDurableNativeCarrier(GeoscapeViewStateSwitchRequest request,
             OccurrenceId occurrence)
         {
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             if (store == null || request == null) return;
             BoundNativeCarrier carrier;
             lock (_durableCarrierGate)
@@ -275,7 +275,7 @@ namespace Multiplayer.Network.Sync
             if (!WindowOrder.TryGetDurable(current, out ordinary) || !WindowOrder.TryGetDurable(pending, out priority) ||
                 DurableWindowRegistry.PriorityOf(ordinary) != DurableWindowPriority.Ordinary ||
                 DurableWindowRegistry.PriorityOf(priority) == DurableWindowPriority.Ordinary) return false;
-            var store = DurableInboxSaveBridge.ActiveStore;
+            var store = DurableInboxSession.ActiveStore;
             if (store == null) return false;
             EnsureDurableCarrierSession(store);
             string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
@@ -290,7 +290,7 @@ namespace Multiplayer.Network.Sync
         internal static bool TryDurableResume(GeoscapeViewSwitchQuery query)
         {
             if (_durableRestoreActive) return false;
-            var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+            var store = DurableInboxSession.ActiveStore; MembershipId member;
             if (store == null || !TryLocalMember(store, out member)) return false;
             EnsureDurableCarrierSession(store);
             return new DurableInboxEngine(store, member,
@@ -303,7 +303,7 @@ namespace Multiplayer.Network.Sync
             if (_durableEnginePresentation || _durableRestoreActive) return;
             OccurrenceId occurrence; var request = WindowOrder.CurrentRequest(query);
             if (!WindowOrder.TryGetDurable(request, out occurrence)) return;
-            var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+            var store = DurableInboxSession.ActiveStore; MembershipId member;
             if (store == null || !TryLocalMember(store, out member)) return;
             EnsureDurableCarrierSession(store);
             MarkDurableNativeCurrent(request, occurrence);
@@ -326,7 +326,7 @@ namespace Multiplayer.Network.Sync
             var query = AccessTools.Field(typeof(GeoscapeView), "_viewSwichQuery")?.GetValue(view) as GeoscapeViewSwitchQuery;
             OccurrenceId occurrence; var current = WindowOrder.CurrentRequest(query);
             if (!WindowOrder.TryGetDurable(current, out occurrence)) return;
-            var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+            var store = DurableInboxSession.ActiveStore; MembershipId member;
             if (store == null || !TryLocalMember(store, out member)) return;
             for (int attempt = 0; attempt < 8; attempt++)
             {
@@ -416,7 +416,7 @@ namespace Multiplayer.Network.Sync
             // idempotent, so this is one teardown, not two.
             private static void Prefix()
             {
-                DurableInboxSaveBridge.ActiveStore = null;
+                DurableInboxSession.ActiveStore = null;
                 ClearDurableRuntimeCarriers();
             }
         }
@@ -829,7 +829,7 @@ namespace Multiplayer.Network.Sync
                 var query = view == null ? null : SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
                 var request = CurrentRequestField?.GetValue(query) as GeoscapeViewStateSwitchRequest;
                 OccurrenceId occurrence;
-                var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+                var store = DurableInboxSession.ActiveStore; MembershipId member;
                 var mission = __instance?.ModalData as GeoMission;
                 if (!ReferenceEquals(request?.State, __instance) || !WindowOrder.TryGetDurable(request, out occurrence) ||
                     store == null || !TryLocalMember(store, out member) || mission == null ||

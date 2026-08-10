@@ -470,7 +470,7 @@ namespace Multiplayer.Network.Sync
         {
             // Task 12 terminal teardown is callback-free and retryable independently of its already-durable
             // tombstone. A transient carrier exception therefore heals on the next ordinary sync tick.
-            DurableSourceRevalidationEngine.RetryTerminalTeardown(DurableInboxSaveBridge.ActiveStore);
+            DurableSourceRevalidationEngine.RetryTerminalTeardown(DurableInboxSession.ActiveStore);
             if (!_dirty)
             {
                 // Every mark the open screen declined still owes the persistent HUD a refresh (L60,

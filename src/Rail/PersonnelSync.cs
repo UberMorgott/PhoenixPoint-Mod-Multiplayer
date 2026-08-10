@@ -952,7 +952,7 @@ namespace Multiplayer.Network.Sync
                                 if (!TryPlanReassign(senderPeerId, geo, character, destinationRef, out plan))
                                 { ok = false; break; }
                                 preparationSource = plan.Source; preparationDestination = plan.Destination;
-                                var preparationEngine = new DurablePreparationEditEngine(DurableInboxSaveBridge.ActiveStore,
+                                var preparationEngine = new DurablePreparationEditEngine(DurableInboxSession.ActiveStore,
                                     delta =>
                                     {
                                         var touched = new HashSet<object> { character };

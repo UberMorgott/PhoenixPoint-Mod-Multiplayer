@@ -2207,7 +2207,7 @@ namespace Multiplayer.Network.Sync
         {
             GenericApplier.MarkGeoscapeStarted();
             // The durable window inbox lives for one geoscape session; this is its only creation seam.
-            Multiplayer.Network.Sync.DurableInboxSaveBridge.OpenSessionStore();
+            Multiplayer.Network.Sync.DurableInboxSession.OpenSessionStore();
         }
     }
 }
