@@ -289,6 +289,50 @@ namespace Multiplayer.Network.Sync
         {
             _commitArrived = true;
             if (TryQueueReplenish("the host's post-mission commit edge")) { _commitArrived = false; _recheckFrames = 0; }
+            LogVerdict("the host's post-mission commit edge");
+        }
+
+        /// <summary>
+        /// THE VERDICT, PER PEER, IN PLAIN TERMS — so "the resupply window did not appear, is that a bug?"
+        /// never costs another log dig. It was asked once (2026-08-10 session, three peers) and the answer
+        /// had to be reconstructed from a native line in the HOST'S log alone: <c>REPLENISHMENT: restoring
+        /// PX_HandGrenade_WeaponDef from storage to …</c>. That line IS the whole rule —
+        /// <c>PostmissionReplenishManager.RestoreList</c>:298-318 puts every preferred item back from the
+        /// extra pile, then the mission rewards, then the FACTION WAREHOUSE, before anything is allowed to
+        /// count as missing (<c>GetMissingItems</c>:336-355 then compares preferred against what the soldier
+        /// now holds). A grenade the stores can cover is simply replaced, so nothing is missing and the game
+        /// itself raises no window. That is correct vanilla behaviour and not a lost screen.
+        ///
+        /// Cheap: one <c>GetMissingItems()</c> walk at ONE terminal moment per peer per mission, never in
+        /// the per-frame re-ask.
+        /// </summary>
+        private static void LogVerdict(string because)
+        {
+            try
+            {
+                var geo = GeoLevel();
+                if (!(geo?.ViewerFaction is GeoPhoenixFaction px))
+                {
+                    Debug.Log("[MP][replenish] VERDICT DEFERRED (" + because + "): this peer's geoscape is not " +
+                              "up yet, so there is nobody to ask GetMissingItems(). The answer is latched and " +
+                              "reported when this peer arrives.");
+                    return;
+                }
+                int shortCount = px.GetMissingItems().Count;
+                Debug.Log("[MP][replenish] VERDICT (" + because + "): " + shortCount + " soldier(s) short of " +
+                          "their preferred loadout — " +
+                          (ReplenishQueued()
+                              ? "the resupply window IS queued on this peer."
+                              : "NO resupply window on this peer, and with 0 short that is the GAME'S OWN " +
+                                "answer rather than a lost screen: PostmissionReplenishManager.RestoreList" +
+                                ":298-318 refills every preferred item from the extra pile, the mission " +
+                                "rewards or the FACTION WAREHOUSE before it can count as missing, so a thrown " +
+                                "grenade the stores can cover is simply put back (the game logs its own " +
+                                "'REPLENISHMENT: restoring … from storage to …' on the HOST for each one). " +
+                                "A non-zero count with no window is the bug shape; 0 is not."));
+            }
+            catch (Exception ex)
+            { Debug.LogError("[MP][replenish] reporting the resupply verdict failed: " + ex); }
         }
 
         /// <summary>The game's own gate and the game's own raiser, in one place so the edge, the arrival and
@@ -299,7 +343,7 @@ namespace Multiplayer.Network.Sync
             var view = geo?.View;
             if (view == null) return false;
             if (!(geo.ViewerFaction is GeoPhoenixFaction phoenix)) return false;
-            if (SwitchQueryOf(view)?.TryGetStateSwitchRequestForState<UIStateReplenish>(out _) == true) return true;
+            if (ReplenishQueued()) return true;
             if (!phoenix.GetMissingItems().Any()) return false;
             view.QueueReplenishState();   // the game's own raiser, at the game's own priority + our rank
             Debug.Log("[MP][replenish] queued the game's own UIStateReplenish on " + because +
@@ -355,7 +399,12 @@ namespace Multiplayer.Network.Sync
                 try
                 {
                     var engine = NetworkEngine.Instance;
-                    if (engine == null || !engine.IsActiveSession || engine.IsHost) return;
+                    // NOT host-gated any more. The ARM below still is (the host's own gate was already true
+                    // at EnterState, because its own Complete ran before it), but the VERDICT LINE must
+                    // exist on EVERY peer — the 2026-08-10 question "no resupply window, bug or nothing to
+                    // replenish?" was unanswerable precisely because the host, the one peer whose gate is
+                    // authoritative, logged nothing at all here.
+                    if (engine == null || !engine.IsActiveSession) return;
                     if (ParamsField == null)
                     {
                         Debug.LogError("[MP][replenish] UIStateInitial._params did not resolve — this peer " +
@@ -375,10 +424,16 @@ namespace Multiplayer.Network.Sync
                     var geo = GeoLevel();
                     var view = geo?.View;
                     if (view == null) return;
+
+                    // THE HOST'S VERDICT AND NOTHING ELSE: its own GeoMission.Complete ran before this
+                    // state, so the gate at UIStateInitial:125 already had the true answer and there is
+                    // nothing here to arm or re-ask.
+                    if (engine.IsHost)
+                    { LogVerdict("the game's own gate at UIStateInitial:125, HOST"); return; }
+
                     // Already queued by the native gate = the state DID arrive in time; re-asking would
                     // double the screen.
-                    if (SwitchQueryOf(view)?.TryGetStateSwitchRequestForState<UIStateReplenish>(out _) == true)
-                        return;
+                    if (ReplenishQueued()) return;
 
                     // THE EDGE MAY ALREADY HAVE LANDED. A client that spent longer rebuilding its geoscape
                     // than the host spent shipping the batch receives 0xB2 before it ever enters this state,
@@ -413,6 +468,11 @@ namespace Multiplayer.Network.Sync
         private static readonly System.Reflection.FieldInfo SwitchQueryField =
             AccessTools.Field(typeof(GeoscapeView), "_viewSwichQuery");                // GeoscapeView.cs:138 (game typo)
 
+        /// <summary>Is the game's resupply screen already in this peer's window queue? One question, one
+        /// place — the gate, the verdict line and the re-ask all have to be asking the same thing.</summary>
+        private static bool ReplenishQueued() =>
+            SwitchQueryOf(GeoLevel()?.View)?.TryGetStateSwitchRequestForState<UIStateReplenish>(out _) == true;
+
         private static GeoscapeViewSwitchQuery SwitchQueryOf(GeoscapeView view) =>
             view == null || SwitchQueryField == null
                 ? null
@@ -435,10 +495,13 @@ namespace Multiplayer.Network.Sync
                 // would hold this peer's other windows forever, which is the one thing P13 forbids.
                 if (TryQueueReplenish("the re-ask safety net")) { _recheckFrames = 0; return; }
                 if (lastFrame)
+                {
+                    LogVerdict("the re-ask ceiling, before the host's commit edge arrived");
                     Debug.Log("[MP][replenish] post-mission re-ask expired with nothing missing and no commit " +
                               "edge — either this squad really did come back whole, or 0x" +
                               SurfaceIds.GeoPostMissionCommit.ToString("X2") + " never arrived. Any window " +
                               "this was holding can go through now.");
+                }
             }
             catch (Exception ex)
             {
