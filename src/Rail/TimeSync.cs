@@ -8,10 +8,68 @@ using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewModules;
+using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
 
 namespace Multiplayer.Network.Sync
 {
+    /// <summary>
+    /// WHO SENT WHICH AIRCRAFT — host-only, and the ONLY reason it exists is the tab-pause rule in
+    /// <see cref="TimeSync"/>. Vanilla stops the world whenever the player leaves the map, which is right
+    /// for one player and wrong for three: a peer clicking Manufacturing froze the aircraft another peer
+    /// was steering (live 2026-08-11, host Player.log — nine `[MP][pause] peer=N → paused=True` lines, every
+    /// one of them a screen change). The game itself records no ordering peer on <c>GeoVehicle</c>, so the
+    /// only place that knowledge exists is where the order was accepted: <c>VehicleSync</c>'s travel seam.
+    /// Entries are pruned lazily on read — an aircraft that landed stops entitling anybody to a pause.
+    /// ponytail: plain dictionary keyed by the live entity, no identity strings — host-local, one process,
+    /// and it is only ever read on a screen change (user-gesture rate).
+    /// </summary>
+    internal static class AircraftDispatch
+    {
+        /// <summary>The host's own marker. <see cref="IntentRail.Reject"/> already treats 0 as "not a
+        /// connected client", so it can never collide with a real sender id.</summary>
+        internal const ulong HostPeer = 0;
+
+        private static readonly Dictionary<PhoenixPoint.Geoscape.Entities.GeoVehicle, ulong> _byVehicle =
+            new Dictionary<PhoenixPoint.Geoscape.Entities.GeoVehicle, ulong>();
+
+        internal static void Reset() { _byVehicle.Clear(); }
+
+        /// <summary>Record the peer whose order put this aircraft in the air. Player-faction aircraft
+        /// only: attributing an alien scout's sim route to the host would make the host permanently
+        /// "steering something" and re-freeze everyone the moment it opened a tab.</summary>
+        internal static void Note(PhoenixPoint.Geoscape.Entities.GeoVehicle vehicle, ulong peer)
+        {
+            var level = GameUtl.CurrentLevel();
+            var geo = level == null ? null : level.GetComponent<GeoLevelController>();
+            if (vehicle == null || geo == null || !ReferenceEquals(vehicle.Owner, geo.PhoenixFaction)) return;
+            _byVehicle[vehicle] = peer;
+        }
+
+        /// <summary>True when <paramref name="peer"/> ordered an aircraft that is STILL in the air.</summary>
+        internal static bool HasAircraftInFlight(ulong peer)
+        {
+            if (_byVehicle.Count == 0) return false;
+            List<PhoenixPoint.Geoscape.Entities.GeoVehicle> landed = null;
+            bool found = false;
+            foreach (var kv in _byVehicle)
+            {
+                bool flying;
+                try { flying = kv.Key != null && kv.Key.Travelling; }
+                catch { flying = false; }   // destroyed/torn-down aircraft: prune, never throw on a screen change
+                if (!flying)
+                {
+                    if (landed == null) landed = new List<PhoenixPoint.Geoscape.Entities.GeoVehicle>();
+                    landed.Add(kv.Key);
+                    continue;
+                }
+                if (kv.Value == peer) found = true;
+            }
+            if (landed != null) foreach (var v in landed) _byVehicle.Remove(v);
+            return found;
+        }
+    }
+
     /// <summary>
     /// GEOSCAPE TIME CONTROL intent seam (law 4a). Same shape as <see cref="PersonnelSync"/>: the
     /// client BLOCKS the native clock mutation and sends an intent; the host runs the SAME native
@@ -57,8 +115,12 @@ namespace Multiplayer.Network.Sync
     public static class TimeSync
     {
         // Intent ops (GeoTimeIntent inner payload: [nonce:u32][op:u8][val:u8]).
-        internal const byte OpPause = 1;  // val = 0 resume / 1 pause      → SetGamePauseState
+        internal const byte OpPause = 1;  // val = 0 resume / 1 pause / 2 tab pause → SetGamePauseState
         internal const byte OpSpeed = 2;  // val = preset index            → SelectTimePreset
+        // val 2 on OpPause = A TAB PAUSE, and it is the ONE conditional value on this wire: the sending
+        // peer left the map for one of ITS OWN screens, which in vanilla stops the world. The host
+        // decides whether that peer is entitled to stop it — see <see cref="HonourTabPause"/>.
+        internal const byte PauseValTab = 2;
         // op 3 was the WINDOW HOLD. Dead, and it is not coming back: see PauseHold. A blocking window is a
         // one-shot pause the GAME issues (RequestGamePause → SetGamePauseState), captured by the seam below.
 
@@ -90,9 +152,11 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>Stateless per intent (same rca-3 contract as <see cref="PersonnelSync"/>): nothing
         /// geoscape-bound is cached, dedup/nonce live in <see cref="IntentRail"/>, and the clock itself is
-        /// re-seeded across the boundary by <see cref="TimeAnchor.Reset"/>. Nothing to clear here — kept
-        /// because <c>SyncEngineStub</c> drives the boundary uniformly across every family.</summary>
-        public static void ResetForReloadBoundary() { }
+        /// re-seeded across the boundary by <see cref="TimeAnchor.Reset"/>. The ONE thing that does not
+        /// survive the boundary is the dispatch ledger: the transferred save replaces every GeoVehicle,
+        /// so entitlements keyed on the old instances would keep a landed aircraft "in the air" forever.
+        /// </summary>
+        public static void ResetForReloadBoundary() { AircraftDispatch.Reset(); }
 
         /// <summary>Arm the 0xB0 surface on the generic intent engine. No family reconverge and no
         /// reject prefixes: the client BLOCKED its local clock write, so a dropped intent leaves both
@@ -148,6 +212,94 @@ namespace Multiplayer.Network.Sync
         /// Both native bodies are provably inert past the write for <c>paused == true</c>: the only side
         /// branch in <c>SetGamePauseState</c> needs <c>!paused</c> (GeoscapeView.cs:1259).</summary>
         private static bool PausesLocally(bool paused) => paused;
+
+        // ─── THE TAB-PAUSE RULE (the pause follows the DISPATCHER, never the audience) ────────────────
+
+        /// <summary>Set while the host replays a peer's pause intent through the native funnel, so the
+        /// re-entrant <see cref="ProgrammaticPauseCapturePatch"/> does not re-judge a verdict that was
+        /// already reached FOR ANOTHER PEER against the host's own screen.</summary>
+        [ThreadStatic] private static bool _replayingRemotePause;
+
+        /// <summary>
+        /// A PRIVATE SCREEN — one peer's own tab, not a window every peer is looking at.
+        ///
+        /// Deliberately an ALLOW-LIST, and the fail-safe direction is "unknown ⇒ global": a window this
+        /// table has never heard of keeps today's everyone-pauses behaviour, which is the wrong-but-safe
+        /// answer (the 2026-08-04 bug was the opposite — an aircraft flying on while every player read a
+        /// popup). Two shapes reach the seam and both are covered:
+        ///   • the SECTION-BAR click, which pauses BEFORE it switches (UIModuleGeoSectionBar.cs:119/135/
+        ///     148/160/172/183/194 — <c>SetGamePauseState(true)</c> then <c>To*State()</c>), so the state
+        ///     still current here is the MAP state the player is leaving;
+        ///   • the screen's own <c>EnterState</c> pause (UIStateResearch.cs:22/24, UIStateManufacturing
+        ///     .cs:53, UIStateReplenish.cs:28, UIStatePhoenixBaseLayout.cs:42, UIStateDiplomacy.cs:26,
+        ///     UIStateGeoscapeLog.cs:17, UIStateGeoscapeOptions.cs:35) and the deferred
+        ///     <c>RequestGamePause</c> ones (GeoscapeView.cs:508 edit-unit, :730 haven details) — by then
+        ///     the state IS the tab, because StateStack.SwitchToState pushes at StateStack.cs:86 and only
+        ///     then calls Enter at :88.
+        /// A queued WINDOW never lands here: GeoscapeViewSwitchQuery.cs:66-70 switches the state in the
+        /// same call that requests the pause, and RequestPauseCrt (GeoscapeView.cs:1289-1295) waits a
+        /// frame — so the modal/event/cutscene/deployment state is already current when the pause runs.
+        /// </summary>
+        private static readonly HashSet<Type> PrivateScreens = new HashSet<Type>
+        {
+            // the map itself (the section bar pauses from here, before the switch)
+            typeof(UIStateNothingSelected), typeof(UIStateVehicleSelected), typeof(UIStateInitial),
+            // the tabs
+            typeof(UIStateResearch), typeof(UIStateManufacturing), typeof(UIStateDiplomacy),
+            typeof(UIStatePhoenixpedia), typeof(UIStatePhoenixBaseLayout), typeof(UIStateReplenish),
+            typeof(UIStateGeoscapeLog), typeof(UIStateGeoscapeOptions), typeof(UIStateSaveLoad),
+            typeof(UIStateMemorial), typeof(UIStateTrade), typeof(UIStateHavenDetailsScreen),
+            // roster / soldier / vehicle screens reached from them
+            typeof(UIStateGeoRoster), typeof(UIStateVehicleRoster), typeof(UIStateRosterAliens),
+            typeof(UIStateRosterRecruits), typeof(UIStateEditSoldier), typeof(UIStateEditVehicle),
+            typeof(UIStateViewVehicle), typeof(UIStateGeoCharacterStatus), typeof(UIStateBionics),
+            typeof(UIStateMutate), typeof(UIStateBuyMutoid), typeof(UIStateSoldierCustomization),
+            typeof(UIStateVehicleCustomization),   // + UIStateSoldierCustomization above; their shared
+                                                   // base UIStateUnitCustomization<T> is generic, and the
+                                                   // two closed subclasses are the only ones the game opens
+
+            typeof(UIStatePhoenixFacilityRosterAssignment), typeof(UIStateVehicleBayAssignment),
+        };
+
+        private static bool IsPrivateScreenPause(GeoLevelController geo)
+        {
+            var state = geo.View == null ? null : geo.View.CurrentViewState;
+            return state != null && PrivateScreens.Contains(state.GetType());
+        }
+
+        /// <summary>
+        /// THE OWNER'S RULE, in one place and on the host only: a tab stops the shared clock ONLY for the
+        /// peer who dispatched an aircraft that is still flying. Everybody else's tab is their own
+        /// business — a peer reading Manufacturing may not freeze the peer steering on the map, and a peer
+        /// who goes AFK inside a tab may not freeze the campaign (NO QUORUM: nothing here waits on a human,
+        /// this only decides a pause bit).
+        /// </summary>
+        private static bool HonourTabPause(ulong peer)
+        {
+            bool own = AircraftDispatch.HasAircraftInFlight(peer);
+            Debug.Log("[MP][pause] peer=" + peer + " opened a tab → " + (own
+                ? "PAUSED — this peer dispatched an aircraft that is still in the air, so its own departure "
+                  + "stops the clock exactly like single player"
+                : "NOT paused — nothing this peer sent is still flying, and another peer may be steering on "
+                  + "the map; vanilla would have frozen everyone"));
+            return own;
+        }
+
+        /// <summary>The local half: never freeze the peers still on the map on this peer's say-so. The host
+        /// judges itself immediately; a client ships the question, because the dispatch ledger is
+        /// host-only, and blocks its own pause meanwhile (the host's verdict comes back as the ordinary
+        /// "T" Paused delta — and <see cref="TimeAnchor.EnforceDrift"/> is the standing backstop either
+        /// way).</summary>
+        private static bool PrivateScreenPause()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return true;   // solo: vanilla, untouched
+            if (engine.IsHost) return HonourTabPause(AircraftDispatch.HostPeer);
+            Send(OpPause, PauseValTab, "pause (tab)");
+            Debug.Log("[MP][pause] this peer opened a tab — asking the host whether its own aircraft is " +
+                      "still in the air; the map keeps running for everyone until the host says otherwise");
+            return false;
+        }
 
         // ─── Harmony seams (law 4a, intent-capture only) ───────────────────
 
@@ -231,6 +383,14 @@ namespace Multiplayer.Network.Sync
                     // DiffEngine.OnEffectiveScaleChanged → FlushNow (DiffEngine.cs:243).
                     if (geo != null && geo.Timing.Paused == paused) return true;
 
+                    // A TAB IS NOT A WINDOW. Vanilla stops the world when the player leaves the map;
+                    // in co-op that is one peer's screen change freezing everyone else's aircraft, so
+                    // the verdict goes through the dispatch rule instead. Skipped while the host is
+                    // replaying a peer's verdict (re-entrancy) and inside an apply (law 8).
+                    if (geo != null && paused && !_replayingRemotePause && !SyncApplyScope.Active &&
+                        IsPrivateScreenPause(geo))
+                        return PrivateScreenPause();
+
                     if (IntentRail.ShouldRunNative()) return true;
                     if (geo != null)
                         Send(OpPause, paused ? (byte)1 : (byte)0, paused ? "pause (screen)" : "resume (screen)");
@@ -258,9 +418,18 @@ namespace Multiplayer.Network.Sync
                 // while somebody else is still reading (and even while the host is AFK). Native funnel, so
                 // the TimeLimit guard (GeoscapeView.cs:1259) stays and the change-gated Paused setter
                 // raises the events that latch TimeAnchor + flush the delta to every peer.
+                // …EXCEPT the one conditional value on this wire: a TAB pause is the sending peer leaving
+                // the map for its own screen, and it only stops the shared clock if that peer is the one
+                // whose aircraft is in the air. Judged here because the dispatch ledger is host-only.
+                if (val == PauseValTab && !HonourTabPause(senderPeerId)) return;
                 bool paused = val != 0;
-                if (geo.View != null) geo.View.SetGamePauseState(paused);
-                else geo.Timing.Paused = paused;   // view mid-init: same write, same events
+                _replayingRemotePause = true;
+                try
+                {
+                    if (geo.View != null) geo.View.SetGamePauseState(paused);
+                    else geo.Timing.Paused = paused;   // view mid-init: same write, same events
+                }
+                finally { _replayingRemotePause = false; }
                 Debug.Log("[MP][pause] peer=" + senderPeerId + " → paused=" + paused + " nonce=" + nonce);
                 return;
             }

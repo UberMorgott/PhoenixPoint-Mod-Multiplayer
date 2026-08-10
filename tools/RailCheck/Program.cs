@@ -377,6 +377,7 @@ namespace RailCheck
             Add(laws, () => L410_TheNewCampaignScreenStopsASaveCountdown.Check());
             Add(laws, () => L411_ADeclinedOfferCanBeReoffered.Check());
             Add(laws, () => L412_AResearchCompletionIsSeededBeforeTheBatchThatCarriesIt.Check());
+            Add(laws, () => L413_ATabPauseFollowsTheDispatcherNotTheAudience.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
 

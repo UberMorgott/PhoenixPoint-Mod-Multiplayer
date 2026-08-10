@@ -211,6 +211,11 @@ namespace Multiplayer.Network.Sync
             private static bool Prefix(GeoVehicle __instance, List<GeoSite> path)
             {
                 MissionSync.CaptureVehicleDeparture(__instance); // immutable BEFORE, host-only
+                // WHO SENT IT (host-only ledger, read by the tab-pause rule in TimeSync). Attributed to
+                // the host by default and OVERWRITTEN by HandleTravelTo below when this StartTravel is
+                // the host replaying a client's order — that call frames this very prefix.
+                var net = NetworkEngine.Instance;
+                if (net != null && net.IsHost) AircraftDispatch.Note(__instance, AircraftDispatch.HostPeer);
                 return CaptureTravel(__instance, path);
             }
             private static Exception Finalizer(GeoVehicle __instance, Exception __exception)
@@ -497,6 +502,7 @@ namespace Multiplayer.Network.Sync
                     return;
                 }
                 vehicle.StartTravel(path);
+                AircraftDispatch.Note(vehicle, senderPeerId); // the dispatcher, for the tab-pause rule
                 Debug.Log("[MP][vehicle] HOST intent APPLIED op=travelTo " + vehicleRef + " -> " + siteRef +
                           " legs=" + path.Count + " nonce=" + nonce + " peer=" + senderPeerId);
             }
