@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;   // MethodImpl(NoInlining) — the JIT boundary in SteamProbe
 using Multiplayer.Network;   // SteamConnect (pure decisions)
 using Multiplayer.Util;      // InviteCode (pure codec)
 using Steamworks;
@@ -8,6 +9,23 @@ using UnityEngine;
 
 namespace Multiplayer.Transport
 {
+    /// <summary>
+    /// One friend who is currently in a co-op Steam lobby of this game. BCL fields ONLY — a name to draw
+    /// and a lobby id to hand straight back to <see cref="SteamInvite.JoinFriendLobby"/>, so the UI never
+    /// has to name a Steamworks type to show a friends list.
+    ///
+    /// TOP-LEVEL, NOT NESTED IN SteamInvite, and that placement is the point. As SteamInvite.HostingFriend
+    /// every caller had to name SteamInvite to declare a variable or a List&lt;&gt; of it — and SteamInvite
+    /// holds <c>Lobby?</c> statics, so resolving that name means loading a type whose layout needs
+    /// Steamworks.Data.Lobby. Type LOAD, not class init: it can fault before any guard of ours runs. Out
+    /// here the struct resolves on its own and no UI file names SteamInvite at all.
+    /// </summary>
+    internal struct HostingFriend
+    {
+        public string Name;
+        public ulong LobbyId;
+    }
+
     /// <summary>
     /// Steam lobby-based invite/join glue. The HOST publishes a friends-only lobby advertising its
     /// connect info; a friend who accepts the invite (overlay invite, friends-list "Join Game", or a
@@ -31,18 +49,6 @@ namespace Multiplayer.Transport
 
         /// <summary>Never-silent stage diagnostics: (message, isError). isError → UI message box; both cases also log.</summary>
         public static Action<string, bool> Report;
-
-        /// <summary>
-        /// One friend who is currently in a co-op Steam lobby of this game. BCL fields ONLY — no
-        /// Facepunch type crosses this boundary, which is the whole reason this class is internal (see
-        /// the class summary): the UI gets a name to draw and a lobby id to hand straight back to
-        /// <see cref="JoinFriendLobby"/>, and never has to name a Steamworks type to do it.
-        /// </summary>
-        internal struct HostingFriend
-        {
-            public string Name;
-            public ulong LobbyId;
-        }
 
         private static bool _handlersRegistered;
         private static Lobby? _hostLobby;   // set on the HOST once its invite lobby exists
@@ -358,6 +364,110 @@ namespace Multiplayer.Transport
                 _joinedLobby = lobby;
             }
             catch (Exception ex) { Stage("lobby join exception: " + ex.Message, true); }
+        }
+    }
+
+    /// <summary>
+    /// THE ONLY SAFE WAY TO ASK ABOUT STEAM FROM UI CODE — and it is a separate type on purpose.
+    ///
+    /// <see cref="SteamInvite"/> holds <c>Lobby?</c> static fields (Facepunch structs), so the CLR cannot
+    /// even load that type where Facepunch.Steamworks.Win64 is absent — a GOG/Epic install, which this
+    /// mod supports and JoinPlan's comments are written around. The throw then lands in the frame of
+    /// whoever touched the first static member, which is why SteamInvite's own internal try/catch blocks
+    /// cannot help: they are inside the type that failed to load. A wrapper declared IN SteamInvite would
+    /// be no better, for exactly the same reason. Only a type that names no Facepunch member can hold the
+    /// catch, so this one does, and every UI caller goes through it.
+    ///
+    /// ONE LATCH, because a missing assembly does not appear later in the process: the first failure
+    /// turns Steam off for the rest of the run and logs once. Without it a per-frame caller (the lobby
+    /// greys its invite button every frame) throws and logs sixty times a second.
+    ///
+    /// ONE NOTION OF "STEAM IS ALIVE": this is the same SteamClient.IsValid that gates the Steam-P2P
+    /// JOIN leg (JoinPlan.Build's steamAlive), so the button that starts an invite and the leg that
+    /// finishes one can never disagree — RailCheck L155 arm (f) pins that chain.
+    /// </summary>
+    internal static class SteamProbe
+    {
+        private static bool _unavailable;
+
+        // ─── THE JIT BOUNDARY, and why every entry point below needs one ───
+        //
+        // A try/catch cannot catch a failure raised while COMPILING the method the try lives in. The
+        // exception surfaces at that method's CALL site — one frame up, outside its own handler. So a
+        // method that both names SteamInvite AND holds the catch protects nobody: naming the type is what
+        // fails, and it fails before the first instruction of the handler exists. That is precisely why
+        // SteamInvite's own internal try/catch never runs, and the rule does not weaken by being applied
+        // one level up.
+        //
+        // So each entry point below keeps its body free of the name and calls a NoInlining shim that has
+        // nothing else in it. The shim's compilation is what fails; the failure lands at the call site,
+        // which is INSIDE the caller's try. NoInlining is required, not decorative — inlining would fold
+        // the SteamInvite reference back into the guarded method and reintroduce the fault.
+        //
+        // Same shape, same reason as ClientIdentity.ReadNicknamePref / WriteNicknamePref, which isolate
+        // their PlayerPrefs ECalls this way (ClientIdentity.cs:82-97).
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static bool CallIsAlive() => SteamInvite.IsSteamAlive();
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static List<HostingFriend> CallFriends() => SteamInvite.HostingFriends();
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static string CallLocalInviteCode() => SteamInvite.LocalInviteCode();
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void CallHandleColdStart() => SteamInvite.HandleColdStart();
+
+        /// <summary>True when local Steam is running. False — never a throw — when it is not, or when
+        /// there is no Steam runtime in this process at all.</summary>
+        internal static bool IsAlive()
+        {
+            if (_unavailable) return false;
+            try { return CallIsAlive(); }
+            catch (Exception e) { Latch(e); return false; }
+        }
+
+        /// <summary>Friends currently hosting a co-op lobby; an EMPTY list (never null, never a throw)
+        /// when Steam is missing or unhappy.</summary>
+        internal static List<HostingFriend> Friends()
+        {
+            if (_unavailable) return new List<HostingFriend>();
+            try { return CallFriends() ?? new List<HostingFriend>(); }
+            catch (Exception e) { Latch(e); return new List<HostingFriend>(); }
+        }
+
+        /// <summary>The local player's own 8-symbol invite code, or NULL when Steam is missing or
+        /// unhappy — deliberately the SAME null SteamInvite.LocalInviteCode already returns for
+        /// !SteamClient.IsValid, so no caller's behaviour moves: GetOwnInviteCode still falls through its
+        /// `?? "(Steam offline)"`, and CopyInviteCode still hits its IsNullOrEmpty → ShowSteamNotAvailable
+        /// arm. Where Steam IS present this is the same string it always was.</summary>
+        internal static string LocalInviteCode()
+        {
+            if (_unavailable) return null;
+            try { return CallLocalInviteCode(); }
+            catch (Exception e) { Latch(e); return null; }
+        }
+
+        /// <summary>Deliver a "+connect_lobby" cold start, if the game was launched by accepting an
+        /// invite. A no-op where there is no Steam — which is the honest answer, since a process with no
+        /// Steam runtime cannot have been launched from a Steam invite.</summary>
+        internal static void HandleColdStart()
+        {
+            if (_unavailable) return;
+            try { CallHandleColdStart(); }
+            catch (Exception e) { Latch(e); }
+        }
+
+        /// <summary>Steam is not available in this process — ONE latch and ONE log for the whole run.
+        /// internal so the startup wiring (MultiplayerUI.WireSteamInvite) reports through the same one:
+        /// if the wiring could not even be attached, nothing else Steam-shaped can work either, and every
+        /// probe above should short-circuit rather than re-discover it.</summary>
+        internal static void Latch(Exception e)
+        {
+            if (_unavailable) return;   // a missing assembly does not come back — say it once
+            _unavailable = true;
+            Debug.LogWarning("[Multiplayer] no Steam runtime in this process (" + e.GetType().Name +
+                             ") — Steam invites and the friends list stay off for the rest of the run.");
         }
     }
 }

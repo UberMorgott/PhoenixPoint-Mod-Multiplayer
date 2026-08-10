@@ -358,11 +358,15 @@ namespace Multiplayer.UI
             for (int i = _friendsList.transform.childCount - 1; i >= 0; i--)
                 Object.DestroyImmediate(_friendsList.transform.GetChild(i).gameObject);
 
-            List<SteamInvite.HostingFriend> friends = SteamInvite.HostingFriends();
+            // BOTH through SteamProbe, and the element type is the TOP-LEVEL HostingFriend — this file
+            // now names SteamInvite nowhere. This screen is the one a GOG/Epic player MUST use (it is
+            // where the paste box lives), and it is exactly there that resolving SteamInvite (Lobby?
+            // statics, no Facepunch assembly) faults. The probe answers "no Steam, no friends" instead.
+            List<HostingFriend> friends = SteamProbe.Friends();
 
             if (_friendsEmpty != null)
             {
-                _friendsEmpty.text = !SteamInvite.IsSteamAlive()
+                _friendsEmpty.text = !SteamProbe.IsAlive()
                     ? "Steam is not running — type an address or invite code above."
                     : friends.Count == 0
                         ? "No Steam friend is in a session right now."

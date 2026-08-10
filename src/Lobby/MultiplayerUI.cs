@@ -136,6 +136,32 @@ namespace Multiplayer.UI
         // silent no-op). Idempotent: SteamInvite.RegisterJoinHandlers self-guards against re-subscribe.
         private void WireSteamInvite()
         {
+            // THE WHOLE OF THIS RUNS FROM Awake, WHERE A THROW KILLS THE MOD — not a feature, the mod.
+            // Every line of the core below names SteamInvite, whose Lobby? statics cannot resolve without
+            // Facepunch.Steamworks.Win64 (absent on GOG/Epic), and the failure is raised while COMPILING
+            // the method that names it — surfacing at that method's call site, one frame up. So the
+            // naming lives in a NoInlining core and the catch lives out here, where the failure actually
+            // lands (the ClientIdentity.cs:82-97 shape). Guarding the three UI readers was worth nothing
+            // while this could take the mod down before any UI existed.
+            //
+            // Where Facepunch IS present the core runs exactly as before, in the same order — the try
+            // adds no branch to the happy path.
+            try
+            {
+                WireSteamInviteCore();
+            }
+            catch (System.Exception e)
+            {
+                // Same latch the probes use: if the wiring never attached, every Steam surface is off for
+                // this run and should stop asking. Logged once, there.
+                SteamProbe.Latch(e);
+            }
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(
+            System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private void WireSteamInviteCore()
+        {
             // JoinOrigin.SteamInvite: this callback is reached ONLY by an accepted Steam invite (overlay,
             // friends-list "Join Game", rich presence, or the cold-start "+connect_lobby"), so the user
             // has explicitly chosen Steam and the plan keeps its Steam-first order.
@@ -178,7 +204,9 @@ namespace Multiplayer.UI
 
                 // Cold start: if the game was launched by accepting a Steam invite ("+connect_lobby <id>"),
                 // kick the join now that the menu + lobby panel are ready (OnLobbyJoin needs them).
-                SteamInvite.HandleColdStart();
+                // Through the probe — this is the menu-build path, and a throw here would cost the lobby
+                // and the gate, not just the cold start.
+                SteamProbe.HandleColdStart();
             }
 
             // F3 — the session died UNDER this client (host quit, crashed, or went silent). SessionEnd
@@ -842,7 +870,10 @@ namespace Multiplayer.UI
                 // Unified branch states why); a legacy code is a single attempt of its own transport.
                 // Each stage's async connect is time-bounded; a stage failure advances to the next in
                 // OnConnectionFailed.
-                _joinPlan = JoinPlan.Build(target, SteamInvite.IsSteamAlive(), origin);
+                // SteamProbe, not SteamInvite directly: naming a static member of the Facepunch-holding
+                // type throws in THIS frame where there is no Steam runtime (GOG/Epic), and this is the
+                // join path — the one path a GOG/Epic player is guaranteed to take.
+                _joinPlan = JoinPlan.Build(target, SteamProbe.IsAlive(), origin);
                 _joinAttemptIndex = 0;
                 if (_joinPlan.Count == 0)
                 {
@@ -1292,6 +1323,18 @@ namespace Multiplayer.UI
 
         // ─── Connect rail values + clipboard ───────────────────────────────
 
+        // THE PLACEHOLDERS, named ONCE. These are what the code cell shows when there is no code yet —
+        // they are STATUS, not something anyone can paste into a join box, and IsPlaceholderCode below is
+        // the single list that says so. Two lists would drift, and the copy path is where the drift would
+        // show: a cell that says COPIED while the clipboard holds "discovering…" is worse than no
+        // feedback, because the player then pastes it to a friend.
+        private const string CodeWaiting = "waiting for host…";
+        private const string CodeUnavailable = "unavailable (NAT/firewall)";
+        private const string CodeDiscovering = "discovering…";
+
+        private static bool IsPlaceholderCode(string code)
+            => code == CodeWaiting || code == CodeUnavailable || code == CodeDiscovering;
+
         // Host STUN short code (or a status placeholder while discovering / on failure).
         // The host's CompositeTransport always includes a hosting StunTransport, so the code
         // shows whenever discovery succeeds — alongside the DirectIP and Steam rail values.
@@ -1308,11 +1351,11 @@ namespace Multiplayer.UI
                 // rounds). "unavailable" = environmentally blocked (symmetric NAT / firewall); the
                 // rail re-reads every frame, so a late success still appears live without reopening.
                 if (stun.LocalEndpoint.Contains("unavailable"))
-                    return "unavailable (NAT/firewall)";
-                return "discovering…";
+                    return CodeUnavailable;
+                return CodeDiscovering;
             }
             var code = ConnectCode.Encode(stun.PublicEndPoint);
-            return code ?? "unavailable (NAT/firewall)";
+            return code ?? CodeUnavailable;
         }
 
         // THE SESSION'S ONE invite code — the PUBLIC ENDPOINT, and nothing else. The same string on every
@@ -1339,7 +1382,7 @@ namespace Multiplayer.UI
             if (!engine.IsHost)
             {
                 var mirrored = engine.Session?.HostInviteCode;
-                return string.IsNullOrEmpty(mirrored) ? "waiting for host…" : mirrored;
+                return string.IsNullOrEmpty(mirrored) ? CodeWaiting : mirrored;
             }
 
             var ep = UpnpPortMapper.Current?.ToEndPoint();      // best: router-forwarded WAN endpoint
@@ -1360,8 +1403,20 @@ namespace Multiplayer.UI
             // Nothing to share yet — mirror the STUN discovery state so the placeholder is accurate.
             var stun = FindHostingChild(TransportType.StunUDP);
             if (stun != null && stun.LocalEndpoint != null && stun.LocalEndpoint.Contains("unavailable"))
-                return "unavailable (NAT/firewall)";
-            return "discovering…";
+                return CodeUnavailable;
+            return CodeDiscovering;
+        }
+
+        /// <summary>The invite code AS SOMETHING TO COPY: the real code, or "" while the cell is showing
+        /// one of the placeholders. The DISPLAY path is untouched — the lobby still writes the full
+        /// GetSessionInviteCode string into the cell, so the player still reads "discovering…" there. Only
+        /// the clipboard (and therefore the COPIED acknowledgement, which CopyToClipboard's empty-check
+        /// gates) refuses a status line. Copying "discovering…" put a string in the clipboard that the
+        /// player would forward to a friend believing it was a code.</summary>
+        public string GetCopyableSessionInviteCode()
+        {
+            var code = GetSessionInviteCode();
+            return IsPlaceholderCode(code) ? "" : code;
         }
 
         // Resolve the live hosting child transport of a given type from the host's transport,
@@ -1379,10 +1434,16 @@ namespace Multiplayer.UI
             return t.TransportType == type && t.IsHost ? t : null;
         }
 
-        public void CopyToClipboard(string text)
+        // THE ONE CLIPBOARD SINK. Returns whether anything was actually copied, which is what lets the
+        // caller acknowledge WITHOUT re-testing the value: a click on a cell whose value is empty (or on
+        // a placeholder that resolved to nothing) must stay silent, and the early return here is the one
+        // place that decides it. LobbyPanel.MakeCopyableValue is the only caller and the only builder of
+        // copyable cells, so the ack it hangs off this bool covers every copy target there will be.
+        public bool CopyToClipboard(string text)
         {
-            if (string.IsNullOrEmpty(text)) return;
+            if (string.IsNullOrEmpty(text)) return false;
             GUIUtility.systemCopyBuffer = text;
+            return true;
         }
 
         // ─── Invite code (host's own short join code) ──────────────────────
@@ -1391,14 +1452,14 @@ namespace Multiplayer.UI
         // offline. Re-read each frame by the rail (self-heals if Steam becomes ready after build).
         public string GetOwnInviteCode()
         {
-            return SteamInvite.LocalInviteCode() ?? "(Steam offline)";
+            return SteamProbe.LocalInviteCode() ?? "(Steam offline)";
         }
 
         // CODE button click: copy the code and confirm via the native prompt (same feedback pattern
         // as the pause-menu "Copied to clipboard" box). No-ops with a Steam-unavailable prompt offline.
         public void CopyInviteCode()
         {
-            var code = SteamInvite.LocalInviteCode();
+            var code = SteamProbe.LocalInviteCode();
             if (string.IsNullOrEmpty(code)) { ShowSteamNotAvailable(); return; }
             GUIUtility.systemCopyBuffer = code;
             var mb = GameUtl.GetMessageBox();
