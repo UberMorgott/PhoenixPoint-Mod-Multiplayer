@@ -54,6 +54,24 @@ namespace RailCheck
     ///       structurally over those three methods. Without this arm the raycaster could regress and the
     ///       next reader would again have three logs that say nothing.
     ///
+    ///   (e) <c>ready-button-greyed-away</c>, THE SAME LESSON ON THE OTHER BUTTON (2026-08-10, and again
+    ///       2026-08-11). Three peers reported "the READY button is gone" — twice. It was never gone: all
+    ///       three were in the locked state at once (host `Player.log` 0:22 run, "JOIN from 1/2 has parity
+    ///       mismatch (soft-gate, ready locked)" plus a host with no save chosen), and `RefreshControls`
+    ///       answered that by invoking the clone's native `PhoenixGeneralButton.SetInteractable(false)`.
+    ///       On a CLONE that is not cosmetic: it runs `ResetButtonAnimations` → `UpdateColorElements` →
+    ///       `UIInteractableColorController.SetColor` (`Base.UI/UIInteractableColorController.cs:41-110`),
+    ///       which paints the MAIN MENU prefab's `DisabledIdleColor` onto the backing Image AND the label
+    ///       Text. On the lobby's dark card that is a dark shape holding dark text — a picture of nothing,
+    ///       which is arm (b)'s defect with the polarity flipped. `fca24ef` blamed label clipping and
+    ///       shortened the strings; the button vanished again, which is what proves the paint.
+    ///       Asserted as: `LobbyPanel` declares NO ready-button `SetInteractable` reflection member, its
+    ///       label handle is the ARRAY (`_readyButtonLabels`) so the clone's second Text cannot keep
+    ///       drawing the clone-time "READY" underneath, and `OnReadyPressed` — the single shared handler
+    ///       for the clone and the from-code fallback — exists to decline a locked press instead.
+    ///       Declining is NOT a quorum (P13): it waits on nobody, and the host refuses both cases
+    ///       authoritatively regardless.
+    ///
     ///   (d) POSITIVE CONTROL, <c>panel-is-never-built</c> — arms (a)-(c) describe a panel. If
     ///       `MultiplayerUI.Awake` stops calling `Attach`, or `MultiplayerUI.Update` stops calling `Sync`,
     ///       all of them pass over a panel that is never built or never repainted, and the overlay is gone
@@ -93,14 +111,19 @@ namespace RailCheck
             var lobbyType = mod.GetType("Multiplayer.Network.LobbyCountdown");
             var lobbyRequest = lobbyType?.GetMethod("RequestCancel", All);
             var lobbyCancel = lobbyType?.GetMethod("Cancel", All);
+            var lobbyPanel = mod.GetType("Multiplayer.UI.LobbyPanel");
+            var refreshControls = lobbyPanel?.GetMethod("RefreshControls", All);
+            var readyLabel = lobbyPanel?.GetMethod("UpdateReadyButtonLabel", All);
 
             if (attach == null || ensure == null || skin == null || clicked == null || sync == null ||
                 request == null || cancel == null || awake == null || update == null ||
-                lobbyRequest == null || lobbyCancel == null)
+                lobbyRequest == null || lobbyCancel == null ||
+                refreshControls == null || readyLabel == null)
             {
                 yield return "L198 premise-changed: one of CountdownPanel.{Attach,EnsureRaycaster,SkinButton," +
                              "OnCancelClicked,Sync}, DeployCountdown.{RequestCancel,Cancel}, " +
-                             "LobbyCountdown.{RequestCancel,Cancel} or MultiplayerUI.{Awake,Update} no longer " +
+                             "LobbyCountdown.{RequestCancel,Cancel}, " +
+                             "LobbyPanel.{RefreshControls,UpdateReadyButtonLabel} or MultiplayerUI.{Awake,Update} no longer " +
                              "resolves. This law is the only thing asserting that the veto L177 protects can " +
                              "actually be PRESSED, and a vacuous pass here reads exactly like the three empty " +
                              "logs that started it.";
@@ -169,6 +192,40 @@ namespace RailCheck
                                  "decision including the case where it lands on no running countdown — must " +
                                  "leave a line. This repo's dominant bug class is the silent swallow, and this " +
                                  "path has already cost one live session to it.";
+
+            // ── (e) the OTHER button a player must find: READY is never painted into the background ──
+            foreach (var dead in new[] { "_readyButtonSetInteractable", "_readyButtonCtrl", "_readyInteractableCache" })
+                if (lobbyPanel.GetField(dead, All) != null)
+                    yield return "L198 ready-button-greyed-away: LobbyPanel carries " + dead + " again, i.e. the " +
+                                 "READY button's native disabled repaint is back. PhoenixGeneralButton." +
+                                 "SetInteractable(false) on a CLONE paints the main-menu prefab's " +
+                                 "DisabledIdleColor onto the button's Image AND its label Text " +
+                                 "(UIInteractableColorController.cs:41-110) — on the lobby's dark card that is a " +
+                                 "dark shape holding dark text, which three peers twice reported as 'the READY " +
+                                 "button is gone'. The lock is UX only (the host refuses both cases anyway): " +
+                                 "decline the press in OnReadyPressed and let the label name the reason.";
+
+            var labels = lobbyPanel.GetField("_readyButtonLabels", All);
+            if (labels == null || labels.FieldType != typeof(Text[]))
+                yield return "L198 ready-button-greyed-away: LobbyPanel._readyButtonLabels is not a Text[]. " +
+                             "NativeWidgetFactory.CloneMenuButton relabels EVERY Text in the clone's subtree " +
+                             "because the native TemplateMenuButton carries a second one; holding a single Text " +
+                             "means the sibling keeps drawing the clone-time \"READY\" on top of \"NO SAVE\" in " +
+                             "the same 160-px cell, which is the other half of an unreadable locked button.";
+
+            var pressed = lobbyPanel.GetMethod("OnReadyPressed", All);
+            if (pressed == null)
+                yield return "L198 ready-button-greyed-away: LobbyPanel.OnReadyPressed is gone. It is the single " +
+                             "handler shared by the cloned native button and the from-code fallback, and the only " +
+                             "place a locked READY is declined now that nothing greys the button. Two inline " +
+                             "copies is two places to forget the lock; no copy at all is a lock that does nothing.";
+
+            if (!Calls(refreshControls, readyLabel, mod))
+                yield return "L198 ready-button-greyed-away: LobbyPanel.RefreshControls no longer calls " +
+                             "UpdateReadyButtonLabel. With the grey deliberately gone, that label IS the entire " +
+                             "signal that READY is locked and why — MultiplayerUI.Update:1967 -> Refresh -> " +
+                             "RefreshControls is the per-frame repaint seam that keeps it true on an already-open " +
+                             "lobby when the host's save choice or a parity verdict lands.";
 
             // ── (d) POSITIVE CONTROL: the panel is built and repainted ─────────────────────────────
             if (!Calls(awake, attach, mod))

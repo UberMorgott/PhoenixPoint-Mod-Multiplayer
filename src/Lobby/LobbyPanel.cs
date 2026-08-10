@@ -34,7 +34,12 @@ namespace Multiplayer.UI
         // so there is no from-code nickname field in the full-screen tree.
         private Button _leaveButton;
         private Button _readyButton;
-        private Text _readyButtonLabel;
+        // EVERY Text in the clone's subtree, not the first one. CloneMenuButton writes the label to ALL of
+        // them on purpose (the native TemplateMenuButton carries a shadow/echo Text beside the main one, and
+        // a child left alone keeps the prefab's "NEEDS TEXT" placeholder). Relabelling only the first left
+        // the sibling still reading the CLONE-TIME string "READY" drawn on top of the new one — two words in
+        // the same 160-px cell, which is a large part of why a locked READY button read as unreadable mush.
+        private Text[] _readyButtonLabels;
         // Local optimistic ready flag — flipped on click for instant label feedback, then re-synced
         // from authoritative roster state (me.Ready) in RefreshControls.
         private bool _localReady;
@@ -42,17 +47,30 @@ namespace Multiplayer.UI
         // every client, off the same authoritative Session.ChosenSaveName — nobody should have to ask
         // which save they are about to be pulled into.
         private Text _queuedCampaign;
-        // The READY button's native PhoenixGeneralButton controller + last-applied interactable state
-        // (resolved via reflection — the mod can't reference the type). Its Update() repaints ONLY when
-        // its own IsEnabled/VisualHovered/VisualPressed change, NOT when BaseButton.interactable changes,
-        // so writing interactable alone leaves the button stale (greyed) until a real pointer-enter.
-        // SetInteractable(bool) is the complete native "appear now" path: it sets BaseButton.interactable,
-        // flips IsEnabled, runs the animator and calls UpdateColorElements() — no pointer needed.
-        // object/MethodInfo because the type isn't referenceable at compile time. -1 = not yet applied.
-        private object _readyButtonCtrl;
-        private System.Reflection.MethodInfo _readyButtonSetInteractable;
-        private int _readyInteractableCache = -1;
-        // Same three, for NEW CAMPAIGN — it greys on the lobby readiness gate exactly as PLAY does
+        // THE READY BUTTON IS NEVER GREYED, AND THAT IS THE FIX FOR "the READY button is gone" (reported
+        // 2026-08-10 and again 2026-08-11, both times by three peers at once). It used to resolve the
+        // clone's native PhoenixGeneralButton and call SetInteractable(false) while locked. That call is
+        // NOT cosmetic-safe on a clone: PhoenixGeneralButton.SetInteractable (decompile
+        // PhoenixPoint.Common.View.ViewControllers/PhoenixGeneralButton.cs:283-288) runs
+        // ResetButtonAnimations → UpdateColorElements → UIInteractableColorController.SetColor
+        // (Base.UI/UIInteractableColorController.cs:41-110), which writes the MAIN MENU prefab's
+        // DisabledIdleColor onto the button's backing Image AND its label Text. Tuned for the menu's own
+        // background, on the lobby's dark card that is a dark shape carrying dark text — indistinguishable
+        // from an empty cell. Both live reports land exactly on the all-locked state (host Player.log
+        // 0:22 run: "JOIN from 1/2 has parity mismatch (soft-gate, ready locked)" and a host with no save),
+        // and NEW CAMPAIGN — enabled in the same footer, since its gate excludes peers no human could ready
+        // (L181) — was never reported missing. fca24ef shortened the locked labels on the theory that they
+        // were clipped; the button vanished again, so the paint was the cause, not the string length.
+        //
+        // The lock is UX only — the host refuses both cases authoritatively (SetClientReady ignores a
+        // mismatched client, SetHostReady refuses a save-less host) — so the press is simply declined in
+        // OnReadyPressed and the LABEL carries the reason. A visible button that says "NO SAVE" is strictly
+        // better than a correct grey nobody can see. Do not reintroduce SetInteractable here (L198 arm (e)).
+        //
+        // NEW CAMPAIGN keeps its native grey: it is a secondary control that has never been reported
+        // missing, and unlike READY it has no label that could name its own reason.
+        // Reflection object/MethodInfo because the type isn't referenceable at compile time. -1 = not yet
+        // applied.
         // (owner ruling 2026-08-07). It reads PeersReady rather than CanStart because a fresh campaign
         // picks no save, so the chosen-save half of the start gate must not apply to it.
         private object _newCampaignCtrl;
@@ -1163,44 +1181,24 @@ namespace Multiplayer.UI
             // label in RefreshControls, on BOTH sides — the host's own row carries HostReady, so the same
             // one line of code serves host and client.
             _readyButton = NativeWidgetFactory.CloneMenuButton(footer.transform, "ReadyBtn", "READY",
-                () =>
-                {
-                    _localReady = !_localReady;        // optimistic flip for instant feedback
-                    _owner.OnLobbyToggleReady(_localReady); // send the post-flip ready/unready intent
-                    UpdateReadyButtonLabel();
-                });
+                OnReadyPressed);
+            Transform readyRoot = null;
             if (_readyButton != null)
             {
                 AddCloneLayoutElement(_readyButton, footer.transform, FooterButtonSize.x, FooterButtonSize.y);
-                // READY LOCK repaint: resolve the clone's native PhoenixGeneralButton controller ONCE so
-                // the greyed visual appears immediately — interactable alone doesn't repaint a cloned
-                // native button. Two things lock this button: a client's parity mismatch, and a HOST with
-                // no save chosen (there is nothing to be ready FOR, and SetHostReady refuses it anyway).
-                var readyPgbType = HarmonyLib.AccessTools.TypeByName(
-                    "PhoenixPoint.Common.View.ViewControllers.PhoenixGeneralButton");
-                if (readyPgbType != null)
-                {
-                    _readyButtonCtrl = _readyButton.GetComponentInParent(readyPgbType)
-                        ?? _readyButton.GetComponentInChildren(readyPgbType);
-                    if (_readyButtonCtrl != null)
-                        _readyButtonSetInteractable =
-                            HarmonyLib.AccessTools.Method(readyPgbType, "SetInteractable", new[] { typeof(bool) });
-                }
+                readyRoot = ResolveCloneRoot(_readyButton.transform, footer.transform);
             }
             else
             {
                 _readyButton = UiToolkit.CreateButton(footer, "ReadyBtn", "READY",
-                    Vector2.zero, FooterButtonSize, new Vector2(0f, 0f),
-                    () =>
-                    {
-                        _localReady = !_localReady;
-                        _owner.OnLobbyToggleReady(_localReady);
-                        UpdateReadyButtonLabel();
-                    });
+                    Vector2.zero, FooterButtonSize, new Vector2(0f, 0f), OnReadyPressed);
                 var rdle = LE(_readyButton.gameObject);
                 rdle.minWidth = FooterButtonSize.x; rdle.preferredWidth = FooterButtonSize.x;
             }
-            _readyButtonLabel = _readyButton != null ? _readyButton.GetComponentInChildren<Text>() : null;
+            // From the CLONE ROOT, and including inactive: that is the subtree CloneMenuButton relabelled,
+            // and it is an ancestor of the child Button this method holds — reading from the Button alone
+            // misses the sibling Text that then keeps drawing the clone-time "READY" over every relabel.
+            _readyButtonLabels = (readyRoot ?? _readyButton?.transform)?.GetComponentsInChildren<Text>(true);
             UpdateReadyButtonLabel();
 
             // NO PLAY BUTTON. There used to be one right here, host-only, greyed on the same gate. It is
@@ -1796,27 +1794,8 @@ namespace Multiplayer.UI
             _parityLocked = !engine.IsHost && me != null
                 && !Multiplayer.Network.Parity.ParityComparer.ReadyAllowed(me.ParityDiffs);
             _needsSave = engine.IsHost && string.IsNullOrEmpty(engine.Session?.ChosenSaveName);
-            if (_readyButton != null)
-            {
-                var interactable = !_parityLocked && !_needsSave;
-                _readyButton.interactable = interactable;
-                var interactableNow = interactable ? 1 : 0;
-                // The cloned native button's greyed visual is driven by its PhoenixGeneralButton
-                // controller, which repaints ONLY when its own IsEnabled changes (via SetInteractable) —
-                // NOT when BaseButton.interactable changes. Fire on a real transition only.
-                if (interactableNow != _readyInteractableCache)
-                {
-                    _readyInteractableCache = interactableNow;
-                    if (_readyButtonCtrl != null && _readyButtonSetInteractable != null)
-                    {
-                        try { _readyButtonSetInteractable.Invoke(_readyButtonCtrl, new object[] { interactable }); }
-                        catch (System.Exception e)
-                        {
-                            UnityEngine.Debug.LogError("[Multiplayer] Ready button repaint failed: " + e.Message);
-                        }
-                    }
-                }
-            }
+            // NOTHING GREYS THIS BUTTON — see the _readyButtonLabels note at the top of the file. The two
+            // locks are carried entirely by the label and by OnReadyPressed declining the press.
             UpdateReadyButtonLabel();
 
             // NEW CAMPAIGN: greys on the SAME lobby readiness gate, minus the chosen-save half (a fresh
@@ -1847,21 +1826,48 @@ namespace Multiplayer.UI
         // readied up (press to take it back); "READY" = press to ready up. A locked button names its own
         // reason: the parity row's "!" badge click shows the exact diff list, and a host with no campaign
         // queued is told what is missing rather than being handed a dead control.
+        /// <summary>
+        /// THE ONLY READY HANDLER, shared by the native clone and the from-code fallback — the two used to
+        /// carry a copy each, which is two places for a lock to be forgotten.
+        ///
+        /// A locked press is DECLINED HERE rather than by greying the button, because greying it is what
+        /// made it invisible (see the _readyButtonLabels note). Declining is not a new gate: the host
+        /// already refuses both cases authoritatively (SetClientReady ignores a parity-mismatched client,
+        /// SetHostReady refuses a host with no save), so this only spares the player an optimistic flip
+        /// that the next roster re-sync would take straight back. It waits on NO other player (P13).
+        /// </summary>
+        private void OnReadyPressed()
+        {
+            if (_parityLocked || _needsSave)
+            {
+                UnityEngine.Debug.Log("[Multiplayer] READY declined locally — " +
+                    (_parityLocked ? "this peer's mod set does not match the host's (the roster row's \"!\" " +
+                                     "badge lists the diffs)"
+                                   : "no campaign is queued yet; choose a save or start a new campaign") +
+                    ". The button stays visible and says so; the host refuses this ready anyway.");
+                return;
+            }
+            _localReady = !_localReady;             // optimistic flip for instant feedback
+            _owner.OnLobbyToggleReady(_localReady); // send the post-flip ready/unready intent
+            UpdateReadyButtonLabel();
+        }
+
         private void UpdateReadyButtonLabel()
         {
-            if (_readyButtonLabel == null) return;
-            // SEVEN GLYPHS IS THE CELL, and that is why these two read the way they do. The clone's label
-            // keeps the PREFAB's own wide main-menu rect (CapCloneFont's note), so best-fit measures
-            // against THAT and the RectMask2D in AddCloneLayoutElement clips whatever overhangs the 160-px
-            // footer cell. "✓ READY" is the widest string known to survive that window. "MODS MISMATCH"
-            // and "CHOOSE A SAVE" are thirteen, so both were clipped to their middle few glyphs and a
-            // greyed button reading "S MISMA" is indistinguishable from no READY button at all — which is
-            // exactly what a three-instance test reported on 2026-08-10, with every client parity-locked
-            // and the host on the new-campaign route. The reason still has a full-length home: the roster
-            // row's "!" badge lists the exact diffs.
-            _readyButtonLabel.text = _parityLocked ? "MODS ✗"
+            if (_readyButtonLabels == null) return;
+            // SEVEN GLYPHS IS THE CELL. The clone's label keeps the PREFAB's own wide main-menu rect
+            // (CapCloneFont's note), so best-fit measures against THAT and the RectMask2D in
+            // AddCloneLayoutElement clips whatever overhangs the 160-px footer cell — "MODS MISMATCH" and
+            // "CHOOSE A SAVE" are thirteen and were clipped to their middle few glyphs. Keep them short.
+            // This is NOT why the button read as absent, though: fca24ef shortened them and the next
+            // three-instance test reported it gone again. The paint was (see _readyButtonLabels), and so
+            // was the clone-time "READY" this method used to leave drawn underneath. The reason still has
+            // a full-length home: the roster row's "!" badge lists the exact diffs.
+            var text = _parityLocked ? "MODS ✗"
                 : _needsSave ? "NO SAVE"
                 : _localReady ? "✓ READY" : "READY";
+            for (int i = 0; i < _readyButtonLabels.Length; i++)
+                if (_readyButtonLabels[i] != null) _readyButtonLabels[i].text = text;
         }
 
         /// <summary>
