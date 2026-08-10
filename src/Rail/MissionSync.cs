@@ -261,11 +261,7 @@ namespace Multiplayer.Network.Sync
                     mission.MissionDef.DeployOnlyFromActiveVehicle, null, vehicleIdentity);
                 var before = DeploymentSources(mission, geo.PhoenixFaction, missionUnique ? vehicle : null);
                 if (before.ContainsSource(vehicleIdentity)) bindings = store.Ledger.AllEntries
-                .Where(x => x.Lifecycle != InboxLifecycle.Removed &&
-                    (string.Equals(x.Occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal) ||
-                     DurableWindowRegistry.IsMissionOfferOccurrence(x.Occurrence)) &&
-                    x.Occurrence.SubjectIds.Contains(stable, StringComparer.Ordinal) &&
-                    x.Occurrence.SubjectIds.Contains(IdentityResolver.RootRef(site), StringComparer.Ordinal))
+                .Where(x => BindsDeparture(x.Occurrence, x.Lifecycle, stable))
                 .Select(x => x.Occurrence).Distinct()
                 .Select(x => new DepartureBinding(x, mission, before,
                     UniqueSourceBinding(mission.MissionDef != null && mission.MissionDef.DeployOnlyFromActiveVehicle,
@@ -280,6 +276,25 @@ namespace Multiplayer.Network.Sync
                 stack.Push(capture);
             }
         }
+
+        /// <summary>PURE (RailCheck L402): does this ledger entry name the mission the departing aircraft was
+        /// parked on, so that the aircraft leaving must be revalidated against it?
+        ///
+        /// The stable subject IS the site: <c>StableMissionSubject</c> is
+        /// <c>RootRef(mission.Site) + "|" + MissionDef.Guid</c>, and the mission here is
+        /// <c>site.ActiveMission</c>. This used to demand a SECOND, bare <c>RootRef(site)</c> subject as well,
+        /// which pinned nothing extra and merely required the three-subject shape that only the arrival-watch
+        /// occurrences carry. Deployment windows and the modal briefs are minted with the single stable
+        /// subject (<see cref="DurableWindowRegistry.CaptureDeployment"/>, <c>CaptureModal</c>), so that term
+        /// excluded exactly the windows this machinery exists for: the aircraft flew off, the sources were
+        /// recomputed, and the deployment window stayed open on every peer because it had never been bound
+        /// to the departure at all.</summary>
+        internal static bool BindsDeparture(OccurrenceId occurrence, InboxLifecycle lifecycle,
+            string stableMissionSubject) =>
+            lifecycle != InboxLifecycle.Removed && !string.IsNullOrEmpty(stableMissionSubject) &&
+            (string.Equals(occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal) ||
+             DurableWindowRegistry.IsMissionOfferOccurrence(occurrence)) &&
+            occurrence.SubjectIds.Contains(stableMissionSubject, StringComparer.Ordinal);
 
         internal static bool UniqueSourceBinding(bool deployOnlyFromActiveVehicle, OccurrenceId? occurrence,
             string vehicleIdentity) => deployOnlyFromActiveVehicle &&

@@ -365,6 +365,7 @@ namespace RailCheck
             Add(laws, () => L378_WindowsPresentOnlyOnTheGeoscape.Check());
             Add(laws, () => L393_EveryRoutedWindowFamilyHasAVerdict.Check());
             Add(laws, () => L401_OnlyExactNativeRaisersArePriority.Check());
+            Add(laws, () => L402_ADepartedLastSourceClosesTheWindowEverywhere.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
 
