@@ -3,6 +3,84 @@
 Player-facing notes for each release. Releases before `0.9.5-beta` are documented on the
 [GitHub releases page](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/releases).
 
+## 0.9.8-beta
+
+A release on top of `0.9.6-beta`, and it also carries everything that was tagged as `0.9.7-beta`
+but never written up. Same mod, same install — replace the `Multiplayer` folder in your `Mods`
+directory. **Every player must run the same version**; a mismatch is reported when you join. This
+release changes what travels over the wire, so `0.9.8-beta` cannot play with older builds.
+
+**Connect codes have changed and old ones no longer work.** A code is now 11 symbols and carries a
+check symbol, so a mistyped code is rejected on the spot instead of dialling some random address.
+Any code you wrote down from an earlier version is dead — ask the host for a new one.
+
+Most of this release is about the windows a mission is made of: they now reach every player, each
+player answers his own copy, and a decline no longer ends the mission for the group.
+
+### Events, story and research
+
+- **Event and story windows reach clients at all.** They used to appear only for the host —
+  everybody else simply never saw them.
+- **The research-completion window opens for every player**, not only the host.
+
+### Reaching and starting a mission
+
+- **The START/CANCEL window is answered per player.** Everyone gets their own live copy. One
+  player's choice no longer greys out everyone else's buttons, a decline closes only that player's
+  window, and the mission still launches exactly once no matter how many people press START.
+- **A client pressing START actually launches the mission.** It used to fail with an internal error
+  and drop the player back on the map.
+- **Declining a mission no longer kills it.** Click the site again and it is re-offered on every
+  peer — no flying away and coming back — and everyone lands in the same stage.
+- **Everyone on the geoscape is taken to the squad/deployment screen when a mission arrives.** A
+  player who is deep inside another screen is not yanked out of it; he gets the screen when he
+  returns.
+- **Squad preparation is collaborative.** Edits one player makes to the deployment loadout now show
+  up for the others.
+- **Backing out of deployment preparation no longer cancels the mission.** It just steps back, and
+  you can go in again.
+- **A deployment window closes for everyone once the last aircraft that raised it has left**,
+  instead of lingering as a dead screen on the other players' geoscapes.
+
+### On the geoscape
+
+- **Time no longer stops for everyone when another player opens a tab.** It pauses only when the
+  player who dispatched the aircraft leaves the map.
+
+### After a mission
+
+- **A five-second "returning to geoscape" countdown** is shown at the top.
+- **Resupply is the first thing offered**, and each player's log states plainly whether anything was
+  actually short.
+
+### Hosting and joining
+
+- **The lobby now asks whether you are creating or joining a session**, instead of dropping you
+  straight into one flow; the session starts from there once you are ready.
+- **Hosting works again without Steam.** On GOG and Epic, CREATE SESSION did nothing at all.
+- **Sharing a session is simpler.** What you hand a friend is a short endpoint code rather than a
+  raw Steam id, the session card reads as a labelled value you can copy, and the invite button greys
+  out and tells you when a value has been copied. A pasted short code now also tries a direct
+  connection instead of only the relayed route.
+- **The join list names the host and shows how many players are in the session.**
+- **Clicking JOIN keeps you on the join page** with a "connecting" line, instead of flashing you
+  back to the main menu — and the join itself is near-instant rather than taking about ten seconds.
+- **Ping recovers from a spike within a second** instead of drifting back down over twenty.
+- **The READY button stays visible while it is locked and says why** — `MODS ✗` when the mod lists
+  differ, `NO SAVE` before a save has been chosen.
+- **Same-machine testing is supported**: the host card on the join page shows a
+  `This PC (same machine)` address.
+
+### Robustness
+
+- A mismatched or oversized piece of shared state no longer silently stops reaching a player.
+- A failed save transfer no longer leaves the receiving player's campaign identity overwritten.
+- One player's very long nickname can no longer stop the player list from reaching everyone.
+- A slow handler no longer stalls the network reader.
+- The mod no longer breaks on installs where Steam support is not present — a missing Steam
+  component is survived instead of failing outright.
+- A window that got wedged open no longer pins the session's verdicts; it can recover on its own.
+
 ## 0.9.6-beta
 
 A patch release on top of `0.9.5-beta`. Same mod, same install — replace the `Multiplayer` folder
