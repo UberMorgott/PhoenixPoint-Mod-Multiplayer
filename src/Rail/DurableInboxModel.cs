@@ -184,7 +184,9 @@ namespace Multiplayer.Network.Sync
     internal enum InboxMessageKind : byte { TransportAck = 0x46 }
     // Append-only: values 0..5 already exist in campaign saves and on the wire.
     internal enum InboxLifecycle : byte { Queued, Open, Read, Dismissed, Removed, Suspended, Deferred }
-    internal enum InboxSuspensionReason : byte { None, PriorityPreemption, LevelTeardown }
+    // On the wire (DurableInboxCodec:336, Enum.IsDefined-guarded). Value 2 was LevelTeardown — deleted
+    // 2026-08-10 with zero writers, never encoded by any build. Do not reuse it.
+    internal enum InboxSuspensionReason : byte { None = 0, PriorityPreemption = 1 }
 
     internal sealed class InboxWindowCheckpoint : IEquatable<InboxWindowCheckpoint>
     {
@@ -237,7 +239,8 @@ namespace Multiplayer.Network.Sync
 
     internal enum SharedChoicePhase : byte { EffectPending, EffectApplied, ChoiceLocked }
     internal enum DurableEffectStepState : byte { Prepared, Applied }
-    internal enum SharedEffectReceipt : byte { None, ChargeApplied, RewardApplied, NativeCompleted }
+    // Not serialised anywhere. ChargeApplied/RewardApplied went with the effect-transaction machinery.
+    internal enum SharedEffectReceipt : byte { None, NativeCompleted }
 
     internal sealed class DurableEffectStep : IEquatable<DurableEffectStep>
     {

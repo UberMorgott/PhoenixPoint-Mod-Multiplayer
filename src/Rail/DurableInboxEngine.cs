@@ -79,15 +79,17 @@ namespace Multiplayer.Network.Sync
         void FinalizeRestore(OccurrenceId occurrence);
     }
 
+    /// <summary>Numbered EXPLICITLY: the byte rides the wire (<c>DurableInboxCodec</c>:129/:192) and an
+    /// <c>Enum.IsDefined</c> guards the decode, so a member's value is a compatibility contract. 2, 3 and 4
+    /// were <c>MissionCompleted</c>/<c>Launched</c>/<c>MembershipEnded</c> — deleted 2026-08-10 with the
+    /// completion-teardown and membership-epoch subsystems; they had zero writers, so no peer and no save
+    /// ever carried them. Do not reuse those values.</summary>
     internal enum TerminalReason : byte
     {
-        Invalidated,
-        Superseded,
-        MissionCompleted,
-        Launched,
-        MembershipEnded,
-        LevelTeardown,
-        SourceInvalidated
+        Invalidated = 0,
+        Superseded = 1,
+        LevelTeardown = 5,
+        SourceInvalidated = 6
     }
 
     internal enum DurableCarrierClass : byte
