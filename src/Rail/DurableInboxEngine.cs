@@ -922,17 +922,24 @@ namespace Multiplayer.Network.Sync
             return false;
         }
 
-        /// <summary>Production opaque-campaign path. PRE is written after EffectPending is committed;
-        /// native CompleteEvent runs once between PRE and POST; ChoiceLocked is committed before POST is
-        /// snapshotted. Any failure is owned by the coordinator's mandatory PRE reload boundary.</summary>
-        internal bool TryAnswerCheckpointed(OccurrenceId occurrence, MembershipId winner,
+        /// <summary>Production shared-answer path. Committing EffectPending IS the arbitration: two peers
+        /// answering the same occurrence race on that one commit, the loser observes the winner's decision
+        /// and returns it. Native CompleteEvent then runs exactly once, and the resulting record delta is
+        /// what freezes the picker on every peer (<c>EventPopup.IsFrozen</c> reads the native record, not
+        /// this ledger) — so the answer is already shared before any of this bookkeeping is broadcast.
+        ///
+        /// Deliberately NOT transactional. Native CompleteEvent is not undoable, so a rollback here can only
+        /// release the in-memory decision, never un-apply the effect; pretending otherwise is what cost two
+        /// full campaign saves per dialog. A throw therefore rolls the pending decision back — leaving the
+        /// occurrence answerable again exactly as vanilla leaves a Triggered record — and is logged.</summary>
+        internal bool TryAnswer(OccurrenceId occurrence, MembershipId winner,
             CanonicalChoiceId choice, CanonicalResultId result, IEnumerable<CanonicalRewardItemId> rewards,
-            Func<bool> validate, Func<EffectToken, DurableEffectTransactionCoordinator> coordinatorFactory,
-            Action executeNativeOnce, Action<SharedChoiceDecision> broadcast, out SharedChoiceDecision decision)
+            Func<bool> validate, Action executeNativeOnce, Action<SharedChoiceDecision> broadcast,
+            out SharedChoiceDecision decision)
         {
             decision = null;
-            if (validate == null || coordinatorFactory == null || executeNativeOnce == null || broadcast == null)
-                throw new ArgumentNullException("checkpointed choice dependency");
+            if (validate == null || executeNativeOnce == null || broadcast == null)
+                throw new ArgumentNullException("shared choice dependency");
             if (!choice.Occurrence.Equals(occurrence) || !result.Occurrence.Equals(occurrence)) return false;
             var rewardArray = (rewards ?? throw new ArgumentNullException(nameof(rewards))).ToArray();
             if (rewardArray.Any(x => !x.Occurrence.Equals(occurrence))) return false;
@@ -947,11 +954,11 @@ namespace Multiplayer.Network.Sync
                     !ledger.AllEntries.Any(x => x.Occurrence.Equals(occurrence) && x.Membership.Equals(winner))) return false;
                 bool valid; try { valid = validate(); } catch { return false; } if (!valid) return false;
                 var token = new EffectToken(occurrence, "effect:" + occurrence.TriggerId);
-                // Canonical choice/result/reward/RNG-derived facts are all in the pending journal before PRE.
-                var barrierStep = new DurableEffectStep("campaign-checkpoint", "native-complete-event",
-                    "checkpoint:PRE", "checkpoint:POST");
+                // Canonical choice/result/reward/RNG-derived facts are all journaled before the native call.
+                var nativeStep = new DurableEffectStep("campaign-effect", "native-complete-event",
+                    "effect:pending", "effect:applied");
                 var candidate = new SharedChoiceDecision(occurrence, token, choice, result, rewardArray, winner,
-                    SharedChoicePhase.EffectPending, new[] { barrierStep });
+                    SharedChoicePhase.EffectPending, new[] { nativeStep });
                 var entries = ledger.AllEntries.Select(x => x.Occurrence.Equals(occurrence)
                     ? new InboxEntry(x.Occurrence, x.Membership, x.Lifecycle, choice, x.LifecycleRevision,
                         x.TombstoneRevision, x.HostOrderKey, x.SuspensionReason, x.Checkpoint, x.TerminalReason) : x).ToArray();
@@ -959,12 +966,11 @@ namespace Multiplayer.Network.Sync
                 if (_store.CommitWithCanonical(ledger, next, canonical.WithDecision(candidate))) pending = candidate;
             }
             if (pending == null) return false;
-            SharedChoiceDecision locked = null;
+            SharedChoiceDecision locked;
             try
             {
-                coordinatorFactory(pending.EffectToken).Execute(occurrence, pending.EffectToken, executeNativeOnce, () =>
-                {
-                if (!PersistAppliedStep(occurrence, "campaign-checkpoint"))
+                executeNativeOnce();
+                if (!PersistAppliedStep(occurrence, "campaign-effect"))
                     throw new InvalidOperationException("could not commit durable campaign effect receipt");
                 var live = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(occurrence));
                 if (!Advance(live, SharedChoicePhase.EffectApplied))
@@ -973,20 +979,22 @@ namespace Multiplayer.Network.Sync
                 if (!Advance(live, SharedChoicePhase.ChoiceLocked))
                     throw new InvalidOperationException("could not commit ChoiceLocked");
                 locked = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(occurrence));
-                }, _ =>
-                {
-                _repaint(occurrence);
-                broadcast(locked ?? throw new InvalidOperationException("POST verified without ChoiceLocked"));
-                });
             }
-            catch (DurableEffectPreCheckpointException)
+            catch (Exception ex)
             {
+                // Release the arbitration so the occurrence stays answerable. The native effect is whatever
+                // it is — same as vanilla, where a throw inside CompleteEvent leaves the record Triggered.
                 if (!_store.RollbackUncheckpointedDecision(pending))
-                    throw new InvalidOperationException("PRE failed and pending authority could not roll back");
+                    throw new InvalidOperationException("shared answer failed and pending authority could " +
+                        "not roll back", ex);
+                UnityEngine.Debug.LogError("[MP][events] shared answer for '" + occurrence.EventId +
+                    "' rolled back, the window stays answerable: " + ex);
                 return false;
             }
+            _repaint(occurrence);
+            broadcast(locked);
             decision = locked;
-            return locked != null;
+            return true;
         }
 
         internal int RecoverPending()
@@ -996,26 +1004,6 @@ namespace Multiplayer.Network.Sync
                 .Where(x => x.Phase != SharedChoicePhase.ChoiceLocked).ToArray())
             { SharedChoiceDecision ignored; if (Recover(pending, out ignored)) recovered++; }
             return recovered;
-        }
-
-        internal bool ResumeCheckpointed(SharedChoiceDecision pending,
-            DurableEffectTransactionCoordinator coordinator, Action executeNativeOnce,
-            Action<SharedChoiceDecision> broadcast, out SharedChoiceDecision locked)
-        {
-            locked = null;
-            if (pending == null || pending.Phase != SharedChoicePhase.EffectPending) return false;
-            SharedChoiceDecision completed = null;
-            coordinator.Execute(pending.Occurrence, pending.EffectToken, executeNativeOnce, () =>
-            {
-                if (!PersistAppliedStep(pending.Occurrence, "campaign-checkpoint"))
-                    throw new InvalidOperationException("could not resume campaign checkpoint receipt");
-                var live = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(pending.Occurrence));
-                if (!Advance(live, SharedChoicePhase.EffectApplied)) throw new InvalidOperationException("resume EffectApplied failed");
-                live = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(pending.Occurrence));
-                if (!Advance(live, SharedChoicePhase.ChoiceLocked)) throw new InvalidOperationException("resume ChoiceLocked failed");
-                completed = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(pending.Occurrence));
-            }, _ => { _repaint(pending.Occurrence); broadcast(completed); });
-            locked = completed; return completed != null;
         }
 
         private bool Recover(SharedChoiceDecision known, out SharedChoiceDecision decision)

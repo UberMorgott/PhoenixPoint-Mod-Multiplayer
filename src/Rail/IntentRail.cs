@@ -141,12 +141,6 @@ namespace Multiplayer.Network.Sync
         {
             if (!_families.TryGetValue(surfaceId, out var family)) return false;
             if (engine == null) return true;
-            if (engine.IsHost && DurableEffectTransactionBarrier.BlocksHostWork)
-            {
-                Reject(surfaceId, senderPeerId,
-                    "campaign choice transaction is committing; retry after authoritative reload/save", true);
-                return true;
-            }
             if (!engine.IsHost)
             {
                 // The only host→client traffic on an intent surface is the Reject nudge (below): the

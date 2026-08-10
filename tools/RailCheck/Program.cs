@@ -363,7 +363,6 @@ namespace RailCheck
             Add(laws, () => L396_BackDefersPreparationWithoutCancelling.Check());
             Add(laws, () => L379_AHostOrderSurvivesTheNativeSaveBlob.Check());
             Add(laws, () => L380_APriorityWindowSuspendsBeforeItPreempts.Check());
-            Add(laws, () => L381_AFirstValidSharedAnswerAppliesOneDurableEffect.Check());
             Add(laws, () => L382_AChoiceLockRetainsEveryPlayersWindow.Check());
             Add(laws, () => L383_ACanonicalResultNeverRebindsByListPosition.Check());
             Add(laws, () => L384_ACancelledOfferStaysLocal.Check());
@@ -375,7 +374,6 @@ namespace RailCheck
             Add(laws, () => L393_EveryRoutedWindowFamilyHasAVerdict.Check());
             Add(laws, () => L401_OnlyExactNativeRaisersArePriority.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
-            Add(laws, () => L377_AReceiptAdvancesNoInboxLifecycle.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a

@@ -421,7 +421,6 @@ namespace Multiplayer.Network
         /// retransmitted — the heartbeat/RTT probe, where a retransmit would be measured as latency.</summary>
         public void SendToClient(ulong clientId, NetworkMessage msg, bool reliable = true)
         {
-            if (IsHost && DurableEffectTransactionBarrier.TryDeferOutbound(() => SendToClient(clientId, msg, reliable))) return;
             var data = msg.Serialize();
             Transport?.Send(clientId, data, reliable);
         }
@@ -450,7 +449,6 @@ namespace Multiplayer.Network
 
         public void BroadcastToAll(NetworkMessage msg)
         {
-            if (DurableEffectTransactionBarrier.TryDeferOutbound(() => BroadcastToAll(msg))) return;
             var data = msg.Serialize();
             Transport?.Broadcast(data);
         }
@@ -461,14 +459,12 @@ namespace Multiplayer.Network
         // late snapshot is harmless. LoadComplete / PEER_LIST stay on the reliable BroadcastToAll path.
         public void BroadcastUnreliable(NetworkMessage msg)
         {
-            if (DurableEffectTransactionBarrier.TryDeferOutbound(() => BroadcastUnreliable(msg))) return;
             var data = msg.Serialize();
             Transport?.Broadcast(data, reliable: false);
         }
 
         public void BroadcastExcept(ulong excludeSteamId, NetworkMessage msg)
         {
-            if (DurableEffectTransactionBarrier.TryDeferOutbound(() => BroadcastExcept(excludeSteamId, msg))) return;
             var data = msg.Serialize();
             // Transport layer doesn't support exclude — send individually
             foreach (var client in Session.GetConnectedClients())

@@ -141,8 +141,6 @@ namespace Multiplayer.Network.Sync
                 Journal = (journal ?? Enumerable.Empty<DurableInboxJournalRecord>()).Select(EncodeJournal).ToArray(),
                 SnapshotRevision = ledger.CommittedRevision
             };
-            DurableEffectTransactionBarrier.StampOwnerRoot(root);
-            DurableEffectSaveCatalog.CaptureNormalRoot(root, canonical?.Decisions);
             root.Crc = ComputeRootCrc(root);
             return root;
         }
@@ -201,9 +199,6 @@ namespace Multiplayer.Network.Sync
                     var retired = root.RetiredEffectTokens ?? Array.Empty<string>();
                     if (retired.Length > MaxCount || retired.Distinct(StringComparer.Ordinal).Count() != retired.Length)
                         throw new InvalidDataException("invalid retired effect-token catalog");
-                    foreach (var encoded in retired)
-                    { EffectToken ignored; if (!DurableEffectSaveCatalog.TryDecodeToken(encoded, out ignored))
-                        throw new InvalidDataException("malformed retired effect token"); }
                 }
                 HostLedger ledger; List<CanonicalChoiceId> choices; List<CanonicalResultId> results; List<CanonicalRewardItemId> rewards;
                 List<SharedChoiceDecision> decisions;
@@ -373,28 +368,10 @@ namespace Multiplayer.Network.Sync
                 root.TransactionSharedRevision == 0 && !root.TransactionWasIronman &&
                 string.IsNullOrEmpty(root.TransactionPredecessorSaveLocator) &&
                 (root.TransactionSubjectIds == null || root.TransactionSubjectIds.Length == 0);
+            // The checkpoint transaction these fields described is gone. A save written by that build still
+            // carries them, so they stay READABLE and inert — validating them would only reject a save the
+            // rest of this decoder can read perfectly well.
             if (absent) return;
-            if (root.TransactionKind > (byte)DurableEffectCheckpointKind.Committed)
-                throw new InvalidDataException("invalid durable transaction checkpoint kind");
-            if (root.Schema >= 7 && string.IsNullOrEmpty(root.TransactionPredecessorSaveLocator))
-                throw new InvalidDataException("durable transaction omitted exact predecessor save locator");
-            try
-            {
-                var occurrence = new OccurrenceId(root.TransactionEventId, root.TransactionTriggerId,
-                    root.TransactionSubjectIds ?? Array.Empty<string>());
-                var token = new EffectToken(occurrence, root.TransactionEffectToken);
-                var checkpoint = new DurableEffectCheckpoint(root.TransactionCheckpointId,
-                    (DurableEffectCheckpointKind)root.TransactionKind, occurrence, token,
-                    root.TransactionPendingCheckpointId);
-                if (root.Schema >= 7 && !string.IsNullOrEmpty(root.TransactionPredecessorSaveLocator))
-                    checkpoint.BindPredecessor(root.TransactionPredecessorSaveLocator);
-                if (root.TransactionKind == (byte)DurableEffectCheckpointKind.Pending && root.TransactionSharedRevision != 0)
-                    throw new InvalidDataException("PRE checkpoint cannot contain a locked shared revision");
-                if (root.TransactionKind == (byte)DurableEffectCheckpointKind.Committed && root.TransactionSharedRevision == 0)
-                    throw new InvalidDataException("POST checkpoint omitted its locked shared revision");
-            }
-            catch (Exception ex) when (!(ex is InvalidDataException))
-            { throw new InvalidDataException("invalid durable transaction checkpoint marker", ex); }
         }
         private static void WriteBytes(BinaryWriter w, byte[] p) { p = p ?? Array.Empty<byte>(); w.Write(p.Length); w.Write(p); }
         private static byte[] ReadBytes(BinaryReader r) { int n = r.ReadInt32(); if (n < 0 || n > SharedChoiceDecision.MaxRewardPayloadBytes) throw new InvalidDataException("byte payload length"); var p = r.ReadBytes(n); if (p.Length != n) throw new EndOfStreamException(); return p; }
@@ -498,7 +475,6 @@ namespace Multiplayer.Network.Sync
             // must preserve the validated root byte-for-byte, never replace an unread inbox with empty state.
             if (_activeStore == null && _pendingRoot != null)
             {
-                DurableEffectSaveCatalog.CaptureNormalRoot(_pendingRoot, _pendingRestore?.Canonical.Decisions);
                 values.Add(_pendingRoot);
                 result = values;
             }
@@ -529,12 +505,9 @@ namespace Multiplayer.Network.Sync
             if (roots.Length > 1) throw new InvalidDataException("multiple durable inbox save roots");
             if (roots.Length == 1)
             {
-                if (!DurableEffectSaveCatalog.AcceptLoadedRoot(roots[0]))
-                    throw new InvalidDataException("loaded durable checkpoint changed after validation; fallback scheduled");
                 DurableInboxRestore restored; string refusal;
                 if (!DurableInboxSaveCodec.TryRestore(roots[0], null, out restored, out refusal))
                     throw new InvalidDataException(refusal);
-                DurableEffectSaveCatalog.RestoreRetiredTokens(roots[0]);
                 _pendingRestore = restored;
                 _pendingRoot = roots[0];
                 if (roots[0].TransactionWasIronman)
@@ -577,22 +550,10 @@ namespace Multiplayer.Network.Sync
             }
             WindowQueueSync.ClearDurableRuntimeCarriers();
             old?.Carriers.AbandonStore();
-            DurableEffectSaveCatalog.ClearPinnedBlobs();
             DurableSourceRevalidationEngine.RetryTerminalTeardown(installed);
-            var pendingDecision = installed.Canonical.Decisions.FirstOrDefault(x => x.Phase != SharedChoicePhase.ChoiceLocked);
-            if (pendingDecision != null)
-            {
-                if (!DurableEffectTransactionBarrier.TryEnter(pendingDecision.EffectToken, "<restored-durable-effect>"))
-                    throw new InvalidOperationException("another durable transaction owns restored EffectPending");
-                var timing = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.Timing;
-                if (timing != null)
-                {
-                    bool wasPaused = timing.Paused;
-                    timing.Paused = true;
-                    DurableEffectTransactionBarrier.RegisterPauseRestore(() => timing.Paused = wasPaused, wasPaused);
-                }
-                DurableEffectTransactionBarrier.CompletePendingReload(pendingDecision.EffectToken);
-            }
+            // A restored decision short of ChoiceLocked no longer freezes the session: EventSync's ledger
+            // recovery settles it on the next host tick, and the native record — not this ledger — is what
+            // decides whether the window still shows an answer.
             return true;
         }
     }

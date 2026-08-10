@@ -326,24 +326,19 @@ namespace Multiplayer.Network.Sync
                 _ => DurableEffectObservation.Diverged),
                 EventPopup.RepaintDurableChoice);
             SharedChoiceDecision stored;
-            accepted = durable.TryAnswerCheckpointed(occurrence, winner, canonicalChoice, canonicalResult,
+            accepted = durable.TryAnswer(occurrence, winner, canonicalChoice, canonicalResult,
                 canonicalRewards, () => Validate(record.State, index, choiceCount) == null,
-                token => new DurableEffectTransactionCoordinator(new DurableEffectPhoenixCheckpointBackend(token)),
                 () =>
                 {
-                    using (EventRewardTransaction.Begin(occurrence, store))
-                    {
-                        if (record.State != GeoscapeEventRecordState.Triggered)
-                            throw new InvalidOperationException("native event diverged after PRE checkpoint");
-                        if (choice != null && choice.Requirments != null)
-                            faction.Wallet.Take(choice.Requirments.Resources, OperationReason.Gift);
-                        ev.CompleteEvent(choice != null && choice.Outcome == null ? null : choice, faction);
-                    }
+                    if (record.State != GeoscapeEventRecordState.Triggered)
+                        throw new InvalidOperationException("native event diverged before it was answered");
+                    if (choice != null && choice.Requirments != null)
+                        faction.Wallet.Take(choice.Requirments.Resources, OperationReason.Gift);
+                    ev.CompleteEvent(choice != null && choice.Outcome == null ? null : choice, faction);
                 }, locked =>
                 {
                     EventPopup.HostBroadcastDurableReward(locked.Occurrence, locked.RewardPayload);
                     EventPopup.HostBroadcastDurableDecision(locked);
-                    DurableEffectTransactionBarrier.FlushCommittedOutbound();
                 }, out stored);
             if (accepted)
             {
@@ -405,59 +400,17 @@ namespace Multiplayer.Network.Sync
             var store = DurableInboxSaveBridge.ActiveStore;
             if (network == null || !network.IsActiveSession || !network.IsHost || geo?.EventSystem == null || store == null)
                 return 0;
-            int recovered = 0;
-            // Finish a POST reload only after the loaded save has installed its locked durable journal.
-            foreach (var locked in store.Canonical.Decisions.Where(x => x.Phase == SharedChoicePhase.ChoiceLocked))
-                if (DurableEffectTransactionBarrier.TryExitInstalled(locked.EffectToken))
-                { EventPopup.RepaintDurableChoice(locked.Occurrence); EventPopup.HostBroadcastDurableDecision(locked); recovered++; }
-            foreach (var pending in store.Canonical.Decisions.Where(x => x.Phase != SharedChoicePhase.ChoiceLocked).ToArray())
-            {
-                if (DurableEffectTransactionBarrier.RecoveryLoadInFlight(pending.EffectToken)) continue;
-                try
-                {
-                    var backend = new DurableEffectPhoenixCheckpointBackend(pending.EffectToken);
-                    var coordinator = new DurableEffectTransactionCoordinator(backend);
-                    DurableEffectCheckpoint post;
-                    if (backend.TryFindCheckpoint(pending.Occurrence, pending.EffectToken,
-                        DurableEffectCheckpointKind.Committed, out post))
-                    {
-                        coordinator.Recover(pending.Occurrence, pending.EffectToken, _ => { });
-                        continue;
-                    }
-                    string subject = pending.Occurrence.SubjectIds.FirstOrDefault(x => x.StartsWith("event:", StringComparison.Ordinal));
-                    string eventId = subject?.Substring("event:".Length);
-                    var data = string.IsNullOrEmpty(eventId) ? null : geo.EventSystem.GetEventByID(eventId, canFail: true)?.GeoscapeEventData;
-                    var record = string.IsNullOrEmpty(eventId) ? null : geo.EventSystem.GetEventRecord(eventId);
-                    if (data == null || record?.State != GeoscapeEventRecordState.Triggered)
-                        throw new InvalidOperationException("verified PRE did not restore Triggered event");
-                    var matches = data.Choices.Where(x => string.Equals(x?.Text?.LocalizationKey,
-                        pending.Choice.Value, StringComparison.Ordinal)).ToArray();
-                    GeoEventChoice choice = pending.Choice.Value == "choice:none" ? null :
-                        matches.Length == 1 ? matches[0] : throw new InvalidOperationException("pending choice cannot resolve uniquely");
-                    var ev = EventPopup.LiveInstance(geo.View, eventId) ?? new GeoscapeEvent(data,
-                        new GeoscapeEventContext(geo.EventSystem.FindEventLocation(eventId), geo.ViewerFaction)) { Record = record };
-                    var durable = new DurableSharedChoiceEngine(store, new DelegateDurableChoiceEffect(_ => { },
-                        _ => DurableEffectObservation.Diverged), EventPopup.RepaintDurableChoice);
-                    SharedChoiceDecision locked;
-                    durable.ResumeCheckpointed(pending, coordinator, () =>
-                    {
-                        using (EventRewardTransaction.Begin(pending.Occurrence, store))
-                        {
-                            if (choice != null && choice.Requirments != null)
-                                geo.ViewerFaction.Wallet.Take(choice.Requirments.Resources, OperationReason.Gift);
-                            ev.CompleteEvent(choice != null && choice.Outcome == null ? null : choice, geo.ViewerFaction);
-                        }
-                    }, decision =>
-                    {
-                        EventPopup.HostBroadcastDurableReward(decision.Occurrence, decision.RewardPayload);
-                        EventPopup.HostBroadcastDurableDecision(decision);
-                        DurableEffectTransactionBarrier.FlushCommittedOutbound();
-                    }, out locked);
-                }
-                catch (Exception ex)
-                { Debug.LogError("[MP][events] durable choice recovery remains frozen pending authoritative reload: " + ex); }
-            }
-            return recovered;
+            // A decision left short of ChoiceLocked means the host died between committing the arbitration
+            // and finishing its bookkeeping. The native effect either ran or it did not, and no record in
+            // this ledger can tell us which — so this only settles the LEDGER, and never re-runs
+            // CompleteEvent. Re-running it was the whole reason the old path needed two campaign saves.
+            // The locked half needs nothing here: EventPopup.HostRebroadcastLockedDecisions, the caller's
+            // very next statement, already re-sends every ChoiceLocked decision.
+            try { return new DurableSharedChoiceEngine(store,
+                new DelegateDurableChoiceEffect(_ => { }, _ => DurableEffectObservation.Diverged),
+                EventPopup.RepaintDurableChoice).RecoverPending(); }
+            catch (Exception ex)
+            { Debug.LogError("[MP][events] durable choice ledger recovery failed: " + ex); return 0; }
         }
 
         /// <summary>HOST: replay the client's variable write through the game's OWN setter. NEVER the
