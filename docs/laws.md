@@ -371,7 +371,7 @@ on the inline side. Nothing is missing and no row is invented — verified 2026-
 
 ## Durable-window inbox allocation clarification (2026-08-10)
 
-- The approved DWI allocation was `DWI-01..DWI-26 -> L376..L401`. **L402 WAS created after all**, 2026-08-10, as `L402_ADepartedLastSourceClosesTheWindowEverywhere.cs` — placed with its family rather than in the free L87–L90 block, which would have scattered it. No L403 exists.
+- The approved DWI allocation was `DWI-01..DWI-26 -> L376..L401`. **L402 WAS created after all**, 2026-08-10, as `L402_ADepartedLastSourceClosesTheWindowEverywhere.cs` — placed with its family rather than in the free L87–L90 block, which would have scattered it. No L403 exists; the family then continued at `L404`..`L410` (see the two sections below).
 - WITHDRAWN 2026-08-10, same day: the membership-epoch design below was never wired and has been removed. `L376`, `L397`, `L398`, `L399` and `L400` are DELETED — see the commit `refactor(inbox): remove epoch bookkeeping no session path reaches`. Do not reissue these numbers; `L<n>` numbering is sparse by design.
 - WITHDRAWN 2026-08-10, same day, by the rest of the durable-window surgery (`a13c63c`, `9624919`) — five more DELETED, each because its subject no longer exists. Do not reissue these numbers either:
   - `L377` a receipt advances no inbox lifecycle — it asserted `DurableInboxReducer`'s transition table, which production deliberately contradicts (`src/Rail/DurableInboxReducer.cs:37-42`). The L127(d)/L182(d) trap: a law mandating a table the engine does not obey. Its receipt half (a transport ack advances nothing) survives in `L396`.
@@ -389,20 +389,34 @@ on the inline side. Nothing is missing and no row is invented — verified 2026-
 ## Mission-start windows and post-mission resupply — the 2026-08-10 owner decisions
 
 Three owner rulings, given in these words, now recorded so nobody re-derives them. Held by
-`L404`..`L407` (file-backed, registered, `tools/law-count.txt` 208 -> 212) plus the two arms rewritten
-in `L163` and `L164`.
+`L404`..`L407` (file-backed, registered, `tools/law-count.txt` 208 -> 212; `L408`..`L410` from the
+same day's audit work took it to **215**) plus the two arms rewritten in `L163` and `L164`.
 
 - **"для каждого своё окно ТОЛЬКО У ОКОН У КОТОРЫХ ИДЁТ ПОДТВЕРЖДЕНИЕ НАЧАЛА МИССИИ, без блокировки
   выбора. остальные окна по правилам как уже есть."** Shared-answer FIRST-WINS stays the RULE
   (`docs/superpowers/specs/2026-08-09-durable-window-inbox-design.md:89`, `HANDOFF.md:44`,
   `EventPopup.IsFrozen` `src/Rail/EventPopup.cs:1225`, L44/L45). The ONE additional exception is the
-  MISSION-START CONFIRMATION, matched on its native raiser and not on a name: `ShowMissionBriefing`
-  (GeoscapeView.cs:1903) pushes a `UIStateGeoModal` whose `ModalType` IS `GetMissionBriefModal(mission)`
-  (:1724) over a live `GeoMission`, Confirm -> `ModalResultCallback`:825 -> `LaunchMission`:1043. Named
-  by `GeoWindowCoverage.IsMissionStartConfirmationClass` (`src/Rail/GeoWindowCoverage.cs:478`), a strict
-  subset of the older per-peer answer class — the `*Outcome` sibling (`GetMissionOutcomeModal`:1800)
-  stays in that class and OUT of this one, because it starts nothing. No copy is frozen read-only and
-  no peer's answer is replayed onto another peer's copy. **L404.**
+  MISSION-START CONFIRMATION, matched on its native raiser and not on a name. **CORRECTED 2026-08-10
+  by `86c2f62`, after the 22:42-22:45 three-peer playtest of `2bab25d`: the window the player is
+  actually shown for "НАЧАТЬ / ОТМЕНА" is NOT a `UIStateGeoModal` — no peer entered one — it is a
+  plain geoscape EVENT (`PROG_AN0_MISS`, `UIStateGeoscapeEvent`), and one client sat behind buttons
+  the shared first-wins freeze had greyed for 58 s.** So the family is carved out at BOTH raisers:
+  - the EVENT, which is the live path: `EventPopup.NeverFrozenClass` / `IsMissionStartConfirmationEvent`
+    (`src/Rail/EventPopup.cs:501`/`:504`) name any window with a mission-starting choice
+    (`OutcomeStartMission.MissionTypeDef` — the same test `MissionArrivalNav` arms on, so TFTV and DLC
+    content are in for free); `IsFrozen` exempts it (`:1292`) and `EventChoiceClientLock.Prefix`
+    (`:1849`) answers it per peer — a decline closes only that peer's window and resolves nothing
+    shared, a start still goes to the host.
+  - the MODAL sibling, still live and still carved out: `ShowMissionBriefing` (GeoscapeView.cs:1903)
+    pushes a `UIStateGeoModal` whose `ModalType` IS `GetMissionBriefModal(mission)` (:1724) over a live
+    `GeoMission`, Confirm -> `ModalResultCallback`:825 -> `LaunchMission`:1043. Named by
+    `GeoWindowCoverage.IsMissionStartConfirmationClass` (`src/Rail/GeoWindowCoverage.cs:478`), read at
+    `MissionSync.cs:1719`, a strict subset of the older per-peer answer class — the `*Outcome` sibling
+    (`GetMissionOutcomeModal`:1800) stays in that class and OUT of this one, because it starts nothing.
+
+  No copy is frozen read-only and no peer's answer is replayed onto another peer's copy. **L404**, whose
+  arm (e) was RE-AIMED rather than added: it used to assert `IsFrozen` "cannot name" the family, which
+  is the wrong subject and the reason it stayed green over a broken game.
 - **The cost of that, and the hard part:** several peers may confirm the same mission, so the LAUNCH
   behind the window must be idempotent. The key is the SUCCESSOR, not a flag —
   `MissionSync.MissionStartAlreadyCommitted` (`src/Rail/MissionSync.cs:416`) reads the replicated ledger
@@ -417,7 +431,7 @@ in `L163` and `L164`.
   `ToDeploymentState`:596 already queues `UIStateRosterDeployment` at `int.MaxValue`, so the rank table
   deliberately does not name it. A PUSH, never a wait (P13). **L406.**
 - **"Да, первым после миссии."** `ReplenishSync.ReplenishRank` 20 -> `int.MaxValue`
-  (`src/Rail/ReplenishSync.cs:82`). 20 cleared the event family but lost to `UIStateGeoCutscene` (100);
+  (`src/Rail/ReplenishSync.cs:94`). 20 cleared the event family but lost to `UIStateGeoCutscene` (100);
   at the ceiling the resupply screen loses only to the post-mission outcome modal, which shares
   `int.MaxValue` and is queued first from the same arrival — i.e. the native order, you-won panel then
   resupply. The rank does NOT also promote the YANK: `UIStateReplenish` joined

@@ -96,10 +96,10 @@ definitions the other side cannot resolve.
 
 ### Internals
 
-The RailCheck law harness now stands at 206 file-backed laws plus 60 inline checks (266 total). The
+The RailCheck law harness now stands at 215 file-backed laws plus 60 inline checks (275 total). The
 durable-window work that shipped through this release was cut back afterwards: ten laws covering a
-persistence and reconnect design that was never wired were deleted, and one law was added to hold
-down the deployment-window rule above.
+persistence and reconnect design that was never wired were deleted, and the audit and mission-start
+work that followed added more than it took away.
 
 ## 0.9.5-beta
 

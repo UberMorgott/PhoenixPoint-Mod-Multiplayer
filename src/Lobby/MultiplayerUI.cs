@@ -1426,7 +1426,8 @@ namespace Multiplayer.UI
             if (ep == null)
                 ep = FindHostingChild(TransportType.StunUDP)?.PublicEndPoint; // fallback: STUN-discovered
 
-            // ponytail: the code carries an ENDPOINT ONLY (10 symbols), so a host with neither a UPnP
+            // ponytail: the code carries an ENDPOINT ONLY (11 symbols since the check symbol landed —
+            // ConnectCode.TotalSymbols, "4-3-4"), so a host with neither a UPnP
             // mapping nor a STUN-discovered endpoint has no shareable code at all and must invite through
             // Steam — the placeholder below says so, and the join screen repeats it. Upgrade path if that
             // host ever has to be shareable: a relay, not a richer code; there is nothing else to encode.

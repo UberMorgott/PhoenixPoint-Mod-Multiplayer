@@ -6,26 +6,32 @@ This session did not add a feature. It **removed** one that had been built again
 rather than against the owner's requirements, kept the parts that serve those requirements, and
 closed the single real gap. Net `-4542` lines across seven commits on `main`, `bef42ad..ed1d4c0`.
 
-## 0. Verified state at HEAD `ed1d4c0`
+## 0. Verified state at HEAD (re-verified 2026-08-10 after the end-of-session sweep)
+
+The rest of this file was written at `ed1d4c0`; §§9-12 and this block are at HEAD. Where a §1-§8
+number disagrees with a later section, the later section wins.
 
 ```
-laws: 206 file(s) + 60 inline = 266; 206 file registration(s); 19 unguarded (19 exempt)
+laws: 215 file(s) + 60 inline = 275; 215 file registration(s); 19 unguarded (19 exempt)
 law-integrity: OK
 
-Release build: 0 errors, 0 warnings
+Debug build: 0 errors, 0 warnings
 
 LAW VIOLATION  L62 unbanded-name: ClockPhaseProbe (0xC0) …
-RAILCHECK GREEN — types=99 polymorphic-codec=no laws-run=266/266 known-violations=1 (baselined)
+RAILCHECK GREEN — types=99 polymorphic-codec=no laws-run=275/275 known-violations=1 (baselined)
 ```
 
-Every shell call needs the first two lines:
+Every shell call needs the first two lines. The instances really on this machine are
+`D:\PP-Instance2`, `D:\PP-Instance3` and the Steam copy
+`D:\Steam\steamapps\common\Phoenix Point` — point `PhoenixPointDir` at one of those:
 
 ```powershell
 $env:Path='C:\Program Files\dotnet;'+$env:Path
-$env:PhoenixPointDir='E:\Dev Games\PP-Instance2'
+$env:PhoenixPointDir='D:\PP-Instance2'
 pwsh -File tools\law-integrity.ps1
 dotnet build Multiplayer.csproj -c Release -v m
 dotnet run -c Debug --project tools\RailCheck
+.\deploy.ps1 -GameDir 'D:\Steam\steamapps\common\Phoenix Point'
 ```
 
 **NOTHING in this session has been run in a live game.** Not one peer, not one window. The owner
@@ -44,10 +50,10 @@ The owner stated these five, in these words. They are the whole product spec for
 | 2 | Окно с вариантами ответа: кто первый выбрал — тот решил; остальным read-only, кликабелен только выбранный вариант | `EventPopup.IsFrozen` (`src/Rail/EventPopup.cs:1225`) reads the game's OWN `GeoscapeEventRecord.State`/`SelectedChoice` (`:1230`, `:1233`); `EventPopup.FreezeChoiceButtons` (`:1150`) paints from it and leaves only the winner interactable (`:1156-1158`); host arbitration is `EventSync.Validate` (`src/Rail/EventSync.cs:178`) refusing anything that is not `Triggered` | L44, L45 | YES, entirely. DWI wrapped a two-save campaign-checkpoint transaction around it that bought nothing — removed in `a13c63c` |
 | 3 | Окна высадки индивидуальны у каждого; пропадают у ВСЕХ, если самолёт отлетел от точки миссии ИЛИ миссия закончилась | **mission ended:** `WindowOrder.DropResolvedSubjects` (`src/Rail/WindowOrder.cs:376`), called from `:410` under the restore patch. **last aircraft left:** `MissionSync.CaptureVehicleDeparture` (`src/Rail/MissionSync.cs:246`) prefixed onto `GeoVehicle.StartTravel` (`src/Rail/VehicleSync.cs:209-213`), selecting through `MissionSync.BindsDeparture` (`:292`), committed by `CommitCapturedVehicleDeparture` (`:303`) → `SourceRevalidationPlan.Terminal` (`src/Rail/DurableInboxEngine.cs:763`) → `RetryTerminalTeardown` (`:735`) → `RemoveAllCarriers` (`:361`), broadcast so every peer installs the identical tombstone | L388, **L402 (new)** | HALF. The mission-ended half worked. The departure half was the one real gap — see §3 |
 | 4 | Окна подготовки к высадке и засады — в самый верх очереди показа | `DurableWindowRegistry.PriorityOf` (`src/Rail/DurableWindowRegistry.cs:316`): `DeploymentPreparing` ⇒ `Deployment` (`:318-319`), the brief families incl. `Modal:GeoAmbushBrief` ⇒ `Priority` (`:327-335`); applied at `WindowOrder.DurablePriorityHead` (`:119`, sorts `PriorityOf` DESC then `HostOrderKey`) | L401 | NO — this is DWI's, and it STAYS |
-| 5 | Окно пополнения запасов после миссии — всегда первое | `ReplenishSync.ReplenishRank = 20` (`src/Rail/ReplenishSync.cs:82`), the one-entry rank table (`:86-89`), `RankFor` (`:94`); plus the hold `ReplenishSync.ResupplyVerdictPending` (`:209`) consumed at `EventPopup.cs:715` | L93 | YES, untouched by DWI and by this session |
+| 5 | Окно пополнения запасов после миссии — всегда первое | `ReplenishSync.ReplenishRank = int.MaxValue` (`src/Rail/ReplenishSync.cs:94`), the one-entry rank table (`:106`); plus the hold `ReplenishSync.ResupplyVerdictPending` consumed in `EventPopup` | L93, L407 | YES, untouched by DWI; the rank was raised from 20 later the same day — see just below |
 
 **Requirement 5 was settled on 2026-08-10: literally first.** The owner answered "Да, первым после
-миссии", so `ReplenishSync.ReplenishRank` is `int.MaxValue` (`src/Rail/ReplenishSync.cs:82`), not 20.
+миссии", so `ReplenishSync.ReplenishRank` is `int.MaxValue` (`src/Rail/ReplenishSync.cs:94`), not 20.
 It now clears `UIStateGeoCutscene` (100) too; it ties the post-mission outcome modal
 (`UIStateInitial:112`, also `int.MaxValue`), which `QueryStateSwitch`:77-82 keeps first because it is
 queued first from the same arrival — the native order, you-won panel then resupply. The rank does NOT
@@ -61,7 +67,7 @@ Recorded in full under `docs/laws.md` → *Mission-start windows and post-missio
 
 | decision | where it lives | law |
 |---|---|---|
-| Per-peer answers ONLY for the mission-START confirmation, no read-only lock, every other family keeps shared first-wins | `GeoWindowCoverage.IsMissionStartConfirmationClass` (`src/Rail/GeoWindowCoverage.cs:478`) / `IsMissionStartConfirmation` (`:485`), matched on `ShowMissionBriefing`:1903 + `GetMissionBriefModal`:1724 | **L404** |
+| Per-peer answers ONLY for the mission-START confirmation, no read-only lock, every other family keeps shared first-wins | TWO raisers, both carved out. The one the player actually sees is a geoscape EVENT (`PROG_AN0_MISS`): `EventPopup.NeverFrozenClass` / `IsMissionStartConfirmationEvent` (`src/Rail/EventPopup.cs:501`/`:504`), matched on a choice carrying `OutcomeStartMission.MissionTypeDef`, exempted in `IsFrozen` (`:1292`) and answered per peer at `EventChoiceClientLock.Prefix` (`:1849`). The modal sibling stays too: `GeoWindowCoverage.IsMissionStartConfirmationClass` (`src/Rail/GeoWindowCoverage.cs:478`) / `IsMissionStartConfirmation` (`:484`), matched on `ShowMissionBriefing`:1903 + `GetMissionBriefModal`:1724, read at `MissionSync.cs:1719` | **L404** |
 | Therefore the launch must be idempotent — one Confirm or five, `GeoMission.Launch` runs once | `MissionSync.MissionStartAlreadyCommitted` (`src/Rail/MissionSync.cs:416`) + `RunNativeMissionOfferAnswer(..., startCommitted)` (`:440`), wired at `PerPeerModalAnswer.Prefix` (`:1717`) | **L405** |
 | Any peer's Confirm puts the preparation window first in EVERY peer's queue (push, no quorum) | `DurableInboxStore.TryStartDeployment`:99-101 mints it for every member; `DurableWindowRegistry.PriorityOf`:318 ranks it `Deployment` (the max) | **L406** |
 | Resupply first after a mission, and the client asks on an EDGE rather than racing a frame ceiling | `SurfaceIds.GeoPostMissionCommit` = **0xB2**, host postfix on `GeoMission.Complete` → `ReplenishSync.HostPostMissionTick` broadcast from `SyncEngine.Tick` right after `DiffEngine.HostTick` (`src/Rail/SyncEngineStub.cs:142`); client `OnPostMissionWritesCommitted` → `TryQueueReplenish` | **L407** |
@@ -164,7 +170,9 @@ requirement 3's per-player drawer depends on.
 
 ## 5. Laws
 
-**Ten deleted, one added. `tools/law-count.txt` 215 → 206 files; `inline=60` unchanged.**
+**Ten deleted, one added by the surgery itself: `tools/law-count.txt` 215 → 206 files, `inline=60`
+unchanged.** The audit and mission-start work of §§9-11 then added more than the surgery took away —
+`files=215` again at HEAD, `275` total. The ten below are still deleted and must not be reissued.
 
 | law | deleted in | why it can never fire again |
 |---|---|---|
@@ -237,14 +245,17 @@ cutscene"); the owner ruled "первым после миссии" and the rank 
 
 ### Branches
 
-| branch | sha | what |
-|---|---|---|
-| `main` | `ed1d4c0` | post-surgery. This handoff describes it |
-| `dwi-archive` | **`bef42ad`** | the last pre-surgery commit — `build(railcheck): reference the physics module the harness needs`, i.e. `a13c63c`'s parent and DWI's HEAD after Task 12. The full DWI-era history is `git log --oneline dwi-archive` (26 commits back to `0b3ec02 docs(spec): define durable per-player window inbox`) |
-| `dwi-task13-wip` | `d855528` | `wip(inbox): unfinished task 13 generation-linked completion`, one commit on top of `bef42ad`. Never merged, never verified |
+Corrected 2026-08-10 against the real clone — the two shas this table used to carry were wrong, and
+`dwi-archive` is not a branch at all:
 
-Neither branch is merged and neither should be without re-reading §2 first — most of what they carry
-is the code this session deleted on purpose.
+| ref | sha | what |
+|---|---|---|
+| branch `main` | HEAD | post-surgery plus §§9-12. This handoff describes it |
+| **no branch** — commit only | `bef42ad` | the last pre-surgery commit, `build(railcheck): reference the physics module the harness needs`: `a13c63c`'s parent and DWI's HEAD after Task 12. It is reachable from `main`'s own history, so the DWI-era work is `git log --oneline bef42ad`. There is no `dwi-archive` branch in this clone and none is needed |
+| branch `dwi-task13-wip` | **`9c424ec`** | one WIP commit (`On main: wip-L389-before-ff`) archiving unfinished task-13 generation-linked completion. Never merged, never verified. **Do not delete, rename or rewrite it** — it is a deliberate archive |
+
+`dwi-task13-wip` is not merged and should not be without re-reading §2 first — most of what it
+carries is the code this session deleted on purpose.
 
 ### Greps for a tester
 
@@ -402,3 +413,57 @@ is the code this session deleted on purpose.
   someone ELSE can dial"; the local line is added at the card, not in the resolver.
 - **`::1` is still Invalid** and that is honest: the transport is IPv4-only (`IPAddress.Any`,
   `AddressFamily.InterNetwork` filter). Add it only when the transport becomes dual-stack.
+
+---
+
+## 12. `ponytail:` debt ledger — the shortcuts this session left on purpose
+
+Every one of these is a DELIBERATE simplification with a known ceiling and a named upgrade path, not
+an oversight. The comments stay in the source; this table exists so they are tracked rather than
+forgotten. Nine markers, added `f24768d..HEAD`. (The tree carries ~70 `ponytail:` markers in total;
+only the ones this session added are listed.) Grep `ponytail:` for the full text.
+
+| `file:line` | ceiling accepted | upgrade path, and when |
+|---|---|---|
+| `src/Join/LanIpResolver.cs:37` | the LAN address list refreshes on a 10 s TTL (`CacheSeconds`), not on an interface-change event | subscribe `System.Net.NetworkInformation.NetworkChange` — one subscription, but its Mono behaviour would have to be proven. Only if the sweep ever shows up in a profile |
+| `src/Lobby/LobbyPanel.cs:1602` | the host address card draws at most `MaxAddressLines` rows | raise the cap or give the group its own scroller, if a real machine (twenty VPN adapters) ever hits it. Below the cap the card just grows and the chat absorbs it; past it the chat is pushed off screen |
+| `src/Lobby/MultiplayerUI.cs:1429` | the connect code encodes an ENDPOINT ONLY (11 symbols, `4-3-4`), so a host with neither a UPnP mapping nor a STUN endpoint has no shareable code and must invite through Steam | a relay. There is nothing else to put in the code — a richer code cannot fix it |
+| `src/Lobby/NetworkGatePanel.cs:367` | the friend/host list is a snapshot taken when the screen opens, not a poll; a friend who starts hosting while it is up appears only after BACK → JOIN SESSION | add a timer here, if that turns out to matter in practice |
+| `src/Rail/DurableInboxModel.cs:515` | ONE authority lock for the whole durable inbox | split it, only if measured host inbox contention warrants it |
+| `src/Rail/DurableInboxSave.cs:74` | `DurableInboxLegacyRootFilterPatch` null-filters `GeoLevelSavegame.SetReadObjects` so a DWI-era save (`Multiplayer.DurableInbox/v1`, type gone) still loads | **delete the patch outright** once no DWI-era saves remain in the wild. It is a compatibility shim, not a feature — see §4 |
+| `src/Rail/DurableWindowRegistry.cs:256` | a priority enrolment that the store refuses 32 times logs loudly and gives up — no deferred retry, because there is no durable per-frame host pump to hang one on | add the retry where the geoscape tick already runs, **if `[MP][inbox] could not enrol priority occurrence` ever appears in a Player.log**. This one has a concrete trigger — watch for it in the playtest |
+| `src/Rail/EventPopup.cs:1847` | a NON-mission choice inside the per-peer mission-start family grants nothing to anyone, even if its def carries a reward | relay reward-only declines, if such an event ever turns up in the content |
+| `src/Rail/RailMeta.cs:1278` | `DefByReducedId`'s per-type index is built ONCE; a def minted afterwards by `DefRepository.CreateDef`/`CreateRuntimeDef` (TFTV does use them) is not in it and misses | clear the map on a def-graph change, if a runtime def is ever recorded through a reduced DTO member |
+
+The two markers this session did NOT create but which now have a live trigger are called out where
+they live: `src/Bootstrap/TftvLateBinder.cs:22` (hand-written array; a new TFTV-gated patch class must
+be added to it or it silently dies — held by **L373**) and `src/Rail/RailMeta.cs:2646`.
+
+---
+
+## 13. End-of-session sweep, 2026-08-10
+
+- **Dead enum members removed** (`a631c4f`): `TerminalReason.MissionCompleted` / `.Launched` /
+  `.MembershipEnded`, `InboxSuspensionReason.LevelTeardown`, `SharedEffectReceipt.ChargeApplied` /
+  `.RewardApplied` — all with zero writers, orphaned by the §2 surgery. `TerminalReason` and
+  `InboxSuspensionReason` ride the wire as raw bytes behind an `Enum.IsDefined` decode guard, so the
+  survivors are now numbered EXPLICITLY and keep their old values (`LevelTeardown = 5`,
+  `SourceInvalidated = 6`); the deleted values are marked do-not-reuse. Nothing renumbers on any wire
+  or in any save.
+- **KEPT deliberately, both still load-bearing:** `RevealInputLock.ProbeInputDispatch` and its
+  `_inputSets` / `_callHandlersRefCount` / `_activeActionHashes` reflection fields, marked
+  `DIAGNOSTIC, 2026-08-10 — REMOVE WHEN THE CLIENT INPUT-DEATH REPORT IS CLOSED` (the client
+  input-death bug — whole keyboard plus geoscape world clicks dead while uGUI stays alive — is
+  UNRESOLVED and this is the only instrumentation that can pin it); and the `[MP][brief]` diagnostic
+  added in `86c2f62`, which stays until the owner confirms that fix in a running game.
+- **Also kept:** ~29 apparently-unused `using` directives across `src/` and `tools/RailCheck/`. A
+  mechanical removal sweep was attempted and REVERTED — the heuristic produced 43 compile errors
+  (`System.Text` is reached through `Encoding` in most of them). Zero build impact; not worth
+  churning 29 hot files. Use a real analyser if this is ever worth doing.
+- **Deploy targets cleaned:** a stale `Multiplayer.zip` (421 947 B, 09.08) that `deploy.ps1` never
+  writes, removed from all three `Mods\Multiplayer` folders — Steam, `D:\PP-Instance2`,
+  `D:\PP-Instance3`. Each now holds exactly `meta.json` + `Multiplayer.dll` + `Multiplayer.pdb`.
+- **Law hygiene:** `tools/law-count.txt` matches reality (`files=215`, `inline=60`, 275 registered,
+  no duplicate registration, no orphan law file, no `laws.AddRange`). `tools/vacuity-exempt.txt` still
+  holds **19** entries; every one was re-checked and none has gained a `premise-changed` or
+  `POSITIVE CONTROL` guard, so nothing could be removed from the ratchet. Nothing was added.
