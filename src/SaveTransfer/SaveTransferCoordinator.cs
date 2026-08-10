@@ -2478,6 +2478,9 @@ namespace Multiplayer.Network
             // Converge the reveal input-lock invariant before anything else: a peer that has revealed must
             // never be left holding the geoscape loading-screen input override (see RepairRevealInputLock).
             RepairRevealInputLock();
+            // AFTER the repair on purpose: L196 asserts the repair is callee #0 of this method, and this
+            // probe must observe the state the repair leaves behind. Diagnostic — see ProbeInputDispatch.
+            RevealInputLock.ProbeInputDispatch();
 
             // The one place "this peer is loaded" leaves this peer — runs on EVERY peer, above every
             // host-only return below, and one frame later than the SendLoadComplete that armed it.

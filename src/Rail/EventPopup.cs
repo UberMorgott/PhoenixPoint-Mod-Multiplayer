@@ -780,13 +780,28 @@ namespace Multiplayer.Network.Sync
                 return true;
             }
 
-            if (durableStore == null || !durableStore.Ledger.Contains(durableOccurrence))
+            // THE ARRIVING RAISE *IS* THE HOST'S AUTHORITY — THERE IS NO SECOND MESSAGE TO WAIT FOR.
+            // The durable ledger is per-peer SESSION state: DurableInboxSession.OpenSessionStore:30 mints it
+            // EMPTY on every peer and NO rail surface carries it (there is no SurfaceIds entry for the inbox
+            // at all, and DurableInboxEngine contains no networking), so only the peer that enrols an
+            // occurrence ever has one. The host enrols at :372, on its own broadcast path; this method only
+            // ever runs on a CLIENT. Waiting here for the host's entry to "arrive" therefore waited for a
+            // message that does not exist, and EVERY mirrored geoscape event window was held forever — live
+            // 2026-08-10: UIStateGeoscapeEvent entered 4x on the host and 0x on both clients, with the wait
+            // line repeating every frame for the whole session. Enrol it instead, from the raise, using the
+            // SAME OccurrenceId the host builds from the same seq and subjects, so everything downstream
+            // (WindowOrder.BindDurable at :741, RestoreSuspended, the carrier leases) gets the entry it
+            // expects. Idempotent by construction: EnqueuePriorityOccurrence:243 returns false when the
+            // occurrence is already present, so a re-delivered raise adds nothing.
+            if (durableStore == null)
             {
                 if (_held.All(x => x.Key != seq)) _held.Add(new KeyValuePair<uint, Raise>(seq, p));
-                TrackHeldCarrier(durableStore, durableOccurrence, seq);
-                Debug.Log("[MP][events] raise of '" + p.EventId + "' waits for its host-authoritative durable occurrence");
+                Debug.Log("[MP][events] raise of '" + p.EventId + "' HELD — this peer's durable inbox store " +
+                          "is not open yet (it is minted when the co-op geoscape is built); the drain " +
+                          "replays it the moment it is");
                 return true;
             }
+            DurableWindowRegistry.EnqueuePriorityOccurrence(durableStore, durableOccurrence);
 
             var es = geo.EventSystem;
             var data = es?.GetEventByID(p.EventId, canFail: true)?.GeoscapeEventData;

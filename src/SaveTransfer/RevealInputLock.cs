@@ -1,9 +1,11 @@
 using System;
+using System.Collections;
 using System.Reflection;
 using Base.Core;
 using Base.Input;
 using HarmonyLib;
 using PhoenixPoint.Geoscape.Levels;
+using UnityEngine;
 
 namespace Multiplayer.Network
 {
@@ -85,6 +87,63 @@ namespace Multiplayer.Network
             if (!ShouldClear(revealed, OverrideSetsField?.GetValue(input) as Array, _loadingSet)) return false;
             input.ClearOverrideInputSet();
             return true;
+        }
+
+        // ── DIAGNOSTIC, 2026-08-10 — REMOVE WHEN THE CLIENT INPUT-DEATH REPORT IS CLOSED ─────────────
+        // Reported live and confirmed by the player: on CLIENTS the whole keyboard, the geoscape camera and
+        // WORLD CLICKS are dead while uGUI tabs still click — the exact signature this class's header
+        // describes, but NOT the stale override this class repairs. The 2026-08-10 logs prove the override
+        // was cleared FOUR FRAMES BEFORE UIStateGeoCutscene entered and the 2:01 intro still could not be
+        // skipped on either client (the host skipped it at 11.85 s). Only three things inside
+        // InputController can swallow a view state's input, so this names all three and prints the tuple
+        // ONLY WHEN IT CHANGES — a complete timeline of when input died and what killed it, at no
+        // per-frame log cost:
+        //   · OverrideEventHandlers non-empty → DispatchEvent:947 skips the NORMAL handler list entirely
+        //     (every GeoscapeViewState.OnInputEventInternal) for every event type but InputTypeChanged.
+        //   · _callHandlersRefCount > 0 → Update:1102 skips the whole input pass, which ALSO freezes any
+        //     pending override change (SetOverrideInputSets is inside the skipped branch at :1111).
+        //   · the active set is simply wrong → the named sets and the active action COUNT say so.
+        private static readonly FieldInfo InputSetsField =
+            AccessTools.Field(typeof(InputController), "_inputSets");
+        private static readonly FieldInfo CallHandlersRefField =
+            AccessTools.Field(typeof(InputController), "_callHandlersRefCount");
+        private static readonly FieldInfo ActiveActionHashesField =
+            AccessTools.Field(typeof(InputController), "_activeActionHashes");
+        private static string _lastProbe;
+
+        private static string Names(object sets)
+        {
+            var array = sets as Array;
+            if (array == null || array.Length == 0) return "[]";
+            var names = new string[array.Length];
+            for (int i = 0; i != array.Length; i++)
+            {
+                var o = array.GetValue(i) as UnityEngine.Object;
+                names[i] = o == null ? "?" : o.name;
+            }
+            return "[" + string.Join(",", names) + "]";
+        }
+
+        /// <summary>Print the input-dispatch tuple whenever it changes. Reads only; never throws out.</summary>
+        internal static void ProbeInputDispatch()
+        {
+            try
+            {
+                var input = GameUtl.GameComponent<InputController>();
+                if (input == null) return;
+                var hashes = ActiveActionHashesField?.GetValue(input) as ICollection;
+                string probe = "sets=" + Names(InputSetsField?.GetValue(input)) +
+                               " override=" + Names(OverrideSetsField?.GetValue(input)) +
+                               " actions=" + (hashes == null ? -1 : hashes.Count) +
+                               " overrideHandlers=" + input.OverrideEventHandlers.Count +
+                               " handlers=" + input.EventHandlers.Count +
+                               " callHandlers=" + input.CallHandlers +
+                               " refCount=" + (CallHandlersRefField?.GetValue(input) ?? "?");
+                if (string.Equals(probe, _lastProbe, StringComparison.Ordinal)) return;
+                _lastProbe = probe;
+                Debug.Log("[MP][input] " + probe);
+            }
+            catch (Exception e) { Debug.LogError("[MP][input] probe failed: " + e.Message); }
         }
     }
 }
