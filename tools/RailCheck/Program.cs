@@ -372,6 +372,7 @@ namespace RailCheck
             Add(laws, () => L405_AConfirmedMissionStartLaunchesExactlyOnce.Check());
             Add(laws, () => L406_AConfirmPutsThePreparationWindowFirstForEveryPeer.Check());
             Add(laws, () => L407_PostMissionResupplyIsFirstAndAsksOnAnEdge.Check());
+            Add(laws, () => L408_AFailedPrepareLeavesTheLocalCampaignsIdentity.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
 
@@ -2921,6 +2922,51 @@ namespace RailCheck
             if (!ReferenceEquals(DiffEngine.FragmentForWire(plain), plain))
                 yield return "L40 fragments-what-fits: a batch whose largest value is exactly at the cap was rebuilt — " +
                              "every ordinary tick then pays a copy of its whole changed list";
+
+            // ── the STRUCTURAL blob, same ceiling, same split ─────────────
+            // A create payload is a whole native graph and rides the SAME u16 envelope. It used to be
+            // handed to EncodeEnvelope whole: over 65535 B that THROWS, SendStructural swallowed it and
+            // returned normally, and EmitStructural then recorded the root in _prevRoots — the create is
+            // only ever derived from a root's ABSENCE from that set, so the entity was never sent to
+            // anyone again, for the rest of the session, after one log line.
+            var bigBlob = new byte[DiffEngine.MaxStructuralBlobBytes * 2 + 71];
+            new System.Random(11).NextBytes(bigBlob);
+            var blobFrames = DiffEngine.FragmentStructuralBlob(bigBlob);
+            if (blobFrames.Count < 2)
+                yield return "L40 structural-unsplit: a " + bigBlob.Length + " B structural blob left " +
+                             "FragmentStructuralBlob as " + blobFrames.Count + " frame(s) — it goes to " +
+                             "EncodeEnvelope whole, the encode throws on the u16 length field, and the root is " +
+                             "retired as SHIPPED without any client ever receiving the entity";
+            foreach (var f in blobFrames)
+                if (f.Length > DiffEngine.MaxStructuralBlobBytes)
+                {
+                    yield return "L40 structural-frame-oversized: a structural frame still carries " + f.Length +
+                                 " B (cap " + DiffEngine.MaxStructuralBlobBytes + ") — the envelope refuses it and " +
+                                 "the create is lost silently";
+                    break;
+                }
+            byte[] rebuilt = null;
+            for (int i = 0; i < blobFrames.Count; i++)
+                rebuilt = GenericApplier.Reassemble("U#4242", ushort.MaxValue, "#structural", blobFrames[i]);
+            if (rebuilt == null || !RailMeta.BytesEqual(rebuilt, bigBlob))
+                yield return "L40 structural-reassembly-lossy: the structural frames did not reassemble to the " +
+                             "host's exact blob — the client deserializes a corrupt entity graph instead of the " +
+                             "entity, which is worse than never creating it";
+            // A blob that FITS must ride whole: fragmenting it would tag every ordinary create with the
+            // fragment flag and route it through the reassembly buffer for nothing.
+            var smallBlob = new byte[DiffEngine.MaxStructuralBlobBytes];
+            var smallFrames = DiffEngine.FragmentStructuralBlob(smallBlob);
+            if (smallFrames.Count != 1 || !ReferenceEquals(smallFrames[0], smallBlob))
+                yield return "L40 structural-fragments-what-fits: a structural blob exactly at the cap was split — " +
+                             "every ordinary create then pays a copy and a buffered reassembly";
+
+            // …and the send must be able to SAY it failed, or the caller cannot help but retire the root.
+            var sendStructural = typeof(DiffEngine).GetMethod("SendStructural", AllMembers);
+            if (sendStructural == null || sendStructural.ReturnType != typeof(bool))
+                yield return "L40 structural-send-cannot-fail: DiffEngine.SendStructural " +
+                             (sendStructural == null ? "no longer resolves" : "returns void again") +
+                             " — it catches its own emit exception, so a caller with no result to read marks the " +
+                             "root shipped on a send that never happened";
 
             // ── the residual drop path: loud AND non-quiescent ────────────
             const uint dropSeq = 4242u;
@@ -10534,8 +10580,15 @@ namespace RailCheck
         // internal, not private: L131 asserts an ordering that CROSSES the assembly boundary (our SetTarget
         // before the game's StatusComponent.ApplyStatus), which Callees' one-assembly filter cannot express.
         internal static List<MethodBase> CalleeSequence(MethodBase m)
+            => CallSites(m).Select(s => s.Value).ToList();
+
+        /// <summary>The same walk as <see cref="CalleeSequence"/> but keeping each call's IL OFFSET, so a law
+        /// can ask WHERE a call sits — e.g. inside a finally region (MethodBody.ExceptionHandlingClauses is
+        /// expressed in the same offsets). L408 needs it: "the restore is invoked" and "the restore is
+        /// invoked on the throwing path" are different facts.</summary>
+        internal static List<KeyValuePair<int, MethodBase>> CallSites(MethodBase m)
         {
-            var seq = new List<MethodBase>();
+            var seq = new List<KeyValuePair<int, MethodBase>>();
             byte[] il = null;
             try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }
             if (il == null) return seq;
@@ -10544,6 +10597,7 @@ namespace RailCheck
             int i = 0;
             while (i < il.Length)
             {
+                int at = i;
                 short code = il[i++];
                 if (code == 0xFE)
                 {
@@ -10557,7 +10611,7 @@ namespace RailCheck
                 {
                     MethodBase callee = null;
                     try { callee = m.Module.ResolveMethod(BitConverter.ToInt32(il, i), typeArgs, methodArgs); } catch { }
-                    if (callee != null) seq.Add(callee);
+                    if (callee != null) seq.Add(new KeyValuePair<int, MethodBase>(at, callee));
                 }
                 i += size;
             }
