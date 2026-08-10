@@ -1289,6 +1289,15 @@ namespace Multiplayer.Network.Sync
             internal string SiteRef;
             internal string VehicleRef;
             internal string HostTriggerId;
+            /// <summary>Which <c>GeoscapeEventRecord.TriggerCount</c> THIS window is answered from —
+            /// <c>EventPopup.RaiseTriggerCount</c> read off the live record at arm time, the same number
+            /// <c>EventPopup</c> binds to the window itself. Without it the watch read a record left over
+            /// from an EARLIER trigger as this window's answer: live 2026-08-11, the host re-offered
+            /// <c>PROG_SY0_MISS</c> (<c>answeredFrom=#2</c>) and one client still held <c>Completed#1</c>
+            /// when the raise landed (<c>PP-Instance3 11348</c>) — it skipped the dialog and went straight
+            /// to the preparation screen, while the client whose <c>Reset#1</c> delta had already landed
+            /// (<c>PP-Instance2 11430</c>) got the dialog. Two peers, two stages, one raise.</summary>
+            internal int RaiseTriggerCount;
             /// <summary>One line per watch, not one per frame: Step polls from SyncEngine.Tick, so an
             /// unconditional "waiting for a map state" log would be a spew.</summary>
             internal bool PresentationDeferred;
@@ -1350,8 +1359,13 @@ namespace Multiplayer.Network.Sync
                                  "aircraft's Launch button");
                 return;
             }
+            var live = eventId == null ? null : EventPopup.LiveRecord(eventId, null);
             _watched[key] = new Watched
-            { EventId = eventId, SiteRef = siteRef, VehicleRef = vehicleRef, ResolvedAt = resolvedAt };
+            {
+                EventId = eventId, SiteRef = siteRef, VehicleRef = vehicleRef, ResolvedAt = resolvedAt,
+                RaiseTriggerCount = live == null ? 0
+                    : EventPopup.RaiseTriggerCount(live.State, live.TriggerCount)
+            };
         }
 
         /// <summary>PURE (RailCheck L197). Has the mission this window promised ARRIVED on this peer?
@@ -1423,7 +1437,13 @@ namespace Multiplayer.Network.Sync
                 var rec = EventPopup.LiveRecord(w.EventId, null);
                 choices = geo.EventSystem?.GetEventByID(w.EventId, canFail: true)?.GeoscapeEventData?.Choices;
                 idx = rec == null ? -1 : rec.SelectedChoice;
+                // ...FROM THIS WINDOW'S OWN TRIGGER. IsResolvedForRaise is the same trigger-count test
+                // EventPopup already uses to decide whether a window's buttons are frozen (L44); reusing it
+                // here is what stops a stale Completed record from an EARLIER trigger being read as the
+                // answer to a RE-OFFER (see Watched.RaiseTriggerCount).
                 recordResolved = rec != null && rec.State == GeoscapeEventRecordState.Completed &&
+                                 EventPopup.IsResolvedForRaise(rec.State, rec.TriggerCount,
+                                                               w.RaiseTriggerCount, false) &&
                                  choices != null && idx >= 0 && idx < choices.Count;
             }
             if (!AnswerIsIn(w.EventId, recordResolved)) return;  // still open on somebody's screen

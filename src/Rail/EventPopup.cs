@@ -1881,6 +1881,10 @@ namespace Multiplayer.Network.Sync
                     "decline closes ITS window only: no 0xB4 answer, no record resolution, the mission offer " +
                     "stays open for every other peer");
                 __instance.Context?.View?.FinishQueriedState();
+                // ...AND IT STAYS OPEN FOR THIS ONE TOO (2026-08-11). Closing the window is not retiring the
+                // offer: the game's own re-offer switch is EnableGeoscapeEvent (CompleteEvent:103-106), and
+                // without it neither menu row can ever come back (MissionReoffer's header has the measurement).
+                MissionReoffer.AfterDecline(ev.EventID, ev.Context?.Site);
                 return false;
             }
 

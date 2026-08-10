@@ -46,6 +46,9 @@ namespace Multiplayer.Network.Sync
     {
         internal const byte OpAnswer = 1;       // DWI2 + full occurrence + membership + expected revision + eventId + choiceIndex
         internal const byte OpSetVariable = 2;  // [name:string][value:i32]
+        internal const byte OpReoffer = 3;      // [siteRef:string][eventId:string][mode:u8]
+        internal const byte ReofferEnable = 0;  // a peer declined: re-enable the offer, raise nothing
+        internal const byte ReofferNow = 1;     // a peer clicked the site's re-entry row: re-offer it now
         private const uint DurableAnswerMagic = 0x32495744; // DWI2
 
         internal static void WriteDurableAnswer(BinaryWriter w, OccurrenceId occurrence, MembershipId membership,
@@ -166,6 +169,7 @@ namespace Multiplayer.Network.Sync
             {
                 [OpAnswer] = HandleAnswer,
                 [OpSetVariable] = HandleSetVariable,
+                [OpReoffer] = HandleReoffer,
             };
             IntentRail.Register(SurfaceIds.GeoEventIntent, "event", ops);
         }
@@ -175,9 +179,16 @@ namespace Multiplayer.Network.Sync
         /// the race it arbitrates is testable headless — RailCheck L27 calls it directly (an in-game-only
         /// arbiter is how v1's double-grants stayed invisible for a month). A reason is never blank: a
         /// silently eaten click is the bug class this family exists to kill.</summary>
+        /// <remarks>RESET IS OPEN, NOT FROZEN (2026-08-11). <c>GeoscapeEventRecord.IsFree</c> is literally
+        /// <c>_state == Reset</c> — it is the game's own "nobody has answered this" state, the one
+        /// <c>EnableGeoscapeEvent</c> writes and <c>GeoSite.HasActiveEncounter</c> reads. Since
+        /// <see cref="MissionReoffer.AfterDecline"/> parks a declined offer there, treating it as answered
+        /// refused every later START on an offer somebody had merely declined. Nothing is double-granted by
+        /// this: a Reset record carries no reward and no completion, and the two states that DO
+        /// (SelectedChoice/Completed, plus the migration twin) stay frozen.</remarks>
         internal static string Validate(GeoscapeEventRecordState state, int choiceIndex, int choiceCount)
         {
-            if (state != GeoscapeEventRecordState.Triggered)
+            if (state != GeoscapeEventRecordState.Triggered && state != GeoscapeEventRecordState.Reset)
                 return "already answered (record=" + state + ") — the first choice is frozen for everyone";
             if (choiceIndex < -1 || choiceIndex >= choiceCount)
                 return "choice index " + choiceIndex + " outside [-1," + choiceCount + ") — stale mirror or def mismatch";
@@ -224,7 +235,61 @@ namespace Multiplayer.Network.Sync
             return current == value ? "the host already has " + value + " — no state to change" : null;
         }
 
+        /// <summary>PURE (RailCheck L411). May a peer's DECLINE re-enable this offer for everyone, or why
+        /// not? Null = re-enable. The only refusals are "the host does not know this event" and "somebody
+        /// already took it" — an answered record must never be walked back to <c>Reset</c>, or the reward
+        /// gate (<see cref="Validate"/>) would reopen on an offer that has already been paid out.
+        /// A record that is ALREADY <c>Reset</c> accepts: <c>EnableGeoscapeEvent</c> is idempotent, and
+        /// refusing there would make the second decliner's menu row depend on the first one's timing.</summary>
+        internal static string ReofferRefusal(GeoscapeEventRecordState? state)
+        {
+            if (state == null) return "the host has no record for that event — nothing to re-enable";
+            if (state == GeoscapeEventRecordState.SelectedChoice || state == GeoscapeEventRecordState.Completed ||
+                state == GeoscapeEventRecordState.MigratedCompleted)
+                return "the offer is already answered on the host (record=" + state + ") — the mission itself " +
+                       "is the way back in, not a second offer";
+            return null;
+        }
+
         // ─── HOST: apply through the SAME native funnel (dedup/decode/reject = IntentRail) ─────
+
+        /// <summary>Re-offer relay (0xB4 op 3). The client's own doors into the stock re-entry path are
+        /// gated (see <see cref="MissionReoffer"/>), so the gesture is run HERE, by the host, through the
+        /// game's own calls — which broadcast to every peer as the ordinary raise, keeping all peers in one
+        /// stage. Nothing waits on any player (P13).</summary>
+        private static void HandleReoffer(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
+        {
+            string siteRef = ReadBoundedString(r), eventId = ReadBoundedString(r);
+            byte mode = r.ReadByte();
+            var geo = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>();
+            var es = geo?.EventSystem;
+            if (es == null)
+            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "no geoscape for the re-offer at " + siteRef); return; }
+
+            if (mode == ReofferEnable)
+            {
+                var rec = string.IsNullOrEmpty(eventId) ? null : es.GetEventRecord(eventId);
+                string refusal = ReofferRefusal(rec == null ? (GeoscapeEventRecordState?)null : rec.State);
+                EventPopup.BriefProbe(eventId, "reoffer-enabled", "peer " + senderPeerId + " declined — " +
+                    (refusal ?? "the offer is RE-ENABLED for every peer (EnableGeoscapeEvent), so the site's " +
+                                "own menu row comes back on each peer's open menu as an ES delta"));
+                if (refusal != null)
+                // NOT notifying (L123 arm (g)): re-enabling is a SIDE EFFECT of a decline the player already
+                // got what he asked for from — his window closed. An error box here would pop on the peer
+                // that just said "not now", for a row he has not tried to press.
+                { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, refusal, false, RecordScope); return; }
+                es.EnableGeoscapeEvent(eventId);
+                return;
+            }
+
+            var site = IdentityResolver.Resolve(geo, siteRef, null) as PhoenixPoint.Geoscape.Entities.GeoSite;
+            string why = MissionReoffer.HostReoffer(geo, site);
+            EventPopup.BriefProbe(siteRef, "reoffer-now", "peer " + senderPeerId + " clicked the site's re-entry " +
+                "row — " + (why ?? "the host ran the game's own re-offer; the window reaches every peer as one " +
+                                   "0xB6 raise, so no two peers end up in different stages"));
+            if (why != null)
+                IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, why, true, RecordScope);
+        }
 
         private static void HandleAnswer(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {

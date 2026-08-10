@@ -260,6 +260,12 @@ namespace RailCheck
                 // exact offer carrier deliberately stays open for retry, so without this line the click is dead.
                 "Multiplayer.Network.Sync.MissionSync.RejectDurableStart",
                 "Multiplayer.Network.Sync.EventSync.HandleAnswer",
+                // L411: a peer clicked the site's LIVE re-entry row and the host had nothing to re-offer
+                // (another peer took the mission, or the encounter record is no longer free). Co-op-invented
+                // exactly: single player cannot have a second peer consume the offer between the row being
+                // drawn and the click landing, so vanilla has no control to grey — the row is live and the
+                // click does nothing. The DECLINE side of the same handler rejects WITHOUT notify.
+                "Multiplayer.Network.Sync.EventSync.HandleReoffer",
                 // L146: two peers commanded ONE soldier and this peer lost the race. Purely co-op-invented —
                 // single player cannot produce a second commander, so vanilla has no control to grey and the
                 // player is left with a soldier that wound up and cancelled for no visible reason (measured:

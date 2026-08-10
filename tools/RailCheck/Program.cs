@@ -375,6 +375,7 @@ namespace RailCheck
             Add(laws, () => L408_AFailedPrepareLeavesTheLocalCampaignsIdentity.Check());
             Add(laws, () => L409_ASharedAnswerChargesTheWalletOnce.Check());
             Add(laws, () => L410_TheNewCampaignScreenStopsASaveCountdown.Check());
+            Add(laws, () => L411_ADeclinedOfferCanBeReoffered.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
 
@@ -5185,8 +5186,14 @@ namespace RailCheck
         private static IEnumerable<string> AnswerValidatorLaw()
         {
             const int count = 3;
+            // RESET LEFT THIS LIST 2026-08-11 and is now asserted OPEN by L411 arm (c). It never carried an
+            // answer: GeoscapeEventRecord.IsFree is literally `_state == Reset`, the state
+            // EnableGeoscapeEvent writes and GeoSite.HasActiveEncounter reads as "still offerable". Freezing
+            // it was harmless only while nothing parked a record there; MissionReoffer.AfterDecline now does,
+            // and the freeze refused every START on an offer somebody had merely declined. The three states
+            // that DO carry a reward stay frozen, which is all this law ever guarded.
             var frozen = new[] { GeoscapeEventRecordState.SelectedChoice, GeoscapeEventRecordState.Completed,
-                                 GeoscapeEventRecordState.MigratedCompleted, GeoscapeEventRecordState.Reset };
+                                 GeoscapeEventRecordState.MigratedCompleted };
 
             // An OPEN decision with a legal index must be accepted, or nobody can ever answer anything.
             foreach (var idx in new[] { -1, 0, count - 1 })
