@@ -42,6 +42,12 @@ hands.
   runnable mission".
 - **Returning from a mission no longer leaves a finished mission's window on screen**, and host and
   clients arrive at the geoscape with the same windows.
+- **A deployment window closes for everyone once the last aircraft flies away from the mission.**
+  Each player gets his own deployment window and reads it in his own time, but if the aircraft that
+  could actually deploy there leaves the site, the window was offering a landing nobody could make —
+  it now disappears on every player's screen, not just the one who moved the aircraft. The mission
+  itself stays on the map; fly back and it opens again. Previously only the *mission ending* closed
+  those windows, so an aircraft leaving left a dead window sitting on every other player's geoscape.
 - **A client no longer finishes site exploration on its own schedule.** Exploration timers were
   compared against the wrong clock, so a client could complete — or lose — an exploration the host
   never agreed to.
@@ -61,12 +67,27 @@ hands.
 - **The countdown panel's text fits inside it, and its Cancel button works.**
 - **The ready button can be hovered and clicked again.**
 
+### Saving and loading
+
+- **The mod no longer writes anything of its own into your campaign saves.** Your open windows are
+  saved and restored by the game itself, the way they always were before — so loading a save puts
+  you back with the game's own window queue rather than with a half-finished set of windows the mod
+  remembered separately. Two side effects you may notice: answering a dialog no longer writes extra
+  saves behind your back, and a long campaign's save files stop growing the way they did.
+- **Saves written by an earlier test build still load.** They carry a leftover section the mod no
+  longer understands; it is skipped rather than refused.
+
 ### Known issues / unverified
 
 This build is published for testing. Everything above has been built and verified against the
 RailCheck law harness, but only the campaign-start fixes and item transfer have been confirmed in a
 live three-player session. The rest — animation timing above all, since it changes the path of every
 action in combat — still needs a real game.
+
+The deployment-window and save-state changes above are **new and completely unplayed**. Nobody has
+loaded a save or flown an aircraft off a mission site with this build. If you are testing one thing,
+test those: park an aircraft on a mission, open the deployment window on two machines, fly it away,
+and check the window goes on both.
 
 If the animation change misbehaves, it is a single revert: nothing else depends on it.
 
@@ -75,8 +96,10 @@ definitions the other side cannot resolve.
 
 ### Internals
 
-67 new law files were added to the RailCheck harness to hold these fixes down, bringing it to 134
-file-backed laws plus 60 inline checks (194 total).
+The RailCheck law harness now stands at 206 file-backed laws plus 60 inline checks (266 total). The
+durable-window work that shipped through this release was cut back afterwards: ten laws covering a
+persistence and reconnect design that was never wired were deleted, and one law was added to hold
+down the deployment-window rule above.
 
 ## 0.9.5-beta
 

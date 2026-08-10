@@ -1,5 +1,40 @@
 # Durable Window Inbox Implementation Plan
 
+> ## SUPERSEDED 2026-08-10 — do not execute
+>
+> **Do not resume this plan.** It is kept as the record of a real decision, not as work to finish.
+> Read `HANDOFF.md` §1-§3 first; it describes what actually ships at `main`.
+>
+> - **What landed:** Tasks 1-12, commits `93fed1a..bef42ad` on `main`, archived as branch
+>   `dwi-archive` (HEAD `bef42ad`). Task 13 exists only as the unfinished `dwi-task13-wip`
+>   (`d855528`). Tasks 13-18 were never executed.
+> - **What was then reverted:** commits `a13c63c`, `da02dce`, `4234b06`, `9624919`, `656d0cd`,
+>   `ec61557`, `ed1d4c0` on `main`, `-4542` lines net. The campaign-save root, the whole binary save
+>   codec, the journal and its compaction, the effect-transaction/checkpoint machinery, and all
+>   membership-epoch bookkeeping are **gone**. The mod writes nothing into any campaign save.
+> - **Why:** an audit against the shipped assemblies found that 4.5 of the owner's five actual
+>   requirements already worked before this plan, and that large parts of what it specified were dead
+>   or actively harmful — two full campaign saves per dialog, a host that could freeze forever,
+>   quadratically growing saves, and `Enroll`/`EndMembership` with zero production callers against a
+>   reconnect feature this mod does not have.
+> - **What of this plan still lives, and matters:** the presentation **scheduler**
+>   (`DurableInboxEngine.TryPresentNext`), the geoscape gate `DurableWindowRegistry.MayPresent`, the
+>   priority classification `PriorityOf` / `PriorityOccurrenceFamilies`, the ordering at
+>   `WindowOrder.DurablePriorityHead`, and the **carrier registry** with `RemoveAllCarriers` and
+>   `RetryTerminalTeardown`. These serve owner requirements 1, 3 and 4 and are load-bearing.
+> - **Requirements that survive from the 26:** the delivery/queueing and geoscape-gate rules, the
+>   priority-interrupt rules, and the deployment source-revalidation teardown. The **durability
+>   across native campaign save/load** requirement (and everything downstream of it — snapshot pages,
+>   journal, compaction, quarantine) is **withdrawn**; the native queue is the source of truth again.
+>   Every **membership-epoch / reconnect** requirement is withdrawn: if reconnect is ever added, all
+>   windows reset, with no history.
+> - **Laws:** L376, L377, L379, L381, L383, L394, L397, L398, L399 and L400 are DELETED; **L402**
+>   (`ADepartedLastSourceClosesTheWindowEverywhere`) is new. `tools/law-count.txt` 215 → 206 files.
+>   See `docs/laws.md:372` and `HANDOFF.md` §5.
+>
+> Note also that the execution instructions below reference `E:\DEV\PhoenixPoint\Multiplayer2`, which
+> is not this working copy.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:executing-plans`. Execute Tasks 1-18 strictly in order; never parallelize edits to shared files.
 
 **Goal:** Replace ephemeral Geoscape window delivery with a host-authoritative, campaign-save-persisted, per-player durable inbox for actively enrolled players that survives tactical play and native campaign save/load while retaining native rendering, immediate open-UI repaint, and progress when every other player is AFK. Disconnect ends the current epoch; reconnect enrolls a new epoch without prior windows.

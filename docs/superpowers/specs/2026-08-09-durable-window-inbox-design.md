@@ -1,5 +1,55 @@
 # Durable per-player window inbox — approved design
 
+> ## SUPERSEDED 2026-08-10 — read `HANDOFF.md` before trusting anything below
+>
+> This design was approved, partly built (plan Tasks 1-12, `93fed1a..bef42ad`, archived as branch
+> `dwi-archive` HEAD `bef42ad`), and then largely reverted by `a13c63c`, `da02dce`, `4234b06`,
+> `9624919`, `656d0cd`, `ec61557` and `ed1d4c0` on `main` — `-4542` lines net. It is kept because it
+> is the record of a real decision. It is **not** a description of the shipping system.
+>
+> The document was written against 26 numbered requirements. The owner's actual requirements are
+> five, and an audit grounded in the shipped assemblies found that **4.5 of the five already worked
+> before any of this was built**. `HANDOFF.md` §1 maps each of the five to its `file:line`.
+>
+> **Withdrawn from this design — the code is deleted:**
+>
+> - **Every clause about surviving native campaign save/load.** The campaign save root
+>   (`Multiplayer.DurableInbox/v1`), the `GetObjectsToWrite` postfix, the binary codec, the journal,
+>   compaction/`CompactionProof`/`DurableReferenceClass`, the restore/reconcile path, quarantine of
+>   unresolved entries, and the bounded snapshot pages are all gone. **The mod writes nothing into
+>   any save.** The native `GeoscapeViewSwitchQuery` queue is the source of truth again, which the
+>   "Native pending" vocabulary entry below explicitly denied. Concretely: strike every "restore and
+>   teardown" cell in the window taxonomy that says a state survives save/load.
+> - **The entire membership-epoch model.** "Durable player identity … paired with a membership epoch
+>   for each join/rejoin tenure", "Disconnect ends the current epoch; reconnect enrolls a new epoch",
+>   the creation-set entitlement wording, and `MemberPresence`. Reconnect does not exist in this mod;
+>   `Enroll`/`EndMembership` never had a production caller. `MembershipId` is now the player guid
+>   alone. If reconnect is ever added, all windows reset, with no history.
+> - **The shared-effect transaction.** The campaign-checkpoint backend, the transaction coordinator
+>   and barrier, and `EventRewardTransaction`. Requirement 2 ("first valid answer wins, everyone else
+>   read-only") is and always was delivered by the game's own `GeoscapeEventRecord` freeze —
+>   `EventPopup.IsFrozen` / `FreezeChoiceButtons` — which never consulted this ledger. The
+>   transaction bought nothing and cost two full campaign saves per dialog plus a host that could
+>   freeze forever.
+>
+> **Still live and load-bearing — do not delete these while cleaning up:** the presentation scheduler
+> (`DurableInboxEngine.TryPresentNext`), the geoscape display gate `DurableWindowRegistry.MayPresent`,
+> the window taxonomy's *classification* half (`PriorityOf` / `PriorityOccurrenceFamilies`, and the
+> exhaustiveness rule, now held by L393 derived from `RoutedPresentations` rather than a hand-written
+> table), the ordering at `WindowOrder.DurablePriorityHead`, the **carrier** concept with
+> `RemoveAllCarriers` / `RetryTerminalTeardown`, and the deployment source-revalidation teardown. They
+> serve owner requirements 1, 3 and 4.
+>
+> **What this design got right and nobody else had:** the "Exceptional mission offer" and
+> "DeploymentPreparing" rows below both name *"revalidation proving no valid source remains
+> (including a mission uniquely bound to a departed source)"* as a global invalidation. That was the
+> one genuine gap, and it was closed by `ed1d4c0` — not by building the mechanism (it existed and
+> L388 guarded it) but by deleting one redundant conjunct in the selection filter. See `HANDOFF.md` §3
+> and law `L402`.
+>
+> **Law numbering:** the `DWI-01..DWI-26 -> L376..L401` allocation is recorded in `docs/laws.md:372`.
+> L376, L377, L379, L381, L383, L394, L397, L398, L399 and L400 are DELETED. L402 is new.
+
 ## Status and scope
 
 - Design only; no implementation decisions below authorize code changes.
