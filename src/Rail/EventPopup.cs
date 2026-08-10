@@ -480,6 +480,44 @@ namespace Multiplayer.Network.Sync
             return false;
         }
 
+        /// <summary>PURE (RailCheck L404 arm (e)). THE MISSION-START CONFIRMATION AS THE GAME ACTUALLY
+        /// RAISES IT — the seam b63e1aa missed.
+        ///
+        /// That commit carved the family out of <c>UIStateGeoModal</c>
+        /// (<see cref="GeoWindowCoverage.IsMissionStartConfirmationClass"/>, matched on
+        /// <c>GeoscapeView.GetMissionBriefModal</c>:1724). MEASURED in the 22:42:36-22:45:38 playtest that
+        /// ran that very build: NOT ONE <c>UIStateGeoModal</c> was entered on any of the three peers, while
+        /// the window the owner was actually looking at — "НАЧАТЬ / ОТМЕНА" for <c>PROG_AN0_MISS</c> — came
+        /// up as a GEOSCAPE EVENT (host raise, its log 5924; client mirrors, theirs 4287/4266). So the
+        /// carve-out was never reached and this window kept shared first-wins: the answering peer's choice
+        /// greyed every other peer's buttons (<see cref="FreezeChoiceButtons"/>) and their own click was
+        /// replayed instead of answered. The second client sat in <c>UIStateGeoscapeEvent</c> from 121,0 s
+        /// to 179,2 s and only left it when the host quit.
+        ///
+        /// THE CLASS IS THE GAME'S, NOT A LIST OF OURS, exactly as in the modal twin: any window a peer can
+        /// answer with "enter this mission" is one. TFTV and DLC content inherit it for free because the
+        /// question is asked of the def's own <c>OutcomeStartMission.MissionTypeDef</c>
+        /// (<see cref="StartsMission"/>) — the same test <see cref="MissionArrivalNav"/> already arms on.</summary>
+        internal static bool NeverFrozenClass(bool anyChoiceStartsMission) => anyChoiceStartsMission;
+
+        /// <summary>The live question. <see cref="NeverFrozenClass"/> over this window's own choices.</summary>
+        internal static bool IsMissionStartConfirmationEvent(GeoscapeEventData data) =>
+            NeverFrozenClass(AnyChoiceStartsMission(data));
+
+        // DIAGNOSTIC, 2026-08-10 — REMOVE WHEN THE MISSION-BRIEF REPORT IS CLOSED.
+        // Same convention as RevealInputLock.ProbeInputDispatch: static verification passed twice while the
+        // game stayed broken, so the runtime says which family a window matched, whether the per-peer
+        // carve-out applied and how a click ended. Deduped per (event, phase) — these seams are polled.
+        private static readonly HashSet<string> _briefProbed = new HashSet<string>();
+
+        internal static void BriefProbe(string eventId, string phase, string detail)
+        {
+            var key = (eventId ?? "?") + "|" + phase;
+            if (_briefProbed.Count > 256) _briefProbed.Clear();
+            if (!_briefProbed.Add(key)) return;
+            Debug.Log("[MP][brief] " + phase + " '" + (eventId ?? "?") + "' — " + detail);
+        }
+
         /// <summary>Does this choice carry a REAL outcome beyond declining? Walked GENERICALLY over the
         /// outcome's public fields rather than against a hand-listed set: <c>GeoEventChoiceOutcome</c> has
         /// ~25 payload fields and DLCs add more, and a list that silently goes stale would start classifying
@@ -1247,6 +1285,17 @@ namespace Multiplayer.Network.Sync
             var choices = ev.EventData?.Choices;
             int i = rec.SelectedChoice;
             if (choices != null && i >= 0 && i < choices.Count) winner = choices[i];
+            // THE PER-PEER MISSION-START FAMILY IS NEVER FROZEN (owner 2026-08-10, "без блокировки выбора").
+            // This is the one gate that has to know: it feeds the freeze PAINT (FreezeChoiceButtons:1165 greys
+            // every losing button), the replay (ResolutionIsNotOurs) and RepaintDialog's auto-close. Exempting
+            // it here leaves every peer's copy fully clickable no matter who answered first.
+            if (IsMissionStartConfirmationEvent(ev.EventData))
+            {
+                BriefProbe(ev.EventID, "freeze-skipped", "per-peer mission-start family — another peer's answer " +
+                           "(choice " + i + ") locks NOTHING on this peer; every button stays live");
+                winner = null;
+                return false;
+            }
             return true;
         }
 
@@ -1789,10 +1838,20 @@ namespace Multiplayer.Network.Sync
             // (:562-567 and :580 → SelectChoice:600).
             if (ev.IsCompleted && choice != null && choice.Outcome == null && choice.Requirments == null) return true;
 
+            // PER-PEER MISSION-START CONFIRMATION (owner 2026-08-10). Every peer answers its OWN copy: no
+            // replay of anybody else's choice onto it, and a decline stays LOCAL — it resolves nothing shared,
+            // so one player saying "not now" can never take the mission away from the rest (the 2026-08-08
+            // report, in the seam the game really uses). The START side is unchanged and stays
+            // host-authoritative: the host runs the native funnel, a client relays the 0xB4 answer, and the
+            // launch behind it is single by MissionSync.Validate / MissionStartAlreadyCommitted (L405).
+            // ponytail: a NON-mission choice in this family grants nothing to anyone, even if its def carries
+            // a reward — upgrade to relaying reward-only declines if such an event ever turns up.
+            bool perPeer = EventPopup.IsMissionStartConfirmationEvent(ev.EventData);
+
             // Decided elsewhere (the game at trigger, or the peer that won the race): show the RESULT PAGE
             // rather than eat the click. Peer-symmetric — a losing HOST must not pay for a choice it did not
             // get either, and that charge happens two calls before any funnel EventCompleteArbiter guards.
-            if (EventPopup.ResolutionIsNotOurs(ev, out var winner))
+            if (!perPeer && EventPopup.ResolutionIsNotOurs(ev, out var winner))
             {
                 // The native body below this line is what NEVER RUNS on this peer — including
                 // SelectChoice:612's LaunchMission, the one call that carries a mission-start encounter to the
@@ -1809,8 +1868,28 @@ namespace Multiplayer.Network.Sync
                 return false;
             }
 
+            // A CANCEL on the per-peer family: local on EVERY peer, host included. Nothing is relayed and no
+            // record is resolved, so the offer stays open for whoever still wants to take it. Closed with the
+            // view's own FinishQueriedState — the same exit the replay arm above uses when it has no page to
+            // show — deliberately NOT the module's FinishEncounter, whose postfix (MissionEncounterNav) would
+            // read another peer's winning answer off the record and drag this one to the squad screen it just
+            // declined. The squad screen still reaches every peer that DOES want it, by itself and with no
+            // click, through MissionArrivalNav's state watch (no quorum, P13).
+            if (perPeer && !EventPopup.StartsMission(choice))
+            {
+                EventPopup.BriefProbe(ev.EventID, "cancel-local", "per-peer mission-start family — this peer's " +
+                    "decline closes ITS window only: no 0xB4 answer, no record resolution, the mission offer " +
+                    "stays open for every other peer");
+                __instance.Context?.View?.FinishQueriedState();
+                return false;
+            }
+
             if (IntentRail.ShouldRunNative())
             {
+                if (perPeer)
+                    EventPopup.BriefProbe(ev.EventID, "start-native", "per-peer mission-start family on the " +
+                        "peer that owns resolutions — SelectChoice:598-613 runs natively, :612 opens this " +
+                        "peer's squad screen and the launch is host-authoritative");
                 if (SyncApplyScope.Active) return true;
                 return !EventSync.TryHostLocalDurableAnswer(__instance, ev, choice);
             }
@@ -1841,6 +1920,16 @@ namespace Multiplayer.Network.Sync
             IntentRail.Send(SurfaceIds.GeoEventIntent, EventSync.OpAnswer, "answer '" + id + "' choice=" + index,
                             w => EventSync.WriteDurableAnswer(w, occurrence, entry.Membership,
                                 entry.LifecycleRevision, id, index));
+            // The per-peer family gets no result page and no freeze, so nothing downstream would ever close
+            // this peer's own copy — the answer is sent, the window is this peer's to dismiss. The squad
+            // screen arrives on its own (MissionArrivalNav) the moment the host's ActiveMission lands here.
+            if (perPeer)
+            {
+                EventPopup.BriefProbe(id, "start-relayed", "per-peer mission-start family on a client — 0xB4 " +
+                    "answer sent (choice " + index + ") and this peer's own window closed; the launch is the " +
+                    "host's to make, exactly once");
+                __instance.Context?.View?.FinishQueriedState();
+            }
             return false;
         }
     }

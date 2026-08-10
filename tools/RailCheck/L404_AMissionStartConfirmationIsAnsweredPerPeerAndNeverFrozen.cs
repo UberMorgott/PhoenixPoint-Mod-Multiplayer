@@ -39,10 +39,15 @@ namespace RailCheck
     ///   (d) <c>start-answer-was-blocked</c> — "без блокировки выбора": a Confirm on this class RUNS for a
     ///       peer whose offer never resolved, and a non-Confirm never runs the native
     ///       <c>GeoMission.Cancel</c> arm. A peer is never locked out of answering its own copy.
-    ///   (e) <c>freeze-can-reach-the-start-family</c> — <c>EventPopup.IsFrozen</c> is the shared first-wins
-    ///       lock and its subject is a <c>GeoscapeEvent</c>. A mission-start confirmation carries a
-    ///       <c>GeoMission</c>, so the freeze path cannot name it; if that parameter ever widens, the
-    ///       read-only lock the owner ruled out becomes reachable.
+    ///   (e) <c>freeze-can-reach-the-start-family</c> — RE-AIMED 2026-08-10. The family is ALSO raised as a
+    ///       plain geoscape EVENT (a choice whose <c>OutcomeStartMission.MissionTypeDef</c> is set), and that
+    ///       is the form the player actually meets: in the 22:42:36-22:45:38 playtest of b63e1aa itself no
+    ///       <c>UIStateGeoModal</c> was entered on any peer while <c>PROG_AN0_MISS</c> came up as an event on
+    ///       all three, and the second client sat in <c>UIStateGeoscapeEvent</c> from 121,0 s to 179,2 s
+    ///       behind buttons another peer's answer had greyed. So the arm no longer asserts that
+    ///       <c>EventPopup.IsFrozen</c> cannot NAME the family — it asserts that IsFrozen EXEMPTS it
+    ///       (<c>EventPopup.NeverFrozenClass</c>), that the exemption is wired into IsFrozen and into
+    ///       <c>EventChoiceClientLock.Prefix</c>, and that it does not spread to any other event.
     ///   (f) <c>wiring-dropped</c> — <c>PerPeerModalAnswer.Prefix</c> actually calls both
     ///       <c>IsMissionStartConfirmation</c> and <c>MissionStartAlreadyCommitted</c>. A pure predicate
     ///       nobody calls is a law that checks nothing (the L394 trap).
@@ -64,8 +69,10 @@ namespace RailCheck
             var runs = typeof(PerPeerModalAnswer).GetMethod("Runs", AllMembers);
             var prefix = typeof(PerPeerModalAnswer).GetMethod("Prefix", AllMembers);
             var frozen = typeof(EventPopup).GetMethod("IsFrozen", AllMembers);
+            var neverFrozen = typeof(EventPopup).GetMethod("NeverFrozenClass", AllMembers);
+            var eventFamily = typeof(EventPopup).GetMethod("IsMissionStartConfirmationEvent", AllMembers);
             if (startClass == null || perPeerClass == null || live == null || runs == null ||
-                prefix == null || frozen == null)
+                prefix == null || frozen == null || neverFrozen == null || eventFamily == null)
             {
                 yield return "L404 premise-changed: one of GeoWindowCoverage.{IsMissionStartConfirmationClass," +
                              "IsPerPeerAnswerClass,IsMissionStartConfirmation}, PerPeerModalAnswer.{Runs,Prefix} " +
@@ -154,14 +161,44 @@ namespace RailCheck
                              "start committed no longer reaches LaunchMission:1043. That is the legacy path " +
                              "every non-durable brief still rides.";
 
-            // ── (e) the shared first-wins freeze cannot name this family ────────────────────────────
-            var frozenParams = frozen.GetParameters();
-            if (frozenParams.Length == 0 || frozenParams[0].ParameterType != typeof(GeoscapeEvent))
-                yield return "L404 freeze-can-reach-the-start-family: EventPopup.IsFrozen's subject is no " +
-                             "longer a GeoscapeEvent (" + (frozenParams.Length == 0 ? "<none>" :
-                             frozenParams[0].ParameterType.Name) + "). That predicate IS the shared first-wins " +
-                             "read-only lock (EventPopup.cs:1225, painted by FreezeChoiceButtons:1150); a " +
-                             "mission-start confirmation carries a GeoMission and must stay unreachable from it.";
+            // ── (e) the shared first-wins freeze EXEMPTS this family ────────────────────────────────
+            // RE-AIMED 2026-08-10. This arm used to assert that IsFrozen "cannot name" the family, on the
+            // reasoning that a start confirmation carries a GeoMission and IsFrozen's subject is a
+            // GeoscapeEvent. THAT WAS THE WRONG SUBJECT, and it is why L404 stayed green over a game that
+            // was broken: the window the player is actually shown for "НАЧАТЬ / ОТМЕНА" is raised as a
+            // GEOSCAPE EVENT, not as a UIStateGeoModal — MEASURED in the 22:42:36-22:45:38 run of b63e1aa
+            // itself, where no UIStateGeoModal was entered on any peer and PROG_AN0_MISS came up as an event
+            // on all three. The freeze DOES reach the family; what the owner's ruling requires is that it
+            // step aside there.
+            if (!EventPopup.NeverFrozenClass(true))
+                yield return "L404 freeze-can-reach-the-start-family: a geoscape-event window with a " +
+                             "mission-starting choice is frozen again. FreezeChoiceButtons then greys every " +
+                             "losing button on every peer that did not answer first — the reported symptom: " +
+                             "the client's copy is unclickable and the host's pick is locked in on it.";
+            if (EventPopup.NeverFrozenClass(false))
+                yield return "L404 start-family-overreaches: a window with NO mission-starting choice is now " +
+                             "exempt from the freeze too, so ordinary story events lost shared first-wins.";
+            var frozenCallees = Program.Callees(frozen, typeof(EventPopup).Assembly).ToArray();
+            if (!frozenCallees.Any(c => c.Name == "IsMissionStartConfirmationEvent"))
+                yield return "L404 wiring-dropped: EventPopup.IsFrozen no longer asks " +
+                             "IsMissionStartConfirmationEvent, so the exemption is a pure function nothing " +
+                             "reaches and every arm above is green over a dead rule (the L394 trap).";
+            var clickPrefix = typeof(EventChoiceClientLock).GetMethod("Prefix", AllMembers);
+            if (clickPrefix == null)
+                yield return "L404 premise-changed: EventChoiceClientLock.Prefix is gone, so the per-peer " +
+                             "answer arm for the geoscape-event mission-start family has no subject.";
+            else
+            {
+                var clickCallees = Program.Callees(clickPrefix, typeof(EventPopup).Assembly).ToArray();
+                if (!clickCallees.Any(c => c.Name == "IsMissionStartConfirmationEvent"))
+                    yield return "L404 wiring-dropped: EventChoiceClientLock.Prefix no longer asks " +
+                                 "IsMissionStartConfirmationEvent, so a peer's click on its own copy is back " +
+                                 "on the shared path — replayed, or refused as already answered.";
+                if (!clickCallees.Any(c => c.Name == "StartsMission"))
+                    yield return "L404 start-answer-was-blocked: EventChoiceClientLock.Prefix no longer " +
+                                 "separates the mission-starting choice from the decline, so either a cancel " +
+                                 "resolves the offer for the whole team or a Confirm never reaches the host.";
+            }
 
             // ── (f) the predicates are actually wired into the answer path ──────────────────────────
             var callees = Program.Callees(prefix, typeof(MissionSync).Assembly).ToArray();
