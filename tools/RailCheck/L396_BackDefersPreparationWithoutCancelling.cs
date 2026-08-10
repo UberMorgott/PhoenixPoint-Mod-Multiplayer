@@ -185,10 +185,23 @@ namespace RailCheck
             var beginToken = typeof(NativeRaiserToken.DeploymentCapture).GetMethod("BeginExplicitReentry", All);
             if (AnyCalls(typeof(MissionSync), beginToken) || AnyCalls(typeof(EventSync), beginToken))
                 yield return "L396 automatic-MissionSync-or-EventSync-path-can-mint-an-explicit-user-token";
-            var tokenProducers = typeof(NativeRaiserToken).Assembly.GetTypes()
-                .SelectMany(x => x.GetMethods(All)).Where(x => Calls(x, beginToken)).ToArray();
+            // DECLARED methods only. GetMethods without DeclaredOnly also hands back every INHERITED
+            // method — System.Enum.ToString, once per enum type in this assembly — and Calls() is a raw
+            // scan for the target's four metadata-token BYTES anywhere in a method body, not an IL
+            // decode. Adding any member anywhere in the mod renumbers every metadata token, so the
+            // pattern eventually lands inside a BCL body this sweep never meant to read: it did, and
+            // thirty-five enums each reported themselves as a producer of a token only our own patch
+            // class can mint. The question the law asks is about code WE declare; ask only about that.
+            var ownAssembly = typeof(NativeRaiserToken).Assembly;
+            var tokenProducers = ownAssembly.GetTypes()
+                .SelectMany(x => x.GetMethods(All | BindingFlags.DeclaredOnly))
+                .Where(x => Calls(x, beginToken)).ToArray();
             if (tokenProducers.Length != 1 || tokenProducers[0].DeclaringType != typeof(NativeRaiserToken.ExplicitDeploymentInput))
-                yield return "L396 explicit-user-token-has-a-producer-outside-the-grounded-LaunchMissionAbility-input";
+                // Name them: a byte-scan false positive is indistinguishable from a real second producer
+                // until you can see which method it claims, and that is the difference between a five-
+                // minute diagnosis and an afternoon.
+                yield return "L396 explicit-user-token-has-a-producer-outside-the-grounded-LaunchMissionAbility-input: " +
+                             string.Join(", ", tokenProducers.Select(x => x.DeclaringType.FullName + "." + x.Name));
             if (Calls(prefix, typeof(GeoMission).GetMethod("Cancel", All)))
                 yield return "L396 Back-deferral-directly-called-mission-Cancel";
 
@@ -207,10 +220,12 @@ namespace RailCheck
                 if (il[i] == token[0] && il[i + 1] == token[1] && il[i + 2] == token[2] && il[i + 3] == token[3]) return true;
             return false;
         }
+        // DeclaredOnly for the same reason the producer sweep above carries it: an inherited BCL body is
+        // not this type's code, and Calls() is a byte scan that will eventually find the token in one.
         private static bool AnyCalls(Type type, MethodInfo target)
         {
             if (type == null || target == null) return false;
-            if (type.GetMethods(All).Any(x => Calls(x, target))) return true;
+            if (type.GetMethods(All | BindingFlags.DeclaredOnly).Any(x => Calls(x, target))) return true;
             return type.GetNestedTypes(All).Any(x => AnyCalls(x, target));
         }
 
