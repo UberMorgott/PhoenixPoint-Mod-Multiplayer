@@ -40,7 +40,7 @@ namespace RailCheck
                 !checkpoint.Equals(decoded.Get(ordinary, member).Checkpoint))
                 yield return "L380 suspended-checkpoint-was-not-durable: " + refusal;
             var currentCanonical = legacyCanonical(entries[0], member);
-            var oldCanonical = new byte[currentCanonical.Length - 21];
+            var oldCanonical = new byte[currentCanonical.Length - 37];
             Buffer.BlockCopy(currentCanonical, 9, oldCanonical, 0, oldCanonical.Length);
             HostLedger oldDecoded; string oldRefusal;
             if (!DurableInboxCodec.TryDecodeLedger(oldCanonical, out oldDecoded, out oldRefusal) ||
@@ -50,7 +50,7 @@ namespace RailCheck
                 1, 0, new HostOrderKey(1, ordinary.TriggerId));
             var collisionCurrent = new HostLedger(new[] { collisionEntry }, 0x02D2,
                 new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active) }).EncodeCanonical();
-            var collisionLegacy = new byte[collisionCurrent.Length - 21];
+            var collisionLegacy = new byte[collisionCurrent.Length - 37];
             Buffer.BlockCopy(collisionCurrent, 9, collisionLegacy, 0, collisionLegacy.Length);
             HostLedger collisionDecoded; string collisionRefusal;
             if (!DurableInboxCodec.TryDecodeLedger(collisionLegacy, out collisionDecoded, out collisionRefusal) ||
@@ -58,7 +58,7 @@ namespace RailCheck
                 yield return "L380 legacy-revision-02d2-collided-with-new-framing: " + collisionRefusal;
             var magicCurrent = new HostLedger(new[] { collisionEntry }, 0x33495744,
                 new[] { new KeyValuePair<MembershipId, MemberPresence>(member, MemberPresence.Active) }).EncodeCanonical();
-            var magicLegacy = new byte[magicCurrent.Length - 21];
+            var magicLegacy = new byte[magicCurrent.Length - 37];
             Buffer.BlockCopy(magicCurrent, 9, magicLegacy, 0, magicLegacy.Length);
             HostLedger magicDecoded; string magicRefusal;
             if (!DurableInboxCodec.TryDecodeLedger(magicLegacy, out magicDecoded, out magicRefusal) ||

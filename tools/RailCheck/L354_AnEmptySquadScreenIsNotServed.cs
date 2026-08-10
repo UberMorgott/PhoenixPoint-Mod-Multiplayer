@@ -82,7 +82,8 @@ namespace RailCheck
             var servable = refresh.GetMethod("IsServable", All);
             var postfix = refresh.GetMethod("Postfix", All);
             var repaint = close.GetMethod("RepaintDeploymentScreen", All);
-            if (servable == null || postfix == null || repaint == null)
+            var nativeRefresh = close.GetMethod("RunNativePreparationRefresh", All);
+            if (servable == null || postfix == null || repaint == null || nativeRefresh == null)
             {
                 yield return "L354 premise-changed: DeploymentRosterRefresh.IsServable / .Postfix or " +
                              "DeploymentWindowClose.RepaintDeploymentScreen no longer resolve whole. Those three " +
@@ -112,6 +113,9 @@ namespace RailCheck
                                  "aircraft on a site (measured live) one flying off must take its soldiers off " +
                                  "this screen and out of the landing, and the LAST one leaving must close it.";
             var repaintIl = CalleeNames(repaint);
+            repaintIl.UnionWith(CalleeNames(nativeRefresh));
+            foreach (var oneHop in Program.Callees(repaint, mod).Where(c => c != null))
+                repaintIl.UnionWith(CalleeNames(oneHop));
             foreach (var needed in new[] { "Init", "Invoke" })
                 if (!repaintIl.Contains(needed))
                     yield return "L354 native-tail-skipped: the repaint no longer reaches the game's own " +

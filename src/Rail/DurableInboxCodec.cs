@@ -9,13 +9,16 @@ namespace Multiplayer.Network.Sync
 {
     internal static class DurableInboxCodec
     {
-        private const byte Schema = 5;
+        private const byte MessageSchema = 5;
+        private const byte LedgerSchema = 6;
         private const uint LedgerMagic = 0x34495744; // DWI4, cannot alias the first four bytes of a framed ledger
         private const uint LegacyLedgerMagic = 0x33495744; // DWI3
         private const uint LedgerTail = 0xCCA6A8BB;
         internal const byte DeploymentTransitionOp = 0x44;
+        internal const byte PreparationEditOp = DeploymentTransitionOp;
         private const byte DeploymentTransitionSchema = 1;
         private const uint DeploymentTransitionTail = 0x44915AC3;
+        private const uint PreparationEditTail = 0x45A15AC3;
         private const int MaxStringBytes = 4096;
         private const int MaxCollection = 1024;
         private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
@@ -26,7 +29,7 @@ namespace Multiplayer.Network.Sync
             using (var stream = new MemoryStream())
             using (var writer = new BinaryWriter(stream, StrictUtf8))
             {
-                writer.Write(Schema);
+                writer.Write(MessageSchema);
                 writer.Write((byte)message.Kind);
                 WriteOccurrence(writer, message.Occurrence);
                 WriteOccurrence(writer, message.ResultId.Occurrence);
@@ -66,7 +69,7 @@ namespace Multiplayer.Network.Sync
                 using (var reader = new BinaryReader(stream, StrictUtf8))
                 {
                     byte schema = reader.ReadByte();
-                    if (schema != 1 && schema != 2 && schema != 3 && schema != Schema)
+                    if (schema != 1 && schema != 2 && schema != 3 && schema != MessageSchema)
                         throw new InvalidDataException("unknown schema");
                     var kind = (InboxMessageKind)reader.ReadByte();
                     if (!Enum.IsDefined(typeof(InboxMessageKind), kind)) throw new InvalidDataException("unknown kind");
@@ -154,12 +157,14 @@ namespace Multiplayer.Network.Sync
                     if (entry.SupersededBy.HasValue) WriteOccurrence(writer, entry.SupersededBy.Value);
                     writer.Write(entry.Predecessor.HasValue);
                     if (entry.Predecessor.HasValue) WriteOccurrence(writer, entry.Predecessor.Value);
+                    writer.Write(entry.PreparationRevision);
+                    writer.Write(entry.PreparationAuthorityRevision);
                 }
                 body = stream.ToArray();
             }
             using (var framed = new MemoryStream()) using (var writer = new BinaryWriter(framed, StrictUtf8))
             {
-                writer.Write(LedgerMagic); writer.Write(Schema); writer.Write(body.Length); writer.Write(body);
+                writer.Write(LedgerMagic); writer.Write(LedgerSchema); writer.Write(body.Length); writer.Write(body);
                 writer.Write(Crc32.Compute(body)); writer.Write(LedgerTail); return framed.ToArray();
             }
         }
@@ -197,6 +202,42 @@ namespace Multiplayer.Network.Sync
             { refusal=ex.Message; return false; }
         }
 
+        internal static byte[] EncodePreparationEdit(PreparationEditDelta delta)
+        {
+            if (delta == null || delta.PreparationRevision == 0 || delta.AuthoritativeLedgerRevision == 0)
+                throw new ArgumentException("invalid preparation edit delta", nameof(delta));
+            byte[] body; using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms, StrictUtf8))
+            {
+                WriteOccurrence(w, delta.Occurrence); w.Write(delta.PreparationRevision);
+                w.Write(delta.AuthoritativeLedgerRevision); WriteCount(w, delta.TouchedStableIdentities.Count);
+                foreach (var identity in delta.TouchedStableIdentities) WriteString(w, identity); body = ms.ToArray();
+            }
+            if (body.Length > ushort.MaxValue) throw new ArgumentOutOfRangeException(nameof(delta));
+            using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms, StrictUtf8))
+            { w.Write(PreparationEditOp); w.Write((byte)2); w.Write((ushort)body.Length); w.Write(body);
+              w.Write(Crc32.Compute(body)); w.Write(PreparationEditTail); return ms.ToArray(); }
+        }
+
+        internal static bool TryDecodePreparationEdit(byte[] payload, out PreparationEditDelta delta, out string refusal)
+        {
+            delta = null; refusal = null;
+            try { using (var ms = new MemoryStream(payload ?? Array.Empty<byte>(), false)) using (var r = new BinaryReader(ms, StrictUtf8))
+            {
+                if (r.ReadByte() != PreparationEditOp || r.ReadByte() != 2) throw new InvalidDataException("invalid preparation edit header");
+                int length = r.ReadUInt16(); if (length <= 0 || ms.Length - ms.Position != length + 8) throw new InvalidDataException("invalid preparation edit length");
+                var body = r.ReadBytes(length); if (body.Length != length || r.ReadUInt32() != Crc32.Compute(body) ||
+                    r.ReadUInt32() != PreparationEditTail || ms.Position != ms.Length) throw new InvalidDataException("invalid preparation edit frame");
+                using (var bs = new MemoryStream(body, false)) using (var br = new BinaryReader(bs, StrictUtf8))
+                {
+                    var occurrence = ReadOccurrence(br); ulong prep = br.ReadUInt64(), ledger = br.ReadUInt64();
+                    var touched = new string[ReadCount(br)]; for (int i = 0; i < touched.Length; i++) touched[i] = ReadString(br);
+                    if (prep == 0 || ledger == 0 || bs.Position != bs.Length) throw new InvalidDataException("invalid preparation edit body");
+                    delta = new PreparationEditDelta(occurrence, prep, ledger, touched); return true;
+                }
+            }} catch (Exception ex) when (ex is ArgumentException || ex is InvalidDataException || ex is EndOfStreamException || ex is IOException || ex is OverflowException)
+            { refusal = ex.Message; return false; }
+        }
+
         internal static bool TryDecodeLedger(byte[] payload, out HostLedger ledger, out string refusal)
         {
             ledger = null; refusal = null;
@@ -213,7 +254,7 @@ namespace Multiplayer.Network.Sync
                     if (framed)
                     {
                         ledgerSchema = payload[4];
-                        if (ledgerSchema != 3 && ledgerSchema != 4 && ledgerSchema != Schema)
+                        if (ledgerSchema < 3 || ledgerSchema > LedgerSchema)
                             throw new InvalidDataException("unknown ledger schema");
                         bodyPayload = new byte[length]; Buffer.BlockCopy(payload, 9, bodyPayload, 0, length);
                         if (BitConverter.ToUInt32(payload, 9 + length) != Crc32.Compute(bodyPayload))
@@ -277,13 +318,15 @@ namespace Multiplayer.Network.Sync
                             if (reader.ReadBoolean()) supersededBy = ReadOccurrence(reader);
                             if (reader.ReadBoolean()) predecessor = ReadOccurrence(reader);
                         }
+                        ulong preparationRevision = ledgerSchema >= 6 ? reader.ReadUInt64() : 0;
+                        ulong preparationAuthorityRevision = ledgerSchema >= 6 ? reader.ReadUInt64() : 0;
                         entries.Add(new InboxEntry(occurrence, membership,
                             (InboxLifecycle)rawLifecycle, choice, lifecycleRevision, tombstoneRevision,
                             new HostOrderKey(ordinal, orderTrigger), reason, checkpoint, terminalReason,
-                            supersededBy, predecessor));
+                            supersededBy, predecessor, preparationRevision, preparationAuthorityRevision));
                     }
                     if (stream.Position != stream.Length) throw new InvalidDataException("trailing ledger bytes");
-                    ledger = ledgerSchema < Schema
+                    ledger = ledgerSchema < LedgerSchema
                         ? LegacyMembershipMigration.EndDisconnected(entries, revision, members)
                         : new HostLedger(entries, revision, members);
                     return true;

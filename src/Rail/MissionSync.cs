@@ -76,10 +76,42 @@ namespace Multiplayer.Network.Sync
                 SurfaceIds.GeoWindowIntent, SyncKind.StateDelta, DurableInboxCodec.EncodeDeploymentTransition(delta))));
         }
 
+        internal static void BroadcastPreparationEdit(PreparationEditDelta delta)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, SyncProtocol.EncodeEnvelope(
+                SurfaceIds.GeoWindowIntent, SyncKind.StateDelta, DurableInboxCodec.EncodePreparationEdit(delta))));
+        }
+
+        internal static bool ApplyPreparationEditDelta(DurableInboxStore store, PreparationEditDelta delta,
+            Action<PreparationEditDelta> repaint)
+        {
+            if (store == null || delta == null || repaint == null || !store.InstallPreparationEdit(delta)) return false;
+            repaint(delta); return true;
+        }
+
         internal static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
         {
-            if (surfaceId != SurfaceIds.GeoWindowIntent || payload == null || payload.Length == 0 ||
+            if (surfaceId != SurfaceIds.GeoWindowIntent || payload == null || payload.Length < 2 ||
                 payload[0] != DurableInboxCodec.DeploymentTransitionOp) return false;
+            if (payload[1] == 2)
+            {
+                PreparationEditDelta edit; string why;
+                if (!DurableInboxCodec.TryDecodePreparationEdit(payload, out edit, out why))
+                { Debug.LogWarning("[MP][inbox] malformed preparation-edit StateDelta refused: " + why); return true; }
+                if (engine == null || engine.IsHost || engine.Session == null ||
+                    !IsAuthoritativeTransitionSender(engine.Session.HostPeerId, senderPeerId)) return true;
+                var clientStore = DurableInboxSaveBridge.ActiveStore;
+                if (clientStore != null) ApplyPreparationEditDelta(clientStore, edit, applied =>
+                {
+                    var geo = GenericApplier.StartedGeoLevel(); var touched = new HashSet<object>();
+                    if (geo != null) foreach (var identity in applied.TouchedStableIdentities)
+                    { var value = IdentityResolver.Resolve(geo, identity, null); if (value != null) touched.Add(value); }
+                    if (geo != null) UiEventMap.FirePreparationEdit(touched, geo, applied.Occurrence, applied.PreparationRevision);
+                });
+                return true;
+            }
             DeploymentTransitionDelta delta; string decodeRefusal;
             if (!DurableInboxCodec.TryDecodeDeploymentTransition(payload, out delta, out decodeRefusal)) return false;
             if (engine == null || engine.IsHost || engine.Session == null ||

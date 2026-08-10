@@ -16,6 +16,8 @@ using PhoenixPoint.Geoscape.Entities.Sites;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.Levels.Factions;
 using PhoenixPoint.Geoscape.View.ViewModules;
+using PhoenixPoint.Geoscape.View.ViewControllers.Roster;
+using PhoenixPoint.Geoscape.View.ViewStates;
 using PhoenixPoint.Tactical.Entities.Abilities;
 using UnityEngine;
 
@@ -72,11 +74,13 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     public static class PersonnelSync
     {
+        [ThreadStatic] private static bool _applyingPreparationIntent;
+        [ThreadStatic] private static bool _hostLocalPreparationIntent;
         // Intent ops (GeoPersonnelIntent inner payload) — each maps onto the native commit it replaces.
         private const byte OpSpendStats = 1;  // one stat click (±1)         → ModifyBaseStat + SP debit/refund
         private const byte OpBuyAbility = 2;  // BuyAbility                  → LearnAbility / AddAbility
         private const byte OpSecondSpec = 3;  // ChoseSecondSpecialization   → AddSecondaryClass
-        private const byte OpReassign = 4;    // OnActionSlotTransferInitiated → RemoveCharacter/AddCharacter
+        internal const byte OpReassign = 4;    // OnActionSlotTransferInitiated → RemoveCharacter/AddCharacter
         private const byte OpSkillReset = 5;  // UseAllowedAbilityReset       → ResetCharacterProgression (free respec, _hasSkillReset-gated)
         private const byte OpHire = 6;        // haven recruit purchase       → GeoHaven.TakeRecruit
         private const byte OpFire = 7;        // dismiss / scrap              → KillCharacter(Dismissed) (+ vehicle ScrapPrice tail)
@@ -461,6 +465,29 @@ namespace Multiplayer.Network.Sync
         /// still a pure mirror) and a lone Add IS a complete transfer by construction. Host, solo and
         /// rail applies pass through (<see cref="ShouldRunNative"/>; the rail's ApplyList and native
         /// save-load both write _tacUnits directly anyway — GeoSite.cs:1566, GeoVehicle.cs:1087).</summary>
+        [HarmonyPatch(typeof(UIStateGeoRoster), "OnActionSlotTransferInitiated")]
+        internal static class HostPreparationReassignPatch
+        {
+            private static bool Prefix(GeoRosterItem slot, IGeoCharacterContainer source,
+                IGeoCharacterContainer destination)
+            {
+                var network = NetworkEngine.Instance; DurablePreparationEditContext context;
+                if (_applyingPreparationIntent || network == null || !network.IsActiveSession || !network.IsHost ||
+                    SyncApplyScope.Active || !DeploymentWindowClose.TryCapturePreparationEditContext(out context)) return true;
+                var character = slot?.Character; var dstRef = IdentityResolver.RootRef(destination);
+                if (character == null || string.IsNullOrEmpty(dstRef)) return true;
+                using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms, System.Text.Encoding.UTF8, true))
+                {
+                    w.Write((int)character.Id); w.Write(dstRef); DurablePreparationEditContext.Write(w, context);
+                    w.Flush(); ms.Position = 0;
+                    using (var r = new BinaryReader(ms, System.Text.Encoding.UTF8, true))
+                    { _hostLocalPreparationIntent = true; try { HandleIntentOp(network, 0, 0, OpReassign, r); }
+                      finally { _hostLocalPreparationIntent = false; } }
+                }
+                return false;
+            }
+        }
+
         [HarmonyPatch(typeof(GeoSite), nameof(GeoSite.AddCharacter))]
         internal static class SiteAddGuardPatch
         {
@@ -524,7 +551,13 @@ namespace Multiplayer.Network.Sync
                 }
                 IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpReassign,
                     "reassign U#" + (int)character.Id + " -> " + dstRef,
-                    w => { w.Write((int)character.Id); w.Write(dstRef); });
+                    w =>
+                    {
+                        w.Write((int)character.Id); w.Write(dstRef);
+                        DurablePreparationEditContext preparation;
+                        if (DeploymentWindowClose.TryCapturePreparationEditContext(out preparation))
+                            DurablePreparationEditContext.Write(w, preparation);
+                    });
             }
             catch (Exception ex) { Debug.LogError("[MP][personnel] reassign capture failed: " + ex); }
             return false;
@@ -896,7 +929,8 @@ namespace Multiplayer.Network.Sync
                 if (!ReferenceEquals(character.Faction, geo.PhoenixFaction))
                 { Reject(senderPeerId, charId, "not a Phoenix soldier"); return; }
 
-                bool ok;
+                bool ok; DurablePreparationEditContext preparation = default(DurablePreparationEditContext);
+                IGeoCharacterContainer preparationSource = null, preparationDestination = null;
                 switch (op)
                 {
                     case OpSpendStats:
@@ -907,7 +941,44 @@ namespace Multiplayer.Network.Sync
                                              r.ReadInt32(), r.ReadInt32(), r.ReadString());
                         break;
                     case OpReassign:
-                        ok = ApplyReassign(senderPeerId, geo, character, r.ReadString());
+                        {
+                            string destinationRef = r.ReadString();
+                            bool hasPreparation = DurablePreparationEditContext.TryReadTrailing(r, out preparation);
+                            if (!hasPreparation && DeploymentWindowClose.RequiresPreparationContextForSender(engine, senderPeerId))
+                            { Reject(senderPeerId, charId, "open deployment preparation requires revision context"); return; }
+                            if (hasPreparation)
+                            {
+                                ReassignPlan plan;
+                                if (!TryPlanReassign(senderPeerId, geo, character, destinationRef, out plan))
+                                { ok = false; break; }
+                                preparationSource = plan.Source; preparationDestination = plan.Destination;
+                                var preparationEngine = new DurablePreparationEditEngine(DurableInboxSaveBridge.ActiveStore,
+                                    delta =>
+                                    {
+                                        var touched = new HashSet<object> { character };
+                                        if (preparationSource != null) touched.Add(preparationSource);
+                                        if (preparationDestination != null) touched.Add(preparationDestination);
+                                        try { MissionSync.BroadcastPreparationEdit(delta); }
+                                        catch (Exception ex) { Debug.LogError("[MP][inbox] preparation-edit broadcast failed after durable commit: " + ex); }
+                                        UiEventMap.FirePreparationEdit(touched, geo, delta.Occurrence, delta.PreparationRevision);
+                                    });
+                                string refusal;
+                                var touchedIds = new[] { IdentityResolver.RootRef(character),
+                                    IdentityResolver.RootRef(preparationSource), destinationRef };
+                                ok = preparationEngine.TryApply(preparation,
+                                    () => DeploymentWindowClose.AuthorizePreparationContext(engine, senderPeerId,
+                                        preparation, _hostLocalPreparationIntent),
+                                    () =>
+                                {
+                                    _applyingPreparationIntent = true;
+                                    try { plan.Apply(); return true; }
+                                    finally { _applyingPreparationIntent = false; }
+                                }, () => plan.Rollback(), touchedIds, out refusal);
+                                if (!ok && !string.IsNullOrEmpty(refusal) && refusal != "native edit validation refused")
+                                    Reject(senderPeerId, charId, refusal);
+                            }
+                            else ok = ApplyReassign(senderPeerId, geo, character, destinationRef);
+                        }
                         break;
                     case OpSkillReset:
                         ok = ApplySkillReset(senderPeerId, character);
@@ -1571,8 +1642,32 @@ namespace Multiplayer.Network.Sync
         /// button gate (TransferActionMenuElement.cs:28-45). The SOURCE is the host's own answer to
         /// "which container holds this character" — never the wire's. Outcome rides the covered
         /// <c>_tacUnits</c> LeafLists; rejects re-emit both container subtrees.</summary>
-        private static bool ApplyReassign(ulong peer, GeoLevelController geo, GeoCharacter character, string dstRef)
+        private sealed class ReassignPlan
         {
+            internal readonly IGeoCharacterContainer Source, Destination; internal readonly GeoCharacter Character;
+            internal ReassignPlan(IGeoCharacterContainer source, IGeoCharacterContainer destination, GeoCharacter character)
+            { Source=source;Destination=destination;Character=character; }
+            internal void Apply()=>RunReassignSteps(()=>Source.RemoveCharacter(Character),()=>Destination.AddCharacter(Character));
+            internal void Rollback()=>RunReassignRollback(
+                ()=>Destination.GetAllCharacters().Contains(Character),()=>Destination.RemoveCharacter(Character),
+                ()=>Source.GetAllCharacters().Contains(Character),()=>Source.AddCharacter(Character));
+        }
+
+        // The exact paired transition used by ReassignPlan, factored so its partial-failure rollback remains
+        // executable in the headless law harness without constructing Unity containers.
+        internal static void RunReassignSteps(Action removeSource,Action addDestination)
+        {removeSource();addDestination();}
+        internal static void RunReassignRollback(Func<bool> destinationContains,Action removeDestination,
+            Func<bool> sourceContains,Action restoreSource)
+        {if(destinationContains())removeDestination();if(!sourceContains())restoreSource();}
+
+        private static bool ApplyReassign(ulong peer, GeoLevelController geo, GeoCharacter character, string dstRef)
+        { ReassignPlan plan; if(!TryPlanReassign(peer,geo,character,dstRef,out plan))return false; plan.Apply(); return true; }
+
+        private static bool TryPlanReassign(ulong peer, GeoLevelController geo, GeoCharacter character, string dstRef,
+            out ReassignPlan plan)
+        {
+            plan = null;
             int charId = (int)character.Id;
             // dstRef is wire input fed to the resolver — accept only a bare container root ref.
             if (string.IsNullOrEmpty(dstRef) || dstRef.IndexOf('.') >= 0 || (dstRef[0] != 'S' && dstRef[0] != 'V'))
@@ -1587,7 +1682,7 @@ namespace Multiplayer.Network.Sync
             var source = FindCharacterContainer(geo, character);
             if (source == null)
             { RejectReassign(peer, charId, "character in no container", null, dstRef); return false; }
-            if (ReferenceEquals(source, destination)) // no-op: the client's view was behind — re-emit heals its mirror
+            if (ReferenceEquals(source, destination))
             { RejectReassign(peer, charId, "already there", null, dstRef); return false; }
             var srcRef = IdentityResolver.RootRef(source);
             if (!destination.CanTransferBetweenContainer(source))
@@ -1600,8 +1695,7 @@ namespace Multiplayer.Network.Sync
                     destination.GetAllCharacters().Any(c => c.TemplateDef.Volume == 3))
                 { RejectReassign(peer, charId, "volume-3 unit already in " + dstRef, srcRef, dstRef); return false; }
             }
-            source.RemoveCharacter(character);   // native :294
-            destination.AddCharacter(character); // native :295
+            plan = new ReassignPlan(source,destination,character);
             return true;
         }
 

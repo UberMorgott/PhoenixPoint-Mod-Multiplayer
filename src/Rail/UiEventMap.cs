@@ -172,6 +172,31 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        internal static void FirePreparationEdit(HashSet<object> touched, GeoLevelController geo,
+            OccurrenceId occurrence, ulong revision)
+        {
+            touched = touched ?? new HashSet<object>();
+            foreach (var subject in occurrence.SubjectIds)
+            {
+                var resolved = IdentityResolver.Resolve(geo, subject, null);
+                if (resolved != null) touched.Add(resolved);
+                var site = resolved as GeoSite;
+                var mission = site?.ActiveMission;
+                if (mission == null) continue;
+                touched.Add(mission);
+                if (DeploymentRosterRefresh.TryCount(mission, null, out var sources, out var soldiers))
+                {
+                    foreach (var source in sources) if (source != null) touched.Add(source);
+                    foreach (var soldier in soldiers) if (soldier != null) touched.Add(soldier);
+                }
+            }
+            Fire(touched, geo);
+            // The durable ledger update above refreshes queued/suspended copies before they can be
+            // displayed.  The open native preparation screen is callback-free and must participate in
+            // the same coalesced read-direction repaint as the touched campaign entities.
+            OpenUiRepaint.MarkPreparationDirty(geo);
+        }
+
         /// <summary>READ-direction durable-choice nudge. The ledger/canonical transaction is committed
         /// before this is called; routing through the real event-system kind reaches OpenUiRepaint and its
         /// native UIStateGeoscapeEvent entry without closing or re-opening another player's dialog.</summary>

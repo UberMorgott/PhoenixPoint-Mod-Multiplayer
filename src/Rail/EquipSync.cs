@@ -72,6 +72,8 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     public static class EquipSync
     {
+        [ThreadStatic] private static bool _applyingPreparationIntent;
+        [ThreadStatic] private static bool _hostLocalPreparationIntent;
         // Intent ops (GeoEquipIntent 0xB3 inner payload). Byte values kept from their 0xAE tenure —
         // never renumber a live op (no version negotiation; both peers must agree byte-for-byte).
         internal const byte OpSetItems = 8;       // per-gesture loadout commit [charId][flags][slot triples]
@@ -138,8 +140,25 @@ namespace Multiplayer.Network.Sync
             {
                 SelfCheckGestureCommit(); // in-session only; the flush about to happen is the commit
                 if (BlockStaleHostRevert(__instance, armour, equipment, inventory, freeReload)) return false;
-                if (IntentRail.ShouldRunNative()) return true;
-                if (IsAugmentStaging()) return true;
+                var network = NetworkEngine.Instance; DurablePreparationEditContext hostPreparation;
+                if (!_applyingPreparationIntent && network != null && network.IsActiveSession && network.IsHost &&
+                    !SyncApplyScope.Active && DeploymentWindowClose.TryCapturePreparationEditContext(out hostPreparation))
+                {
+                    var body = ChangedBody(freeReload,
+                        new[] { ToSlots(armour), ToSlots(equipment), ToSlots(inventory) }, Slots(__instance));
+                    if (body == null) return false;
+                    using (var ms = new MemoryStream()) using (var writer = new BinaryWriter(ms, Encoding.UTF8, true))
+                    {
+                        writer.Write((int)__instance.Id); writer.Write(body);
+                        DurablePreparationEditContext.Write(writer, hostPreparation); writer.Flush(); ms.Position = 0;
+                        using (var reader = new BinaryReader(ms, Encoding.UTF8, true))
+                        { _hostLocalPreparationIntent = true; try { HandleIntent(network, 0, 0, reader); }
+                          finally { _hostLocalPreparationIntent = false; } }
+                    }
+                    return false;
+                }
+                if (IntentRail.ShouldRunNative() || IsAugmentStaging())
+                    return true;
                 try
                 {
                     var canon = Slots(__instance);
@@ -156,7 +175,13 @@ namespace Multiplayer.Network.Sync
                     }
                     IntentRail.Send(SurfaceIds.GeoEquipIntent, OpSetItems,
                         "loadout char=U#" + charId + " bytes=" + body.Length + " freeReload=" + freeReload,
-                        w => { w.Write(charId); w.Write(body); });
+                        w =>
+                        {
+                            w.Write(charId); w.Write(body);
+                            DurablePreparationEditContext preparation;
+                            if (DeploymentWindowClose.TryCapturePreparationEditContext(out preparation))
+                                DurablePreparationEditContext.Write(w, preparation);
+                        });
                 }
                 catch (Exception ex)
                 {
@@ -167,6 +192,7 @@ namespace Multiplayer.Network.Sync
                 }
                 return false;
             }
+
         }
 
         // ─── CLIENT state: the intent already in flight per character (the repeat guard) ───
@@ -552,6 +578,32 @@ namespace Multiplayer.Network.Sync
             internal int Charges;
         }
 
+        private sealed class EquipRollbackSnapshot
+        {
+            private readonly GeoCharacter _character; private readonly ItemStorage _storage;
+            private readonly List<GeoItem>[] _lists; private readonly List<GeoItem> _stored;
+            internal EquipRollbackSnapshot(GeoCharacter character, ItemStorage storage)
+            {
+                _character=character;_storage=storage;
+                _lists=Enumerable.Range(0,3).Select(i=>ListValue(character,i)
+                    .Select(x=>(GeoItem)x.Clone()).ToList()).ToArray();
+                _stored=storage.ToList().Select(x=>(GeoItem)x.Clone()).ToList();
+            }
+            internal void Restore()
+            {
+                _storage.Clear(); _storage.AddItems(ClonePreparationSnapshot(_stored,x=>(GeoItem)x.Clone()));
+                _applyingPreparationIntent=true;
+                try{_character.SetItems(ClonePreparationSnapshot(_lists[0],x=>(GeoItem)x.Clone()),
+                    ClonePreparationSnapshot(_lists[1],x=>(GeoItem)x.Clone()),
+                    ClonePreparationSnapshot(_lists[2],x=>(GeoItem)x.Clone()),false);}
+                finally{_applyingPreparationIntent=false;}
+            }
+        }
+
+        internal static IReadOnlyList<T> ClonePreparationSnapshot<T>(IEnumerable<T> snapshot,Func<T,T> clone)
+        {if(snapshot==null)throw new ArgumentNullException(nameof(snapshot));if(clone==null)throw new ArgumentNullException(nameof(clone));
+            return snapshot.Select(clone).ToArray();}
+
         /// <summary>The character's three loadout lists, in wire order (0 armour, 1 equipment, 2 inventory).</summary>
         private static List<GeoItem> ListValue(GeoCharacter c, int i)
         {
@@ -645,6 +697,8 @@ namespace Multiplayer.Network.Sync
             {
                 charId = r.ReadInt32();
                 var wire = DecodeBody(r, out bool freeReload);
+                DurablePreparationEditContext preparation;
+                bool hasPreparation = DurablePreparationEditContext.TryReadTrailing(r, out preparation);
 
                 var geo = GeoLevel();
                 if (geo == null) { Reject(senderPeerId, charId, "no geoscape"); return; }
@@ -652,6 +706,22 @@ namespace Multiplayer.Network.Sync
                 { Reject(senderPeerId, charId, "unresolved character"); return; }
                 var storage = ResolveStorage(character);
                 if (storage == null) { Reject(senderPeerId, charId, "no storage"); return; }
+                if (!hasPreparation && DeploymentWindowClose.RequiresPreparationContextForSender(engine, senderPeerId))
+                { Reject(senderPeerId, charId, "open deployment preparation requires revision context"); return; }
+                DurablePreparationEditEngine preparationEngine = null;
+                if (hasPreparation)
+                {
+                    preparationEngine = new DurablePreparationEditEngine(DurableInboxSaveBridge.ActiveStore,
+                        delta =>
+                        {
+                            var touched = new HashSet<object> { character, storage };
+                            for (int list = 0; list < 3; list++)
+                                foreach (var item in ListValue(character, list)) if (item != null) touched.Add(item);
+                            try { MissionSync.BroadcastPreparationEdit(delta); }
+                            catch (Exception ex) { Debug.LogError("[MP][inbox] preparation-edit broadcast failed after durable commit: " + ex); }
+                            UiEventMap.FirePreparationEdit(touched, geo, delta.Occurrence, delta.PreparationRevision);
+                        });
+                }
 
                 // The character's OWN live items from the lists being REPLACED (a null wire list = untouched,
                 // so its items stay out of the pool). Everything the client still wants is served from HERE —
@@ -689,6 +759,9 @@ namespace Multiplayer.Network.Sync
                     { Reject(senderPeerId, charId, "storage lacks " + kv.Key.name + " need=" + kv.Value + " have=" + have); return; }
                 }
 
+                bool appliedForMemo = false;
+                Func<bool> apply = () =>
+                {
                 CheckLastApplyStuck(character, charId);
                 _appliedBefore[charId] = EncodeBody(false, Slots(character));
 
@@ -711,7 +784,9 @@ namespace Multiplayer.Network.Sync
                     }
                 }
 
-                character.SetItems(newLists[0], newLists[1], newLists[2], freeReload);
+                _applyingPreparationIntent = true;
+                try { character.SetItems(newLists[0], newLists[1], newLists[2], freeReload); }
+                finally { _applyingPreparationIntent = false; }
                 // Whatever the client did NOT ask for is what the loadout LOST: hand back the LIVE instance so
                 // per-instance charges survive and AddItem natively unloads its magazines into storage.
                 foreach (var dropped in pool) storage.AddItem(dropped);
@@ -726,8 +801,22 @@ namespace Multiplayer.Network.Sync
                 catch (Exception ex) { Debug.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
                 Debug.Log("[MP][equip] HOST intent APPLIED char=U#" + charId + " nonce=" + nonce +
                           " peer=" + senderPeerId + " took=" + took + " returned=" + pool.Count + " freeReload=" + freeReload);
-                RecordApplied(character, charId, senderPeerId);
+                appliedForMemo = true;
                 ReseedLocalScreenAfterRemoteMutation();
+                return true;
+                };
+                if (hasPreparation)
+                {
+                    string refusal;
+                    var touchedIds = new[] { IdentityResolver.RootRef(character), IdentityResolver.RootRef(storage) };
+                    var rollback = new EquipRollbackSnapshot(character, storage);
+                    bool accepted = preparationEngine.TryApply(preparation,
+                        () => DeploymentWindowClose.AuthorizePreparationContext(engine, senderPeerId,
+                            preparation, _hostLocalPreparationIntent), apply, rollback.Restore, touchedIds, out refusal);
+                    if (appliedForMemo && !_hostLocalPreparationIntent) RecordApplied(character, charId, senderPeerId);
+                    if (!accepted) { Reject(senderPeerId, charId, refusal); return; }
+                }
+                else { apply(); if (appliedForMemo && !_hostLocalPreparationIntent) RecordApplied(character, charId, senderPeerId); }
                 // No push needed: GeoCharacter EntityList fields + storage GeoItemDict ride DiffEngine 0xAC.
             }
             catch (Exception ex)

@@ -1,9 +1,75 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text;
 
 namespace Multiplayer.Network.Sync
 {
+    internal readonly struct DurablePreparationEditContext
+    {
+        private const byte Marker = 0xD6;
+        internal DurablePreparationEditContext(OccurrenceId occurrence, ulong expectedRevision)
+        { Occurrence = occurrence; ExpectedRevision = expectedRevision; }
+        internal OccurrenceId Occurrence { get; }
+        internal ulong ExpectedRevision { get; }
+
+        internal static void Write(BinaryWriter writer, DurablePreparationEditContext context)
+        {
+            writer.Write(Marker); WriteString(writer, context.Occurrence.EventId);
+            WriteString(writer, context.Occurrence.TriggerId);
+            if (context.Occurrence.SubjectIds.Count > 1024) throw new InvalidDataException("too many preparation subjects");
+            writer.Write((ushort)context.Occurrence.SubjectIds.Count);
+            foreach (var subject in context.Occurrence.SubjectIds) WriteString(writer, subject);
+            writer.Write(context.ExpectedRevision);
+        }
+
+        internal static bool TryReadTrailing(BinaryReader reader, out DurablePreparationEditContext context)
+        {
+            context = default(DurablePreparationEditContext);
+            if (reader.BaseStream.Position == reader.BaseStream.Length) return false;
+            if (reader.ReadByte() != Marker) throw new InvalidDataException("invalid preparation context marker");
+            string eventId = ReadString(reader), triggerId = ReadString(reader);
+            int count = reader.ReadUInt16(); if (count <= 0 || count > 1024) throw new InvalidDataException("invalid preparation subject count");
+            var subjects = new string[count]; for (int i = 0; i < count; i++) subjects[i] = ReadString(reader);
+            context = new DurablePreparationEditContext(new OccurrenceId(eventId, triggerId, subjects), reader.ReadUInt64());
+            if (reader.BaseStream.Position != reader.BaseStream.Length) throw new InvalidDataException("trailing preparation edit bytes");
+            return true;
+        }
+
+        private static void WriteString(BinaryWriter writer, string value)
+        { var bytes = new UTF8Encoding(false, true).GetBytes(InboxIdentity.Required(value, nameof(value)));
+          if (bytes.Length > 4096) throw new InvalidDataException("preparation identity exceeds bound");
+          writer.Write((ushort)bytes.Length); writer.Write(bytes); }
+        private static string ReadString(BinaryReader reader)
+        { int length = reader.ReadUInt16(); if (length <= 0 || length > 4096) throw new InvalidDataException("invalid preparation identity length");
+          var bytes = reader.ReadBytes(length); if (bytes.Length != length) throw new EndOfStreamException();
+          return new UTF8Encoding(false, true).GetString(bytes); }
+    }
+
+    /// <summary>Host-serialized material revision layered over the existing equipment/personnel command
+    /// funnels.  It validates before native apply and advances every entitled copy in one ledger commit;
+    /// it never introduces a second edit opcode or a readiness gate.</summary>
+    internal sealed class DurablePreparationEditEngine
+    {
+        private readonly DurableInboxStore _store;
+        private readonly Action<PreparationEditDelta> _repaint;
+        internal DurablePreparationEditEngine(DurableInboxStore store, Action<PreparationEditDelta> repaint)
+        { _store = store ?? throw new ArgumentNullException(nameof(store)); _repaint = repaint ?? throw new ArgumentNullException(nameof(repaint)); }
+
+        internal bool TryApply(DurablePreparationEditContext context, Func<bool> validateAuthority,
+            Func<bool> applyNative, Action rollbackNative, IEnumerable<string> touchedStableIdentities,
+            out string refusal)
+        {
+            PreparationEditDelta delta = null; string local = null;
+            bool result = _store.WithTransitionGate(context.Occurrence, () => _store.CommitPreparationNative(
+                context.Occurrence, context.ExpectedRevision, validateAuthority, applyNative, rollbackNative,
+                touchedStableIdentities, out delta, out local));
+            if (result) _repaint(delta);
+            refusal = local; return result;
+        }
+    }
+
     internal interface IDurableWindowCarrierAdapter
     {
         InboxWindowCheckpoint Capture(OccurrenceId occurrence);
@@ -502,6 +568,22 @@ namespace Multiplayer.Network.Sync
         { Offer = offer; Preparation = preparation; Order = order; TombstoneRevision = tombstoneRevision; Reason = reason; }
         internal OccurrenceId Offer { get; } internal OccurrenceId Preparation { get; }
         internal HostOrderKey Order { get; } internal ulong TombstoneRevision { get; } internal TerminalReason Reason { get; }
+    }
+
+    internal sealed class PreparationEditDelta
+    {
+        internal PreparationEditDelta(OccurrenceId occurrence, ulong preparationRevision,
+            ulong authoritativeLedgerRevision, IEnumerable<string> touchedStableIdentities)
+        {
+            Occurrence = occurrence; PreparationRevision = preparationRevision;
+            AuthoritativeLedgerRevision = authoritativeLedgerRevision;
+            TouchedStableIdentities = (touchedStableIdentities ?? Enumerable.Empty<string>())
+                .Where(x => !string.IsNullOrEmpty(x)).Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.Ordinal).ToArray();
+        }
+        internal OccurrenceId Occurrence { get; }
+        internal ulong PreparationRevision { get; }
+        internal ulong AuthoritativeLedgerRevision { get; }
+        internal IReadOnlyList<string> TouchedStableIdentities { get; }
     }
 
     internal sealed class DurableMissionOfferEngine

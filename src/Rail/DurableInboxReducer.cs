@@ -14,7 +14,8 @@ namespace Multiplayer.Network.Sync
                 entries[i] = new InboxEntry(entry.Occurrence, entry.Membership, entry.Lifecycle, entry.Choice,
                     entry.LifecycleRevision, entry.TombstoneRevision, entry.HostOrderKey,
                     entry.SuspensionReason, entry.Checkpoint, entry.TerminalReason,
-                    entry.SupersededBy, entry.Predecessor);
+                    entry.SupersededBy, entry.Predecessor, entry.PreparationRevision,
+                    entry.PreparationAuthorityRevision);
             }
             return new HostLedger(entries, ledger.CommittedRevision, ledger.Members);
         }

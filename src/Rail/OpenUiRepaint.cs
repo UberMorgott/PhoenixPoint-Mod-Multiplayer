@@ -341,6 +341,12 @@ namespace Multiplayer.Network.Sync
             MarkDirty();
         }
 
+        /// <summary>Material deployment edits use the same coalesced, drag-safe repaint boundary as a
+        /// mirrored model batch, but name the callback-free roster primitive explicitly so a queued
+        /// window can never fall through to destructive Exit/Enter.</summary>
+        internal static void MarkPreparationDirty(GeoLevelController geo) =>
+            MarkDirty(typeof(UIStateRosterDeployment), geo);
+
         /// <summary>The SCREEN declined this kind, so the persistent HUD still has to hear about it.
         /// <see cref="UiNativeRepaint.IgnoredKinds"/> is a claim about one VIEW STATE's own reads, and L38
         /// proves it against that state's <c>EnterState</c> — but the skip it drives used to suppress the

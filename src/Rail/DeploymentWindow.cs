@@ -86,6 +86,13 @@ namespace Multiplayer.Network.Sync
         /// raises its brief with a null vehicle on purpose.</summary>
         internal static bool IsServable(int containers, int soldiers) => containers > 0 && soldiers > 0;
 
+        internal static void PruneSelection<T>(List<T> selected, ISet<T> valid)
+        {
+            if (selected == null) throw new ArgumentNullException(nameof(selected));
+            if (valid == null) throw new ArgumentNullException(nameof(valid));
+            selected.RemoveAll(item => ReferenceEquals(item, null) || !valid.Contains(item));
+        }
+
         /// <summary>
         /// THE AIRCRAFT THAT OPENED THE SCREEN COUNTS ITSELF FOREVER, AND THAT IS WHY NOTHING EVER CLOSED.
         ///
@@ -280,6 +287,67 @@ namespace Multiplayer.Network.Sync
         private static GeoscapeView View() =>
             GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.View;
 
+        internal static bool TryCapturePreparationEditContext(out DurablePreparationEditContext context)
+        {
+            context = default(DurablePreparationEditContext);
+            var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+            if (store == null || !WindowQueueSync.TryLocalMember(store, out member)) return false;
+            var view = GenericApplier.StartedGeoLevel()?.View;
+            var query = view == null ? null : WindowQueueSync.SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
+            OccurrenceId bound;
+            if (query != null && WindowOrder.TryGetDurable(WindowOrder.CurrentRequest(query), out bound) &&
+                string.Equals(bound.EventId, "DeploymentPreparing", StringComparison.Ordinal))
+            {
+                InboxEntry current;
+                try { current = store.Ledger.Get(bound, member); }
+                catch (InvalidOperationException) { return false; }
+                if (current.Lifecycle != InboxLifecycle.Open) return false;
+                context = new DurablePreparationEditContext(bound, current.PreparationRevision); return true;
+            }
+            return false;
+        }
+
+        internal static bool RequiresPreparationContextForSender(NetworkEngine engine, ulong senderPeerId)
+        {
+            var store = DurableInboxSaveBridge.ActiveStore; ClientInfo client;
+            if (store == null || engine?.Session == null ||
+                !engine.Session.Clients.TryGetValue(senderPeerId, out client)) return false;
+            string player = client.PlayerGuid.ToString("D");
+            return store.Ledger.AllEntries.Any(x => x.Lifecycle == InboxLifecycle.Open &&
+                string.Equals(x.Occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal) &&
+                string.Equals(x.Membership.PlayerGuid, player, StringComparison.OrdinalIgnoreCase));
+        }
+
+        internal static bool AuthorizePreparationContext(NetworkEngine engine, ulong senderPeerId,
+            DurablePreparationEditContext context, bool hostLocal)
+        {
+            var store = DurableInboxSaveBridge.ActiveStore;
+            if (store == null) return false;
+            if (hostLocal)
+            {
+                DurablePreparationEditContext bound;
+                return senderPeerId == 0 && TryCapturePreparationEditContext(out bound) &&
+                    bound.Occurrence.Equals(context.Occurrence) && bound.ExpectedRevision == context.ExpectedRevision;
+            }
+            ClientInfo client;
+            if (engine?.Session == null || !engine.Session.Clients.TryGetValue(senderPeerId, out client)) return false;
+            string player = client.PlayerGuid.ToString("D");
+            var active = store.Ledger.Members.Keys.Where(x => string.Equals(x.PlayerGuid, player,
+                StringComparison.OrdinalIgnoreCase)).OrderByDescending(x => x.Epoch).ToArray();
+            if (active.Length != 1) return false;
+            return AuthorizePreparationMember(store, active[0], context);
+        }
+
+        internal static bool AuthorizePreparationMember(DurableInboxStore store, MembershipId member,
+            DurablePreparationEditContext context)
+        {
+            if (store == null || !store.Ledger.Members.ContainsKey(member)) return false;
+            InboxEntry entry;
+            try { entry = store.Ledger.Get(context.Occurrence, member); }
+            catch (InvalidOperationException) { return false; }
+            return entry.Lifecycle == InboxLifecycle.Open && entry.PreparationRevision == context.ExpectedRevision;
+        }
+
         /// <summary>Close whatever the game's queue is currently showing, through the game's own two calls.
         /// <c>ResetViewState</c> also clears <c>SetUiInDeploymentMode</c> (GeoscapeView.cs:414-416), which
         /// <c>ToDeploymentState</c>:591 set and nothing else would put back.</summary>
@@ -363,6 +431,17 @@ namespace Multiplayer.Network.Sync
             !DeploymentRosterRefresh.TryCount(mission, null, out var sources, out var pool) ||
             DeploymentRosterRefresh.IsServable(sources.Count, pool.Count);
 
+        /// <summary>The executable native refresh tail used by the open deployment screen.  Keeping the
+        /// two native phases in one seam makes their ordering explicit: the roster must be rebuilt before
+        /// the state's own setup method recomputes deployment/button validity.</summary>
+        internal static bool RunNativePreparationRefresh(Action initializeRoster, Action setUpInitial)
+        {
+            if (initializeRoster == null || setUpInitial == null) return false;
+            initializeRoster();
+            setUpInitial();
+            return true;
+        }
+
         /// <summary>THE OPEN SCREEN, re-asked (<c>UiNativeRepaint.Table</c> entry). Reached at
         /// <c>OpenUiRepaint</c>:554, BEFORE the <c>PauseHold.IsCurrentQueuedWindow</c> skip at :586 — which is
         /// why a table entry is the only repaint this screen can ever have: it holds the current queued slot
@@ -406,32 +485,34 @@ namespace Multiplayer.Network.Sync
 
             containers.Clear();
             containers.AddRange(sources);
-            selected.RemoveAll(c => c == null || !pool.Contains(c));
+            DeploymentRosterRefresh.PruneSelection(selected, new HashSet<GeoCharacter>(pool));
 
             var ctx = ContextGetter.Invoke(state, null) as GeoscapeViewContext;
             var roster = view?.GeoscapeModules?.GeneralPersonelRosterModule;
             if (ctx == null || roster == null) return false;
-            roster.Init(ctx, containers, priority, (GeoRosterFilterMode)(FilterField?.GetValue(state) ??
-                                                                         GeoRosterFilterMode.Deployment));
-            var items = (roster.Slots ?? Enumerable.Empty<GeoRosterItem>())
-                        .Where(x => x != null && x.gameObject.activeSelf)
-                        .Select(x => x.GetComponent<GeoRosterDeploymentItem>())
-                        .Where(x => x != null).ToList();
-            // EnterState:123-126 subscribes the screen's own handler to the items it built; a slot the re-Init
-            // just activated has none, and its checkbox would silently do nothing. Remove-then-Combine so a
-            // slot that survived the re-Init keeps exactly one subscription rather than N.
-            var handler = OnEnrollment == null
-                              ? null
-                              : Delegate.CreateDelegate(typeof(Action<GeoRosterDeploymentItem>), state,
-                                                        OnEnrollment, false) as Action<GeoRosterDeploymentItem>;
-            if (handler != null)
-                foreach (var item in items)
-                    item.EnrollmentChanged = (Action<GeoRosterDeploymentItem>)
-                        Delegate.Combine(Delegate.Remove(item.EnrollmentChanged, handler), handler);
+            return RunNativePreparationRefresh(
+                () =>
+                {
+                    roster.Init(ctx, containers, priority, (GeoRosterFilterMode)(FilterField?.GetValue(state) ??
+                                                                                 GeoRosterFilterMode.Deployment));
+                    var items = (roster.Slots ?? Enumerable.Empty<GeoRosterItem>())
+                                .Where(x => x != null && x.gameObject.activeSelf)
+                                .Select(x => x.GetComponent<GeoRosterDeploymentItem>())
+                                .Where(x => x != null).ToList();
+                    // EnterState:123-126 subscribes the screen's own handler to the items it built; a slot the
+                    // re-Init just activated has none, and its checkbox would silently do nothing.
+                    var handler = OnEnrollment == null
+                                      ? null
+                                      : Delegate.CreateDelegate(typeof(Action<GeoRosterDeploymentItem>), state,
+                                                                OnEnrollment, false) as Action<GeoRosterDeploymentItem>;
+                    if (handler != null)
+                        foreach (var item in items)
+                            item.EnrollmentChanged = (Action<GeoRosterDeploymentItem>)
+                                Delegate.Combine(Delegate.Remove(item.EnrollmentChanged, handler), handler);
 
-            ItemsField.SetValue(state, items);
-            SetUpInitial.Invoke(state, null);
-            return true;
+                    ItemsField.SetValue(state, items);
+                },
+                () => SetUpInitial.Invoke(state, null));
         }
     }
 

@@ -391,11 +391,14 @@ namespace Multiplayer.Network.Sync
         internal InboxWindowCheckpoint Checkpoint { get; }
         internal OccurrenceId? SupersededBy { get; }
         internal OccurrenceId? Predecessor { get; }
+        internal ulong PreparationRevision { get; }
+        internal ulong PreparationAuthorityRevision { get; }
         internal InboxEntry(OccurrenceId occurrence, MembershipId membership, InboxLifecycle lifecycle,
             CanonicalChoiceId choice, ulong lifecycleRevision, ulong tombstoneRevision, HostOrderKey hostOrderKey,
             InboxSuspensionReason suspensionReason = InboxSuspensionReason.None,
             InboxWindowCheckpoint checkpoint = null, TerminalReason? terminalReason = null,
-            OccurrenceId? supersededBy = null, OccurrenceId? predecessor = null)
+            OccurrenceId? supersededBy = null, OccurrenceId? predecessor = null,
+            ulong preparationRevision = 0, ulong preparationAuthorityRevision = 0)
         {
             if (!string.Equals(hostOrderKey.TriggerId, occurrence.TriggerId, StringComparison.Ordinal))
                 throw new ArgumentException("foreign order namespace", nameof(hostOrderKey));
@@ -411,6 +414,8 @@ namespace Multiplayer.Network.Sync
             if (predecessor.HasValue && predecessor.Value.Equals(occurrence))
                 throw new ArgumentException("successor cannot precede itself", nameof(predecessor));
             SupersededBy = supersededBy; Predecessor = predecessor;
+            PreparationRevision = preparationRevision;
+            PreparationAuthorityRevision = preparationAuthorityRevision;
             if (!Enum.IsDefined(typeof(InboxSuspensionReason), suspensionReason))
                 throw new ArgumentOutOfRangeException(nameof(suspensionReason));
             if ((lifecycle == InboxLifecycle.Suspended) != (suspensionReason != InboxSuspensionReason.None))
@@ -423,12 +428,19 @@ namespace Multiplayer.Network.Sync
         internal InboxEntry WithLifecycle(InboxLifecycle lifecycle, ulong revision) =>
             lifecycle == InboxLifecycle.Suspended
                 ? new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision,
-                    HostOrderKey, SuspensionReason, Checkpoint, predecessor: Predecessor)
+                    HostOrderKey, SuspensionReason, Checkpoint, predecessor: Predecessor,
+                    preparationRevision: PreparationRevision, preparationAuthorityRevision: PreparationAuthorityRevision)
                 : new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision, HostOrderKey,
-                    terminalReason: TerminalReason, supersededBy: SupersededBy, predecessor: Predecessor);
+                    terminalReason: TerminalReason, supersededBy: SupersededBy, predecessor: Predecessor,
+                    preparationRevision: PreparationRevision, preparationAuthorityRevision: PreparationAuthorityRevision);
         internal InboxEntry Suspend(InboxSuspensionReason reason, InboxWindowCheckpoint checkpoint, ulong revision) =>
             new InboxEntry(Occurrence, Membership, InboxLifecycle.Suspended, Choice, revision, TombstoneRevision,
-                HostOrderKey, reason, checkpoint, predecessor: Predecessor);
+                HostOrderKey, reason, checkpoint, predecessor: Predecessor,
+                preparationRevision: PreparationRevision, preparationAuthorityRevision: PreparationAuthorityRevision);
+        internal InboxEntry WithPreparationRevision(ulong revision, ulong authorityRevision = 0) =>
+            new InboxEntry(Occurrence, Membership, Lifecycle, Choice, LifecycleRevision, TombstoneRevision,
+                HostOrderKey, SuspensionReason, Checkpoint, TerminalReason, SupersededBy, Predecessor,
+                revision, authorityRevision == 0 ? PreparationAuthorityRevision : authorityRevision);
     }
 
     internal sealed class HostLedger

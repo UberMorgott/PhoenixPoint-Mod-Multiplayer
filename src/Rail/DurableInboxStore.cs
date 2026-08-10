@@ -81,6 +81,9 @@ namespace Multiplayer.Network.Sync
         private HostLedger _ledger;
         private readonly HostLedger _snapshot;
         private DurableInboxCanonicalState _canonical;
+        // Monitor locks are re-entrant.  Native game callbacks can therefore loop back into a second
+        // store command on the same thread unless the transaction owns an explicit write barrier.
+        private bool _nativeTransitionActive;
         private readonly DurableInboxCanonicalState _snapshotCanonical;
         private readonly HashSet<OccurrenceId> _unservable;
         private readonly Dictionary<OccurrenceId, object> _effectGates = new Dictionary<OccurrenceId, object>();
@@ -145,6 +148,8 @@ namespace Multiplayer.Network.Sync
         // Testable persistence seam. Returning false or throwing simulates a journal write failure.
         internal Func<DurableInboxJournalRecord, bool> WriteRecord { get; set; } = _ => true;
         internal Func<HostLedger, bool> ValidateCandidate { get; set; } = _ => true;
+        internal Action PreparationMaterializationProbe { get; set; } = () => { };
+        internal Action PreparationCapacityProbe { get; set; } = () => { };
 
         internal bool Commit(HostLedger expected, HostLedger next) => CommitWithCanonical(expected, next, null);
 
@@ -212,12 +217,108 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        internal bool InstallPreparationEdit(PreparationEditDelta delta)
+        {
+            if (delta == null || !string.Equals(delta.Occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal)) return false;
+            return WithTransitionGate(delta.Occurrence, () =>
+            {
+                var expected = Ledger;
+                var copies = expected.AllEntries.Where(x => x.Occurrence.Equals(delta.Occurrence)).ToArray();
+                if (copies.Length == 0 || copies.Any(x => x.Lifecycle == InboxLifecycle.Removed)) return false;
+                ulong current = copies[0].PreparationRevision;
+                if (copies.Any(x => x.PreparationRevision != current ||
+                    x.PreparationAuthorityRevision != copies[0].PreparationAuthorityRevision) ||
+                    delta.PreparationRevision != current + 1 ||
+                    delta.AuthoritativeLedgerRevision <= copies[0].PreparationAuthorityRevision) return false;
+                var next = expected.ReplaceOccurrence(delta.Occurrence,
+                    x => x.WithPreparationRevision(delta.PreparationRevision,
+                        delta.AuthoritativeLedgerRevision)).WithAuthority(
+                        checked(expected.CommittedRevision + 1), expected.Members);
+                return Commit(expected, next);
+            });
+        }
+
+        internal bool CommitPreparationNative(OccurrenceId occurrence, ulong expectedPreparationRevision,
+            Func<bool> validateAuthority, Func<bool> applyNative, Action rollbackNative,
+            IEnumerable<string> touchedStableIdentities, out PreparationEditDelta delta, out string refusal)
+        {
+            delta = null; refusal = null;
+            if (validateAuthority == null || applyNative == null || rollbackNative == null)
+                throw new ArgumentNullException("preparation native transaction delegate");
+            lock (_gate)
+            {
+                // Monitor.Enter is recursive.  Refuse before validation/materialization so an engine callback
+                // cannot begin a nested native transaction or let its finally clear the outer transaction's guard.
+                if (_nativeTransitionActive)
+                { refusal = "a native preparation transition is already active on this store"; return false; }
+                if (!string.Equals(occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal))
+                { refusal = "edit does not name a deployment preparation"; return false; }
+                bool authority; try { authority = validateAuthority(); }
+                catch (Exception ex) { refusal = "authority validation threw: " + ex.Message; return false; }
+                if (!authority) { refusal = "sender has no open addressed preparation entitlement"; return false; }
+                var expected = _ledger;
+                var copies = expected.AllEntries.Where(x => x.Occurrence.Equals(occurrence)).ToArray();
+                if (copies.Length == 0 || copies.Any(x => x.Lifecycle == InboxLifecycle.Removed) ||
+                    copies.Any(x => x.PreparationRevision != expectedPreparationRevision))
+                { refusal = "stale or terminal preparation revision"; return false; }
+                ulong revision; try { revision = checked(expected.CommittedRevision + 1); }
+                catch (OverflowException) { refusal = "ledger revision exhausted"; return false; }
+                HostLedger candidate; DurableInboxJournalRecord record;
+                PreparationEditDelta preparedDelta;
+                try
+                {
+                    candidate = DurableInboxReducer.CloneAndValidate(expected.ReplaceOccurrence(occurrence,
+                        x => x.WithPreparationRevision(checked(expectedPreparationRevision + 1), revision))
+                        .WithAuthority(revision, expected.Members));
+                    if (!(ValidateCandidate ?? (_ => true))(candidate))
+                    { refusal = "preparation revision candidate refused"; return false; }
+                    record = new DurableInboxJournalRecord(candidate.CommittedRevision,
+                        DurableInboxSaveCodec.EncodeJournalCandidate(candidate, _canonical),
+                        candidate.AllEntries.Select(entry => entry.Occurrence));
+                    preparedDelta = new PreparationEditDelta(occurrence,
+                        checked(expectedPreparationRevision + 1), revision, touchedStableIdentities);
+                    (PreparationMaterializationProbe ?? (() => { }))();
+                    if (!(WriteRecord ?? (_ => true))(record))
+                    { refusal = "preparation revision journal preflight refused"; return false; }
+                    (PreparationCapacityProbe ?? (() => { }))();
+                    if (_journal.Count == _journal.Capacity) _journal.Capacity = checked(_journal.Count + 1);
+                }
+                catch (Exception ex) { refusal = "preparation revision preflight threw: " + ex.Message; return false; }
+
+                bool applied;
+                _nativeTransitionActive = true;
+                try
+                {
+                    try { applied = applyNative(); }
+                    catch (Exception ex)
+                    {
+                        try { rollbackNative(); }
+                        catch (Exception rollback) { throw new InvalidOperationException("native preparation rollback failed", rollback); }
+                        refusal = "native preparation edit threw and was rolled back: " + ex.Message; return false;
+                    }
+                    if (!applied)
+                    {
+                        try { rollbackNative(); }
+                        catch (Exception rollback) { throw new InvalidOperationException("native preparation rollback failed", rollback); }
+                        refusal = "native preparation edit refused and was rolled back"; return false;
+                    }
+                }
+                finally { _nativeTransitionActive = false; }
+                // Every fallible operation completed before native mutation.  The store lock also excludes
+                // save/root readers, so these three in-memory assignments are the guaranteed commit point.
+                _journal.Add(record); _ledger = candidate;
+                delta = preparedDelta;
+                return true;
+            }
+        }
+
         internal bool CommitWithCanonical(HostLedger expected, HostLedger next, DurableInboxCanonicalState nextCanonical)
         {
             if (expected == null) throw new ArgumentNullException(nameof(expected));
             if (next == null) throw new ArgumentNullException(nameof(next));
             lock (_gate)
             {
+                if (_nativeTransitionActive) return false;
                 if (!ReferenceEquals(expected, _ledger) || expected.CommittedRevision == ulong.MaxValue ||
                     next.CommittedRevision != expected.CommittedRevision + 1)
                     return false;
@@ -256,6 +357,7 @@ namespace Multiplayer.Network.Sync
             if (decision == null || decision.Phase != SharedChoicePhase.ChoiceLocked || decision.SharedRevision == 0) return false;
             lock (_gate)
             {
+                if (_nativeTransitionActive) return false;
                 var expected = _ledger; var canonical = _canonical;
                 var existing = canonical.Decisions.SingleOrDefault(x => x.Occurrence.Equals(decision.Occurrence));
                 if (existing != null && existing.Phase == SharedChoicePhase.ChoiceLocked) return existing.Equals(decision);
@@ -320,6 +422,7 @@ namespace Multiplayer.Network.Sync
         {
             lock (_gate)
             {
+                if (_nativeTransitionActive) return false;
                 var live = _canonical.Decisions.SingleOrDefault(x => x.Occurrence.Equals(pending.Occurrence));
                 if (live == null || live.Phase != SharedChoicePhase.EffectPending || !live.Equals(pending) ||
                     _ledger.CommittedRevision == 0 || _journal.Count == 0 ||
