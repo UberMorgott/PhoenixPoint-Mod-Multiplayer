@@ -22,8 +22,25 @@ namespace Multiplayer.Transport
     /// </summary>
     internal struct HostingFriend
     {
+        /// <summary>The Steam persona of the friend whose row this is — always present, the last-resort label.</summary>
         public string Name;
         public ulong LobbyId;
+
+        /// <summary>The HOST's chosen nickname (the one the lobby roster shows), or null when the friend
+        /// publishes no browse record — an older build, or a friend who merely JOINED someone's session.</summary>
+        public string HostName;
+        /// <summary>Occupancy to draw as "n/max". BOTH are 0 when unknown; the row then draws no count
+        /// rather than a made-up one.</summary>
+        public int Players;
+        public int MaxPlayers;
+        /// <summary>The host's SteamID64, advertised so a row click can start the join with NO Steam
+        /// round trip. 0 = unknown, and the click falls back to entering the lobby to read it.</summary>
+        public ulong HostId;
+
+        /// <summary>The row label: the HOST's name when it advertised one, else the friend's persona.</summary>
+        public string Label => string.IsNullOrWhiteSpace(HostName) ? Name : HostName;
+        /// <summary>"2/50", or null when this friend advertised no occupancy.</summary>
+        public string Occupancy => MaxPlayers > 0 ? Players + "/" + MaxPlayers : null;
     }
 
     /// <summary>
@@ -51,6 +68,9 @@ namespace Multiplayer.Transport
         public static Action<string, bool> Report;
 
         private static bool _handlersRegistered;
+        /// <summary>Seats the published lobby was CREATED with — captured in <see cref="HostPublish"/>, which
+        /// is the one method law L91 sanctions to read the seat count. 0 until a lobby exists.</summary>
+        private static int _hostSeats;
         private static Lobby? _hostLobby;   // set on the HOST once its invite lobby exists
         // …and the lobby we entered as a CLIENT (accepted invite, friends-list row, "+connect_lobby").
         // JoinLobby used to drop this handle on the floor, which is why the invite button was host-only:
@@ -114,7 +134,13 @@ namespace Multiplayer.Transport
                 LeaveSteamLobby();
                 Stage("creating Steam lobby…");
                 // The seat count is NetworkEngine's, not a second opinion — see NetworkEngine.MaxPlayers.
-                var made = await SteamMatchmaking.CreateLobbyAsync(NetworkEngine.MaxPlayers);
+                // ONE read, used twice: it sizes the Steam lobby AND it is the "max" a browse row shows,
+                // so the advertised capacity is provably the lobby's real capacity and never a second
+                // literal to keep in step. Law L91 closes the reader set at this method — PublishSessionPresence
+                // deliberately takes the number from here rather than reading the field itself.
+                var seats = NetworkEngine.MaxPlayers;
+                _hostSeats = seats;
+                var made = await SteamMatchmaking.CreateLobbyAsync(seats);
                 if (!made.HasValue) { Stage("Steam lobby creation failed (no lobby returned)", true); return; }
 
                 var lobby = made.Value;
@@ -135,6 +161,10 @@ namespace Multiplayer.Transport
                 SteamFriends.SetRichPresence("connect", SteamConnect.ConnectString(lobby.Id.Value));
                 SteamFriends.SetRichPresence("status", "Hosting co-op campaign");
                 _hostLobby = lobby;
+                // The browse record a friend's join-list row draws from — see SteamConnect.SessionKey.
+                // Published here and refreshed on every seat change by SetLobbyJoinable, which the engine
+                // already calls on each peer connect/disconnect.
+                PublishSessionPresence();
                 Stage($"invite lobby ready ({lobby.Id.Value}) — Invite via Steam is now live");
             }
             catch (Exception ex) { Stage("lobby create exception: " + ex.Message, true); }
@@ -152,8 +182,37 @@ namespace Multiplayer.Transport
             {
                 _hostLobby.Value.SetJoinable(joinable);
                 Stage("invite lobby joinable → " + joinable);
+                // Seats just changed — that IS the occupancy a browse row shows, so refresh it here
+                // rather than adding a second engine hook that could drift out of step with this one.
+                PublishSessionPresence();
             }
             catch (Exception ex) { Stage("SetJoinable failed: " + ex.Message, true); }
+        }
+
+        /// <summary>
+        /// (Re)write the one rich-presence key a friend's join-list row reads: host nickname, host
+        /// SteamID64, and n/max occupancy. Rich presence — NOT lobby data — because only rich presence is
+        /// replicated to a friend who has not entered the lobby, and entering it is exactly the 8-second
+        /// round trip the row must not pay (see JoinFriendLobby).
+        ///
+        /// The nickname is the SAME one the roster shows (ClientIdentity.LocalNickname, what JoinMessage
+        /// carries), so the name on the browse row and the name in the lobby can never disagree. Silent
+        /// no-op off the host path: only a host has seats to advertise.
+        /// </summary>
+        private static void PublishSessionPresence()
+        {
+            try
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsHost) return;
+                // +1 for the host's own seat: the row reads "how many people are in there", and
+                // ClientCount deliberately counts CLIENTS only (NetworkEngine.MaxClients = MaxPlayers - 1).
+                var players = (engine.Session?.ClientCount ?? 0) + 1;
+                if (_hostSeats <= 0) return;   // no lobby sized yet — nothing truthful to advertise
+                SteamFriends.SetRichPresence(SteamConnect.SessionKey, SteamConnect.SessionValue(
+                    ClientIdentity.LocalNickname, SteamClient.SteamId.Value, players, _hostSeats));
+            }
+            catch (Exception ex) { Stage("session presence publish failed: " + ex.Message); }
         }
 
         /// <summary>
@@ -186,6 +245,7 @@ namespace Multiplayer.Transport
         public static void LeaveSteamLobby()
         {
             if (_hostLobby.HasValue) { try { _hostLobby.Value.Leave(); } catch { } _hostLobby = null; }
+            _hostSeats = 0;   // the sized lobby is gone; a stale capacity must not outlive it
             if (_joinedLobby.HasValue) { try { _joinedLobby.Value.Leave(); } catch { } _joinedLobby = null; }
             // Unconditional: rich presence never auto-clears while the game keeps running (canonical Valve
             // lifecycle), and leaving a "Join Game" pointing at a dead session is exactly the bug.
@@ -232,7 +292,23 @@ namespace Multiplayer.Transport
                     }
                     if (lobbyId == 0) continue;   // in the game, but not in any lobby we could join
 
-                    list.Add(new HostingFriend { Name = f.Name, LobbyId = lobbyId });
+                    // The browse record (host nickname / occupancy / host id) rides the SAME already-
+                    // replicated rich-presence dictionary "connect" was just read from, so naming the host
+                    // and its seat count costs no extra call and no extra latency. Absent or malformed →
+                    // every field stays neutral and the row degrades to persona-only (SteamConnect.TryParseSession).
+                    string hostName; ulong hostId; int players; int maxPlayers;
+                    SteamConnect.TryParseSession(f.GetRichPresence(SteamConnect.SessionKey),
+                        out hostName, out hostId, out players, out maxPlayers);
+
+                    list.Add(new HostingFriend
+                    {
+                        Name = f.Name,
+                        LobbyId = lobbyId,
+                        HostName = hostName,
+                        Players = players,
+                        MaxPlayers = maxPlayers,
+                        HostId = hostId,
+                    });
                 }
             }
             catch (Exception ex)

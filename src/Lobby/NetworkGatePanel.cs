@@ -396,8 +396,16 @@ namespace Multiplayer.UI
             {
                 var f = friends[i];
                 var lobbyId = f.LobbyId;   // captured per row, NOT the loop variable
+                // The row names the HOST and its occupancy, both carried on the host's rich presence
+                // (SteamConnect.SessionKey). A host that advertises neither still draws a working row —
+                // Label falls back to the friend's persona and Occupancy is simply omitted, because an
+                // invented "?/?" reads as a broken session rather than as an unknown one.
+                var occupancy = f.Occupancy;
+                var label = occupancy == null
+                    ? f.Label + "   —   JOIN"
+                    : f.Label + "   (" + occupancy + ")   —   JOIN";
                 var btn = UiToolkit.CreateButton(_friendsList, "Friend" + i,
-                    f.Name + "   —   JOIN", Vector2.zero,
+                    label, Vector2.zero,
                     new Vector2(LobbyTheme.Scale(300), rowH), new Vector2(0f, 1f),
                     () => _owner.OnGateJoinFriend(lobbyId));
                 var rle = LobbyPanel.LE(btn.gameObject);

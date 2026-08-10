@@ -18,6 +18,54 @@ namespace Multiplayer.Network
         /// <summary>Rich-presence "connect" value Steam relaunches the joiner with (cold start → command line "+connect_lobby &lt;id&gt;").</summary>
         public static string ConnectString(ulong lobbyId) => "+connect_lobby " + lobbyId;
 
+        // ─── The browse record: what a join-list row can say WITHOUT entering the lobby ───
+        //
+        // A row used to read "<steam persona>   —   JOIN" and nothing else, because the only thing the
+        // host advertised was HostKey in LOBBY DATA — and lobby data is only readable once you are IN the
+        // lobby (or the lobby came back from a RequestLobbyList). Neither holds for a friend row, which is
+        // built from the friends list alone. RICH PRESENCE is the fix and it costs nothing: Steam already
+        // replicates a friend's full rich-presence dictionary to us (that is how "connect" is read in
+        // SteamInvite.HostingFriends), so these fields arrive with ZERO round trips and the row can name
+        // the host and its occupancy the moment the screen opens.
+        //
+        // ONE key, not four: Steam caps rich presence at 20 keys per user and the game itself already
+        // spends some, so the whole record is packed into a single pipe-delimited value.
+        public const string SessionKey = "mp_s";
+
+        /// <summary>Pack a host's browse record. Never throws; a null/blank nickname becomes "Host".</summary>
+        public static string SessionValue(string hostName, ulong hostId, int players, int maxPlayers)
+            => Sanitize(hostName) + "|" + hostId + "|" + players + "|" + maxPlayers;
+
+        /// <summary>
+        /// Unpack a browse record. Returns false — and leaves every out at its neutral value — for
+        /// anything it does not fully understand, so a host running an older build (or a FRIEND who
+        /// merely JOINED someone's session and therefore publishes no record of their own) degrades to
+        /// the persona-name-only row rather than to a wrong number on screen.
+        /// </summary>
+        public static bool TryParseSession(string value, out string hostName, out ulong hostId,
+                                           out int players, out int maxPlayers)
+        {
+            hostName = null; hostId = 0; players = 0; maxPlayers = 0;
+            if (string.IsNullOrWhiteSpace(value)) return false;
+            var p = value.Split('|');
+            if (p.Length != 4) return false;
+            if (!ulong.TryParse(p[1], out hostId)) return false;
+            if (!int.TryParse(p[2], out players) || !int.TryParse(p[3], out maxPlayers)) return false;
+            // A seat count that cannot be true is not rendered as one — occupancy is dropped, the name kept.
+            if (players < 0 || maxPlayers <= 0 || players > maxPlayers) { players = 0; maxPlayers = 0; }
+            hostName = string.IsNullOrWhiteSpace(p[0]) ? null : p[0];
+            return true;
+        }
+
+        // '|' is the delimiter and a persona name may legally contain one; Steam caps a rich-presence
+        // VALUE at 256 bytes, so the name is also clipped well inside that with the three numbers.
+        private static string Sanitize(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return "Host";
+            var clean = name.Trim().Replace('|', '/');
+            return clean.Length > 64 ? clean.Substring(0, 64) : clean;
+        }
+
         /// <summary>Cold start: find "+connect_lobby &lt;id&gt;" in a process command line → lobby id (null if absent / 0).</summary>
         public static ulong? ParseConnectLobby(string[] args)
         {
