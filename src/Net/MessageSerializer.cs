@@ -192,6 +192,11 @@ namespace Multiplayer.Network.MessageLayer
             using (var br = new BinaryReader(ms))
             {
                 var n = br.ReadInt32();
+                // FA-0012, same guard as DeserializeParityManifest: each entry consumes >= 1 byte, so a
+                // count larger than the bytes still in the stream is impossible — reject it before
+                // new List<>(n) pre-allocates a capacity the wire never has to back.
+                if (n < 0 || n > ms.Length - ms.Position)
+                    throw new InvalidDataException("PeerList: implausible peer count " + n);
                 var peers = new List<PeerListEntry>(n);
                 for (var i = 0; i < n; i++)
                 {
@@ -367,6 +372,12 @@ namespace Multiplayer.Network.MessageLayer
                 msg.TotalBytes = br.ReadInt64();
                 msg.Offset = br.ReadInt64();
                 var len = br.ReadInt32();
+                // FA-0012, same guard as DeserializeJoin: bound the wire-declared length against the bytes
+                // actually present BEFORE ReadBytes allocates new byte[len] — a 22-byte SaveChunk declaring
+                // len≈2^31 otherwise forces a 2 GB allocation attempt, long before MaxTransferBytes
+                // (SaveTransferCoordinator:1646) ever sees the message.
+                if (len < 0 || len > ms.Length - ms.Position)
+                    throw new InvalidDataException("SaveChunk: implausible chunk length " + len);
                 msg.Chunk = len > 0 ? br.ReadBytes(len) : null;
                 return msg;
             }
