@@ -148,6 +148,21 @@ namespace RailCheck
             if (new DurableInboxEngine(multiStore, member, multiCarrier).TryPresentNext(true,
                     typeof(UIStateNothingSelected)) || multiCarrier.Presented != 0)
                 yield return "L380 multiple-open-corruption-was-not-refused-before-native-mutation";
+            // ...and refusing must not be a DEAD END. The corrupt ledger has to be repaired in the same
+            // pass — oldest open kept, younger ones requeued — or this member's windows never open again:
+            // every later tick re-reads the same two Open entries and refuses forever, with the whole
+            // notification backlog stranded behind it and nothing in any log saying so.
+            if (multiStore.Ledger.Get(ordinary, member).Lifecycle != InboxLifecycle.Open ||
+                multiStore.Ledger.Get(otherOpen, member).Lifecycle != InboxLifecycle.Queued)
+                yield return "L380 multiple-open-corruption-was-refused-but-never-repaired: ordinary=" +
+                             multiStore.Ledger.Get(ordinary, member).Lifecycle + " otherOpen=" +
+                             multiStore.Ledger.Get(otherOpen, member).Lifecycle +
+                             " — a refusal with no repair strands every queued window behind it forever";
+            var repairedCarrier = new Carrier(multiStore, ordinary, checkpoint);
+            if (!new DurableInboxEngine(multiStore, member, repairedCarrier).TryPresentNext(true,
+                    typeof(UIStateNothingSelected)) || repairedCarrier.Presented == 0)
+                yield return "L380 repaired-ledger-still-refused-to-present: the pass after the repair must " +
+                             "present the queued priority window, or the recovery achieved nothing";
             var reentrantStore = Store(entries, member); var reentrantCarrier = new Carrier(reentrantStore, ordinary, checkpoint);
             var reentrantEngine = new DurableInboxEngine(reentrantStore, member, reentrantCarrier);
             reentrantEngine.TryPreempt(ordinary, priority, true, typeof(UIStateNothingSelected));

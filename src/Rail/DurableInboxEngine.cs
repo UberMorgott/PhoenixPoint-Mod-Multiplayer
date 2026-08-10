@@ -383,15 +383,51 @@ namespace Multiplayer.Network.Sync
             return false;
         }
 
+        private string _reportedMultipleOpen;
+
+        /// <summary>Recovers from a corrupt double-open: the OLDEST open window keeps its place and every
+        /// younger one goes back to Queued, so the next tick presents from a consistent ledger instead of
+        /// refusing forever. Ledger-only — no carrier is captured, restored or abandoned here, because the
+        /// one thing the old code got right is that native UI must not be moved from a state this
+        /// ambiguous. Returns false: nothing was presented on THIS tick.</summary>
+        private bool RepairMultipleOpen(HostLedger expected, IReadOnlyList<InboxEntry> openEntries)
+        {
+            string signature = string.Join(", ", openEntries.Select(x => x.Occurrence.EventId + "#" + x.Occurrence.TriggerId));
+            // TryPresentNext runs on the rail tick, so an unconditional log would be a per-frame spew.
+            // Re-arming on a CHANGED set means a second, different double-open is still reported.
+            if (!string.Equals(_reportedMultipleOpen, signature, StringComparison.Ordinal))
+            {
+                _reportedMultipleOpen = signature;
+                UnityEngine.Debug.LogError("[MP][inbox] " + openEntries.Count + " windows are Open at once for " +
+                    "one member (" + signature + ") — only one may be. Requeueing all but the oldest; windows " +
+                    "keep opening. Nothing is lost, but the state that produced this is a bug worth chasing.");
+            }
+            var next = expected;
+            foreach (var extra in openEntries.Skip(1))
+                next = next.Replace(extra.WithLifecycle(InboxLifecycle.Queued, checked(extra.LifecycleRevision + 1)));
+            next = next.WithAuthority(checked(expected.CommittedRevision + 1), expected.Members);
+            try { _store.Commit(expected, next); } catch { /* contention: the next tick tries again */ }
+            return false;
+        }
+
         internal bool TryPresentNext(bool geoscapeStarted, Type currentViewState)
         {
             if (!DurableWindowRegistry.MayPresent(geoscapeStarted, currentViewState)) return false;
-            var entries = _store.Ledger.EntriesFor(_member);
-            if (entries.Count(x => x.Lifecycle == InboxLifecycle.Open) > 1) return false;
+            var expected = _store.Ledger;
+            var entries = expected.EntriesFor(_member);
+            // Two Open entries at once is a broken invariant, and it used to be a DEAD END: a bare
+            // `return false` with no log and no recovery, so one double-open stopped this member's windows
+            // opening FOREVER and every later notification stranded silently in the queue. Repair the
+            // ledger instead of refusing forever. Still no native mutation from a corrupt ledger — that
+            // part was right, capturing a checkpoint here could pick the wrong window — so this tick
+            // presents nothing and the next one runs from repaired state.
+            var openEntries = entries.Where(x => x.Lifecycle == InboxLifecycle.Open)
+                .OrderBy(x => x.HostOrderKey).ToArray();
+            if (openEntries.Length > 1) return RepairMultipleOpen(expected, openEntries);
             var next = entries.Where(x => x.Lifecycle == InboxLifecycle.Queued)
                 .OrderByDescending(x => DurableWindowRegistry.PriorityOf(x.Occurrence)).ThenBy(x => x.HostOrderKey).FirstOrDefault();
             if (next == null) return TryResumeSuspended(geoscapeStarted, currentViewState);
-            var open = entries.FirstOrDefault(x => x.Lifecycle == InboxLifecycle.Open);
+            var open = openEntries.FirstOrDefault();
             if (open != null)
                 return DurableWindowRegistry.PriorityOf(next.Occurrence) > DurableWindowRegistry.PriorityOf(open.Occurrence) &&
                     TryPreempt(open.Occurrence, next.Occurrence, geoscapeStarted, currentViewState);
