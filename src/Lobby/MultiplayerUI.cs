@@ -441,8 +441,12 @@ namespace Multiplayer.UI
         internal string JoinPrefill()
         {
             var clip = GUIUtility.systemCopyBuffer;
+            // All THREE published forms, because the host publishes whichever is shortest for what it
+            // has (GetSessionInviteCode): 8-symbol InviteCode, 10-symbol ConnectCode, 13/19 UnifiedCode.
+            // Miss one and that host's code falls through to the 127.0.0.1 default the joiner must delete.
             var clipIsCode = !string.IsNullOrEmpty(clip)
                 && (InviteCode.TryDecode(clip, out _)
+                    || ConnectCode.Decode(clip) != null
                     || UnifiedCode.TryDecode(clip, out _, out _, out _, out _));
             return clipIsCode
                 ? clip.Trim()
@@ -1311,11 +1315,20 @@ namespace Multiplayer.UI
             return code ?? "unavailable (NAT/firewall)";
         }
 
-        // THE SESSION'S ONE unified invite code (Steam id and/or public endpoint) — the same string on
-        // every peer, so ANY player can forward it to a friend, not just the host.
+        // THE SESSION'S ONE invite code — the PUBLIC ENDPOINT, and nothing else. The same string on every
+        // peer, so ANY player can forward it to a friend, not just the host.
+        //
+        // NO STEAM ID IN THE CODE, EVER, and that is the design rather than a shortening. The three ways
+        // in are separate channels and do not mix: STEAM is the INVITE VIA STEAM overlay and the friends
+        // list (it produces no code at all); the CODE is this string, the free-services path; DIRECT is
+        // typed by hand (localhost, ip:port, a DNS name). Steam P2P needs a live Steam client on BOTH
+        // sides (SteamInvite.IsSteamAlive gates the client leg, JoinPlan.Build takes it as steamAlive),
+        // so a Steam id inside a shared code is worthless to exactly the people a shared code is for —
+        // and a code that carries only a Steam id builds a single Steam-P2P attempt that cannot come up.
+        //
         //   • HOST: computed here. Endpoint priority: the UPnP-forwarded WAN endpoint (actually open for
         //     TCP+UDP) over the STUN-discovered one (UDP hole-punch only). Re-read every frame by the
-        //     lobby, so it fills in live as UPnP/STUN discovery completes and Steam becomes ready — and
+        //     lobby, so it fills in live as UPnP/STUN discovery completes — and
         //     the lobby publishes each new value into SessionManager.PublishHostInviteCode, which ships
         //     it to clients on the roster broadcast.
         //   • CLIENT: the host's published value, mirrored in by PEER_LIST. Read-only, copyable.
@@ -1329,12 +1342,19 @@ namespace Multiplayer.UI
                 return string.IsNullOrEmpty(mirrored) ? "waiting for host…" : mirrored;
             }
 
-            uint? steamAccount = SteamInvite.LocalAccountId(); // null off Steam
             var ep = UpnpPortMapper.Current?.ToEndPoint();      // best: router-forwarded WAN endpoint
             if (ep == null)
                 ep = FindHostingChild(TransportType.StunUDP)?.PublicEndPoint; // fallback: STUN-discovered
 
-            var code = UnifiedCode.Encode(steamAccount, ep);
+            // ponytail: the code carries an ENDPOINT ONLY (10 symbols), so a host with neither a UPnP
+            // mapping nor a STUN-discovered endpoint has no shareable code at all and must invite through
+            // Steam — the placeholder below says so, and the join screen repeats it. Upgrade path if that
+            // host ever has to be shareable: a relay, not a richer code; there is nothing else to encode.
+            //
+            // This leaves UnifiedCode.Encode with NO producer. Do NOT read UnifiedCode.cs as dead —
+            // UnifiedCode.TryDecode stays load-bearing in SmartJoinParser and JoinPrefill for every 9/13/19
+            // symbol code already copied into a Discord message before this change.
+            var code = ep != null ? ConnectCode.Encode(ep) : null;
             if (code != null) return code;
 
             // Nothing to share yet — mirror the STUN discovery state so the placeholder is accurate.
