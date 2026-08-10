@@ -245,7 +245,21 @@ namespace Multiplayer.Network.Sync
                 if (!sequencer.CreateOccurrence(occurrence)) return false;
                 if (store.Commit(expected, sequencer.Ledger)) return true;
             }
-            throw new InvalidOperationException("durable priority occurrence commit contention exceeded bound");
+            // NOT A THROW, and the bound is not really "contention". CommitWithCanonical returns false
+            // DETERMINISTICALLY while _nativeTransitionActive (DurableInboxStore.cs:391) and whenever
+            // CloneAndValidate / ValidateCandidate refuse (:399-411) — so all 32 attempts fail together and
+            // the throw was guaranteed, not unlikely. It escaped a Harmony Postfix on a native UI transition
+            // (GeoModalMirror.OpenModalPersistent:1032), which is the re-entrancy the store's own header
+            // anticipates (DurableInboxStore.cs:14-15), and tore the transition apart. Failing to ENROL is
+            // survivable: the window still opens natively, it is only not durable-mirrored, and every caller
+            // already ignores this bool. Loud, never silent (P1).
+            // ponytail: no deferred retry — there is no durable per-frame host pump to hang one on. If these
+            // start showing up in Player.log, add one where the geoscape tick already runs.
+            UnityEngine.Debug.LogError("[MP][inbox] could not enrol priority occurrence '" +
+                occurrence.EventId + "/" + occurrence.TriggerId + "' after 32 attempts — the store refused " +
+                "every commit (a native transition is in flight, or the candidate ledger failed validation). " +
+                "The window still opens locally; it is NOT durable-mirrored for this peer.");
+            return false;
         }
 
         private static OccurrenceId? EnqueueCapturedPriority(string family, string stableTrigger, params string[] subjects)
@@ -262,7 +276,16 @@ namespace Multiplayer.Network.Sync
                 if (!sequencer.CreateOccurrence(occurrence)) return null;
                 if (store.Commit(expected, sequencer.Ledger)) return occurrence;
             }
-            throw new InvalidOperationException("native priority occurrence commit contention exceeded bound");
+            // Same reasoning as EnqueuePriorityOccurrence above, and this one is the WORSE site: all three
+            // callers run inside a Harmony Postfix on a native screen transition (CaptureModal /
+            // CaptureDeployment / CaptureAssetDestination), and a throw there does not merely lose an
+            // enrolment — it tears the transition apart mid-flight. All three already handle a null
+            // (`if (occurrence.HasValue && request != null)`), so the window opens natively unmirrored.
+            UnityEngine.Debug.LogError("[MP][inbox] could not enrol native priority occurrence '" + family +
+                "/" + stableTrigger + "' after 32 attempts — the store refused every commit (a native " +
+                "transition is in flight, or the candidate ledger failed validation). The screen still " +
+                "opens; it is NOT durable-mirrored for this peer.");
+            return null;
         }
 
         internal static IReadOnlyDictionary<string, DurableWindowDisposition> RouterFamilies =>
