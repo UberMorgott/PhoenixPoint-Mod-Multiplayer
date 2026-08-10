@@ -371,6 +371,9 @@ namespace Multiplayer.UI
         private void RefreshFriends()
         {
             if (_friendsList == null) return;
+            // A previous click may have collapsed the list to show its connecting line (ShowConnecting);
+            // rebuilding the rows is also what puts the list back.
+            _friendsList.SetActive(true);
 
             for (int i = _friendsList.transform.childCount - 1; i >= 0; i--)
                 Object.DestroyImmediate(_friendsList.transform.GetChild(i).gameObject);
@@ -396,6 +399,8 @@ namespace Multiplayer.UI
             {
                 var f = friends[i];
                 var lobbyId = f.LobbyId;   // captured per row, NOT the loop variable
+                var hostId = f.HostId;     // 0 when this host advertised none — the click then falls back
+                var who = f.Label;
                 // The row names the HOST and its occupancy, both carried on the host's rich presence
                 // (SteamConnect.SessionKey). A host that advertises neither still draws a working row —
                 // Label falls back to the friend's persona and Occupancy is simply omitted, because an
@@ -407,7 +412,7 @@ namespace Multiplayer.UI
                 var btn = UiToolkit.CreateButton(_friendsList, "Friend" + i,
                     label, Vector2.zero,
                     new Vector2(LobbyTheme.Scale(300), rowH), new Vector2(0f, 1f),
-                    () => _owner.OnGateJoinFriend(lobbyId));
+                    () => _owner.OnGateJoinFriend(lobbyId, hostId, who));
                 var rle = LobbyPanel.LE(btn.gameObject);
                 rle.minHeight = rowH;
                 rle.flexibleHeight = 0;
@@ -445,6 +450,11 @@ namespace Multiplayer.UI
         private void ShowScreen(Screen screen)
         {
             if (_canvas == null || _root == null) return;
+            // Coming BACK to the join screen (Reshow after a dismissed error box) with the list still
+            // collapsed behind a connecting line: rebuild it, so a failed join never leaves the player
+            // staring at "Connecting to X…" with no rows and no way to retry. ShowJoin already refreshed,
+            // so this never runs twice.
+            if (screen == Screen.Join && _friendsList != null && !_friendsList.activeSelf) RefreshFriends();
             _screen = screen;
             if (_gateRoot != null) _gateRoot.SetActive(screen == Screen.Gate);
             if (_joinRoot != null) _joinRoot.SetActive(screen == Screen.Join);
@@ -465,6 +475,22 @@ namespace Multiplayer.UI
             _screen = Screen.None;
             if (_canvas != null) _canvas.gameObject.SetActive(false);
             ReleaseChrome();
+        }
+
+        /// <summary>
+        /// A row was clicked: HOLD this page and say so, instead of taking it down and dropping the player
+        /// on the bare main menu while the join resolves. Reuses the list's own empty-state Text — the same
+        /// native widget, the same LobbyTheme styling — so there is no overlay of our own to draw.
+        ///
+        /// The rows go away with it, which is also the point: the resolve is not instantaneous for a host
+        /// that advertised no id, and a second click would start a second join.
+        /// </summary>
+        public void ShowConnecting(string who)
+        {
+            if (_friendsList != null) _friendsList.SetActive(false);
+            if (_friendsEmpty == null) return;
+            _friendsEmpty.text = "Connecting to " + (string.IsNullOrWhiteSpace(who) ? "host" : who) + "…";
+            _friendsEmpty.gameObject.SetActive(true);
         }
 
         /// <summary>Take the page down for a NATIVE screen (the game's MessageBox renders on the menu's own

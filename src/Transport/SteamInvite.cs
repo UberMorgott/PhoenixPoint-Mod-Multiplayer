@@ -321,10 +321,57 @@ namespace Multiplayer.Transport
             return list;
         }
 
-        /// <summary>A friends-list row click: enter that Steam lobby and route into the EXISTING client
-        /// join flow. Literally the accepted-invite path (<see cref="JoinLobby"/>), so this feature adds
-        /// no networking of its own.</summary>
-        public static void JoinFriendLobby(ulong lobbyId) => JoinLobby(lobbyId);
+        /// <summary>
+        /// A friends-list row click. Routes into the EXISTING client join flow, adding no networking of
+        /// its own — but NOT via <see cref="JoinLobby"/> when the row already carries the host id.
+        ///
+        /// WHY THE FAST PATH EXISTS. JoinLobby's whole job is to learn the host SteamID64, and the only
+        /// way it can is to ENTER the lobby first: `await SteamMatchmaking.JoinLobbyAsync` is a round trip
+        /// to Steam's matchmaking backend, and its cost has nothing to do with the distance to the host.
+        /// Measured on the 2026-08-10 loopback playtest — three instances on one machine — it took 10,0 s
+        /// (D:\PP-Instance3\Player.log: "joining Steam lobby 109775242037499855…" at 83,691 →
+        /// "resolved host 76561197996210592 — starting join" at 93,706). The row now learns that same id
+        /// from the host's rich presence when the LIST is built, at no cost, so the join starts at once.
+        ///
+        /// The lobby is still entered — just off the critical path — because membership is what
+        /// <see cref="OpenInviteOverlay"/> needs to let a joiner invite their own friends.
+        /// </summary>
+        public static void JoinFriendLobby(ulong lobbyId, ulong hostId)
+        {
+            // No advertised id (an older host, or a friend who merely JOINED someone's session): fall back
+            // to reading it off the lobby, which is the only place it can be found.
+            if (hostId == 0) { JoinLobby(lobbyId); return; }
+
+            var joinStr = SteamConnect.ResolveJoinString(hostId);
+            Stage("friend row: host " + joinStr + " already known from rich presence — starting join now "
+                  + "(entering the Steam lobby in the background)");
+            var handler = OnJoinResolved;
+            if (handler != null) handler(joinStr);
+            else Stage("no join handler wired (mod menu not ready)", true);
+
+            // AFTER the handler, for the same reason JoinLobby stores its handle after it: OnLobbyJoin
+            // tears the PREVIOUS session down, and that teardown runs LeaveSteamLobby.
+            AdoptLobbyInBackground(lobbyId);
+        }
+
+        /// <summary>Enter the row's lobby without anybody waiting on it, purely so the invite overlay has a
+        /// handle. Discards the result if the session it belonged to is already gone — a lobby nobody is
+        /// in must not outlive it and light a "Join Game" pointing at nothing.</summary>
+        private static async void AdoptLobbyInBackground(ulong lobbyId)
+        {
+            try
+            {
+                var res = await SteamMatchmaking.JoinLobbyAsync(lobbyId);
+                if (!res.HasValue) { Stage("background lobby adopt: could not enter lobby " + lobbyId); return; }
+                if (NetworkEngine.Instance?.IsActiveSession != true)
+                {
+                    try { res.Value.Leave(); } catch { }
+                    return;
+                }
+                _joinedLobby = res.Value;
+            }
+            catch (Exception ex) { Stage("background lobby adopt failed: " + ex.Message); }
+        }
 
         // ─── CLIENT ────────────────────────────────────────────────────────
 
@@ -498,7 +545,7 @@ namespace Multiplayer.Transport
         private static void CallHostPublish() => SteamInvite.HostPublish();
 
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static void CallJoinFriendLobby(ulong lobbyId) => SteamInvite.JoinFriendLobby(lobbyId);
+        private static void CallJoinFriendLobby(ulong lobbyId, ulong hostId) => SteamInvite.JoinFriendLobby(lobbyId, hostId);
 
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static void CallOpenInviteOverlay() => SteamInvite.OpenInviteOverlay();
@@ -558,10 +605,10 @@ namespace Multiplayer.Transport
         /// <summary>Enter a friend's advertised lobby (the friends-list row). Same JIT boundary as
         /// <see cref="HostPublish"/>; a no-op where there is no Steam, which is also the only place the
         /// friends list can be empty enough for the row not to exist.</summary>
-        internal static void JoinFriendLobby(ulong lobbyId)
+        internal static void JoinFriendLobby(ulong lobbyId, ulong hostId)
         {
             if (_unavailable) return;
-            try { CallJoinFriendLobby(lobbyId); }
+            try { CallJoinFriendLobby(lobbyId, hostId); }
             catch (Exception e) { Latch(e); }
         }
 

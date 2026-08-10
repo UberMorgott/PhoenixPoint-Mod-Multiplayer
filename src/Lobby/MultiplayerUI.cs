@@ -434,20 +434,47 @@ namespace Multiplayer.UI
         /// box, and a second check would be a second opinion to keep in step with SmartJoinParser.</summary>
         internal void OnGateJoin(string text)
         {
-            _gate?.HideForNativeScreen();
+            // Same rule as the friends row (OnGateJoinFriend): the connect is asynchronous, so taking the
+            // page down HERE would show the main menu until it lands. The gate holds with a connecting
+            // line; the box sites below step it aside if the target turns out to be unreadable.
+            _gate?.ShowConnecting(text);
             OnLobbyJoin(text ?? "", JoinOrigin.PastedCode);
         }
 
-        /// <summary>A Steam friends-list row: route through the SAME path an accepted invite takes
-        /// (SteamInvite.JoinLobby enters the lobby, reads the advertised host id off it and calls
-        /// OnJoinResolved → OnLobbyJoin with JoinOrigin.SteamInvite), so the row adds no networking.</summary>
-        internal void OnGateJoinFriend(ulong lobbyId)
+        /// <summary>
+        /// A Steam friends-list row: route into the SAME join flow an accepted invite takes, with the
+        /// host id the row already carries so no Steam round trip is needed to find it.
+        ///
+        /// THE PAGE IS NOT TAKEN DOWN HERE, and that is the fix for the main-menu bounce. This used to
+        /// call HideForNativeScreen() up front and then hand off to an ASYNCHRONOUS resolve; with the
+        /// gate gone and no lobby open yet, the player was left looking at the bare main menu for the
+        /// whole resolve — measured at 10,0 s on the 2026-08-10 playtest (D:\PP-Instance3\Player.log
+        /// 83,691 → 93,706). The gate now HOLDS with a connecting line and ShowLobbyScreen closes it
+        /// when the session is actually up. Nothing here waits on another PLAYER — only on the server's
+        /// own reply — so the no-quorum mandate is untouched.
+        /// </summary>
+        internal void OnGateJoinFriend(ulong lobbyId, ulong hostId, string who)
         {
-            _gate?.HideForNativeScreen();
+            _gate?.ShowConnecting(who);
             // Through SteamProbe, never SteamInvite directly: naming that type in THIS method's body is
             // what fails to JIT on a GOG/Epic box, and the throw lands at OnGateJoinFriend's call site
             // where no try of ours exists (SteamInvite.cs:393-408).
-            SteamProbe.JoinFriendLobby(lobbyId);
+            SteamProbe.JoinFriendLobby(lobbyId, hostId);
+        }
+
+        /// <summary>
+        /// The mirror of <see cref="ReturnFromNativeBox"/>, and it exists because that asymmetry was a bug.
+        /// A native MessageBox draws on the menu's own canvases, which BOTH mod pages disable while they
+        /// hold the chrome — so a box raised over either one is invisible until that page steps aside. The
+        /// join path used to satisfy this by having its ENTRY point hide the gate, which is exactly what
+        /// put the player on the main menu for the whole resolve. Now the page stays up, so the box sites
+        /// themselves must step it aside. Both halves are no-ops when their page is not open (the gate
+        /// restores only chrome it hid itself — NetworkGatePanel.ReleaseChrome).
+        /// </summary>
+        private void LeaveForNativeBox()
+        {
+            _lobby?.HideForNativeScreen();
+            _gate?.HideForNativeScreen();
         }
 
         /// <summary>
@@ -844,7 +871,7 @@ namespace Multiplayer.UI
                 // they came from when the box is dismissed — the lobby if a session is live, otherwise
                 // the gate's join screen with their text still in the field.
                 var mbErr = GameUtl.GetMessageBox();
-                _lobby?.HideForNativeScreen();
+                LeaveForNativeBox();
                 mbErr?.ShowSimplePrompt("Could not read that address or code.",
                     MessageBoxIcon.Error, MessageBoxButtons.OK,
                     delegate (MessageBoxCallbackResult _) { ReturnFromNativeBox(); }, this);
@@ -859,7 +886,7 @@ namespace Multiplayer.UI
             if (IsHealthyDirectHost() && SmartJoinParser.IsOwnLoopback(target, DefaultDirectPort))
             {
                 var mbSelf = GameUtl.GetMessageBox();
-                _lobby?.HideForNativeScreen();
+                LeaveForNativeBox();
                 mbSelf?.ShowSimplePrompt(
                     "You're already hosting — share your IP or invite code; you can't join your own game.",
                     MessageBoxIcon.Information, MessageBoxButtons.OK,
@@ -1585,7 +1612,7 @@ namespace Multiplayer.UI
                 // where the address is still typed and one more press retries it — or the plain main
                 // menu when the join did not come from there. NO empty lobby is ever shown on the client
                 // failure path (the session is gone, and ReturnFromNativeBox keys on exactly that).
-                _lobby?.HideForNativeScreen();
+                LeaveForNativeBox();
                 // Show the REASON, nothing else. This handler serves two very different failures and a
                 // fixed networking paragraph was wrong for both: a host-authored ConnectionRejected
                 // ("identity already in use", "a battle is in progress") arrives over an ALREADY-WORKING
