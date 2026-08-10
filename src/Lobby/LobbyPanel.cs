@@ -379,20 +379,30 @@ namespace Multiplayer.UI
 
         // SESSION CARD — EVERY WAY INTO THIS SESSION, listed in the order a player would try them:
         //
-        //   1. INVITE VIA STEAM — the one control that needs no address at all.
-        //   2. THE CONNECT CODE — copyable, and visible to clients too.
-        //   3. THE ADDRESSES, host-only, one per line and each copyable: every local IPv4 the machine
+        //   1. INVITE VIA STEAM + THE INVITE CODE — one row: the button that needs no address at all,
+        //      and beside it the copyable code (visible to clients too).
+        //   2. THE ADDRESSES, host-only, one per line and each copyable: every local IPv4 the machine
         //      answers on (so the Radmin / ZeroTier / Hamachi adapter is listed beside the ordinary LAN
         //      one, labelled with the interface that carries it), then the UPnP-forwarded internet
         //      endpoint when the router actually opened one.
         //
-        // ONE CONTROL PER ROW, and that is a fix, not a preference. INVITE VIA STEAM used to share a row
-        // with the code and was drawn over it. The card interior is 658 logical px at UiScale 1.4 and
-        // that row's summed minimum was only 501 (code cell 210 + gap 11 + button 280), so nothing was
-        // being crushed to zero — what overran was the cloned native button's LABEL, which keeps the
-        // prefab's own rect (sized for the full-width main-menu column) no matter how small the cell
-        // around it gets, and no Text clips itself. Alone on a 658 px row it has nothing to overrun, and
-        // AddCloneLayoutElement now best-fits every clone label into its cell as the second half of it.
+        // EVERY ROW IS KEY-LEFT / VALUE-RIGHT, and every value is the click-to-copy cell (the header says
+        // so once, so no row repeats "click to copy"). Values are LobbyTheme.ValueText, keys are SubText.
+        //
+        // THE BUTTON SHARING A ROW WITH THE CODE IS THE CASE THAT ONCE BROKE, so keep its two rules. The
+        // card interior is 658 logical px at UiScale 1.4 and this row's summed minimum is 501 (button 280
+        // + gap 11 + code cell 210), so nothing is crushed to zero — what overran the first time was the
+        // cloned native button's LABEL, which keeps the prefab's own rect (sized for the full-width
+        // main-menu column) no matter how small the cell around it gets, and no Text clips itself.
+        // (a) AddCloneLayoutElement pins minWidth AND preferredWidth on the clone root (preferredWidth
+        // alone leaves the effective minimum at ZERO and the cell collapses) and CLIPS the clone root
+        // with a RectMask2D. The mask is the load-bearing half, not CapCloneFont: best-fit and Wrap are
+        // measured against the LABEL's own RectTransform, and that rect is the prefab's — it does not
+        // shrink when the clone root does (CloneMenuButton Instantiates with no rect normalisation), so
+        // both settle on a size that fits a rect far wider than the cell. Only the mask actually stops
+        // the glyphs at the cell edge. Delete it and INVITE VIA STEAM paints over the code again.
+        // (b) the code cell carries its own minWidth + flexibleWidth 1 + MakeCopyableValue's RectMask2D,
+        // so it takes the slack and clips its own text instead of reaching into the button.
         //
         // THERE IS NO JOIN BUTTON HERE ANY MORE. Joining lives behind the gate now (NetworkGatePanel's
         // join screen, reached from NETWORK GAME → JOIN SESSION); a "JOIN A GAME…" button inside a
@@ -406,7 +416,6 @@ namespace Multiplayer.UI
         private void BuildSessionCard(GameObject parent)
         {
             var pad = LobbyTheme.ScaledPadding;
-            var labelH = LobbyTheme.ScaledSubFontSize + pad / 2;
 
             var card = new GameObject("SessionCard");
             card.transform.SetParent(parent.transform, false);
@@ -427,14 +436,31 @@ namespace Multiplayer.UI
             vlg.childForceExpandHeight = false;
             vlg.childAlignment = TextAnchor.UpperLeft;
 
-            // ONE header + separator for the whole card, where there used to be three.
+            // ONE header + separator for the whole card, where there used to be three — and the header
+            // row carries the ONE "click to copy" hint for every value cell below it, which is what let
+            // the per-section labels go. Row, not a bare Text, so the hint can sit at the right edge.
             var hdrH = LobbyTheme.ScaledSectionHeaderFontSize + pad / 2;
-            var hdr = UiToolkit.CreateText(card, "Hdr", Vector2.zero,
-                new Vector2(260, hdrH), "SESSION", LobbyTheme.ScaledSectionHeaderFontSize,
-                TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            var hdrRow = AddCardRow(card, "HeaderRow");
+            var hdrRowLe = LE(hdrRow); hdrRowLe.minHeight = hdrH; hdrRowLe.flexibleHeight = 0;
+
+            var hdr = UiToolkit.CreateText(hdrRow, "Hdr", Vector2.zero,
+                new Vector2(LobbyTheme.Scale(200), hdrH), "SESSION",
+                LobbyTheme.ScaledSectionHeaderFontSize, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
             hdr.color = LobbyTheme.Accent;
             hdr.fontStyle = FontStyle.Bold;
-            var hle = LE(hdr.gameObject); hle.minHeight = hdrH; hle.flexibleHeight = 0;
+            // The title takes the slack (flex 1) so the hint is pushed to the right edge whatever the
+            // card's width; both cells still carry a real minWidth, never preferredWidth alone.
+            var hle = LE(hdr.gameObject);
+            hle.minWidth = LobbyTheme.Scale(120); hle.preferredWidth = LobbyTheme.Scale(120);
+            hle.flexibleWidth = 1;
+
+            var hint = UiToolkit.CreateText(hdrRow, "CopyHint", Vector2.zero,
+                new Vector2(LobbyTheme.Scale(120), hdrH), "click to copy",
+                LobbyTheme.ScaledSubFontSize, TextAnchor.MiddleRight, new Vector2(1f, 0.5f));
+            hint.color = LobbyTheme.SubText;
+            var hintLe = LE(hint.gameObject);
+            hintLe.minWidth = LobbyTheme.Scale(120); hintLe.preferredWidth = LobbyTheme.Scale(120);
+            hintLe.flexibleWidth = 0;
 
             var sep = new GameObject("Separator");
             sep.transform.SetParent(card.transform, false);
@@ -444,41 +470,37 @@ namespace Multiplayer.UI
             sepLe.minHeight = LobbyTheme.ScaledSeparatorThickness;
             sepLe.flexibleHeight = 0;
 
-            // ── 1. INVITE VIA STEAM (everyone), alone on its own row ────────────
+            // ── 1. INVITE VIA STEAM + THE INVITE CODE (everyone), one row ───────
             // Steam allows an explicit overlay invite from any lobby MEMBER — friends-only governs who
             // may BROWSE a lobby, not who may invite into it — and a client that accepted an invite is a
             // member of exactly that lobby (SteamInvite.JoinLobby keeps the handle). So a joiner can pull
             // their own friends in instead of asking the host to. OpenInviteOverlay says so out loud when
             // neither a published nor a joined lobby exists yet.
             var inviteRow = AddCardRow(card, "InviteRow");
+            // AddCardRow's floor is the BUTTON height, but the code cell beside it is a ROW-height cell,
+            // and a LayoutElement outranks its own layout group (priority 1 vs 0) — the row's 56 would
+            // win over the group's honest 62 and the code's plate would bleed past the row. Raise the
+            // floor to the tallest thing actually in the row.
+            LE(inviteRow).minHeight = LobbyTheme.ScaledRowHeight;
+
+            // The button is a FIXED cell: AddCardButton pins minWidth AND preferredWidth on both paths
+            // (clone root via AddCloneLayoutElement, from-code fallback inline) and caps/best-fits the
+            // clone's label — the two halves of the fix that let this row exist again.
             var inviteBtn = AddCardButton(inviteRow, "InviteBtn", "INVITE VIA STEAM",
                 SessionButtonSize, () => _owner.InvitePlayers());
             _inviteBtnCell = CellRoot(inviteBtn, inviteRow.transform);
 
-            // ── 2. THE CONNECT CODE (everyone) ──────────────────────────────────
-            var shareSection = AddCardGroup(card, "ShareGroup");
-
-            var stunLabel = UiToolkit.CreateText(shareSection, "InviteLabel", Vector2.zero,
-                new Vector2(260, labelH), "INVITE CODE (click to copy):",
-                LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            stunLabel.color = LobbyTheme.SubText;
-            LE(stunLabel.gameObject).minHeight = labelH;
-
-            var shareRow = AddCardRow(shareSection, "ShareRow");
-            // AddCardRow's floor is the BUTTON height, and this row holds no button — it holds the code
-            // cell, which is a row-height cell. A LayoutElement outranks its own layout group (priority 1
-            // vs 0), so the group's honest 62 lost to the row's 56 and the code's plate bled 3 px past
-            // the row top and bottom. Raise the floor to what is actually in the row.
-            LE(shareRow).minHeight = LobbyTheme.ScaledRowHeight;
-
-            // ONE unified invite code: carries Steam id and/or public endpoint, so a friend pastes this
-            // single string into the join screen and the client cascades Steam → hole-punch → direct.
-            // Value refreshed live in Refresh() (self-heals as UPnP/STUN discovery + Steam become ready).
+            // THE INVITE CODE, right-aligned in the slack the button leaves: the host's PUBLIC ENDPOINT,
+            // 10 symbols, and never a Steam id — the button to its left IS the Steam channel, and a Steam
+            // id in the code would be useless to the non-Steam player a code gets shared with
+            // (MultiplayerUI.GetSessionInviteCode says why). Value refreshed live in Refresh(), so it
+            // self-heals as UPnP/STUN discovery completes.
             //
-            // It is the only cell in its row, and still the one allowed to give up width — hence the
-            // flex, and hence the clip (MakeCopyableValue's RectMask2D). A truncated code is still a
-            // correct COPY, because the click copies the live value, not the drawn glyphs.
-            _inviteCodeValue = MakeCopyableValue(shareRow, "InviteValue", () => _owner.GetSessionInviteCode());
+            // It is the cell allowed to give up width — hence the flex, and hence the clip
+            // (MakeCopyableValue's RectMask2D). A truncated code is still a correct COPY, because the
+            // click copies the live value, not the drawn glyphs.
+            _inviteCodeValue = MakeCopyableValue(inviteRow, "InviteValue", () => _owner.GetSessionInviteCode());
+            _inviteCodeValue.alignment = TextAnchor.MiddleRight;
             var codeW = LobbyTheme.Scale(150);
             var codeLe = LE(_inviteCodeValue.transform.parent.gameObject);
             codeLe.minHeight = LobbyTheme.ScaledRowHeight;
@@ -486,16 +508,12 @@ namespace Multiplayer.UI
             codeLe.preferredWidth = codeW;
             codeLe.flexibleWidth = 1;
 
-            // ── 3. THE ADDRESSES (HOST only), one per line, each copyable ───────
+            // ── 2. THE ADDRESSES (HOST only), one per line, each copyable ───────
             // Every local IPv4 with the adapter that carries it, then the UPnP-forwarded internet
-            // endpoint. Rows are built on demand in RefreshAddresses; this is just the labelled box they
-            // land in. The whole group is one SetActive, so a client never sees the host's addresses.
+            // endpoint — each one a key-left / value-right row like the one above (built on demand in
+            // RefreshAddresses; this is just the box they land in). The whole group is one SetActive, so
+            // a client never sees the host's addresses. No section label: the header's hint covers it.
             _addressGroup = AddCardGroup(card, "AddressGroup");
-            var addrLabel = UiToolkit.CreateText(_addressGroup, "AddressLabel", Vector2.zero,
-                new Vector2(260, labelH), "ADDRESSES (click to copy):",
-                LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            addrLabel.color = LobbyTheme.SubText;
-            LE(addrLabel.gameObject).minHeight = labelH;
             _addressGroup.SetActive(false);   // shown per frame in Refresh, host only
         }
 
@@ -588,8 +606,10 @@ namespace Multiplayer.UI
         // button rect is owned by the parent layout group (caller sets the LayoutElement min/preferred).
         private Text MakeCopyableValue(GameObject parent, string name, System.Func<string> getValue)
         {
-            var btn = UiToolkit.CreateButton(parent, name, "", Vector2.zero,
-                new Vector2(240, LobbyTheme.ScaledRowHeight),
+            // Vector2.zero size, not a hand-picked one: the button rect comes from the parent layout
+            // group and the label is stretched to the button below, so any number here would be a dead
+            // literal that reads like a width someone chose.
+            var btn = UiToolkit.CreateButton(parent, name, "", Vector2.zero, Vector2.zero,
                 new Vector2(0f, 1f), () => _owner.CopyToClipboard(getValue()));
             // The value is the one cell in its row that flexes, so it is the one that can be handed less
             // width than its text needs — and its label is a CreateText, i.e. horizontalOverflow =
@@ -599,10 +619,22 @@ namespace Multiplayer.UI
             var label = btn.GetComponentInChildren<Text>();
             if (label != null)
             {
+                // STRETCH the label to the button rect. CreateButton anchors it at the centre with a
+                // FIXED sizeDelta, so a right-aligned value would line up on the edge of that fixed rect
+                // rather than the edge of the cell the layout group actually handed us — the value would
+                // float somewhere mid-row. Rubber anchors make alignment mean what it says at any width.
+                var lr = label.rectTransform;
+                lr.anchorMin = Vector2.zero;
+                lr.anchorMax = Vector2.one;
+                lr.offsetMin = Vector2.zero;
+                lr.offsetMax = Vector2.zero;
+
                 label.alignment = TextAnchor.MiddleLeft;
                 label.fontSize = LobbyTheme.ScaledRowFontSize;
                 label.fontStyle = FontStyle.Bold;
-                label.color = LobbyTheme.Accent;
+                // ValueText, not Accent: every copyable value in the card reads in the one colour, and
+                // Accent is captured from the game's WarningUIColor (any hue) — see LobbyTheme.ValueText.
+                label.color = LobbyTheme.ValueText;
             }
             return label;
         }
@@ -1094,13 +1126,13 @@ namespace Multiplayer.UI
 
         // KEEP A CLONE'S LABEL INSIDE THE CELL WE GAVE IT.
         //
-        // Capping the font was only half of it, and the missing half is what drew INVITE VIA STEAM over
-        // the invite code beside it. A LayoutElement constrains the clone ROOT; it says nothing about the
-        // prefab's own label rect inside, which is sized for the full-width main-menu column and does not
-        // shrink when the root does — and no uGUI Text clips itself. So after capping, ask the label to
-        // FIT: best-fit shrinks it only when it genuinely does not fit (resizeTextMaxSize is the capped
-        // size, so a label that already fits renders identically), and Wrap keeps a long one from
-        // reaching sideways into its neighbour while it does.
+        // Capping the font is COSMETIC, and knowing that is the point. A LayoutElement constrains the
+        // clone ROOT; it says nothing about the prefab's own label rect inside, which is sized for the
+        // full-width main-menu column and does not shrink when the root does — and best-fit and Wrap are
+        // both measured against THAT rect, so they settle on a size that fits it and the glyphs still
+        // reach past the cell. They keep the label looking right (resizeTextMaxSize is the capped size,
+        // so a label that already fits renders identically); the RectMask2D in AddCloneLayoutElement is
+        // what keeps it INSIDE. Do not read this as the guard.
         //
         // Same three writes as CountdownPanel.FitInsideRect and TacticalReadySync, for the same reason.
         private static void CapCloneFont(Transform start)
@@ -1120,7 +1152,8 @@ namespace Multiplayer.UI
         // then drives position/size — no anchoredPosition/sizeDelta math). Resolves the OUTERMOST clone
         // root (the GameObject Clone* parented directly under <paramref name="container"/> — the
         // returned Button may be that root or a nested child), resets its localScale to 1 (the prefab
-        // can carry a >1 scale), sets preferred W/H + flexibleWidth 0, and caps the label font.
+        // can carry a >1 scale), sets min+preferred W/H + flexibleWidth 0, caps the label font and masks
+        // the root so the prefab's oversized label cannot draw outside the cell.
         private static void AddCloneLayoutElement(Button btn, Transform container, float w, float h)
         {
             if (btn == null) return;
@@ -1143,10 +1176,21 @@ namespace Multiplayer.UI
             // every from-code fixed cell in CreateRow.
             le.minWidth = w;
             le.preferredWidth = w;
-            le.preferredHeight = h;
+            le.minHeight = h;        // pair the height too: a row whose floor is taller than h otherwise
+            le.preferredHeight = h;  // has nothing from this cell to weigh against the stretch.
             le.flexibleWidth = 0;
 
             CapCloneFont(start);
+
+            // AND THE HARD STOP. CapCloneFont asks the label to fit; it cannot make it. Best-fit and Wrap
+            // both measure the label's OWN RectTransform, which is the prefab's (sized for the full-width
+            // main-menu column) and does NOT shrink when this LayoutElement shrinks the clone root — so
+            // they settle on a size that fits that wide rect and the glyphs still reach past the cell,
+            // over whatever sits beside it. No uGUI Text clips itself. This mask is what actually keeps
+            // a clone inside the cell we gave it; the clone root's rect IS layout-driven, so it clips to
+            // exactly the cell.
+            if (root.GetComponent<RectMask2D>() == null)
+                root.gameObject.AddComponent<RectMask2D>();
         }
 
         // Stretch a cloned native scroller GO (an ancestor of its returned content RectTransform, child
@@ -1339,13 +1383,14 @@ namespace Multiplayer.UI
             RefreshControls(engine, roster);
         }
 
-        // One address line: the copyable cell, its label, and the bare "ip:port" the click puts on the
-        // clipboard. The label reads "Ethernet — 192.168.1.23:14242"; the COPY is just the endpoint,
+        // One address line: a key-left / value-right row. Key = the adapter ("Ethernet"), Value = the
+        // "192.168.1.23:14242" cell, which is also the copy target — and the COPY is just that endpoint,
         // because the adapter name is for the human choosing a line, not for the parser reading it.
         private sealed class AddressLine
         {
-            public GameObject Cell;
-            public Text Label;
+            public GameObject Cell;   // the ROW: one SetActive hides key + value together
+            public Text Key;
+            public Text Value;
             public string Endpoint;
         }
 
@@ -1401,17 +1446,19 @@ namespace Multiplayer.UI
                                        Multiplayer.Net.MappedEndpoint upnp)
         {
             var port = Multiplayer.Util.SmartJoinParser.DefaultDirectPort;
-            var dash = LobbyTheme.EmDash;
 
+            // Key and value are two CELLS now, not one concatenated string with an em-dash between them
+            // — the row's own gap is the separator, and the value cell can right-align against the card
+            // edge like every other value. (LobbyTheme.EmDash still serves the roster's ping / no-sample
+            // columns; it just has no job here any more.)
             var i = 0;
             for (int a = 0; a < addrs.Count && i < MaxAddressLines; a++, i++)
-                SetAddressLine(i, addrs[a].Interface + "  " + dash + "  " + addrs[a].Ip + ":" + port,
-                               addrs[a].Ip + ":" + port);
+                SetAddressLine(i, addrs[a].Interface, addrs[a].Ip + ":" + port);
 
             if (upnp != null && i < MaxAddressLines)
             {
                 var ep = upnp.ToEndPoint();
-                SetAddressLine(i, "Internet (UPnP)  " + dash + "  " + ep, ep.ToString());
+                SetAddressLine(i, "Internet (UPnP)", ep.ToString());
                 i++;
             }
 
@@ -1430,34 +1477,54 @@ namespace Multiplayer.UI
         // Pooled, exactly like the roster rows: a line is created once and then only re-labelled, so a
         // re-enumeration costs no GameObject churn. The copy closure reads the LINE's current endpoint
         // rather than capturing a value, which is what makes reuse safe.
-        private void SetAddressLine(int index, string label, string endpoint)
+        private void SetAddressLine(int index, string key, string endpoint)
         {
             while (_addressLines.Count <= index)
             {
                 var line = new AddressLine();
-                var text = MakeCopyableValue(_addressGroup, "Address" + _addressLines.Count,
-                                             () => line.Endpoint);
-                line.Label = text;
-                line.Cell = text.transform.parent.gameObject;
                 // Sub-size, not row-size: these are secondary lines and eight of them at ScaledRowHeight
-                // would be half the card. Still a real minWidth — every fixed cell in this file carries
-                // one, and the flex plus MakeCopyableValue's RectMask2D handles a long adapter name.
+                // would be half the card. AddCardRow's floor is the BUTTON height, so override it.
                 var h = LobbyTheme.ScaledSubFontSize + LobbyTheme.ScaledPadding / 2;
-                var le = LE(line.Cell);
-                le.minHeight = h; le.preferredHeight = h; le.flexibleHeight = 0;
-                le.minWidth = LobbyTheme.Scale(150);
-                le.preferredWidth = LobbyTheme.Scale(150);
-                le.flexibleWidth = 1;
-                line.Label.fontSize = LobbyTheme.ScaledSubFontSize;
-                line.Label.fontStyle = FontStyle.Normal;
-                line.Label.color = LobbyTheme.SubText;
+                var keyW = LobbyTheme.Scale(160);
+                var valW = LobbyTheme.Scale(200);   // fits "255.255.255.255:14242" at ScaledSubFontSize
+
+                var row = AddCardRow(_addressGroup, "Address" + _addressLines.Count);
+                var rowLe = LE(row);
+                rowLe.minHeight = h; rowLe.preferredHeight = h; rowLe.flexibleHeight = 0;
+
+                // KEY cell: fixed (min AND preferred — preferredWidth alone leaves the effective minimum
+                // at zero and the cell collapses). Its own RectMask2D because no uGUI Text clips itself
+                // and a "ZeroTier One [Virtual Adapter]" would otherwise reach across the value beside it.
+                var keyText = UiToolkit.CreateText(row, "Key", Vector2.zero, new Vector2(keyW, h), "",
+                    LobbyTheme.ScaledSubFontSize, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
+                keyText.color = LobbyTheme.SubText;
+                keyText.gameObject.AddComponent<RectMask2D>();
+                var keyLe = LE(keyText.gameObject);
+                keyLe.minWidth = keyW; keyLe.preferredWidth = keyW; keyLe.flexibleWidth = 0;
+                keyLe.minHeight = h; keyLe.preferredHeight = h; keyLe.flexibleHeight = 0;
+
+                // VALUE cell: same font and size as the key, ValueText red, right-aligned, and the click
+                // target. It is the cell that flexes, so it is the one that can be handed less than its
+                // text needs — MakeCopyableValue's RectMask2D clips it rather than letting it overrun.
+                var val = MakeCopyableValue(row, "Value", () => line.Endpoint);
+                val.alignment = TextAnchor.MiddleRight;
+                val.fontSize = LobbyTheme.ScaledSubFontSize;
+                val.fontStyle = FontStyle.Normal;
+                var valLe = LE(val.transform.parent.gameObject);
+                valLe.minWidth = valW; valLe.preferredWidth = valW; valLe.flexibleWidth = 1;
+                valLe.minHeight = h; valLe.preferredHeight = h; valLe.flexibleHeight = 0;
+
+                line.Cell = row;
+                line.Key = keyText;
+                line.Value = val;
                 _addressLines.Add(line);
             }
 
-            var row = _addressLines[index];
-            row.Endpoint = endpoint;
-            if (row.Label.text != label) row.Label.text = label;
-            SetCellActive(row.Cell, true);
+            var ln = _addressLines[index];
+            ln.Endpoint = endpoint;
+            if (ln.Key.text != key) ln.Key.text = key;
+            if (ln.Value.text != endpoint) ln.Value.text = endpoint;
+            SetCellActive(ln.Cell, true);
         }
 
         private void EnsureChatSubscription(NetworkEngine engine)

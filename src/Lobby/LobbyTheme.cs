@@ -89,6 +89,10 @@ namespace Multiplayer.UI
         private static readonly Color _readyText = new Color(0.50f, 0.90f, 0.50f, 1f);  // status READY = green
         private static readonly Color _mutedText = new Color(0.55f, 0.60f, 0.68f, 1f);  // status "not ready" = dim
         private static readonly Color _separator = new Color(0.20f, 0.27f, 0.38f, 0.85f); // thin section divider
+        // Copyable VALUES (invite code, address endpoints) — one red that reads on the #1E2026 card. NOT
+        // Accent: Accent is overwritten by the captured setup.WarningUIColor (CaptureFromColorControllers)
+        // and is not guaranteed to be any particular hue, so it cannot carry "this is the value" reliably.
+        private static readonly Color _valueText = new Color(1f, 0.42f, 0.36f, 1f);
 
         // ─── Public palette accessors (ensure capture first) ────────────────
         public static Color HeaderBackground { get { EnsureCaptured(); return _headerBg; } }
@@ -107,6 +111,8 @@ namespace Multiplayer.UI
         public static Color MutedText => _mutedText;
         // Thin divider line between rail sections.
         public static Color Separator => _separator;
+        // Click-to-copy value cells in the session card.
+        public static Color ValueText => _valueText;
 
         /// <summary>
         /// THE HOST ROW'S WASH. The roster panel behind the row is painted <see cref="CardBackground"/>,
