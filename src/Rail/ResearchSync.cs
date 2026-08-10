@@ -61,7 +61,11 @@ namespace Multiplayer.Network.Sync
 
         // ─── Presentation latch state (client, viewer faction) ─────────────
         private static string _presentedCurrentId;          // last queue head a started-line was shown for
-        private static HashSet<string> _presentedCompleted; // null = unseeded (first fire seeds silently)
+        private static HashSet<string> _presentedCompleted; // null = unseeded (SeedLatchFromMirror fills it)
+        // Completions latched but not yet SHOWN, because this peer was not on a map surface when they
+        // landed. Deferred, never dropped — drained by PumpDeferredCompletions from the sync tick.
+        private static readonly List<string> _deferredCompleted = new List<string>();
+        private static bool _deferralAnnounced;
 
         // ─── Reflection (private members only; everything else is typed) ──
         private static readonly System.Reflection.FieldInfo OnResearchStartedField =
@@ -94,6 +98,39 @@ namespace Multiplayer.Network.Sync
         {
             _presentedCurrentId = null;
             _presentedCompleted = null;
+            _deferredCompleted.Clear();
+        }
+
+        /// <summary>
+        /// SEED THE LATCH FROM THE MIRROR AS IT IS *NOW* — called by <see cref="GenericApplier"/> BEFORE a
+        /// batch applies, which is the whole point of it existing.
+        ///
+        /// THE BUG IT FIXES (live 2026-08-11, host + Instance2 + Instance3). The latch was seeded lazily,
+        /// inside the first <see cref="PresentFromMirror"/> after a reset, and that call runs AFTER the
+        /// batch — so whatever transition arrived in the first post-boundary batch was indistinguishable
+        /// from backlog and was dropped on the floor by design ("a transition inside that same first batch
+        /// is deliberately swallowed with it"). That is not a rare race: the geoscape clock is PAUSED
+        /// across a mission, so the first research delta after a mission return is whatever completes when
+        /// somebody presses play. Measured: clients reloaded at t≈478.7 ("raise of 'PROG_SY0_WIN' HELD —
+        /// this peer has no geoscape ready to carry a window yet"), peer 1 resumed the clock at host
+        /// t=543.067, and the research completed 240 ms later — host `Queuerd state switch UIStateGeoModal
+        /// with priority 99` (= GeoResearchComplete, GeoscapeView.cs:1987-1990) and NEITHER client ever
+        /// entered UIStateGeoModal.
+        ///
+        /// Seeded here, the baseline is the state the peer LOADED, and every later delta is a real
+        /// transition. Idempotent and free once seeded (one null check).
+        /// </summary>
+        internal static void SeedLatchFromMirror(GeoLevelController geo)
+        {
+            if (_presentedCompleted != null) return;
+            var research = geo == null || geo.ViewerFaction == null ? null : geo.ViewerFaction.Research;
+            if (research == null || research.AllResearchesArray == null) return;
+            var seed = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var el in research.AllResearchesArray)
+                if (el != null && el.State == ResearchState.Completed) seed.Add(el.ResearchID);
+            _presentedCompleted = seed;
+            var head = research.Current;
+            _presentedCurrentId = head == null ? null : head.ResearchID;
         }
 
         /// <summary>Arm the intent surface (0xAB) on the generic engine: transport + dedup + reject
@@ -236,21 +273,11 @@ namespace Multiplayer.Network.Sync
             {
                 if (el == null || el.State != ResearchState.Completed || !_presentedCompleted.Add(el.ResearchID))
                     continue;
-                if (!seeded) continue; // backlog latched silently
-                try
-                {
-                    if (geo.View != null && el.Faction != null)
-                        ViewResearchCompletedMethod?.Invoke(geo.View, new object[] { el.Faction, el });
-                }
-                catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] ResearchSync: completed modal failed: " + ex.Message); }
-                try
-                {
-                    if (geo.Log != null && el.Faction != null)
-                        LogResearchCompletedMethod?.Invoke(geo.Log, new object[] { el.Faction, el });
-                }
-                catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] ResearchSync: completed log failed: " + ex.Message); }
-                Debug.Log("[Multiplayer][rail] ResearchSync CLIENT presented complete " + el.ResearchID);
+                if (!seeded) continue; // backlog latched silently (SeedLatchFromMirror normally got there first)
+                _deferredCompleted.Add(el.ResearchID);
             }
+            // The raise itself is NOT made here: UiEventMap.Fire calls PumpDeferredCompletions right after
+            // this, so the one apply-driven raise site stays visible to L49's ordering arm.
 
             var head = research.Current;
             var headId = head == null ? null : head.ResearchID;
@@ -264,6 +291,71 @@ namespace Multiplayer.Network.Sync
                     Debug.Log("[Multiplayer][rail] ResearchSync CLIENT presented start " + headId);
                 }
             }
+        }
+
+        /// <summary>
+        /// SHOW THE LATCHED COMPLETIONS, ON THIS PEER'S OWN TERMS. Driven both from the apply (so the
+        /// common case is same-frame) and from the sync tick (so a peer who was elsewhere still gets it).
+        ///
+        /// The gate is <see cref="DurableWindowRegistry.MayPresent()"/> — THIS peer's own view state and
+        /// nothing else. NOT A QUORUM: nothing waits on another human, and a peer who never comes back to
+        /// the map simply keeps its window pending. It matters more than it used to: geoscape time no
+        /// longer stops because somebody opened a tab (see <see cref="TimeSync"/>), so a research really
+        /// can complete while this peer is deep in Manufacturing — and yanking it out of an unrelated
+        /// screen is exactly what P13 forbids. Vanilla never had to answer this because vanilla's clock
+        /// was frozen the whole time the tab was open.
+        ///
+        /// Presentation itself stays NATIVE: the game's own private handlers, invoked off this peer's
+        /// mirrored element, so the window is built by GeoscapeView.OnFactionResearchCompleted (:1980) and
+        /// queued through the engine's own switch query at priority 99 like any other geoscape window.
+        /// </summary>
+        internal static void PumpDeferredCompletions(GeoLevelController geo)
+        {
+            if (_deferredCompleted.Count == 0) return;
+            var research = geo == null || geo.ViewerFaction == null ? null : geo.ViewerFaction.Research;
+            if (research == null || research.AllResearchesArray == null) return;
+            if (!DurableWindowRegistry.MayPresent(true, geo.View == null || geo.View.CurrentViewState == null
+                    ? null : geo.View.CurrentViewState.GetType()))
+            {
+                if (_deferralAnnounced) return;
+                _deferralAnnounced = true;
+                Debug.Log("[Multiplayer][rail] ResearchSync CLIENT deferred " + _deferredCompleted.Count +
+                          " completed research window(s) — this peer is not on a geoscape map surface. " +
+                          "Nothing is lost and nobody is waiting on it: it opens the moment this peer is " +
+                          "back on the map.");
+                return;
+            }
+            _deferralAnnounced = false;
+            var pending = _deferredCompleted.ToArray();
+            _deferredCompleted.Clear();
+            foreach (var id in pending)
+            {
+                ResearchElement el = null;
+                foreach (var candidate in research.AllResearchesArray)
+                    if (candidate != null && candidate.ResearchID == id) { el = candidate; break; }
+                if (el == null) continue; // the element left the mirror — nothing to draw a window about
+                try
+                {
+                    if (geo.View != null && el.Faction != null)
+                        ViewResearchCompletedMethod?.Invoke(geo.View, new object[] { el.Faction, el });
+                }
+                catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] ResearchSync: completed modal failed: " + ex.Message); }
+                try
+                {
+                    if (geo.Log != null && el.Faction != null)
+                        LogResearchCompletedMethod?.Invoke(geo.Log, new object[] { el.Faction, el });
+                }
+                catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] ResearchSync: completed log failed: " + ex.Message); }
+                Debug.Log("[Multiplayer][rail] ResearchSync CLIENT presented complete " + id);
+            }
+        }
+
+        /// <summary>The sync-tick drain: the deferred window opens the moment this peer walks back onto the
+        /// map, with no further rail traffic needed. Client-only — the host raises its own natively.</summary>
+        public static void ClientTick(NetworkEngine engine)
+        {
+            if (engine == null || !engine.IsActiveSession || engine.IsHost || _deferredCompleted.Count == 0) return;
+            PumpDeferredCompletions(GeoLevel());
         }
 
         /// <summary>Law 11 repaint entry for the generic rail (UiEventMap): research values changed.</summary>

@@ -202,6 +202,9 @@ namespace Multiplayer.Network.Sync
             // event history; deleted 2026-07-30 with the derivation it drove.)
             // Law 11 UNIVERSAL: flush one open-screen re-enter per frame if anything marked dirty —
             // client mirror batches AND host post-intent reseeds (EquipSync/PersonnelSync) both land here.
+            // A research-complete window this peer latched while it was off the map (P13: never yank a
+            // player out of an unrelated screen) opens here, the moment it is back — no rail traffic.
+            ResearchSync.ClientTick(_engine);
             t = RailCost.Now();
             OpenUiRepaint.FlushIfDirty();
             RailCost.Charge("repaint", t);

@@ -222,6 +222,13 @@ namespace Multiplayer.Network.Sync
                 if (_lastSeq != 0 && seq > _lastSeq + 1)
                     RequestResync(engine, "seq gap (" + _lastSeq + "→" + seq + ")");
 
+                // The presentation latches must be seeded from the mirror AS IT WAS BEFORE THIS BATCH.
+                // Seeded lazily from inside the post-batch Fire, the first batch after a reload boundary is
+                // both the seed and the transition — and the transition loses (live 2026-08-11: the geo
+                // clock was paused from the mission return until peer 1 resumed it, so the FIRST research
+                // delta the clients saw after the boundary was the completion itself; it seeded them
+                // silently and the research-complete window opened on the host alone).
+                ResearchSync.SeedLatchFromMirror(geo);
                 var touched = new HashSet<object>();
                 try
                 {
