@@ -380,3 +380,25 @@ is the code this session deleted on purpose.
   `ClipboardText()` read helper); the three ad-hoc `GUIUtility.systemCopyBuffer` writes now route
   through it.
 - **Not touched:** `RecoverPendingDurableChoices` — the audit's "dead code" claim was ruled FALSE.
+
+## 11. Loopback / same-PC join, 2026-08-10
+
+- **Loopback join was never broken and is not a regression.** `SmartJoinParser.Parse` classifies
+  `127.0.0.1`, `127.0.0.1:PORT`, `127.x.x.x:PORT` and `localhost[:PORT]` as `DirectIp`
+  (`src/Join/SmartJoinParser.cs:65-72`, verified by running the parser standalone), `JoinPlan.Build`
+  gives it a `DirectIP` attempt, and the host listens on `TcpListener(IPAddress.Any, port)`
+  (`src/Transport/DirectTransport.cs:141`) — so a second instance on the same box really is answered.
+  `IsOwnLoopback` (`SmartJoinParser.cs:44`) only refuses a HEALTHY DirectIP host joining itself; a 2nd
+  instance whose bind failed is deliberately let through (`MultiplayerUI.cs:859`).
+- **What actually fails on a two-instance box:** the join field prefills a clipboard invite CODE when
+  one is present (`MultiplayerUI.JoinPrefill`, `MultiplayerUI.cs:482-484`), and on one machine the
+  clipboard ALWAYS holds the host's own code. That code carries the UPnP/STUN **WAN** endpoint
+  (`GetSessionInviteCode`), so the same-box joiner hairpins to his own router instead of using the one
+  address that always works. Nothing on screen named loopback in that state.
+- **Fixed by surfacing, not by parsing:** a permanent sub-text hint under the join field
+  (`src/Lobby/NetworkGatePanel.cs`, `LocalHint`) and a `This PC (same machine) — 127.0.0.1:14242`
+  row on the host's address card (`LobbyPanel.PaintAddressLines`), which reuses the existing pooled
+  copyable `AddressLine` row. `LanIpResolver` still drops 127/8 on purpose — its list is "addresses
+  someone ELSE can dial"; the local line is added at the card, not in the resolver.
+- **`::1` is still Invalid** and that is honest: the transport is IPv4-only (`IPAddress.Any`,
+  `AddressFamily.InterNetwork` filter). Add it only when the transport becomes dual-stack.

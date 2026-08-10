@@ -274,6 +274,23 @@ namespace Multiplayer.UI
             var joinW = LobbyTheme.Scale(140);
             LobbyPanel.AddCardButton(row, "GateJoinBtn", "JOIN", new Vector2(joinW, rowH), Submit);
 
+            // SAME-PC PLAY, SAID OUT LOUD. The field already DEFAULTS to 127.0.0.1:14242 (MultiplayerUI
+            // .JoinPrefill) — but only when the clipboard holds no invite code, and on a two-instance test
+            // box it always does: the host copied its own code a moment earlier from the SAME clipboard.
+            // So the one case where loopback is the only address that works is exactly the case where the
+            // default that names it disappears, and the prefilled code dials the host's WAN endpoint back
+            // through its own NAT. One sub-text line, same style as the label above, costs nothing and
+            // never disappears.
+            var hintH = LobbyTheme.ScaledSubFontSize + pad / 2;
+            var hint = UiToolkit.CreateText(screen, "LocalHint", Vector2.zero,
+                new Vector2(LobbyTheme.Scale(600), hintH),
+                "Testing on this PC? Type 127.0.0.1:" + Multiplayer.Util.SmartJoinParser.DefaultDirectPort
+                    + " to join another instance on this machine.",
+                LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            hint.color = LobbyTheme.SubText;
+            hint.raycastTarget = false;
+            var hle = LobbyPanel.LE(hint.gameObject); hle.minHeight = hintH; hle.flexibleHeight = 0;
+
             // No spacer between the card and BACK: the card already carries flexibleHeight 1, so it takes
             // ALL the slack down to the button row. A spacer here would only halve it.
             BuildFriendsCard(screen);

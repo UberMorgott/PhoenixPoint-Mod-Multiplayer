@@ -1625,6 +1625,19 @@ namespace Multiplayer.UI
                 i++;
             }
 
+            // THE SAME-PC LINE, LAST. LanIpResolver deliberately drops 127/8 — "an address nobody outside
+            // this box can dial is worse than no line at all" — and that stays right for the LAN lines it
+            // returns. But a SECOND INSTANCE on this machine is the one joiner for which loopback is the
+            // only address that always works: the WAN/UPnP endpoint has to hairpin through the router and
+            // the invite code carries nothing else. DirectTransport binds TcpListener(IPAddress.Any, port)
+            // (DirectTransport.cs:141), so this listener really does answer here. Last, not first, so it
+            // never crowds out or gets mistaken for an address to send a friend.
+            if (i < MaxAddressLines)
+            {
+                SetAddressLine(i, "This PC (same machine)", "127.0.0.1:" + port);
+                i++;
+            }
+
             for (int spare = i; spare < _addressLines.Count; spare++)
                 SetCellActive(_addressLines[spare].Cell, false);
         }
