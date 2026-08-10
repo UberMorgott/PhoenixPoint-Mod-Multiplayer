@@ -26,11 +26,35 @@ namespace Multiplayer.Network
     /// first casualty) and it would fail silently, this repo's dominant bug class. Nothing may GATE on
     /// a reading either — a peer with no sample is simply unknown (NO-QUORUM mandate, L145).
     ///
-    /// ESTIMATOR: RFC 6298 §2.3's SRTT recurrence at alpha = 1/4 — <c>srtt += (R - srtt) >> 2</c>, and
-    /// <c>SRTT = R</c> on the first sample (§2.2). Its RTTVAR half is deliberately absent: RTTVAR exists
-    /// only to size a retransmission timeout and we retransmit nothing. alpha = 1/4 (not the RFC's 1/8)
-    /// settles in ~4 samples ≈ 4 s at this cadence; 1/8 would lag ~8 s and read as broken.
-    /// ponytail: if a display ever flickers, drop alpha to 1/8 before adding any second filter.
+    /// ESTIMATOR: RFC 6298 §2.3's SRTT recurrence at alpha = 1/4 — <c>srtt += (R - srtt) >> 2</c> — but
+    /// applied in ONE DIRECTION ONLY. A sample BETTER than the current estimate replaces it outright; only
+    /// a sample WORSE than it is smoothed. Its RTTVAR half is deliberately absent: RTTVAR exists only to
+    /// size a retransmission timeout and we retransmit nothing.
+    ///
+    /// WHY NOT SYMMETRIC (2026-08-10 report: "ping climbs to six hundred and then descends very slowly").
+    /// The RFC's recurrence is built to size a TIMEOUT, where over-estimating is the safe error and
+    /// lingering high is a feature. A ping DISPLAY wants the opposite. Symmetric alpha = 1/4 needs ~19
+    /// samples to walk a 600 ms reading back down to 50 — at this 1 s cadence that is ~19 SECONDS of
+    /// visibly wrong number, and §2.2's "SRTT = R on the first sample" seeds exactly such a reading,
+    /// because the first probe of a session is acked across the campaign load that follows the join
+    /// (measured: frameMax 3165,5 ms, D:\PP-Instance3\Player.log). One-directional decay fixes both
+    /// halves at once and needs no first-sample special case: a poisoned seed survives exactly until the
+    /// next good sample, one cadence later. Upward smoothing is kept so a single stalled frame cannot
+    /// paint the meter red.
+    ///
+    /// WHAT THE REMAINING FLOOR IS MADE OF — it is OURS, not the link's. Both the probe and the ack are
+    /// handled in Unity <c>Update</c> (the transport's reader thread only queues; SessionManager.Update
+    /// drains), so a round trip crosses one main-thread frame boundary on the responder and one on the
+    /// initiator. On the 2026-08-10 three-instances-on-one-box playtest both games held a vsync-locked
+    /// 59,4 fps (`[rail] cost/10s: frames=594`, median over 61 samples), i.e. 16,8 ms per frame, so those
+    /// two boundaries alone are ~17 ms of the reading before a single byte touches the network; the rest
+    /// is writer-thread wakeup on a box running three copies of the game. Loopback itself contributes
+    /// well under a millisecond. A raw external ping to 127.0.0.1 shares NONE of that and is not the
+    /// same measurement — the number here is honestly "how long a co-op message takes to be answered",
+    /// which is what a player cares about, and it can never read below one frame.
+    /// ponytail: cutting the last ~17 ms means echoing the probe from the transport's reader thread
+    /// instead of from Update — a real change to every ITransport, worth it only if the floor ever
+    /// matters more than the code it costs.
     /// </summary>
     public class PingTable
     {
@@ -108,9 +132,12 @@ namespace Multiplayer.Network
             var r = nowMs - stamp;
             if (r < 0) return;                       // clock stepped backwards mid-probe
             if (r > ushort.MaxValue) r = ushort.MaxValue;
-            _srtt[peerId] = _srtt.TryGetValue(peerId, out var s)
-                ? s + (((int)r - s) >> 2)            // RFC 6298 §2.3, alpha = 1/4
-                : (int)r;                            // RFC 6298 §2.2, first sample
+            // ASYMMETRIC ON PURPOSE — see the estimator note in this class's summary. Down is instant,
+            // up is smoothed: a spike costs one sample to arrive and one sample to leave, instead of the
+            // ~19 s a symmetric alpha=1/4 needed to walk 600 ms back down to 50 at a 1 s cadence.
+            _srtt[peerId] = _srtt.TryGetValue(peerId, out var s) && (int)r > s
+                ? s + (((int)r - s) >> 2)            // worse than we thought: RFC 6298 §2.3, alpha = 1/4
+                : (int)r;                            // better than we thought (or the first sample): take it
             _sampledAt[peerId] = nowMs;
         }
 
