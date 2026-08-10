@@ -69,9 +69,20 @@ namespace RailCheck
     ///       yield [SteamP2P, DirectIP, StunUDP], and with Steam DEAD must drop to [DirectIP, StunUDP].
     ///       The invite path was explicitly not to change; a fix that pinned everything off Steam would
     ///       satisfy (a) and (c) and break the only path Steam users have.
-    ///   (c) <c>legacy-kind-unpinned</c> — each single-format kind yields exactly ONE attempt of its own
-    ///       transport, under BOTH origins. The origin is about a unified code only; a legacy kind that
-    ///       started varying with it would mean a pasted bare Steam id had lost its Steam attempt.
+    ///   (c) <c>legacy-kind-unpinned</c> — each single-TECHNOLOGY kind (an IP, a hostname, a bare Steam id)
+    ///       yields exactly ONE attempt of its own transport, under BOTH origins. The origin is about a
+    ///       unified code only; a legacy kind that started varying with it would mean a pasted bare Steam
+    ///       id had lost its Steam attempt. The short code is NOT in this table — see (e).
+    ///   (e) <c>short-code-lost-its-tcp-leg</c> — a 10-symbol ConnectCode (<c>JoinKind.StunCode</c>) yields
+    ///       [DirectIP, StunUDP] in that order, under BOTH origins. It names an ENDPOINT, and TCP-to-it
+    ///       then punch-to-it is one technology, so this does not weaken (a)/(c). Until 2026-08-10 this arm
+    ///       of <c>Build</c> emitted the punch ALONE — no TCP leg at all, so every pasted short code ran the
+    ///       save transfer over best-effort UDP even on a LAN, which is the ZeroTier truncation described
+    ///       above with no fallback to lose. It matters more now than it did: the lobby's published code is
+    ///       a ConnectCode and nothing else (<c>MultiplayerUI.GetSessionInviteCode</c>), so this arm is the
+    ///       ONLY plan a code-joiner ever gets. Guarded: the arm first asserts <c>JoinTarget.Stun</c> still
+    ///       classifies as <c>StunCode</c>, because re-routing that classification would leave the
+    ///       assertions passing against a branch nobody meant to test.
     ///   (d) POSITIVE CONTROL. A vacuous sweep is the likeliest silent regression here and it is cheap:
     ///       delete the SteamP2P line entirely and (a) and (c)'s direct/stun cases stay green forever. So
     ///       the law asserts that <c>Build</c> DOES emit SteamP2P where it must — arm (b)'s first attempt
@@ -82,7 +93,8 @@ namespace RailCheck
     ///
     /// Falsify: drop the <c>origin == JoinOrigin.SteamInvite</c> clause from JoinPlan's Unified branch → (a);
     /// remove the Steam attempt outright → (b) and (d); make a legacy kind consult the origin → (c);
-    /// give <c>Build</c> a defaulted origin or a compatibility overload → (d).
+    /// give <c>Build</c> a defaulted origin or a compatibility overload → (d); delete the DirectIP line from
+    /// the StunCode arm, or put it after the StunUDP one → (e).
     /// </summary>
     internal static class L155_EachEntryPointKeepsItsTransport
     {
@@ -141,7 +153,6 @@ namespace RailCheck
             {
                 Tuple.Create(JoinTarget.Direct(HostIp, HostPort), TransportType.DirectIP),
                 Tuple.Create(JoinTarget.DirectHost("host.example.net", HostPort), TransportType.DirectIP),
-                Tuple.Create(JoinTarget.Stun(new IPEndPoint(IPAddress.Parse(HostIp), HostPort)), TransportType.StunUDP),
                 Tuple.Create(JoinTarget.Steam(HostSteamId), TransportType.SteamP2P),
             };
             foreach (var pair in legacy)
@@ -150,12 +161,42 @@ namespace RailCheck
                              new[] { pair.Item2 },
                              "A single-format target names its technology outright — an IP or a hostname is " +
                              "a directly reachable host (LAN, virtual LAN, white IP, forwarding domain) and " +
-                             "so is Direct TCP, a short code is the hole-punch, and a bare SteamID64 is an " +
-                             "explicit request for Steam and keeps it even when PASTED. These four are the " +
+                             "so is Direct TCP, and a bare SteamID64 is an " +
+                             "explicit request for Steam and keeps it even when PASTED. (The short code is " +
+                             "an endpoint, not a technology, and is asserted separately in arm (e).) " +
+                             "These three are the " +
                              "pinning the rest of " +
                              "the change was modelled on; making any of them read the origin would either " +
                              "add back a cross-technology attempt or strip the bare-Steam-id exception."))
                         yield return v;
+
+            // ── arm (e): a SHORT CODE IS AN ENDPOINT AND GETS BOTH LEGS TO IT.
+            // GUARD FIRST, because this arm is the one that can go quietly vacuous: it asserts what
+            // JoinKind.StunCode produces, and the day ConnectCode is re-routed to classify as something
+            // else (Unified, say) this target stops exercising the StunCode branch while every assertion
+            // below keeps passing against a branch nobody meant to test.
+            var stunTarget = JoinTarget.Stun(new IPEndPoint(IPAddress.Parse(HostIp), HostPort));
+            if (stunTarget.Kind != JoinKind.StunCode)
+            {
+                yield return "L155 premise-changed: JoinTarget.Stun no longer yields JoinKind.StunCode " +
+                             "(got " + stunTarget.Kind + "), so the short-code arm below is testing some " +
+                             "other branch of Build. The 10-symbol ConnectCode is the whole free-services " +
+                             "join path — re-point this arm at whatever kind it classifies as now.";
+                yield break;
+            }
+            foreach (var origin in new[] { JoinOrigin.PastedCode, JoinOrigin.SteamInvite })
+                foreach (var v in Expect("short-code-lost-its-tcp-leg", stunTarget, true, origin,
+                         new[] { TransportType.DirectIP, TransportType.StunUDP },
+                         "A 10-symbol code names an ENDPOINT, and both legs to that endpoint are the same " +
+                         "technology — TCP to it, then the punch to it — so this is not the cross-technology " +
+                         "cascade the rest of this law forbids. The punch ALONE is what this arm used to " +
+                         "return, and that is a data-loss shape, not a preference: StunTransport.Send is a " +
+                         "duplicated UDP datagram with no sequencing, ACK or retransmit, the save transfer's " +
+                         "32 KB chunks IP-fragment on top of it, and one lost fragment fails the transfer " +
+                         "outright — 2026-08-07 over ZeroTier, 131072 of 169071 bytes, against a host that " +
+                         "was directly reachable the whole time. Order by what the link can CARRY. Also note " +
+                         "the expectation is ORDER-sensitive: [StunUDP, DirectIP] is the same bug."))
+                    yield return v;
 
             // ── arm (d), the POSITIVE CONTROL.
             foreach (var v in PositiveControl(unified)) yield return v;

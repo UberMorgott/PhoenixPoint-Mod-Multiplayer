@@ -49,6 +49,20 @@ namespace Multiplayer.Util
                     plan.Add(new JoinAttempt(TransportType.DirectIP, target.Ip, target.Port));
                     break;
                 case JoinKind.StunCode:
+                    // A SHORT CODE IS AN ENDPOINT, SO IT GETS BOTH LEGS TO THAT ENDPOINT — Direct TCP
+                    // first, then the punch — exactly like the Unified branch below, and for the same
+                    // reason: STUN's "reliable" send is a duplicated UDP datagram with no sequencing,
+                    // ACK or retransmit (StunTransport.Send), and the save transfer's 32 KB chunks
+                    // IP-fragment on top of it, so one lost fragment fails the whole transfer with no
+                    // recovery. Recorded 2026-08-07 over ZeroTier: STUN won the race to a host that was
+                    // directly reachable the whole time and the client's save arrived 131072 of 169071
+                    // bytes, 2 chunks missing. This arm carried the punch ALONE until 2026-08-10 — not a
+                    // fallback ORDERING problem like the Unified branch's, but no TCP leg at all — so
+                    // every pasted 10-symbol ConnectCode landed on best-effort UDP even on a LAN, and it
+                    // is now the only plan a code-joiner gets (the lobby publishes a ConnectCode and
+                    // nothing else, MultiplayerUI.GetSessionInviteCode). Same technology with and without the
+                    // punch; this is not a cross-technology cascade (L155).
+                    plan.Add(new JoinAttempt(TransportType.DirectIP, target.Ip, target.Port));
                     plan.Add(new JoinAttempt(TransportType.StunUDP, target.Ip + ":" + target.Port, 0));
                     break;
                 case JoinKind.SteamId:
