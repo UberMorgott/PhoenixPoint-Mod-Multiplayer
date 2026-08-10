@@ -386,6 +386,56 @@ on the inline side. Nothing is missing and no row is invented — verified 2026-
 - Native campaign save/load durability is **no longer a mod concern at all**: the mod writes nothing into any save, and the native `GeoscapeViewSwitchQuery` queue is the source of truth (ridden by `WindowQueueSync.RestoreDropsResolvedSubjects`, `src/Rail/WindowQueueSync.cs:988`). See `HANDOFF.md` §4.
 - inline laws have no `L<n>_<Name>.cs`; grep `Program.cs` for the id string.
 
+## Mission-start windows and post-mission resupply — the 2026-08-10 owner decisions
+
+Three owner rulings, given in these words, now recorded so nobody re-derives them. Held by
+`L404`..`L407` (file-backed, registered, `tools/law-count.txt` 208 -> 212) plus the two arms rewritten
+in `L163` and `L164`.
+
+- **"для каждого своё окно ТОЛЬКО У ОКОН У КОТОРЫХ ИДЁТ ПОДТВЕРЖДЕНИЕ НАЧАЛА МИССИИ, без блокировки
+  выбора. остальные окна по правилам как уже есть."** Shared-answer FIRST-WINS stays the RULE
+  (`docs/superpowers/specs/2026-08-09-durable-window-inbox-design.md:89`, `HANDOFF.md:44`,
+  `EventPopup.IsFrozen` `src/Rail/EventPopup.cs:1225`, L44/L45). The ONE additional exception is the
+  MISSION-START CONFIRMATION, matched on its native raiser and not on a name: `ShowMissionBriefing`
+  (GeoscapeView.cs:1903) pushes a `UIStateGeoModal` whose `ModalType` IS `GetMissionBriefModal(mission)`
+  (:1724) over a live `GeoMission`, Confirm -> `ModalResultCallback`:825 -> `LaunchMission`:1043. Named
+  by `GeoWindowCoverage.IsMissionStartConfirmationClass` (`src/Rail/GeoWindowCoverage.cs:478`), a strict
+  subset of the older per-peer answer class — the `*Outcome` sibling (`GetMissionOutcomeModal`:1800)
+  stays in that class and OUT of this one, because it starts nothing. No copy is frozen read-only and
+  no peer's answer is replayed onto another peer's copy. **L404.**
+- **The cost of that, and the hard part:** several peers may confirm the same mission, so the LAUNCH
+  behind the window must be idempotent. The key is the SUCCESSOR, not a flag —
+  `MissionSync.MissionStartAlreadyCommitted` (`src/Rail/MissionSync.cs:416`) reads the replicated ledger
+  for the shared `DeploymentPreparing` occurrence over the same stable mission subject, and
+  `RunNativeMissionOfferAnswer`'s new `startCommitted` arm (`:440`) stops a late Confirm falling through
+  to a second native `LaunchMission`. **L405.**
+- **"а окно подготовки к высадке у всех на первое место перемещается если кто-то выбрал начать
+  миссию."** Already true and now asserted rather than assumed: `DurableInboxStore.TryStartDeployment`
+  (`src/Rail/DurableInboxStore.cs:99-101`) mints the preparation for EVERY member off ONE peer's
+  Confirm, and `DurableWindowRegistry.PriorityOf` (`:318`) ranks it `Deployment`, the maximum, which
+  `WindowOrder.DurablePriorityHead` (`:131`) sorts descending. The native side needs nothing —
+  `ToDeploymentState`:596 already queues `UIStateRosterDeployment` at `int.MaxValue`, so the rank table
+  deliberately does not name it. A PUSH, never a wait (P13). **L406.**
+- **"Да, первым после миссии."** `ReplenishSync.ReplenishRank` 20 -> `int.MaxValue`
+  (`src/Rail/ReplenishSync.cs:82`). 20 cleared the event family but lost to `UIStateGeoCutscene` (100);
+  at the ceiling the resupply screen loses only to the post-mission outcome modal, which shares
+  `int.MaxValue` and is queued first from the same arrival — i.e. the native order, you-won panel then
+  resupply. The rank does NOT also promote the YANK: `UIStateReplenish` joined
+  `WindowOrder.HeldTransitionStates` (`src/Rail/WindowOrder.cs:212`) exactly as
+  `UIStateRosterDeployment` already had, so the 2026-08-07 ruling holds. `L163` arm (d) was rewritten
+  from the SHAPE it asserted (`rank < TransitionPriority`) to that OUTCOME. **L407.**
+- **The post-mission resupply race is fixed at the root, not by a bigger timeout.** A client's geoscape
+  is rebuilt from the HOST'S mid-tactical save, so `GetMissingItems()` is empty at
+  `UIStateInitial`:125 and `QueueReplenishState`:127 never runs. The host now states the fact: a
+  POSTFIX on `GeoMission.Complete` (sole caller of `PostmissionReplenish`, GeoMission.cs:896) arms
+  `ReplenishSync.HostPostMissionTick`, which broadcasts the empty-bodied one-way edge
+  `SurfaceIds.GeoPostMissionCommit` (**0xB2**, a retired id reused) from `SyncEngine.Tick` IMMEDIATELY
+  AFTER `DiffEngine.HostTick` — behind the batch carrying the writes. The transport is per-peer ordered,
+  so a client holding that message has already applied them and asks the game's own question ONCE
+  (`ReplenishSync.OnPostMissionWritesCommitted`). The 180-frame poll survives only as a bounded safety
+  net for a host that never sends. NOT A QUORUM: a host machine event, never a human action. **L407**,
+  and `L164` arm (b) widened one hop so it follows the shared `TryQueueReplenish`.
+
 ## Attention
 
 - rows in table: 150. numbers issued: 155 (L85–L90 never issued; old L26 retired). Registrations: 130 — see "Rows vs registrations".

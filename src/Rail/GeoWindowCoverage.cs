@@ -458,7 +458,51 @@ namespace Multiplayer.Network.Sync
         /// naturally. The 10 briefs and their 11 <c>*Outcome</c> siblings all ride one state
         /// (<c>UIStateGeoModal</c>) and one raiser (<c>ShowMissionBriefing</c>:1903).</summary>
         internal static bool IsPerPeerAnswerClass(bool hasMission, bool isBrief, bool isOutcome)
-            => hasMission && (isBrief || isOutcome);
+            => IsMissionStartConfirmationClass(hasMission, isBrief) || (hasMission && isOutcome);
+
+        /// <summary>PURE (RailCheck L403). THE MISSION-START CONFIRMATION FAMILY, named apart from its
+        /// <c>*Outcome</c> sibling — owner decision 2026-08-10: "для каждого своё окно ТОЛЬКО У ОКОН У
+        /// КОТОРЫХ ИДЁТ ПОДТВЕРЖДЕНИЕ НАЧАЛА МИССИИ, без блокировки выбора".
+        ///
+        /// MATCHED ON THE NATIVE RAISER, not on a name: <c>GeoscapeView.ShowMissionBriefing</c>:1903 pushes
+        /// a <c>UIStateGeoModal</c> whose <c>ModalType</c> IS <c>GeoscapeView.GetMissionBriefModal(mission)</c>
+        /// (:1724) and whose <c>ModalData</c> is the live <c>GeoMission</c>; its Confirm arm is
+        /// <c>ModalResultCallback</c>:825 → <c>LaunchMission</c>:1043, i.e. the one native window that asks a
+        /// player to confirm ENTERING a mission. The outcome sibling (<c>GetMissionOutcomeModal</c>:1800)
+        /// answers the same class but starts nothing, so it is deliberately NOT in here.
+        ///
+        /// WHAT THE SEPARATION BUYS: this family is the only one that may be answered by several peers at
+        /// once without any of them being locked read-only, which means the LAUNCH behind it has to be
+        /// idempotent — <see cref="MissionSync.MissionStartAlreadyCommitted"/> and
+        /// <see cref="MissionSync.RunNativeMissionOfferAnswer"/>. Every other family keeps shared first-wins.</summary>
+        internal static bool IsMissionStartConfirmationClass(bool hasMission, bool isBrief)
+            => hasMission && isBrief;
+
+        /// <summary>The live question for <see cref="IsMissionStartConfirmationClass"/>, asked of the game
+        /// itself. Never throws into game code: an unanswerable question means "not a start confirmation",
+        /// which leaves the caller on the pre-2026-08-10 path.</summary>
+        internal static bool IsMissionStartConfirmation(ModalType modalType, object modalData)
+        {
+            var mission = modalData as GeoMission;
+            if (mission == null || BriefModalMethod == null) return false;
+            var view = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.View;
+            if (view == null) return false;
+            try
+            {
+                // OUTCOME FIRST, same reason as IsPerPeerAnswer: GetMissionBriefModal LogErrors for a mission
+                // type it cannot place, so an outcome-only mission must never reach it.
+                if (modalType == view.GetMissionOutcomeModal(mission)) return false;
+                return IsMissionStartConfirmationClass(true,
+                    modalType == (ModalType)BriefModalMethod.Invoke(view, new object[] { mission }));
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MP][windows] could not ask the game whether '" + modalType + "' is a mission " +
+                               "START confirmation — treating it as NOT one, which leaves the launch on its " +
+                               "pre-2026-08-10 path: " + ex);
+                return false;
+            }
+        }
 
         /// <summary><c>GetMissionBriefModal</c> is private (GeoscapeView.cs:1724); its outcome sibling is
         /// public (:1800). Reflection reaches the PATCHED method, so TFTV's own arm answers here too.</summary>

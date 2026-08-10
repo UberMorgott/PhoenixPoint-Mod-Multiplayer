@@ -47,17 +47,18 @@ namespace RailCheck
     ///       on a screen despite its <c>int.MaxValue</c>, and is NOT held on the map. Arms (a)-(c) all pass
     ///       an ordinary window, so every one of them stays green if the carve-out is dropped — this is the
     ///       only arm that fails when another peer's mission launch starts yanking again.
-    ///   (d) <c>review-family-misranked</c> — <c>ReplenishSync.ReplenishRank</c> is strictly below
-    ///       <c>TransitionPriority</c>, so the resupply screen is in the family this law holds. If a later
-    ///       re-rank pushed it over the line, arm (a) would keep passing for the event family while the one
-    ///       window the owner reports by name silently went back to interrupting.
+    ///   (d) <c>review-family-misranked</c> — <c>UIStateReplenish</c>, AT ITS REAL RANK, is held on a screen
+    ///       and not on the map. Arm (a) passes an ordinary window, so it would keep passing for the event
+    ///       family while the one window the owner reports by name silently went back to interrupting.
+    ///       Rewritten 2026-08-10 from "rank &lt; TransitionPriority" (shape) to this (outcome) when the rank
+    ///       became <c>int.MaxValue</c> and the hold moved to the <c>HeldTransitionStates</c> carve-out.
     ///
     /// Falsify (each verified to go RED, then restored):
     ///   • drop the <c>priority &lt; TransitionPriority</c> clause → <c>transition-held</c>
     ///   • drop the <c>!MapStates.Contains</c> clause → <c>map-held</c>
     ///   • return <c>false</c> unconditionally (i.e. delete the hold) → <c>screen-interrupted</c>
     ///   • add <c>UIStateResearch</c> to <c>MapStates</c> → <c>screen-interrupted</c>
-    ///   • raise <c>ReplenishSync.ReplenishRank</c> to 100 → <c>review-family-misranked</c>
+    ///   • remove <c>"UIStateReplenish"</c> from <c>HeldTransitionStates</c> → <c>review-family-misranked</c>
     ///   • empty <c>HeldTransitionStates</c>, or make it match every state → <c>deployment-yanks</c>
     /// </summary>
     internal static class L163_NotificationWaitsForTheMap
@@ -68,7 +69,9 @@ namespace RailCheck
 
         /// <summary>The three priorities <c>OnGeoscapeEventRaised</c> actually mints (:2044 ordinary / :2044
         /// triggered-by-event / :2051 superseding) plus the resupply rank — the whole review family.</summary>
-        private static readonly int[] ReviewPriorities = { 0, 10, 15, ReplenishSync.ReplenishRank };
+        /// (The resupply rank left this list on 2026-08-10: it is int.MaxValue now, i.e. transition band,
+        /// and arm (d) below asserts its hold over the real UIStateReplenish rather than by band.)
+        private static readonly int[] ReviewPriorities = { 0, 10, 15 };
 
         internal static IEnumerable<string> Check()
         {
@@ -161,17 +164,28 @@ namespace RailCheck
                                  "must widen WHICH windows the hold covers, never WHERE it engages (L144: the " +
                                  "squad screen still has to be reachable).";
 
-            // ── (d) the resupply screen is in the family this law holds ─────────────────────────────
-            // Read as METADATA, not as the compile-time literals: two consts compared in source fold to a
-            // constant and the compiler drops the arm, which is a law that cannot fail by construction.
+            // ── (d) the resupply screen still waits for the map ─────────────────────────────────────
+            // OUTCOME, NOT SHAPE (rewritten 2026-08-10). This arm used to read "ReplenishRank <
+            // TransitionPriority" as metadata, i.e. it asserted the MECHANISM by which the resupply screen
+            // is held. The owner then ranked that screen FIRST ("первым после миссии", ReplenishRank =
+            // int.MaxValue) and the mechanism changed to the HeldTransitionStates carve-out the squad screen
+            // already used — a CORRECT change that failed the law until the law was edited, the L127(d)
+            // trap. What the 2026-08-07 report actually demands is the behaviour below, and it is now driven
+            // over the real predicate at the real rank.
             int replenishRank = ConstOf(typeof(ReplenishSync), "ReplenishRank");
-            int transition = ConstOf(typeof(WindowOrder), "TransitionPriority");
-            if (replenishRank >= transition)
-                yield return "L163 review-family-misranked: ReplenishSync.ReplenishRank is " +
-                             replenishRank + ", at or above WindowOrder.TransitionPriority (" +
-                             transition + "). The resupply screen is a REVIEW window — the " +
-                             "owner names it in the same report — so a rank above the line puts it back to " +
-                             "interrupting an open screen while every other arm here stays green.";
+            var replenishState = typeof(UIStateReplenish);
+            foreach (var screen in screens)
+                if (!Hold(predicate, replenishRank, replenishState, screen))
+                    yield return "L163 review-family-misranked: UIStateReplenish ranked " + replenishRank +
+                                 " is NOT held while " + screen.Name + " is open. The resupply screen is a " +
+                                 "REVIEW window — the owner names it in the 2026-08-07 report — so it must " +
+                                 "wait for the map however it is ranked; a promotion that also promotes the " +
+                                 "YANK puts it back to pulling the player off a screen he opened.";
+            foreach (var mapState in map)
+                if (Hold(predicate, replenishRank, replenishState, mapState))
+                    yield return "L163 review-family-misranked: UIStateReplenish is held while " +
+                                 mapState.Name + " is current — on the map there is no screen to protect and " +
+                                 "the resupply screen is the whole point of the arrival.";
         }
 
         private static int ConstOf(Type owner, string name)

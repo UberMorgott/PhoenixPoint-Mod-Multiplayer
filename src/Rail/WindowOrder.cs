@@ -209,6 +209,12 @@ namespace Multiplayer.Network.Sync
         private static readonly HashSet<string> HeldTransitionStates = new HashSet<string>(StringComparer.Ordinal)
         {
             "UIStateRosterDeployment",   // the pre-mission squad/deployment screen (ToDeploymentState:596)
+            // The post-mission resupply screen joined the transition band on 2026-08-10 when
+            // ReplenishSync.ReplenishRank went from 20 to int.MaxValue (owner: "первым после миссии"). The
+            // rank decides ORDER; it must not silently also decide the YANK, and the 2026-08-07 ruling that
+            // a review window waits for the map covers this screen by name. Without this line the promotion
+            // would pull a player out of the research tree the moment somebody else's squad came home.
+            "UIStateReplenish",
         };
 
         /// <summary>THE GEOSCAPE MAP: the only view states in which the player is "on the geoscape". Everything

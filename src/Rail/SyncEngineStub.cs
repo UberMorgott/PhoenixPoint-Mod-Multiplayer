@@ -84,6 +84,9 @@ namespace Multiplayer.Network.Sync
                 // Client-side inside, and it applies nothing: it logs one [MP][clockphase] line.
                 || ClockPhaseDiag.HandleInbound(_engine, peer, surfaceId, payload)
                 || MissionSync.HandleInbound(_engine, peer, surfaceId, payload)
+                // 0xB2 post-mission commit edge. Claims the id on BOTH roles (an unclaimed surface falls
+                // through to the value rail); the host ignores its own echo.
+                || ReplenishSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || IntentRail.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }
@@ -135,6 +138,11 @@ namespace Multiplayer.Network.Sync
             DeployCountdown.HostTick(_engine);
             t = RailCost.Charge("mist", t);
             DiffEngine.HostTick(_engine);
+            // host-only inside, and IMMEDIATELY AFTER the walk on purpose: the post-mission "writes
+            // committed" edge (0xB2) must leave BEHIND the batch that carries those writes, or it announces
+            // state the client has not applied yet. Ordered transport turns "sent after" into "arrives
+            // after"; that is the whole of ReplenishSync's S5.
+            ReplenishSync.HostPostMissionTick(_engine);
             t = RailCost.Charge("walk", t);
             TimeSync.ClientTick(_engine); // client-only inside: TimeAnchor drift enforcement (~1 Hz)
             // host-only inside, and OFF unless MpDiag.On: ship the host clock reading so the client can

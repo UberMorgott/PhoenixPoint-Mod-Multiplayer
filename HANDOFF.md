@@ -46,11 +46,27 @@ The owner stated these five, in these words. They are the whole product spec for
 | 4 | Окна подготовки к высадке и засады — в самый верх очереди показа | `DurableWindowRegistry.PriorityOf` (`src/Rail/DurableWindowRegistry.cs:316`): `DeploymentPreparing` ⇒ `Deployment` (`:318-319`), the brief families incl. `Modal:GeoAmbushBrief` ⇒ `Priority` (`:327-335`); applied at `WindowOrder.DurablePriorityHead` (`:119`, sorts `PriorityOf` DESC then `HostOrderKey`) | L401 | NO — this is DWI's, and it STAYS |
 | 5 | Окно пополнения запасов после миссии — всегда первое | `ReplenishSync.ReplenishRank = 20` (`src/Rail/ReplenishSync.cs:82`), the one-entry rank table (`:86-89`), `RankFor` (`:94`); plus the hold `ReplenishSync.ResupplyVerdictPending` (`:209`) consumed at `EventPopup.cs:715` | L93 | YES, untouched by DWI and by this session |
 
-**Requirement 5 is not literally "always first" and never was.** `ReplenishSync.cs:76-81` states the
-decision in its own words: rank 20 clears every event window (the event raiser gives 0/10/15), but
-deliberately does NOT clear `UIStateGeoCutscene` (100) or the post-mission outcome modal
-(`int.MaxValue`, `UIStateInitial:112`). A cinematic or the you-won panel still opens ahead of
-resupply. If the owner meant literally first, that is an open decision, not a bug — see §6.
+**Requirement 5 was settled on 2026-08-10: literally first.** The owner answered "Да, первым после
+миссии", so `ReplenishSync.ReplenishRank` is `int.MaxValue` (`src/Rail/ReplenishSync.cs:82`), not 20.
+It now clears `UIStateGeoCutscene` (100) too; it ties the post-mission outcome modal
+(`UIStateInitial:112`, also `int.MaxValue`), which `QueryStateSwitch`:77-82 keeps first because it is
+queued first from the same arrival — the native order, you-won panel then resupply. The rank does NOT
+promote the yank: `UIStateReplenish` joined `WindowOrder.HeldTransitionStates`
+(`src/Rail/WindowOrder.cs:212`), so the 2026-08-07 "a review window waits for the map" ruling still
+holds. Held by **L407**; `L163` arm (d) was rewritten from shape to outcome.
+
+## The 2026-08-10 owner decisions (mission-start windows, deployment promotion, resupply)
+
+Recorded in full under `docs/laws.md` → *Mission-start windows and post-mission resupply*. In short:
+
+| decision | where it lives | law |
+|---|---|---|
+| Per-peer answers ONLY for the mission-START confirmation, no read-only lock, every other family keeps shared first-wins | `GeoWindowCoverage.IsMissionStartConfirmationClass` (`src/Rail/GeoWindowCoverage.cs:478`) / `IsMissionStartConfirmation` (`:485`), matched on `ShowMissionBriefing`:1903 + `GetMissionBriefModal`:1724 | **L404** |
+| Therefore the launch must be idempotent — one Confirm or five, `GeoMission.Launch` runs once | `MissionSync.MissionStartAlreadyCommitted` (`src/Rail/MissionSync.cs:416`) + `RunNativeMissionOfferAnswer(..., startCommitted)` (`:440`), wired at `PerPeerModalAnswer.Prefix` (`:1717`) | **L405** |
+| Any peer's Confirm puts the preparation window first in EVERY peer's queue (push, no quorum) | `DurableInboxStore.TryStartDeployment`:99-101 mints it for every member; `DurableWindowRegistry.PriorityOf`:318 ranks it `Deployment` (the max) | **L406** |
+| Resupply first after a mission, and the client asks on an EDGE rather than racing a frame ceiling | `SurfaceIds.GeoPostMissionCommit` = **0xB2**, host postfix on `GeoMission.Complete` → `ReplenishSync.HostPostMissionTick` broadcast from `SyncEngine.Tick` right after `DiffEngine.HostTick` (`src/Rail/SyncEngineStub.cs:142`); client `OnPostMissionWritesCommitted` → `TryQueueReplenish` | **L407** |
+
+The 180-frame poll is now a bounded SAFETY NET only (a host that never sends), not the mechanism.
 
 ---
 
@@ -205,10 +221,19 @@ has been corrected by this session — see §8.
 5. **Priority order.** Ambush and preparation briefs ahead of ordinary notices; resupply ahead of
    event windows.
 
-**Open decision, not a bug:** requirement 5 says "всегда первое", the code says "ahead of every event
-window but behind a cutscene and behind the post-mission outcome modal"
-(`src/Rail/ReplenishSync.cs:76-81`). Ask the owner which he meant before changing anything — the
-current behaviour is a recorded decision, not an accident.
+**CLOSED 2026-08-10** — requirement 5 was ambiguous ("ahead of every event window but behind a
+cutscene"); the owner ruled "первым после миссии" and the rank is `int.MaxValue` now. See §1 and
+`docs/laws.md`. Playtest additions for that day's work:
+
+6. **Two peers confirming the same mission brief.** Both windows stay live and clickable (neither goes
+   read-only). The second Confirm must close only that peer's copy and start NOTHING — grep
+   `start-already-committed`. Exactly one battle.
+7. **One peer confirms, everyone else is on another screen.** Every peer's deployment-preparation
+   window must be at the TOP of its queue and appear the moment that peer returns to the map — it must
+   not yank anybody off a screen they opened.
+8. **Post-mission resupply on a client.** Grep `post-mission writes committed and shipped` on the host
+   and `queued the game's own UIStateReplenish on the host's post-mission commit edge` on the client.
+   Seeing `the re-ask safety net` instead means 0xB2 never arrived — capture that log.
 
 ### Branches
 

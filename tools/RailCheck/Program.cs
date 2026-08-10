@@ -368,6 +368,10 @@ namespace RailCheck
             Add(laws, () => L401_OnlyExactNativeRaisersArePriority.Check());
             Add(laws, () => L402_ADepartedLastSourceClosesTheWindowEverywhere.Check());
             Add(laws, () => L403_TheLobbyStartsItselfAndACancelUnreadiesWhoPressedIt.Check());
+            Add(laws, () => L404_AMissionStartConfirmationIsAnsweredPerPeerAndNeverFrozen.Check());
+            Add(laws, () => L405_AConfirmedMissionStartLaunchesExactlyOnce.Check());
+            Add(laws, () => L406_AConfirmPutsThePreparationWindowFirstForEveryPeer.Check());
+            Add(laws, () => L407_PostMissionResupplyIsFirstAndAsksOnAnEdge.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
 

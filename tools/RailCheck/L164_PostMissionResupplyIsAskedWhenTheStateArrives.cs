@@ -106,13 +106,24 @@ namespace RailCheck
                              "and QueueReplenishState is never called. Silent: there is no line to miss.";
 
             // ── (b) it asks the GAME's question and hands the raise back to the GAME ────────────────
-            if (!CallsMethod(tick, getMissing))
+            // WIDENED 2026-08-10 to ONE HOP inside ReplenishSync. The ask has two drivers now — the arrival
+            // poll AND the host's 0xB2 commit edge (ReplenishSync.OnPostMissionWritesCommitted) — so it was
+            // factored into the private TryQueueReplenish they share. What this arm protects is that the
+            // QUESTION and the RAISE are the game's own, never where the call instruction sits.
+            var edge = replenish.GetMethod("OnPostMissionWritesCommitted", AllMembers);
+            if (edge == null || !Reaches(replenish, edge, getMissing) || !Reaches(replenish, edge, queueReplenish))
+                yield return "L164 gate-not-the-game's: ReplenishSync.OnPostMissionWritesCommitted — the host's " +
+                             "0xB2 post-mission commit edge, which is the terminator the 180-frame ceiling " +
+                             "stopped being on 2026-08-10 — does not reach GeoPhoenixFaction.GetMissingItems " +
+                             "and GeoscapeView.QueueReplenishState. An edge that arrives and asks nothing " +
+                             "leaves the poll as the whole mechanism, with no line to notice it by.";
+            if (!Reaches(replenish, tick, getMissing))
                 yield return "L164 gate-not-the-game's: ClientArrivalTick does not call " +
                              "GeoPhoenixFaction.GetMissingItems. The whole point of re-asking is that the " +
                              "GAME decides what 'short' means — the same call UIStateInitial:125 makes and the " +
                              "same list UIModuleReplenish draws. Any local re-implementation drifts from the " +
                              "screen it is deciding to open, and drifts silently.";
-            if (!CallsMethod(tick, queueReplenish))
+            if (!Reaches(replenish, tick, queueReplenish))
                 yield return "L164 gate-not-the-game's: ClientArrivalTick does not call " +
                              "GeoscapeView.QueueReplenishState. Minting a UIStateReplenish request directly " +
                              "would skip ReplenishSync.QueueRankPatch (the rank L93 arm G asserts) and " +
@@ -149,6 +160,17 @@ namespace RailCheck
                              "counting in the next one and can put a resupply screen in front of a player who " +
                              "has not been in a battle — state surviving a teardown, the family L26/L91 " +
                              "already record twice.";
+        }
+
+        /// <summary>Direct call, or one hop through a helper declared on <paramref name="owner"/> itself —
+        /// far enough to survive an honest refactor inside the file, too short to let the question leak into
+        /// some other subsystem's implementation.</summary>
+        private static bool Reaches(Type owner, MethodBase from, MethodBase target)
+        {
+            if (CallsMethod(from, target)) return true;
+            foreach (var hop in owner.GetMethods(AllMembers))
+                if (hop.DeclaringType == owner && CallsMethod(from, hop) && CallsMethod(hop, target)) return true;
+            return false;
         }
 
         private static bool CallsMethod(MethodBase caller, MethodBase target)

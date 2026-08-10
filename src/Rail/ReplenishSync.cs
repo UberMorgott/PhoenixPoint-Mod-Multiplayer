@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using Base.Core;
 using HarmonyLib;
+using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Common.Core;
 using PhoenixPoint.Geoscape.Entities;
@@ -73,16 +74,33 @@ namespace Multiplayer.Network.Sync
         internal const byte OpRepair = 1;  // [charId:i32][itemDefGuid:string]
         internal const byte OpReload = 2;  // [charId:i32][itemDefGuid:string]
 
-        /// <summary>Above the event family's ceiling, below a cutscene. The event raiser gives 0 normally,
-        /// 10 for a triggered-by-event raise and bumps a superseding window to 15
-        /// (<c>GeoscapeView.OnGeoscapeEventRaised</c>:2044/:2049/:2057), so 20 clears every event window.
-        /// It deliberately does NOT clear <c>UIStateGeoCutscene</c> (100, <c>ToCutsceneState</c>) or the
-        /// post-mission outcome modal (<c>int.MaxValue</c>, <c>UIStateInitial</c>:112): the decision was
-        /// "resupply ahead of event windows", and a cinematic or the you-won panel still opens first.</summary>
-        internal const int ReplenishRank = 20;
+        /// <summary>FIRST — owner decision 2026-08-10 ("Да, первым после миссии"), replacing the 2026-08-04
+        /// rank 20. 20 cleared the event family (the raiser gives 0 / 10 / 15,
+        /// <c>GeoscapeView.OnGeoscapeEventRaised</c>:2044/:2049/:2057) but deliberately lost to
+        /// <c>UIStateGeoCutscene</c> (100, <c>ToCutsceneState</c>) — a cinematic opened ahead of the resupply
+        /// screen, which is not the native post-mission flow. <c>int.MaxValue</c> is the ceiling the game
+        /// itself uses, and <c>QueryStateSwitch</c>:77-82 inserts before the first STRICTLY lower priority,
+        /// so the post-mission outcome modal (<c>UIStateInitial</c>:112, also <c>int.MaxValue</c> and queued
+        /// FIRST from the same arrival) still shows first and the resupply screen comes immediately after it,
+        /// ahead of every cutscene and every event window. That IS the native order: you-won panel, then
+        /// resupply.
+        ///
+        /// THIS DOES NOT UN-DO THE 2026-08-07 RULING that the resupply screen must not YANK a player out of
+        /// a screen he opened. Rank answers "which queued window is next"; the yank is answered by
+        /// <c>WindowOrder.HoldsForOpenScreen</c>:294, and <c>UIStateReplenish</c> is named in
+        /// <c>WindowOrder.HeldTransitionStates</c> for exactly the reason <c>UIStateRosterDeployment</c>
+        /// already was — a transition-band priority that must still wait for the map. L163 arm (d) asserts
+        /// that OUTCOME now instead of the rank-below-100 shape it used to assert.</summary>
+        internal const int ReplenishRank = int.MaxValue;
 
         /// <summary>DECLARED display rank per window KIND — the whole S1 rule. A kind that is not named here
-        /// keeps the game's own priority untouched, so this table can only ever move what it names.</summary>
+        /// keeps the game's own priority untouched, so this table can only ever move what it names.
+        ///
+        /// <c>UIStateRosterDeployment</c> is deliberately ABSENT: <c>GeoscapeView.ToDeploymentState</c>:596
+        /// already queues the squad screen at <c>int.MaxValue</c>, so requirement B ("the preparation window
+        /// goes to first place for everyone when someone confirms a start") needs no rank of ours — what it
+        /// needed was for the window to EXIST on every peer, which is the shared <c>DeploymentPreparing</c>
+        /// occurrence, not a number.</summary>
         private static readonly Dictionary<Type, int> Rank = new Dictionary<Type, int>
         {
             [typeof(UIStateReplenish)] = ReplenishRank,
@@ -193,8 +211,102 @@ namespace Multiplayer.Network.Sync
         /// that cannot fail.</summary>
         private const int RecheckFrames = 180;
 
+        /// <summary>HOST: <c>GeoMission.Complete</c> has run and its post-mission writes are in the host's
+        /// own model, but not yet on the wire. Cleared by <see cref="HostPostMissionTick"/>.</summary>
+        private static bool _commitPending;
+
+        /// <summary>CLIENT: the 0xB2 edge for the mission this peer just came back from has arrived, i.e.
+        /// the host's post-mission writes are already applied here. Latched because the edge can beat the
+        /// arrival — a client whose geoscape is still being rebuilt receives it before
+        /// <c>UIStateInitial.EnterState</c> ever runs. Consumed by whichever of the two gets there second.</summary>
+        private static bool _commitArrived;
+
         /// <summary>Session/level teardown — a live count-down must not survive into the next geoscape.</summary>
-        internal static void Reset() { _recheckFrames = 0; }
+        internal static void Reset() { _recheckFrames = 0; _commitPending = false; _commitArrived = false; }
+
+        // ─── S5: THE EDGE — "the host's post-mission writes are committed AND shipped" ───
+
+        /// <summary>HOST ONLY. <c>GeoMission.Complete</c> (GeoMission.cs:267) is the sole writer of the state
+        /// the resupply gate reads: <c>ApplyMissionResults</c> reaches
+        /// <c>GeoPhoenixFaction.PostmissionReplenish</c> at GeoMission.cs:896. A POSTFIX, because the fact
+        /// being announced is "the body has run". Nothing is sent from here — see
+        /// <see cref="HostPostMissionTick"/> for why the send has to wait one diff tick.</summary>
+        [HarmonyPatch(typeof(GeoMission), nameof(GeoMission.Complete))]
+        internal static class HostPostMissionCommitPatch
+        {
+            private static void Postfix()
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+                _commitPending = true;
+            }
+        }
+
+        /// <summary>HOST ONLY, driven from <c>SyncEngine.Tick</c> IMMEDIATELY AFTER
+        /// <c>DiffEngine.HostTick</c> — that placement is the whole mechanism and not a convenience. The
+        /// edge must arrive BEHIND the value-rail batch carrying the post-mission writes; the transport is
+        /// per-peer ordered, so "sent after" is "arrives after". Sending it from the
+        /// <c>GeoMission.Complete</c> postfix instead would put it AHEAD of the very state it announces,
+        /// which is the bug it exists to end.</summary>
+        internal static void HostPostMissionTick(NetworkEngine engine)
+        {
+            if (!_commitPending) return;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) { _commitPending = false; return; }
+            _commitPending = false;
+            try
+            {
+                engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                    SyncProtocol.EncodeEnvelope(SurfaceIds.GeoPostMissionCommit, SyncKind.StateDelta, new byte[0])));
+                Debug.Log("[MP][replenish] post-mission writes committed and shipped — 0x" +
+                          SurfaceIds.GeoPostMissionCommit.ToString("X2") + " broadcast behind the batch that " +
+                          "carries them, so every client can ask GetMissingItems() on a squad that is finally its own");
+            }
+            catch (Exception ex)
+            { Debug.LogError("[MP][replenish] broadcasting the post-mission commit edge failed — clients fall " +
+                             "back to the re-ask ceiling: " + ex); }
+        }
+
+        /// <summary>The inbound half. Registered in the geoscape chain so the id is CLAIMED whatever role
+        /// this peer has; the host ignores its own echo because its gate was already true at
+        /// <c>UIStateInitial</c>:125.</summary>
+        internal static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
+        {
+            if (surfaceId != SurfaceIds.GeoPostMissionCommit) return false;
+            try
+            {
+                if (engine != null && engine.IsActiveSession && !engine.IsHost) OnPostMissionWritesCommitted();
+            }
+            catch (Exception ex)
+            { Debug.LogError("[MP][replenish] the post-mission commit edge threw — this peer falls back to the " +
+                             "re-ask ceiling: " + ex); }
+            return true;
+        }
+
+        /// <summary>CLIENT. The host's post-mission writes are applied here now, so ask the game's own
+        /// question ONCE and be done — no poll, no ceiling, no guess about the wire. If the geoscape is not
+        /// up yet the answer is latched for <see cref="ArmArrivalRecheckPatch"/> to consume on arrival.</summary>
+        internal static void OnPostMissionWritesCommitted()
+        {
+            _commitArrived = true;
+            if (TryQueueReplenish("the host's post-mission commit edge")) { _commitArrived = false; _recheckFrames = 0; }
+        }
+
+        /// <summary>The game's own gate and the game's own raiser, in one place so the edge, the arrival and
+        /// the ceiling all ask exactly the same question. Returns true when the screen was queued.</summary>
+        private static bool TryQueueReplenish(string because)
+        {
+            var geo = GeoLevel();
+            var view = geo?.View;
+            if (view == null) return false;
+            if (!(geo.ViewerFaction is GeoPhoenixFaction phoenix)) return false;
+            if (SwitchQueryOf(view)?.TryGetStateSwitchRequestForState<UIStateReplenish>(out _) == true) return true;
+            if (!phoenix.GetMissingItems().Any()) return false;
+            view.QueueReplenishState();   // the game's own raiser, at the game's own priority + our rank
+            Debug.Log("[MP][replenish] queued the game's own UIStateReplenish on " + because +
+                      " — UIStateInitial:127 could not, because this peer's geoscape was still the " +
+                      "pre-battle save when it asked");
+            return true;
+        }
 
         /// <summary>IS THE RESUPPLY VERDICT STILL OUT? Read by <c>EventPopup.CanCarryWindow</c>, which is why
         /// it is a property and not a private test: the popup-history drain starts replaying about a second
@@ -268,6 +380,15 @@ namespace Multiplayer.Network.Sync
                     if (SwitchQueryOf(view)?.TryGetStateSwitchRequestForState<UIStateReplenish>(out _) == true)
                         return;
 
+                    // THE EDGE MAY ALREADY HAVE LANDED. A client that spent longer rebuilding its geoscape
+                    // than the host spent shipping the batch receives 0xB2 before it ever enters this state,
+                    // and the latch is what stops that from being a lost screen.
+                    if (_commitArrived)
+                    {
+                        _commitArrived = false;
+                        if (TryQueueReplenish("the post-mission commit edge that arrived before this peer did"))
+                        { _recheckFrames = 0; return; }
+                    }
                     _recheckFrames = RecheckFrames;
                     // THE GATE'S OWN ANSWER, at the instant UIStateInitial:125 asked it. Absence of the
                     // screen is not evidence of WHICH clause was false, and a whole session was spent
@@ -307,28 +428,17 @@ namespace Multiplayer.Network.Sync
             try
             {
                 bool lastFrame = --_recheckFrames <= 0;
-                var geo = GeoLevel();
-                var view = geo?.View;
-                if (view == null) return;
-                if (!(geo.ViewerFaction is GeoPhoenixFaction phoenix)) { _recheckFrames = 0; return; }
-                if (!phoenix.GetMissingItems().Any())
-                {
-                    // NOTHING SHORT YET — KEEP ASKING TO THE CEILING. There is deliberately no early exit:
-                    // "the host's state has arrived" is not observable from here (the clock ships deltas
-                    // continuously, so any seq-moved test is true within a frame or two of every arrival and
-                    // proves nothing), and an exit that cannot fail is an exit that silently drops the screen
-                    // the day a batch is slower than it. The ceiling is the whole budget — see RecheckFrames.
-                    if (lastFrame)
-                        Debug.Log("[MP][replenish] post-mission re-ask expired with nothing missing — this " +
-                                  "squad really did come back whole, so there is no resupply screen to show. " +
-                                  "Any window this was holding can go through now.");
-                    return;
-                }
-                _recheckFrames = 0;
-                view.QueueReplenishState();   // the game's own raiser, at the game's own priority + our rank
-                Debug.Log("[MP][replenish] the host's post-mission writes have landed and the squad IS short — " +
-                          "queued the game's own UIStateReplenish, which UIStateInitial:127 could not because " +
-                          "this peer's geoscape was still the pre-battle save when it asked.");
+                // THE CEILING IS A SAFETY NET NOW, NOT THE MECHANISM (2026-08-10). The terminator is the
+                // host's own 0xB2 edge (OnPostMissionWritesCommitted); this poll only covers the case where
+                // that message never comes — a host that crashed out of the session mid-arrival, or a peer
+                // whose level went live after the broadcast already flew. Without it ResupplyVerdictPending
+                // would hold this peer's other windows forever, which is the one thing P13 forbids.
+                if (TryQueueReplenish("the re-ask safety net")) { _recheckFrames = 0; return; }
+                if (lastFrame)
+                    Debug.Log("[MP][replenish] post-mission re-ask expired with nothing missing and no commit " +
+                              "edge — either this squad really did come back whole, or 0x" +
+                              SurfaceIds.GeoPostMissionCommit.ToString("X2") + " never arrived. Any window " +
+                              "this was holding can go through now.");
             }
             catch (Exception ex)
             {

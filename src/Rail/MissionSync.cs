@@ -413,11 +413,37 @@ namespace Multiplayer.Network.Sync
                 out refusal);
         }
 
+        /// <summary>PURE (RailCheck L404). HAS THIS MISSION'S START ALREADY BEEN COMMITTED BY SOMEBODY?
+        /// The successor of a confirmed offer is the shared <c>DeploymentPreparing</c> occurrence over the
+        /// SAME stable mission subject (<see cref="HandleDurableMissionOfferAnswer"/>:407), and it is minted
+        /// once, host-authoritatively, under <c>DurableInboxStore.WithTransitionGate</c>. So its presence in
+        /// the replicated ledger is the exact fact "the launch for this mission has already happened once".</summary>
+        internal static bool MissionStartAlreadyCommitted(IEnumerable<OccurrenceId> ledgerOccurrences,
+            string stableMissionSubject) =>
+            ledgerOccurrences != null && !string.IsNullOrEmpty(stableMissionSubject) &&
+            ledgerOccurrences.Any(x => string.Equals(x.EventId, "DeploymentPreparing", StringComparison.Ordinal) &&
+                x.SubjectIds.Contains(stableMissionSubject, StringComparer.Ordinal));
+
+        internal static bool MissionStartAlreadyCommitted(DurableInboxStore store, GeoMission mission) =>
+            store != null && MissionStartAlreadyCommitted(store.Ledger.AllEntries.Select(x => x.Occurrence),
+                DurableWindowRegistry.StableMissionSubject(mission));
+
+        /// <summary>PURE (RailCheck L403/L404). Does the GAME'S own <c>ModalResultCallback</c> run?
+        ///
+        /// <paramref name="startCommitted"/> is the 2026-08-10 arm and the whole of "the launch applies
+        /// EXACTLY ONCE no matter how many peers confirm". Every peer keeps its OWN live copy of a
+        /// mission-start confirmation and none of them is locked read-only, so two peers CAN confirm the same
+        /// mission — the second one arrives after the offer has already transitioned to
+        /// <c>DeploymentPreparing</c>, its own ledger entry is tombstoned, <see cref="TryResolveDurableMissionOffer"/>
+        /// no longer resolves it, and the pre-2026-08-10 fallthrough (<c>return isConfirm</c>) then ran the
+        /// native <c>LaunchMission</c>:1043 a SECOND time — a second <c>GeoMission.Launch</c> on the host, or a
+        /// second 0xB8 launch intent from a client. The successor's existence is the idempotence key.</summary>
         internal static bool RunNativeMissionOfferAnswer(bool inSession, bool perPeerClass, bool isConfirm,
-            bool durableResolved, Func<bool> durableAction)
+            bool durableResolved, Func<bool> durableAction, bool startCommitted = false)
         {
             if (!inSession || !perPeerClass) return true;
             if (durableResolved && durableAction != null && durableAction()) return false;
+            if (isConfirm && startCommitted) return false; // the launch already happened once — idempotent
             return isConfirm; // legacy/unresolved Confirm keeps native LaunchMission; Cancel keeps the prior local-only gate
         }
         internal const byte OpLaunch = 1;  // [siteRef][n:u16][charRef × n]
@@ -1686,9 +1712,25 @@ namespace Multiplayer.Network.Sync
                 // native GeoMission.Cancel at ModalResultCallback:825.
                 bool resolved = MissionSync.TryResolveDurableMissionOffer(modalData as GeoMission,
                     out var durableStore, out var durableMember, out var durableOffer);
+                // A SECOND PEER CONFIRMING THE SAME START. Its own copy was never frozen (owner decision
+                // 2026-08-10, GeoWindowCoverage.IsMissionStartConfirmation), so the click is legitimate — but
+                // the launch behind it is shared campaign state and must apply once. The successor
+                // DeploymentPreparing occurrence is the idempotence key; see RunNativeMissionOfferAnswer.
+                bool startCommitted = GeoWindowCoverage.IsMissionStartConfirmation(modalType, modalData) &&
+                    MissionSync.MissionStartAlreadyCommitted(DurableInboxSession.ActiveStore,
+                        modalData as GeoMission);
                 if (MissionSync.RunNativeMissionOfferAnswer(true, true, result == ModalResult.Confirm, resolved, () =>
                     MissionSync.HandleDurableMissionOfferAnswer(durableStore, durableMember, durableOffer,
-                        result, modalData as GeoMission))) return true;
+                        result, modalData as GeoMission), startCommitted)) return true;
+                if (startCommitted && result == ModalResult.Confirm)
+                {
+                    if (_logged.Add(modalType + ":start-already-committed"))
+                        Debug.Log("[MP][mission] '" + modalType + "' confirmed by this peer AFTER the mission " +
+                                  "start was already committed — the deployment preparation window is already " +
+                                  "in every peer's queue, so this Confirm closes THIS copy and launches " +
+                                  "nothing a second time (logged once per type)");
+                    return false;
+                }
                 if (Runs(true, perPeer, false)) return true;
                 if (_logged.Add(modalType + ":" + result))
                     Debug.Log("[MP][mission] '" + modalType + "' answered " + result + " on THIS PEER ONLY — the " +
