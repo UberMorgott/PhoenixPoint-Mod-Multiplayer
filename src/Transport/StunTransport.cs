@@ -434,13 +434,21 @@ namespace Multiplayer.Transport
                 else OnPeerDisconnected?.Invoke(peerId, endpoint);
             }
 
-            lock (_lock)
+            // Same shape as the peer-event drain above, and for the same reason: dispatching a packet
+            // under _lock holds the transport for the whole of an arbitrary handler (a save chunk apply,
+            // a rail batch), so ReceiveLoop's enqueue (:661) and every Send/Broadcast/DisconnectPeer
+            // stall behind it — and a stalled reader is a DROPPED datagram on a transport with no
+            // retransmit. Dequeue under the lock, raise outside it.
+            while (true)
             {
-                while (_incomingQueue.Count > 0)
+                ulong peerId;
+                byte[] data;
+                lock (_lock)
                 {
-                    var (peerId, data) = _incomingQueue.Dequeue();
-                    OnPacketReceived?.Invoke(peerId, data);
+                    if (_incomingQueue.Count == 0) break;
+                    (peerId, data) = _incomingQueue.Dequeue();
                 }
+                OnPacketReceived?.Invoke(peerId, data);
             }
         }
 
