@@ -335,8 +335,21 @@ namespace Multiplayer.Network.Sync
                 if (_lastSeq != 0 && seq > _lastSeq + 1)
                     RequestResync(engine, "seq gap (" + _lastSeq + "→" + seq + ")");
                 byte op = r.ReadByte();
+                bool fragmented = (op & DiffEngine.FragmentedBlobFlag) != 0;
+                op &= unchecked((byte)~DiffEngine.FragmentedBlobFlag);
                 string rootKey = r.ReadString();
                 var blob = r.ReadBytes(r.ReadInt32());
+                // A blob too big for the u16 envelope arrives as fragments (DiffEngine.FragmentStructuralBlob),
+                // reassembled by the SAME buffer the entry rail uses. Nothing below knows it was ever split;
+                // an incomplete blob simply is not a packet to apply yet. The seq was already accepted, so a
+                // seq gap on the fragment stream still drives the ordinary throttled resync.
+                if (fragmented)
+                {
+                    blob = Reassemble(rootKey, ushort.MaxValue, "#structural", blob);
+                    // A buffered fragment IS a consumed packet: mark its seq, or the NEXT fragment reads as
+                    // a gap and every one of them asks the host for a full resync.
+                    if (blob == null) { _lastSeq = seq; Seq.Mark(SurfaceIds.GeoRail, seq); return; }
+                }
 
                 bool created = false;
                 var touched = new HashSet<object>();

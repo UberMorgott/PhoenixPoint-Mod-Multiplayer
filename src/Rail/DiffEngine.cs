@@ -60,6 +60,14 @@ namespace Multiplayer.Network.Sync
         private const float ExceptionRetryBackoff = 1f; // min pause between forced retries after a tick exception
         private const int MaxPacketBytes = 45000;  // chunk flush threshold
         internal const int MaxValueBytes = 8192;   // per-entry cap: 45000 + 8192 stays under the u16 envelope
+        // Per-STRUCTURAL-packet blob cap. A structural packet carries one blob and its own small header
+        // (msg + seq + op + rootKey + len), so it can use far more of the u16 envelope than an entry can —
+        // 5535 B of headroom covers any root key. Above this the blob is FRAGMENTED (FragmentStructuralBlob).
+        internal const int MaxStructuralBlobBytes = 60000;
+        // Set on the structural op byte when the packet's blob is one FRAGMENT of the real blob rather than
+        // the whole of it. A FLAG, not a sniff on the payload's first byte: a native graph blob is arbitrary
+        // bytes and could legitimately open with RailMeta.FragmentMarker.
+        internal const byte FragmentedBlobFlag = 0x80;
         private const int MaxEntities = 50000;     // graph-chase brake
         private const int MaxDepth = 12;
         // Per-frame walk budget. A static readonly FIELD, not a const, on purpose: a const is inlined into
@@ -1561,7 +1569,8 @@ namespace Multiplayer.Network.Sync
                             Debug.Log("[Multiplayer][rail] structural: destroy of '" + k + "' not enabled — not mirrored");
                         continue;
                     }
-                    SendStructural(engine, 2, k, null, ref packets, ref bytes);
+                    if (!SendStructural(engine, 2, k, null, ref packets, ref bytes))
+                        _prevRoots.Add(k); // send failed → keep it in the reference set so the next walk re-derives the destroy
                 }
             foreach (var kv in _walkRoots)
             {
@@ -1598,13 +1607,45 @@ namespace Multiplayer.Network.Sync
                                    kv.Value.GetType().Name + ") failed — retrying next walk");
                     continue; // NOT added to _prevRoots → re-detected next cycle
                 }
-                SendStructural(engine, 1, kv.Key, blob, ref packets, ref bytes);
+                // NOT added to _prevRoots unless the wire actually took it: marking a root shipped on a
+                // failed send retires it FOREVER (the walk only ever emits a create for a root that is
+                // absent from _prevRoots), so no client ever receives the entity and nothing says so.
+                if (!SendStructural(engine, 1, kv.Key, blob, ref packets, ref bytes)) continue;
                 _prevRoots.Add(kv.Key);
                 _prevRootTypes[kv.Key] = kv.Value.GetType().FullName;
             }
         }
 
-        private static void SendStructural(NetworkEngine engine, byte op, string rootKey, byte[] blob, ref int packets, ref int bytes)
+        /// <summary>The structural blob has the SAME transport ceiling an entry value has — it rides a u16
+        /// envelope (<see cref="SyncProtocol.EncodeEnvelope"/> THROWS above 65535 B) and a create payload is
+        /// a whole native graph, which grows with the campaign. Split it with the entry rail's own frame
+        /// (<see cref="RailMeta.EncodeFragment"/> → <c>GenericApplier.Reassemble</c>) instead of letting the
+        /// encode throw: the old shape swallowed that exception here, returned normally, and the caller then
+        /// recorded the root as SHIPPED — so the entity was never sent to anyone, forever, with one log line.
+        /// PURE and internal because RailCheck L40 drives it against the client's reassembly.</summary>
+        internal static List<byte[]> FragmentStructuralBlob(byte[] blob)
+        {
+            var frames = new List<byte[]>(1);
+            if (blob == null || blob.Length <= MaxStructuralBlobBytes) { frames.Add(blob); return frames; }
+            int chunk = MaxStructuralBlobBytes - RailMeta.FragmentHeaderBytes;
+            for (int off = 0; off < blob.Length; off += chunk)
+                frames.Add(RailMeta.EncodeFragment(blob, off, Math.Min(chunk, blob.Length - off)));
+            return frames;
+        }
+
+        /// <summary>False = the wire did NOT take this create/destroy; the caller must not retire the root.</summary>
+        private static bool SendStructural(NetworkEngine engine, byte op, string rootKey, byte[] blob, ref int packets, ref int bytes)
+        {
+            var frames = FragmentStructuralBlob(blob);
+            bool fragmented = frames.Count > 1;
+            foreach (var frame in frames)
+                if (!SendStructuralPacket(engine, fragmented ? (byte)(op | FragmentedBlobFlag) : op,
+                                          rootKey, frame, ref packets, ref bytes))
+                    return false;
+            return true;
+        }
+
+        private static bool SendStructuralPacket(NetworkEngine engine, byte op, string rootKey, byte[] blob, ref int packets, ref int bytes)
         {
             try
             {
@@ -1623,11 +1664,17 @@ namespace Multiplayer.Network.Sync
                     engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
                     packets++;
                     bytes += (int)ms.Length;
-                    Debug.Log("[Multiplayer][rail] structural " + (op == 1 ? "create" : "destroy") + " '" + rootKey +
-                              "' sent (" + (blob?.Length ?? 0) + "B blob)");
+                    Debug.Log("[Multiplayer][rail] structural " + ((op & ~FragmentedBlobFlag) == 1 ? "create" : "destroy") +
+                              " '" + rootKey + "' sent (" + (blob?.Length ?? 0) + "B blob" +
+                              ((op & FragmentedBlobFlag) != 0 ? ", fragment" : "") + ")");
                 }
+                return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] structural emit '" + rootKey + "' failed: " + ex.Message); }
+            catch (Exception ex)
+            {
+                Debug.LogError("[Multiplayer][rail] structural emit '" + rootKey + "' failed: " + ex.Message);
+                return false;
+            }
         }
 
         // ─── Wire emit (chunked; each packet its own seq on one ordered stream) ───
