@@ -211,6 +211,39 @@ namespace RailCheck
                              "MissionSync.MissionStartAlreadyCommitted, so a second peer's Confirm falls " +
                              "through to the native LaunchMission a second time (L405).";
 
+            // ── (g) THE HOST ACCEPTS THE RELAYED ANSWER IT CANNOT SECOND-GUESS ──────────────────────
+            // Live 2026-08-10: the client's START relayed on 0xB4 and came back "[MP][intent] HOST event
+            // REJECT peer=2 — stale occurrence lifecycle revision", dumping that player on the geoscape while
+            // the same window worked on the host. The durable inbox is PER-PEER session state
+            // (DurableInboxSession.OpenSessionStore:50 seeds Members with the local guid alone), so the host's
+            // ledger NEVER holds a client's membership and the equality test could only ever reject. A
+            // per-peer answer that cannot reach the host is the carve-out deleted at its last mile.
+            var refusal = typeof(EventSync).GetMethod("RevisionRefusal", AllMembers);
+            if (refusal == null)
+                yield return "L404 premise-changed: EventSync.RevisionRefusal no longer resolves — the relayed " +
+                             "answer's acceptance test has moved and arm (g) is asleep";
+            else
+            {
+                var entry = new InboxEntry(new OccurrenceId("event:X", "t", new[] { "event:X" }),
+                    new MembershipId("someone-else"), InboxLifecycle.Open, default(CanonicalChoiceId), 7, 0,
+                    new HostOrderKey(1, "t"));
+                Func<bool, InboxEntry, ulong, string> gate = (knows, e, rev) =>
+                    (string)refusal.Invoke(null, new object[] { knows, e, rev });
+                if (gate(false, null, 7UL) != null)
+                    yield return "L404 relayed-answer-refused: the host refuses a relayed answer whose " +
+                                 "membership its own per-peer ledger cannot hold (" + gate(false, null, 7UL) +
+                                 "). That is EVERY client's mission start: the ledger has one member, the " +
+                                 "local peer, so the answer is authorised by occurrence identity and " +
+                                 "SenderOwnsMembership — not by a revision this peer never sees.";
+                if (gate(true, entry, 6UL) == null || gate(true, null, 7UL) == null)
+                    yield return "L404 relayed-answer-unchecked: the gate accepts a genuinely stale revision, " +
+                                 "or an answer for a membership this peer OWNS but has no entry for. The " +
+                                 "check keeps its full force where this peer can actually evaluate it.";
+                if (gate(true, entry, 7UL) != null)
+                    yield return "L404 relayed-answer-refused: the gate refuses a matching revision for a " +
+                                 "membership this peer owns, so no answer would ever be accepted at all.";
+            }
+
             // POSITIVE CONTROL: the truth-table driver really does observe a difference.
             if (GeoWindowCoverage.IsMissionStartConfirmationClass(true, true) ==
                 GeoWindowCoverage.IsMissionStartConfirmationClass(true, false))

@@ -194,6 +194,31 @@ namespace Multiplayer.Network.Sync
         /// (GeoscapeEventSystem.GetVariable:270-277), so a first write of 0 to a variable nobody has set is
         /// a real change and lands — comparing against 0 would silently drop every "clear this flag" on a
         /// fresh campaign. The reason is never blank: a swallow with a return value is still a swallow.</summary>
+        /// <summary>PURE (RailCheck L404 arm (g)): why a relayed answer's CAPTURED lifecycle revision is
+        /// refused, or null to accept.
+        ///
+        /// The durable inbox is PER-PEER SESSION STATE — <c>DurableInboxSession.OpenSessionStore</c>:50 seeds
+        /// <c>Members</c> with THIS peer's guid and nothing else, "every peer runs its own copy and reads only
+        /// its own entitlement" — so the host's ledger can NEVER hold a client's membership. Comparing the
+        /// client's revision against an entry that by construction does not exist rejected EVERY client
+        /// mission start ("[MP][intent] HOST event REJECT peer=2 — stale occurrence lifecycle revision",
+        /// live 2026-08-10), and threw the player back to the geoscape.
+        ///
+        /// A revision this peer cannot hold is not stale, it is UNKNOWABLE, and the answer is authorised by
+        /// occurrence IDENTITY instead: the <c>event:&lt;id&gt;</c> subject test and
+        /// <see cref="SenderOwnsMembership"/> above. Exactly-once is not this number's job either — the
+        /// <c>DeploymentPreparing</c> successor is the idempotence key (L405), so two peers pressing START
+        /// still produce one launch. The check keeps its full force for a membership this peer DOES own,
+        /// which is the stale-local-click race it was written for.</summary>
+        internal static string RevisionRefusal(bool ledgerKnowsMember, InboxEntry addressedEntry,
+            ulong expectedRevision)
+        {
+            if (!ledgerKnowsMember) return null;
+            if (addressedEntry == null) return "no live entitlement for this occurrence on the host";
+            return addressedEntry.LifecycleRevision == expectedRevision
+                ? null : "stale occurrence lifecycle revision";
+        }
+
         internal static string NoOpReason(int current, int value)
         {
             return current == value ? "the host already has " + value + " — no state to change" : null;
@@ -238,11 +263,19 @@ namespace Multiplayer.Network.Sync
             if (!engine.Session.Clients.TryGetValue(senderPeerId, out sender) ||
                 !SenderOwnsMembership(sender.PlayerGuid.ToString("D"), addressedMember))
             { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "answer membership does not belong to sender", true, RecordScope); return; }
+            var localStore = DurableInboxSession.ActiveStore;
             InboxEntry addressedEntry = null;
-            try { addressedEntry = DurableInboxSession.ActiveStore?.Ledger.Get(addressed, addressedMember); }
+            try { addressedEntry = localStore?.Ledger.Get(addressed, addressedMember); }
             catch (InvalidOperationException) { }
-            if (addressedEntry == null || addressedEntry.LifecycleRevision != expectedRevision)
-            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "stale occurrence lifecycle revision", true, RecordScope); return; }
+            bool knowsMember = localStore != null && localStore.Ledger.Members.Any(x =>
+                string.Equals(x.PlayerGuid, addressedMember.PlayerGuid, StringComparison.OrdinalIgnoreCase));
+            string revisionRefusal = RevisionRefusal(knowsMember, addressedEntry, expectedRevision);
+            EventPopup.BriefProbe(eventId, revisionRefusal == null ? "start-accepted" : "start-refused",
+                "relayed answer from peer " + senderPeerId + " (choice " + index + ", revision " +
+                expectedRevision + ", this peer's ledger " + (knowsMember ? "holds" : "cannot hold") +
+                " that membership) — " + (revisionRefusal ?? "accepted; the launch is this host's to make once"));
+            if (revisionRefusal != null)
+            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, revisionRefusal, true, RecordScope); return; }
 
             bool durableAccepted;
             if (TryDurableOrdinaryAnswer(addressed, addressedMember, eventId, index, data.Choices.Count, rec, ev,
