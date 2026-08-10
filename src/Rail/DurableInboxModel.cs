@@ -187,8 +187,8 @@ namespace Multiplayer.Network.Sync
     }
 
     internal enum InboxMessageKind : byte { TransportAck = 0x46, Lifecycle = 0x40 }
-    // Append-only: values 0..4 already exist in campaign saves and on the wire.
-    internal enum InboxLifecycle : byte { Queued, Open, Read, Dismissed, Removed, Suspended }
+    // Append-only: values 0..5 already exist in campaign saves and on the wire.
+    internal enum InboxLifecycle : byte { Queued, Open, Read, Dismissed, Removed, Suspended, Deferred }
     internal enum InboxSuspensionReason : byte { None, PriorityPreemption, LevelTeardown }
 
     internal sealed class InboxWindowCheckpoint : IEquatable<InboxWindowCheckpoint>
@@ -437,8 +437,20 @@ namespace Multiplayer.Network.Sync
             new InboxEntry(Occurrence, Membership, InboxLifecycle.Suspended, Choice, revision, TombstoneRevision,
                 HostOrderKey, reason, checkpoint, predecessor: Predecessor,
                 preparationRevision: PreparationRevision, preparationAuthorityRevision: PreparationAuthorityRevision);
+        internal InboxEntry Defer(ulong revision) =>
+            new InboxEntry(Occurrence, Membership, InboxLifecycle.Deferred, Choice, revision, TombstoneRevision,
+                HostOrderKey, checkpoint: Checkpoint, predecessor: Predecessor,
+                preparationRevision: PreparationRevision, preparationAuthorityRevision: PreparationAuthorityRevision);
+        internal InboxEntry RestoreDeferred(ulong revision) =>
+            new InboxEntry(Occurrence, Membership, InboxLifecycle.Open, Choice, revision, TombstoneRevision,
+                HostOrderKey, checkpoint: Checkpoint, predecessor: Predecessor,
+                preparationRevision: PreparationRevision, preparationAuthorityRevision: PreparationAuthorityRevision);
         internal InboxEntry WithPreparationRevision(ulong revision, ulong authorityRevision = 0) =>
-            new InboxEntry(Occurrence, Membership, Lifecycle, Choice, LifecycleRevision, TombstoneRevision,
+            new InboxEntry(Occurrence, Membership,
+                Lifecycle == InboxLifecycle.Deferred && revision > PreparationRevision
+                    ? InboxLifecycle.Queued : Lifecycle,
+                Choice, Lifecycle == InboxLifecycle.Deferred && revision > PreparationRevision
+                    ? checked(LifecycleRevision + 1) : LifecycleRevision, TombstoneRevision,
                 HostOrderKey, SuspensionReason, Checkpoint, TerminalReason, SupersededBy, Predecessor,
                 revision, authorityRevision == 0 ? PreparationAuthorityRevision : authorityRevision);
     }

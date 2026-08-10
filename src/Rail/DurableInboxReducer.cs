@@ -36,7 +36,8 @@ namespace Multiplayer.Network.Sync
             bool sameLifecycle = current.Lifecycle == command.Lifecycle;
             bool validTransition = current.Lifecycle == InboxLifecycle.Queued && command.Lifecycle == InboxLifecycle.Open ||
                                    current.Lifecycle == InboxLifecycle.Open &&
-                                       (command.Lifecycle == InboxLifecycle.Suspended || command.Lifecycle == InboxLifecycle.Read || command.Lifecycle == InboxLifecycle.Dismissed) ||
+                                       (command.Lifecycle == InboxLifecycle.Suspended || command.Lifecycle == InboxLifecycle.Deferred ||
+                                        command.Lifecycle == InboxLifecycle.Read || command.Lifecycle == InboxLifecycle.Dismissed) ||
                                    current.Lifecycle == InboxLifecycle.Suspended && command.Lifecycle == InboxLifecycle.Open ||
                                    current.Lifecycle == InboxLifecycle.Read && command.Lifecycle == InboxLifecycle.Dismissed;
             if (!sameLifecycle && !validTransition) return new ReduceResult(ledger, false);
@@ -44,6 +45,8 @@ namespace Multiplayer.Network.Sync
             var replacement = command.Lifecycle == InboxLifecycle.Suspended
                 ? current.Suspend(command.SuspensionReason == InboxSuspensionReason.None ? current.SuspensionReason : command.SuspensionReason,
                     command.Checkpoint ?? current.Checkpoint, command.Revision)
+                : command.Lifecycle == InboxLifecycle.Deferred
+                    ? current.Defer(command.Revision)
                 : current.WithLifecycle(command.Lifecycle, command.Revision);
             return new ReduceResult(ledger.Replace(replacement), true);
         }

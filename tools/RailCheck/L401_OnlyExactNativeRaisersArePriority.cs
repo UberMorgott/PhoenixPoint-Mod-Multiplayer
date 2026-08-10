@@ -84,11 +84,14 @@ namespace RailCheck
             foreach (var capture in captureTypes.Skip(1))
             {
                 var prefix = capture.GetMethod("Prefix", BindingFlags.Static | BindingFlags.NonPublic);
-                var args = new object[] { null };
+                var args = capture == typeof(NativeRaiserToken.DeploymentCapture)
+                    ? new object[] { mission, null }
+                    : new object[] { null };
                 prefix?.Invoke(null, args);
-                var firstRaise = args[0] as NativeRaiserToken.RaiseState;
-                args[0] = null; prefix?.Invoke(null, args);
-                var secondRaise = args[0] as NativeRaiserToken.RaiseState;
+                int stateIndex = args.Length - 1;
+                var firstRaise = args[stateIndex] as NativeRaiserToken.RaiseState;
+                args[stateIndex] = null; prefix?.Invoke(null, args);
+                var secondRaise = args[stateIndex] as NativeRaiserToken.RaiseState;
                 if (prefix == null || firstRaise == null || secondRaise == null ||
                     string.IsNullOrEmpty(firstRaise.TriggerId) || firstRaise.TriggerId == secondRaise.TriggerId)
                     yield return "L401 capture-prefix-did-not-record-native-queue-boundary-" + capture.Name;

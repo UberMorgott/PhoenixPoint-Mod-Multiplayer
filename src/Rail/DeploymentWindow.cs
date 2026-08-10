@@ -273,6 +273,15 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     internal static class DeploymentWindowClose
     {
+        private sealed class LifecycleOnlyCarrier : IDurableWindowCarrierAdapter
+        {
+            public InboxWindowCheckpoint Capture(OccurrenceId occurrence) => null;
+            public bool Present(OccurrenceId occurrence) => false;
+            public bool Restore(OccurrenceId occurrence, InboxWindowCheckpoint checkpoint) => false;
+            public void Abandon(OccurrenceId occurrence) { }
+            public void FinalizeRestore(OccurrenceId occurrence) { }
+        }
+        private static readonly IDurableWindowCarrierAdapter LifecycleCarrier = new LifecycleOnlyCarrier();
         internal static DurableCarrierLease BindDeploymentCarrier(DurableInboxStore store,
             OccurrenceId occurrence, Action<TerminalReason> silentRemove) =>
             DurableCarrierLease.Bind(store, occurrence, DurableCarrierClass.Deployment, silentRemove);
@@ -305,6 +314,88 @@ namespace Multiplayer.Network.Sync
                 context = new DurablePreparationEditContext(bound, current.PreparationRevision); return true;
             }
             return false;
+        }
+
+        internal static bool TryCurrentPreparationOccurrence(out OccurrenceId occurrence)
+        {
+            occurrence = default(OccurrenceId);
+            var view = GenericApplier.StartedGeoLevel()?.View;
+            var query = view == null ? null : WindowQueueSync.SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
+            return query != null && WindowOrder.TryGetDurable(WindowOrder.CurrentRequest(query), out occurrence) &&
+                string.Equals(occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal);
+        }
+
+        internal static bool TryDeferCurrentPreparation(out OccurrenceId occurrence, out MembershipId member,
+            out ulong deferredLifecycleRevision)
+        {
+            occurrence = default(OccurrenceId); member = default(MembershipId); deferredLifecycleRevision = 0;
+            DurablePreparationEditContext context;
+            if (!TryCapturePreparationEditContext(out context)) return false;
+            var store = DurableInboxSaveBridge.ActiveStore;
+            if (store == null || !WindowQueueSync.TryLocalMember(store, out member) ||
+                !new DurableInboxEngine(store, member, LifecycleCarrier).TryDeferPreparation(context.Occurrence)) return false;
+            InboxEntry deferred;
+            try { deferred = store.Ledger.Get(context.Occurrence, member); }
+            catch (InvalidOperationException) { return false; }
+            if (deferred.Lifecycle != InboxLifecycle.Deferred) return false;
+            occurrence = context.Occurrence; deferredLifecycleRevision = deferred.LifecycleRevision;
+            return true;
+        }
+
+        internal static bool TryFindDeferredForMission(DurableInboxStore store, MembershipId member,
+            string stableMissionSubject, out OccurrenceId occurrence)
+        {
+            occurrence = default(OccurrenceId);
+            if (store == null || string.IsNullOrEmpty(stableMissionSubject) ||
+                !store.Ledger.Members.ContainsKey(member)) return false;
+            var matches = store.Ledger.EntriesFor(member).Where(x => x.Lifecycle == InboxLifecycle.Deferred &&
+                string.Equals(x.Occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal) &&
+                x.Occurrence.SubjectIds.Contains(stableMissionSubject, StringComparer.Ordinal) &&
+                x.Predecessor.HasValue).ToArray();
+            if (matches.Length != 1) return false;
+            occurrence = matches[0].Occurrence; return true;
+        }
+
+        internal static bool TryReenterDeferredOccurrence(OccurrenceId expectedOccurrence,
+            string stableMissionSubject, out OccurrenceId occurrence)
+        {
+            occurrence = default(OccurrenceId);
+            var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+            if (store == null || !WindowQueueSync.TryLocalMember(store, out member)) return false;
+            var candidates = store.Ledger.EntriesFor(member).Where(x =>
+                (x.Lifecycle == InboxLifecycle.Deferred || x.Lifecycle == InboxLifecycle.Queued ||
+                 x.Lifecycle == InboxLifecycle.Open) &&
+                string.Equals(x.Occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal) &&
+                x.Occurrence.SubjectIds.Contains(stableMissionSubject, StringComparer.Ordinal) &&
+                x.Predecessor.HasValue).ToArray();
+            if (candidates.Length != 1 || !candidates[0].Occurrence.Equals(expectedOccurrence)) return false;
+            if (candidates[0].Lifecycle == InboxLifecycle.Deferred &&
+                !new DurableInboxEngine(store, member, LifecycleCarrier)
+                    .TryReenterDeferredPreparation(expectedOccurrence)) return false;
+            occurrence = expectedOccurrence;
+            return true;
+        }
+
+        internal static bool TryReenterDeferredForMission(DurableInboxStore store, MembershipId member,
+            string stableMissionSubject, out OccurrenceId occurrence)
+        {
+            occurrence = default(OccurrenceId);
+            if (store == null || string.IsNullOrEmpty(stableMissionSubject) ||
+                !store.Ledger.Members.ContainsKey(member)) return false;
+            OccurrenceId found;
+            if (!TryFindDeferredForMission(store, member, stableMissionSubject, out found) ||
+                !new DurableInboxEngine(store, member, LifecycleCarrier)
+                    .TryReenterDeferredPreparation(found)) return false;
+            occurrence = found;
+            return true;
+        }
+
+        internal static bool RestoreFailedBack(OccurrenceId occurrence, MembershipId member, ulong deferredRevision)
+        {
+            var store = DurableInboxSaveBridge.ActiveStore;
+            bool restored = store != null && new DurableInboxEngine(store, member, LifecycleCarrier)
+                .TryRestoreDeferredAfterFailedBack(occurrence, deferredRevision);
+            return restored;
         }
 
         internal static bool RequiresPreparationContextForSender(NetworkEngine engine, ulong senderPeerId)
@@ -513,6 +604,49 @@ namespace Multiplayer.Network.Sync
                     ItemsField.SetValue(state, items);
                 },
                 () => SetUpInitial.Invoke(state, null));
+        }
+    }
+
+    /// <summary>The native Back funnel calls <c>GeoMission.Cancel</c> before it navigates.  The existing
+    /// cancel gate suppresses that shared mutation; this prefix first records the local, nonterminal
+    /// deferral so the scheduler cannot put the same preparation straight back during this frame.</summary>
+    [HarmonyPatch(typeof(UIStateRosterDeployment), "ToPreviousScreen", new Type[0])]
+    internal static class DeploymentPreparationBack
+    {
+        internal sealed class BackState
+        {
+            internal OccurrenceId Occurrence;
+            internal MembershipId Member;
+            internal ulong DeferredRevision;
+            internal bool Committed;
+        }
+        private static bool Prefix(ref BackState __state)
+        {
+            __state = new BackState();
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession) return true;
+            OccurrenceId bound;
+            if (!DeploymentWindowClose.TryCurrentPreparationOccurrence(out bound)) return true;
+            if (DeploymentWindowClose.TryDeferCurrentPreparation(out __state.Occurrence, out __state.Member,
+                    out __state.DeferredRevision))
+            { __state.Committed = true; return true; }
+            Debug.LogError("[MP][inbox] deployment Back was held because its Deferred lifecycle could not " +
+                           "be committed before native navigation; the shared mission was not cancelled");
+            try { SessionNotifier.ShowToast("Could not close mission preparation safely; please retry.",
+                    modalFallback: true); }
+            catch { /* notification failure must not turn a safely blocked Back into a shared mutation */ }
+            return false;
+        }
+
+        private static Exception Finalizer(Exception __exception, BackState __state)
+        {
+            if (__exception != null && __state != null && __state.Committed &&
+                !DeploymentWindowClose.RestoreFailedBack(__state.Occurrence, __state.Member,
+                    __state.DeferredRevision))
+                Debug.LogError("[MP][inbox] native deployment Back threw after Deferred committed and the " +
+                               "exact lifecycle revision could not be restored to Open; retaining the " +
+                               "exception and durable state for reconciliation");
+            return __exception;
         }
     }
 

@@ -5,6 +5,7 @@ using System.Linq;
 using HarmonyLib;
 using PhoenixPoint.Common.Utils;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Entities.Abilities;
 using PhoenixPoint.Geoscape.Entities.Missions;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewStates;
@@ -27,6 +28,7 @@ namespace Multiplayer.Network.Sync
         {
             internal int Before;
             internal string TriggerId;
+            internal OccurrenceId? DeferredOccurrence;
         }
         internal enum Kind { MissionBrief, Deployment, AssetDestination }
         internal Kind Raiser { get; }
@@ -65,7 +67,50 @@ namespace Multiplayer.Network.Sync
             new[] { typeof(GeoMission), typeof(IGeoCharacterContainer), typeof(bool) })]
         internal static class DeploymentCapture
         {
-            private static void Prefix(ref RaiseState __state) { __state = NewRaiseState("deployment"); }
+            internal sealed class ExplicitReentryToken
+            {
+                internal OccurrenceId Occurrence;
+                internal string MissionSubject;
+                internal bool Consumed;
+            }
+            [ThreadStatic] private static ExplicitReentryToken _explicitReentry;
+
+            internal static bool TryBeginExplicitReentry(DurableInboxStore store, MembershipId member,
+                string missionSubject, out ExplicitReentryToken token)
+            {
+                token = null; OccurrenceId occurrence;
+                if (!DeploymentWindowClose.TryFindDeferredForMission(store, member, missionSubject,
+                        out occurrence)) return false;
+                token = new ExplicitReentryToken { Occurrence = occurrence, MissionSubject = missionSubject };
+                return true;
+            }
+
+            internal static bool TryTakeExplicitReentry(string missionSubject, out OccurrenceId occurrence)
+            {
+                occurrence = default(OccurrenceId); var token = _explicitReentry;
+                if (token == null || token.Consumed ||
+                    !string.Equals(token.MissionSubject, missionSubject, StringComparison.Ordinal)) return false;
+                token.Consumed = true; occurrence = token.Occurrence; return true;
+            }
+
+            internal static bool BeginExplicitReentry(ExplicitReentryToken token)
+            {
+                if (token == null || _explicitReentry != null) return false;
+                _explicitReentry = token; return true;
+            }
+            internal static void EndExplicitReentry(ExplicitReentryToken token)
+            { if (ReferenceEquals(_explicitReentry, token)) _explicitReentry = null; }
+
+            private static void Prefix(GeoMission mission, ref RaiseState __state)
+            {
+                __state = new RaiseState { Before = DurableWindowRegistry.QueueCount() };
+                OccurrenceId deferred;
+                string subject = _explicitReentry == null ? null : DurableWindowRegistry.StableMissionSubject(mission);
+                if (!string.IsNullOrEmpty(subject) && TryTakeExplicitReentry(subject, out deferred))
+                    __state.DeferredOccurrence = deferred;
+                else
+                    __state.TriggerId = "deployment:" + Guid.NewGuid().ToString("N");
+            }
             private static void Postfix(GeoMission mission, IGeoCharacterContainer container, RaiseState __state)
             {
                 var state = DurableWindowRegistry.LastQueued<UIStateRosterDeployment>();
@@ -76,12 +121,46 @@ namespace Multiplayer.Network.Sync
             {
                 string missionId = DurableWindowRegistry.StableMissionSubject(mission);
                 if (raise == null || !NativeSucceeded(raise.Before, after, state, mission) || string.IsNullOrEmpty(missionId)) return false;
+                var existing = DurableWindowRegistry.LastQueuedRequest(r => ReferenceEquals(r.State, state));
+                OccurrenceId deferred;
+                if (existing != null && raise.DeferredOccurrence.HasValue &&
+                    DeploymentWindowClose.TryReenterDeferredOccurrence(raise.DeferredOccurrence.Value, missionId,
+                        out deferred))
+                {
+                    WindowOrder.BindDurable(existing, deferred);
+                    return true;
+                }
+                // A deferred occurrence selected by the explicit input owns this native gesture. If it became
+                // terminal or ambiguous before the queue completed, never mint a replacement occurrence
+                // with a different identity; terminal reconciliation owns removal of the now-stale carrier.
+                if (raise.DeferredOccurrence.HasValue) return false;
                 DurableWindowRegistry.CaptureDeployment(mission, new NativeRaiserToken(Kind.Deployment,
                     ModalType.None, mission, raise.TriggerId));
                 return true;
             }
             internal static bool NativeSucceeded(int before, int after, UIStateRosterDeployment state, GeoMission mission) =>
                 after > before && mission != null && state != null && ReferenceEquals(state.Mission, mission);
+        }
+
+        [HarmonyPatch(typeof(LaunchMissionAbility), "ActivateInternal",
+            new[] { typeof(GeoAbilityTarget) })]
+        internal static class ExplicitDeploymentInput
+        {
+            private static void Prefix(GeoAbilityTarget target, ref DeploymentCapture.ExplicitReentryToken __state)
+            {
+                __state = null;
+                var mission = (target.Actor as GeoSite)?.ActiveMission;
+                var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+                string subject = DurableWindowRegistry.StableMissionSubject(mission);
+                if (store == null || string.IsNullOrEmpty(subject) ||
+                    !WindowQueueSync.TryLocalMember(store, out member) ||
+                    !DeploymentCapture.TryBeginExplicitReentry(store, member, subject, out __state)) return;
+                if (!DeploymentCapture.BeginExplicitReentry(__state)) __state = null;
+            }
+
+            private static Exception Finalizer(Exception __exception,
+                DeploymentCapture.ExplicitReentryToken __state)
+            { DeploymentCapture.EndExplicitReentry(__state); return __exception; }
         }
 
         [HarmonyPatch(typeof(GeoscapeView), nameof(GeoscapeView.PrepareDeployAsset),

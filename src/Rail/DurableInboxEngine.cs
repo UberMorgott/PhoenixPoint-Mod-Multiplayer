@@ -408,6 +408,58 @@ namespace Multiplayer.Network.Sync
             try { return _store.Commit(expected, next); } catch { return false; }
         }
 
+        /// <summary>Commits this peer's nonterminal Back before native navigation is allowed to run.</summary>
+        internal bool TryDeferPreparation(OccurrenceId occurrence)
+        {
+            if (!string.Equals(occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal)) return false;
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                var expected = _store.Ledger; InboxEntry current;
+                try { current = expected.Get(occurrence, _member); } catch (InvalidOperationException) { return false; }
+                if (current.Lifecycle == InboxLifecycle.Deferred) return true;
+                if (current.Lifecycle != InboxLifecycle.Open) return false;
+                var deferred = current.Defer(checked(current.LifecycleRevision + 1));
+                var next = expected.Replace(deferred)
+                    .WithAuthority(checked(expected.CommittedRevision + 1), expected.Members);
+                try { if (_store.Commit(expected, next)) return true; } catch { return false; }
+            }
+            return false;
+        }
+
+        /// <summary>Explicit local re-entry is the only gesture, apart from a newer material revision,
+        /// that makes a deferred preparation eligible for the display gate again.</summary>
+        internal bool TryReenterDeferredPreparation(OccurrenceId occurrence)
+        {
+            if (!string.Equals(occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal)) return false;
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                var expected = _store.Ledger; InboxEntry current;
+                try { current = expected.Get(occurrence, _member); } catch (InvalidOperationException) { return false; }
+                if (current.Lifecycle != InboxLifecycle.Deferred) return false;
+                var queued = current.WithLifecycle(InboxLifecycle.Queued, checked(current.LifecycleRevision + 1));
+                var next = expected.Replace(queued)
+                    .WithAuthority(checked(expected.CommittedRevision + 1), expected.Members);
+                try { if (_store.Commit(expected, next)) return true; } catch { return false; }
+            }
+            return false;
+        }
+
+        internal bool TryRestoreDeferredAfterFailedBack(OccurrenceId occurrence, ulong deferredLifecycleRevision)
+        {
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                var expected = _store.Ledger; InboxEntry current;
+                try { current = expected.Get(occurrence, _member); } catch (InvalidOperationException) { return false; }
+                if (current.Lifecycle != InboxLifecycle.Deferred ||
+                    current.LifecycleRevision != deferredLifecycleRevision) return false;
+                var open = current.RestoreDeferred(checked(current.LifecycleRevision + 1));
+                var next = expected.Replace(open)
+                    .WithAuthority(checked(expected.CommittedRevision + 1), expected.Members);
+                try { if (_store.Commit(expected, next)) return true; } catch { return false; }
+            }
+            return false;
+        }
+
         internal bool TryPreempt(OccurrenceId ordinary, OccurrenceId priority,
             bool geoscapeStarted, Type currentViewState)
         {
