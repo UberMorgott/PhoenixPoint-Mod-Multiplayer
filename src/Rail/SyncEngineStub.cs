@@ -226,6 +226,7 @@ namespace Multiplayer.Network.Sync
             MarketplaceSync.Reset();  // 0xBF offer-list seq stream, same teardown-only contract
             MissionOutcomeMirror.Reset();  // 0xBB reward raise seq stream + any un-consumed stash
             ReplenishSync.Reset();  // the post-mission re-ask count-down must not survive into the next session
+            Multiplayer.Tactical.ReturnCountdown.Reset();  // the pre-geoscape hold must not outlive its battle
             Multiplayer.Tactical.TacticalTurnSync.Reset();  // 0x80 seq + the client's turn cursor / mission-over flag
             Multiplayer.Tactical.TacticalCommandSync.Reset();  // 0x82 seq + pending settles + the per-battle "not covered" notices
             Multiplayer.Tactical.TacticalDamageSync.Reset();   // 0x84 seq + gap cursor + the mirror-apply scope depth

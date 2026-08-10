@@ -245,11 +245,24 @@ namespace Multiplayer.UI
             // is a fallthrough, not an arbitration, and the caption says WHICH so a five-second number is
             // never ambiguous about what it is about to do.
             int left = DeployCountdown.DisplaySecondsLeft();
-            string what = "MISSION";
-            // The lobby clock counts down to one of TWO things (start-from-save, or the host's new
-            // campaign), so the subject comes off the arm that is running rather than being a literal.
-            if (left <= 0) { left = LobbyCountdown.DisplaySecondsLeft(); what = LobbyCountdown.Subject; }
-            bool show = engine != null && engine.IsActiveSession && left > 0;
+            string caption = left > 0 ? "MISSION STARTS IN " + Seconds(left) : null;
+            // NOT EVERY COUNTDOWN CAN BE VETOED. The two STARTS are a decision a peer may still stop; the
+            // post-mission RETURN is not — the battle is already over and the geoscape is where the game
+            // goes next, so that one shows the number and no button.
+            bool cancellable = true;
+            if (caption == null)
+            {
+                // The lobby clock counts down to one of TWO things (start-from-save, or the host's new
+                // campaign), so the subject comes off the arm that is running rather than being a literal.
+                left = LobbyCountdown.DisplaySecondsLeft();
+                if (left > 0) caption = LobbyCountdown.Subject + " STARTS IN " + Seconds(left);
+            }
+            if (caption == null)
+            {
+                left = Multiplayer.Tactical.ReturnCountdown.DisplaySecondsLeft();
+                if (left > 0) { caption = "RETURNING TO GEOSCAPE IN " + Seconds(left); cancellable = false; }
+            }
+            bool show = engine != null && engine.IsActiveSession && caption != null;
 
             if (!show)
             {
@@ -258,16 +271,21 @@ namespace Multiplayer.UI
                 return;
             }
             if (!_root.activeSelf) _root.SetActive(true);
+            // BEFORE the caption compare: the button's visibility is not part of the caption, so an early
+            // return on an unchanged number must not be able to leave the wrong one showing.
+            if (_cancel != null && _cancel.gameObject.activeSelf != cancellable)
+                _cancel.gameObject.SetActive(cancellable);
 
-            // Keyed on the whole caption, not on the number alone: the two countdowns share this widget, so
-            // "5" from one and "5" from the other must not be mistaken for the same repaint.
-            var caption = what + " STARTS IN " + left + (left == 1 ? " SECOND" : " SECONDS");
+            // Keyed on the whole caption, not on the number alone: three countdowns share this widget, so
+            // "5" from one and "5" from another must not be mistaken for the same repaint.
             if (caption == _shownCaption) return;            // per-frame work is one string compare
             _shownCaption = caption;
 
             _title.text = caption;
             _title.color = LobbyTheme.BodyText;
         }
+
+        private static string Seconds(int n) => n + (n == 1 ? " SECOND" : " SECONDS");
 
         private static Color Fade(Color c, float a) => new Color(c.r, c.g, c.b, a);
     }

@@ -1975,6 +1975,10 @@ namespace Multiplayer.UI
             // Same seam, same argument: an ARMING countdown must reach an already-open screen within one
             // frame of the rail batch that carried it, and a cancel must take it away the same way.
             _countdownPanel?.Sync();
+            // THE POST-MISSION RETURN HOLD, released here and nowhere else. Unconditional for the same
+            // reason the Sync above is: this loop is the only one that runs in the TACTICAL scene, and a
+            // held return that never got a tick would strand the player on the summary screen.
+            Multiplayer.Tactical.ReturnCountdown.Tick();
         }
 
         // ═══════════════════════════════════════════════════════════════════
