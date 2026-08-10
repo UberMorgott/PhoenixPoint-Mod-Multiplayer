@@ -61,7 +61,14 @@ namespace Multiplayer.Network
         // Host's own lobby identity. The host is NOT in _clients (which holds remote peers only),
         // so its row is injected into the broadcast roster via a self-entry in BuildPeerList. The
         // lobby UI sets these; defaults give a sensible display before the player edits anything.
-        public string HostNickname { get; set; } = ClientIdentity.LocalNickname ?? "Host";
+        // Capped through the same seam as every other roster name (ClientInfo.Cap) — the host's own row
+        // rides the same PEER_LIST datagram, so its length costs every peer exactly as much.
+        private string _hostNickname = ClientInfo.Cap(ClientIdentity.LocalNickname) ?? "Host";
+        public string HostNickname
+        {
+            get { return _hostNickname; }
+            set { _hostNickname = ClientInfo.Cap(value); }
+        }
         public bool HostReady { get; set; }
 
         // Host's chosen save (rail display + read-only client mirror). Set on the rail save-pick.
@@ -655,6 +662,10 @@ namespace Multiplayer.Network
             JoinMessage join = null;
             if (msg.Payload != null && msg.Payload.Length > 0)
                 join = MessageSerializer.DeserializeJoin(msg.Payload);
+            // Cap the peer-supplied nickname at the boundary it enters on, so the join NOTICES below
+            // (:816/:834/:841 — broadcast chat) carry the same bounded name the roster does. The roster
+            // itself is capped by ClientInfo.PlayerName's setter; see the comment there for why.
+            if (join != null) join.Nickname = ClientInfo.Cap(join.Nickname);
 
             if (join == null || join.PlayerGuid == Guid.Empty)
             {
@@ -1659,7 +1670,24 @@ namespace Multiplayer.Network
         public ulong SteamId { get; set; }            // per-session peerID (transport handle)
         public Guid PlayerGuid { get; set; }          // persistent identity (JOIN); permission/ownership key
         public string Endpoint { get; set; }
-        public string PlayerName { get; set; } = "Unknown";
+        // A nickname is PEER-SUPPLIED and rides PEER_LIST to every peer, so one oversized name inflates
+        // the roster broadcast for the whole lobby — and on StunTransport an oversized datagram is a
+        // silent total loss (no retransmit, SendRaw:693; the receive side swallows the failure at :703),
+        // i.e. ONE player's long name stops roster delivery for everybody. Cap it where a name ENTERS the
+        // roster, once: the JOIN apply (:786), RENAME (:1415) and the client-side PEER_LIST apply (:1341)
+        // all route through this setter. TRUNCATE, never reject — a long name is not a reason to refuse
+        // a player, and a rejected peer is a worse failure than a shortened label.
+        public const int MaxNicknameChars = 32;
+        private string _playerName = "Unknown";
+        public string PlayerName
+        {
+            get { return _playerName; }
+            set { _playerName = Cap(value); }
+        }
+
+        internal static string Cap(string nickname)
+            => nickname != null && nickname.Length > MaxNicknameChars
+                ? nickname.Substring(0, MaxNicknameChars) : nickname;
         public int Permissions { get; set; }
         public bool IsReady { get; set; }             // mirror of _readyClients for PEER_LIST broadcast
         // Host-local: this peer stopped answering and is being held, not removed (SessionManager.PausePeer).
