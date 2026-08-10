@@ -362,6 +362,8 @@ namespace RailCheck
             Add(laws, () => L395_TerminalRemovalReachesEveryCarrier.Check());
             Add(laws, () => L379_AHostOrderSurvivesTheNativeSaveBlob.Check());
             Add(laws, () => L380_APriorityWindowSuspendsBeforeItPreempts.Check());
+            Add(laws, () => L381_AFirstValidSharedAnswerAppliesOneDurableEffect.Check());
+            Add(laws, () => L382_AChoiceLockRetainsEveryPlayersWindow.Check());
             Add(laws, () => L383_ACanonicalResultNeverRebindsByListPosition.Check());
             Add(laws, () => L378_WindowsPresentOnlyOnTheGeoscape.Check());
             Add(laws, () => L393_EveryRoutedWindowFamilyHasAVerdict.Check());

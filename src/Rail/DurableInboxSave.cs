@@ -12,6 +12,7 @@ using TimeSlice = Base.Utils.TimeSlice;
 using HarmonyLib;
 using Multiplayer.Util;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Levels;
 
 namespace Multiplayer.Network.Sync
 {
@@ -28,15 +29,24 @@ namespace Multiplayer.Network.Sync
         internal static DurableInboxCanonicalState Empty { get; } = new DurableInboxCanonicalState(
             Array.Empty<CanonicalChoiceId>(), Array.Empty<CanonicalResultId>(), Array.Empty<CanonicalRewardItemId>());
         internal DurableInboxCanonicalState(IEnumerable<CanonicalChoiceId> choices,
-            IEnumerable<CanonicalResultId> results, IEnumerable<CanonicalRewardItemId> rewards)
+            IEnumerable<CanonicalResultId> results, IEnumerable<CanonicalRewardItemId> rewards,
+            IEnumerable<SharedChoiceDecision> decisions = null)
         {
             Choices = new ReadOnlyCollection<CanonicalChoiceId>((choices ?? throw new ArgumentNullException(nameof(choices))).Distinct().OrderBy(x => x).ToArray());
             Results = new ReadOnlyCollection<CanonicalResultId>((results ?? throw new ArgumentNullException(nameof(results))).Distinct().OrderBy(x => x).ToArray());
             Rewards = new ReadOnlyCollection<CanonicalRewardItemId>((rewards ?? throw new ArgumentNullException(nameof(rewards))).Distinct().OrderBy(x => x).ToArray());
+            var decisionCopy = (decisions ?? Enumerable.Empty<SharedChoiceDecision>()).ToArray();
+            if (decisionCopy.Any(x => x == null) || decisionCopy.GroupBy(x => x.Occurrence).Any(x => x.Count() != 1))
+                throw new ArgumentException("duplicate shared-choice decision", nameof(decisions));
+            Decisions = new ReadOnlyCollection<SharedChoiceDecision>(decisionCopy.OrderBy(x => x.Occurrence).ToArray());
+            if (decisionCopy.Any(d => !Choices.Contains(d.Choice) || !Results.Contains(d.Result) ||
+                d.Rewards.Any(r => !Rewards.Contains(r))))
+                throw new ArgumentException("shared-choice decision identities are not canonical", nameof(decisions));
         }
         internal IReadOnlyList<CanonicalChoiceId> Choices { get; }
         internal IReadOnlyList<CanonicalResultId> Results { get; }
         internal IReadOnlyList<CanonicalRewardItemId> Rewards { get; }
+        internal IReadOnlyList<SharedChoiceDecision> Decisions { get; }
         internal DurableInboxCanonicalState With(OccurrenceId occurrence, CanonicalChoiceId choice,
             CanonicalResultId result, IEnumerable<CanonicalRewardItemId> rewards)
         {
@@ -47,11 +57,23 @@ namespace Multiplayer.Network.Sync
             return new DurableInboxCanonicalState(
                 Choices.Where(x => !x.Occurrence.Equals(occurrence)).Concat(new[] { choice }),
                 Results.Where(x => !x.Occurrence.Equals(occurrence)).Concat(new[] { result }),
-                Rewards.Where(x => !x.Occurrence.Equals(occurrence)).Concat(rewardArray));
+                Rewards.Where(x => !x.Occurrence.Equals(occurrence)).Concat(rewardArray), Decisions);
+        }
+        internal DurableInboxCanonicalState WithDecision(SharedChoiceDecision decision)
+        {
+            if (decision == null) throw new ArgumentNullException(nameof(decision));
+            return new DurableInboxCanonicalState(
+                Choices.Where(x => !x.Occurrence.Equals(decision.Occurrence)).Concat(new[] { decision.Choice }),
+                Results.Where(x => !x.Occurrence.Equals(decision.Occurrence)).Concat(new[] { decision.Result }),
+                Rewards.Where(x => !x.Occurrence.Equals(decision.Occurrence)).Concat(decision.Rewards),
+                Decisions.Where(x => !x.Occurrence.Equals(decision.Occurrence)).Concat(new[] { decision }));
         }
         internal DurableInboxCanonicalState Without(ISet<OccurrenceId> occurrences) => new DurableInboxCanonicalState(
             Choices.Where(x => !occurrences.Contains(x.Occurrence)), Results.Where(x => !occurrences.Contains(x.Occurrence)),
-            Rewards.Where(x => !occurrences.Contains(x.Occurrence)));
+            Rewards.Where(x => !occurrences.Contains(x.Occurrence)), Decisions.Where(x => !occurrences.Contains(x.Occurrence)));
+        internal DurableInboxCanonicalState WithoutDecision(OccurrenceId occurrence) => new DurableInboxCanonicalState(
+            Choices.Where(x => !x.Occurrence.Equals(occurrence)), Results.Where(x => !x.Occurrence.Equals(occurrence)),
+            Rewards.Where(x => !x.Occurrence.Equals(occurrence)), Decisions.Where(x => !x.Occurrence.Equals(occurrence)));
     }
 
     [SerializeType(SerializeMembersByDefault = SerializeMembersType.SerializeAll)]
@@ -63,6 +85,21 @@ namespace Multiplayer.Network.Sync
         public byte[][] Journal = Array.Empty<byte[]>();
         public ulong SnapshotRevision;
         public uint Crc;
+        // Schema 6: the checkpoint identity is part of the Phoenix object graph.  It is deliberately
+        // not kept in PlatformData or a companion file: copying/deleting the save cannot detach its
+        // transaction proof.
+        public byte TransactionKind = byte.MaxValue;
+        public string TransactionCheckpointId;
+        public string TransactionPendingCheckpointId;
+        public string TransactionEventId;
+        public string TransactionTriggerId;
+        public string[] TransactionSubjectIds = Array.Empty<string>();
+        public string TransactionEffectToken;
+        public ulong TransactionSharedRevision;
+        public bool TransactionWasIronman;
+        public string TransactionPredecessorSaveLocator;
+        public string[] RetiredEffectTokens = Array.Empty<string>();
+        public string RetiredCatalogGameId;
     }
 
     internal sealed class DurableInboxRestore
@@ -90,7 +127,7 @@ namespace Multiplayer.Network.Sync
     internal static class DurableInboxSaveCodec
     {
         internal const string Magic = "Multiplayer.DurableInbox/v1";
-        internal const int Schema = 4;
+        internal const int Schema = 7;
         private const int MaxCount = 65535;
         private const int MaxString = 4096;
 
@@ -100,10 +137,12 @@ namespace Multiplayer.Network.Sync
             if (ledger == null) throw new ArgumentNullException(nameof(ledger));
             var root = new DurableInboxSaveRoot
             {
-                Snapshot = EncodeSnapshot(ledger, canonical?.Choices, canonical?.Results, canonical?.Rewards),
+                Snapshot = EncodeSnapshot(ledger, canonical?.Choices, canonical?.Results, canonical?.Rewards, canonical?.Decisions),
                 Journal = (journal ?? Enumerable.Empty<DurableInboxJournalRecord>()).Select(EncodeJournal).ToArray(),
                 SnapshotRevision = ledger.CommittedRevision
             };
+            DurableEffectTransactionBarrier.StampOwnerRoot(root);
+            DurableEffectSaveCatalog.CaptureNormalRoot(root, canonical?.Decisions);
             root.Crc = ComputeRootCrc(root);
             return root;
         }
@@ -136,28 +175,39 @@ namespace Multiplayer.Network.Sync
             try
             {
                 if (root == null || root.Magic != Magic ||
-                    (root.Schema != 1 && root.Schema != 2 && root.Schema != 3 && root.Schema != Schema))
+                    (root.Schema != 1 && root.Schema != 2 && root.Schema != 3 && root.Schema != 4 && root.Schema != 5 && root.Schema != 6 && root.Schema != Schema))
                     throw new InvalidDataException("unknown durable inbox save root");
                 if (root.Snapshot == null || root.Journal == null || root.Crc != ComputeRootCrc(root)) throw new InvalidDataException("durable inbox CRC mismatch");
+                if (root.Schema >= 6) ValidateTransactionMarker(root);
+                if (root.Schema >= 7)
+                {
+                    var retired = root.RetiredEffectTokens ?? Array.Empty<string>();
+                    if (retired.Length > MaxCount || retired.Distinct(StringComparer.Ordinal).Count() != retired.Length)
+                        throw new InvalidDataException("invalid retired effect-token catalog");
+                    foreach (var encoded in retired)
+                    { EffectToken ignored; if (!DurableEffectSaveCatalog.TryDecodeToken(encoded, out ignored))
+                        throw new InvalidDataException("malformed retired effect token"); }
+                }
                 HostLedger ledger; List<CanonicalChoiceId> choices; List<CanonicalResultId> results; List<CanonicalRewardItemId> rewards;
-                DecodeSnapshot(root.Snapshot, root.Schema, out ledger, out choices, out results, out rewards);
+                List<SharedChoiceDecision> decisions;
+                DecodeSnapshot(root.Snapshot, root.Schema, out ledger, out choices, out results, out rewards, out decisions);
                 if (ledger.CommittedRevision != root.SnapshotRevision) throw new InvalidDataException("snapshot revision mismatch");
                 var snapshotLedger = ledger;
-                var snapshotCanonical = new DurableInboxCanonicalState(choices, results, rewards);
+                var snapshotCanonical = new DurableInboxCanonicalState(choices, results, rewards, decisions);
                 var records = root.Journal.Select(bytes => DecodeJournal(bytes, root.Schema)).OrderBy(r => r.Revision).ToList();
                 ulong previous = root.SnapshotRevision;
                 foreach (var record in records)
                 {
                     HostLedger replayed; List<CanonicalChoiceId> replayChoices; List<CanonicalResultId> replayResults;
-                    List<CanonicalRewardItemId> replayRewards; string replayRefusal = null;
+                    List<CanonicalRewardItemId> replayRewards; List<SharedChoiceDecision> replayDecisions; string replayRefusal = null;
                     if (previous == ulong.MaxValue || record.Revision != previous + 1 ||
                         record.Crc != Crc32.Compute(record.Payload) ||
                         !TryDecodeJournalCandidate(record.Payload, root.Schema, out replayed, out replayChoices, out replayResults,
-                            out replayRewards, out replayRefusal) ||
+                            out replayRewards, out replayDecisions, out replayRefusal) ||
                         replayed.CommittedRevision != record.Revision)
                         throw new InvalidDataException("invalid journal sequence: " + replayRefusal);
                     ledger = replayed;
-                    choices = replayChoices; results = replayResults; rewards = replayRewards;
+                    choices = replayChoices; results = replayResults; rewards = replayRewards; decisions = replayDecisions;
                     previous = record.Revision;
                 }
                 var quarantine = new HashSet<OccurrenceId>();
@@ -181,7 +231,7 @@ namespace Multiplayer.Network.Sync
                 }
                 // Quarantine is a presentation/reconciliation filter only. Durable truth stays byte-for-byte
                 // available for a later resolver pass and the next campaign save.
-                var canonical = new DurableInboxCanonicalState(choices, results, rewards);
+                var canonical = new DurableInboxCanonicalState(choices, results, rewards, decisions);
                 restore = new DurableInboxRestore(ledger, snapshotLedger, canonical, snapshotCanonical, records, quarantine);
                 return true;
             }
@@ -189,7 +239,8 @@ namespace Multiplayer.Network.Sync
         }
 
         private static byte[] EncodeSnapshot(HostLedger ledger, IEnumerable<CanonicalChoiceId> choices,
-            IEnumerable<CanonicalResultId> results, IEnumerable<CanonicalRewardItemId> rewards)
+            IEnumerable<CanonicalResultId> results, IEnumerable<CanonicalRewardItemId> rewards,
+            IEnumerable<SharedChoiceDecision> decisions)
         {
             using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms))
             {
@@ -212,24 +263,26 @@ namespace Multiplayer.Network.Sync
                 WriteIdentities(w, choices ?? Enumerable.Empty<CanonicalChoiceId>(), (bw, x) => { WriteOccurrence(bw, x.Occurrence); WriteString(bw, x.Value); });
                 WriteIdentities(w, results ?? Enumerable.Empty<CanonicalResultId>(), (bw, x) => { WriteOccurrence(bw, x.Occurrence); WriteString(bw, x.Value); });
                 WriteIdentities(w, rewards ?? Enumerable.Empty<CanonicalRewardItemId>(), (bw, x) => { WriteOccurrence(bw, x.Occurrence); WriteString(bw, x.SubjectId); WriteString(bw, x.Value); });
+                WriteIdentities(w, decisions ?? Enumerable.Empty<SharedChoiceDecision>(), WriteDecision);
                 return ms.ToArray();
             }
         }
 
         internal static byte[] EncodeJournalCandidate(HostLedger ledger, DurableInboxCanonicalState canonical) =>
-            EncodeSnapshot(ledger, canonical.Choices, canonical.Results, canonical.Rewards);
+            EncodeSnapshot(ledger, canonical.Choices, canonical.Results, canonical.Rewards, canonical.Decisions);
 
         private static bool TryDecodeJournalCandidate(byte[] payload, int schema, out HostLedger ledger,
             out List<CanonicalChoiceId> choices, out List<CanonicalResultId> results,
-            out List<CanonicalRewardItemId> rewards, out string refusal)
+            out List<CanonicalRewardItemId> rewards, out List<SharedChoiceDecision> decisions, out string refusal)
         {
-            ledger = null; choices = null; results = null; rewards = null; refusal = null;
-            try { DecodeSnapshot(payload, schema, out ledger, out choices, out results, out rewards); return true; }
+            ledger = null; choices = null; results = null; rewards = null; decisions = null; refusal = null;
+            try { DecodeSnapshot(payload, schema, out ledger, out choices, out results, out rewards, out decisions); return true; }
             catch (Exception ex) { refusal = ex.Message; return false; }
         }
 
         private static void DecodeSnapshot(byte[] bytes, int schema, out HostLedger ledger, out List<CanonicalChoiceId> choices,
-            out List<CanonicalResultId> results, out List<CanonicalRewardItemId> rewards)
+            out List<CanonicalResultId> results, out List<CanonicalRewardItemId> rewards,
+            out List<SharedChoiceDecision> decisions)
         {
             using (var ms = new MemoryStream(bytes, false)) using (var r = new BinaryReader(ms))
             {
@@ -252,8 +305,9 @@ namespace Multiplayer.Network.Sync
                 choices = ReadIdentities(r, br => { var o = ReadOccurrence(br); return new CanonicalChoiceId(o, ReadString(br)); });
                 results = ReadIdentities(r, br => { var o = ReadOccurrence(br); return new CanonicalResultId(o, ReadString(br)); });
                 rewards = ReadIdentities(r, br => { var o = ReadOccurrence(br); return new CanonicalRewardItemId(o, ReadString(br), ReadString(br)); });
+                decisions = schema >= 5 ? ReadIdentities(r, br => ReadDecision(br, schema)) : new List<SharedChoiceDecision>();
                 if (ms.Position != ms.Length) throw new InvalidDataException("trailing snapshot bytes");
-                ledger = schema < Schema
+                ledger = schema < 4
                     ? LegacyMembershipMigration.EndDisconnected(entries, revision, members)
                     : new HostLedger(entries, revision, members);
             }
@@ -270,15 +324,47 @@ namespace Multiplayer.Network.Sync
                 var p = r.ReadBytes(n); uint crc = r.ReadUInt32();
                 if (ms.Position != ms.Length || crc != Crc32.Compute(p)) throw new InvalidDataException("journal CRC");
                 HostLedger decoded; List<CanonicalChoiceId> c; List<CanonicalResultId> result;
-                List<CanonicalRewardItemId> reward; string refusal;
-                if (!TryDecodeJournalCandidate(p, schema, out decoded, out c, out result, out reward, out refusal) || decoded.CommittedRevision != rev)
+                List<CanonicalRewardItemId> reward; List<SharedChoiceDecision> decisions; string refusal;
+                if (!TryDecodeJournalCandidate(p, schema, out decoded, out c, out result, out reward, out decisions, out refusal) || decoded.CommittedRevision != rev)
                     throw new InvalidDataException("journal ledger: " + refusal);
                 return new DurableInboxJournalRecord(rev, p, decoded.AllEntries.Select(x => x.Occurrence));
             }
         }
         private static uint ComputeRootCrc(DurableInboxSaveRoot root)
-        { using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms)) { WriteString(w, root.Magic); w.Write(root.Schema); w.Write(root.SnapshotRevision); WriteBytes(w, root.Snapshot); WriteCount(w, root.Journal.Length); foreach (var p in root.Journal) WriteBytes(w, p); return Crc32.Compute(ms.ToArray()); } }
+        { using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms)) { WriteString(w, root.Magic); w.Write(root.Schema); w.Write(root.SnapshotRevision); WriteBytes(w, root.Snapshot); WriteCount(w, root.Journal.Length); foreach (var p in root.Journal) WriteBytes(w, p); if (root.Schema >= 6) { w.Write(root.TransactionKind); WriteNullableString(w, root.TransactionCheckpointId); WriteNullableString(w, root.TransactionPendingCheckpointId); WriteNullableString(w, root.TransactionEventId); WriteNullableString(w, root.TransactionTriggerId); var subjects = root.TransactionSubjectIds ?? Array.Empty<string>(); WriteCount(w, subjects.Length); foreach (var subject in subjects) WriteNullableString(w, subject); WriteNullableString(w, root.TransactionEffectToken); w.Write(root.TransactionSharedRevision); w.Write(root.TransactionWasIronman); if (root.Schema >= 7) { WriteNullableString(w, root.TransactionPredecessorSaveLocator); WriteNullableString(w, root.RetiredCatalogGameId); var retired = root.RetiredEffectTokens ?? Array.Empty<string>(); WriteCount(w, retired.Length); foreach (var item in retired) WriteNullableString(w, item); } } return Crc32.Compute(ms.ToArray()); } }
+        private static void ValidateTransactionMarker(DurableInboxSaveRoot root)
+        {
+            bool absent = root.TransactionKind == byte.MaxValue && string.IsNullOrEmpty(root.TransactionCheckpointId) &&
+                string.IsNullOrEmpty(root.TransactionPendingCheckpointId) && string.IsNullOrEmpty(root.TransactionEventId) &&
+                string.IsNullOrEmpty(root.TransactionTriggerId) && string.IsNullOrEmpty(root.TransactionEffectToken) &&
+                root.TransactionSharedRevision == 0 && !root.TransactionWasIronman &&
+                string.IsNullOrEmpty(root.TransactionPredecessorSaveLocator) &&
+                (root.TransactionSubjectIds == null || root.TransactionSubjectIds.Length == 0);
+            if (absent) return;
+            if (root.TransactionKind > (byte)DurableEffectCheckpointKind.Committed)
+                throw new InvalidDataException("invalid durable transaction checkpoint kind");
+            if (root.Schema >= 7 && string.IsNullOrEmpty(root.TransactionPredecessorSaveLocator))
+                throw new InvalidDataException("durable transaction omitted exact predecessor save locator");
+            try
+            {
+                var occurrence = new OccurrenceId(root.TransactionEventId, root.TransactionTriggerId,
+                    root.TransactionSubjectIds ?? Array.Empty<string>());
+                var token = new EffectToken(occurrence, root.TransactionEffectToken);
+                var checkpoint = new DurableEffectCheckpoint(root.TransactionCheckpointId,
+                    (DurableEffectCheckpointKind)root.TransactionKind, occurrence, token,
+                    root.TransactionPendingCheckpointId);
+                if (root.Schema >= 7 && !string.IsNullOrEmpty(root.TransactionPredecessorSaveLocator))
+                    checkpoint.BindPredecessor(root.TransactionPredecessorSaveLocator);
+                if (root.TransactionKind == (byte)DurableEffectCheckpointKind.Pending && root.TransactionSharedRevision != 0)
+                    throw new InvalidDataException("PRE checkpoint cannot contain a locked shared revision");
+                if (root.TransactionKind == (byte)DurableEffectCheckpointKind.Committed && root.TransactionSharedRevision == 0)
+                    throw new InvalidDataException("POST checkpoint omitted its locked shared revision");
+            }
+            catch (Exception ex) when (!(ex is InvalidDataException))
+            { throw new InvalidDataException("invalid durable transaction checkpoint marker", ex); }
+        }
         private static void WriteBytes(BinaryWriter w, byte[] p) { p = p ?? Array.Empty<byte>(); w.Write(p.Length); w.Write(p); }
+        private static byte[] ReadBytes(BinaryReader r) { int n = r.ReadInt32(); if (n < 0 || n > SharedChoiceDecision.MaxRewardPayloadBytes) throw new InvalidDataException("byte payload length"); var p = r.ReadBytes(n); if (p.Length != n) throw new EndOfStreamException(); return p; }
         private static void WriteCount(BinaryWriter w, int n) { if (n < 0 || n > MaxCount) throw new InvalidDataException("count out of range"); w.Write(n); }
         private static int ReadCount(BinaryReader r) { int n = r.ReadInt32(); if (n < 0 || n > MaxCount) throw new InvalidDataException("count out of range"); return n; }
         private static void WriteString(BinaryWriter w, string s) { s = InboxIdentity.Required(s, nameof(s)); var b = System.Text.Encoding.UTF8.GetBytes(s); if (b.Length > MaxString) throw new InvalidDataException("string too long"); w.Write((ushort)b.Length); w.Write(b); }
@@ -289,6 +375,28 @@ namespace Multiplayer.Network.Sync
         private static MembershipId ReadMembership(BinaryReader r) => new MembershipId(ReadString(r), r.ReadUInt64());
         private static void WriteOptionalChoice(BinaryWriter w, CanonicalChoiceId c) { bool has = c.Value != null; w.Write(has); if (has) WriteString(w, c.Value); }
         private static CanonicalChoiceId ReadOptionalChoice(BinaryReader r, OccurrenceId o) => r.ReadBoolean() ? new CanonicalChoiceId(o, ReadString(r)) : default(CanonicalChoiceId);
+        private static void WriteDecision(BinaryWriter w, SharedChoiceDecision d)
+        {
+            WriteOccurrence(w, d.Occurrence); WriteString(w, d.EffectToken.Value); WriteString(w, d.Choice.Value);
+            WriteString(w, d.Result.Value); WriteMembership(w, d.Winner); w.Write((byte)d.Phase);
+            WriteIdentities(w, d.EffectSteps, (bw, step) => { WriteString(bw, step.Key); WriteString(bw, step.Operation);
+                WriteString(bw, step.BeforeFact); WriteString(bw, step.AfterFact); bw.Write((byte)step.State); });
+            w.Write(d.SharedRevision);
+            WriteIdentities(w, d.Rewards, (bw, x) => { WriteString(bw, x.SubjectId); WriteString(bw, x.Value); });
+            WriteBytes(w, d.RewardPayload);
+        }
+        private static SharedChoiceDecision ReadDecision(BinaryReader r, int schema)
+        {
+            var o = ReadOccurrence(r); var token = new EffectToken(o, ReadString(r));
+            var choice = new CanonicalChoiceId(o, ReadString(r)); var result = new CanonicalResultId(o, ReadString(r));
+            var winner = ReadMembership(r); var phase = ReadEnum<SharedChoicePhase>(r);
+            var steps = ReadIdentities(r, br => new DurableEffectStep(ReadString(br), ReadString(br),
+                ReadString(br), ReadString(br), ReadEnum<DurableEffectStepState>(br)));
+            ulong sharedRevision = r.ReadUInt64();
+            var rewards = ReadIdentities(r, br => new CanonicalRewardItemId(o, ReadString(br), ReadString(br)));
+            var payload = schema >= 6 ? ReadBytes(r) : Array.Empty<byte>();
+            return new SharedChoiceDecision(o, token, choice, result, rewards, winner, phase, steps, sharedRevision, payload);
+        }
         private static void WriteOptionalCheckpoint(BinaryWriter w, InboxWindowCheckpoint checkpoint)
         {
             w.Write(checkpoint != null);
@@ -356,6 +464,7 @@ namespace Multiplayer.Network.Sync
             // must preserve the validated root byte-for-byte, never replace an unread inbox with empty state.
             if (_activeStore == null && _pendingRoot != null)
             {
+                DurableEffectSaveCatalog.CaptureNormalRoot(_pendingRoot, _pendingRestore?.Canonical.Decisions);
                 values.Add(_pendingRoot);
                 result = values;
             }
@@ -386,11 +495,20 @@ namespace Multiplayer.Network.Sync
             if (roots.Length > 1) throw new InvalidDataException("multiple durable inbox save roots");
             if (roots.Length == 1)
             {
+                if (!DurableEffectSaveCatalog.AcceptLoadedRoot(roots[0]))
+                    throw new InvalidDataException("loaded durable checkpoint changed after validation; fallback scheduled");
                 DurableInboxRestore restored; string refusal;
                 if (!DurableInboxSaveCodec.TryRestore(roots[0], null, out restored, out refusal))
                     throw new InvalidDataException(refusal);
+                DurableEffectSaveCatalog.RestoreRetiredTokens(roots[0]);
                 _pendingRestore = restored;
                 _pendingRoot = roots[0];
+                if (roots[0].TransactionWasIronman)
+                {
+                    var manager = GameUtl.GameComponent<PhoenixPoint.Common.Game.PhoenixGame>()?.SaveManager;
+                    if (manager != null) AccessTools.Field(typeof(PhoenixPoint.Common.Saves.PhoenixSaveManager),
+                        "<IsIronmanMode>k__BackingField")?.SetValue(manager, true);
+                }
             }
             else _pendingRestore = new DurableInboxRestore(new HostLedger(Array.Empty<InboxEntry>()),
                 new HostLedger(Array.Empty<InboxEntry>()), DurableInboxCanonicalState.Empty, DurableInboxCanonicalState.Empty,
@@ -424,6 +542,21 @@ namespace Multiplayer.Network.Sync
             }
             WindowQueueSync.ClearDurableRuntimeCarriers();
             old?.Carriers.AbandonStore();
+            DurableEffectSaveCatalog.ClearPinnedBlobs();
+            var pendingDecision = installed.Canonical.Decisions.FirstOrDefault(x => x.Phase != SharedChoicePhase.ChoiceLocked);
+            if (pendingDecision != null)
+            {
+                if (!DurableEffectTransactionBarrier.TryEnter(pendingDecision.EffectToken, "<restored-durable-effect>"))
+                    throw new InvalidOperationException("another durable transaction owns restored EffectPending");
+                var timing = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.Timing;
+                if (timing != null)
+                {
+                    bool wasPaused = timing.Paused;
+                    timing.Paused = true;
+                    DurableEffectTransactionBarrier.RegisterPauseRestore(() => timing.Paused = wasPaused, wasPaused);
+                }
+                DurableEffectTransactionBarrier.CompletePendingReload(pendingDecision.EffectToken);
+            }
             return true;
         }
     }

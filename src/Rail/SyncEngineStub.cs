@@ -96,6 +96,18 @@ namespace Multiplayer.Network.Sync
         // post-reload deltas keep applying).
         public void Tick()
         {
+            if (_engine.IsHost && !DurableEffectTransactionBarrier.RetryCommittedOutbound())
+                UnityEngine.Debug.LogWarning("[MP][inbox] verified POST outbound retry remains queued");
+            // PRE/native/POST is one invisible campaign transaction.  No sync-family tick may publish
+            // an observation of its in-memory middle; the owner checkpoint coroutine runs on Phoenix
+            // Timing independently of this rail tick.
+            if (_engine.IsHost && DurableEffectTransactionBarrier.BlocksHostWork)
+            {
+                // The only legal work behind the curtain is completing an authoritative PRE/POST
+                // reload after DurableInboxSaveBridge installed the loaded journal.
+                EventSync.RecoverPendingDurableChoices();
+                return;
+            }
             // RailCost: one always-on cost line per 10 s (see RailCost). The steps charged by name are the
             // ones that can plausibly own a frame; everything else is covered by the tick total, and
             // frameMax is the control that says whether a hitch is the rail's at all.

@@ -57,9 +57,37 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     internal static class EventPopup
     {
+        private const byte DurableDecisionPayload = 0xD8;
+        private const byte DurableRewardPayload = 0xD7;
+        private static float _nextDurableDecisionReplay;
         internal static DurableCarrierLease BindDeferredCarrier(DurableInboxStore store,
             OccurrenceId occurrence, Action<TerminalReason> silentRemove) =>
             DurableCarrierLease.Bind(store, occurrence, DurableCarrierClass.ModDeferred, silentRemove);
+
+        internal static bool TryFindDurableOccurrence(string eventId, out OccurrenceId occurrence)
+        {
+            occurrence = default(OccurrenceId);
+            var store = DurableInboxSaveBridge.ActiveStore;
+            if (store == null || string.IsNullOrEmpty(eventId)) return false;
+            var found = store.Ledger.AllEntries.Where(x => x.Occurrence.EventId == "EventPopup" &&
+                x.Occurrence.SubjectIds.Contains("event:" + eventId, StringComparer.Ordinal) &&
+                x.Lifecycle != InboxLifecycle.Removed).Select(x => x.Occurrence).Distinct().ToArray();
+            if (found.Length != 1) return false;
+            occurrence = found[0]; return true;
+        }
+
+        internal static bool TryGetDurableOccurrence(GeoscapeEvent ev, out OccurrenceId occurrence)
+        {
+            occurrence = default(OccurrenceId); RaiseBinding binding;
+            return ev != null && Bound.TryGetValue(ev, out binding) && binding.Occurrence.EventId != null &&
+                ((occurrence = binding.Occurrence).EventId != null);
+        }
+
+        internal static void RepaintDurableChoice(OccurrenceId occurrence)
+        {
+            var geo = GeoLevel();
+            UiEventMap.FireDurableChoice(geo);
+        }
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
 
         private static readonly System.Reflection.FieldInfo SwitchQueryField =
@@ -87,8 +115,10 @@ namespace Multiplayer.Network.Sync
         /// raise look stale to a client that kept its own high-water mark, and the windows vanish silently).</summary>
         public static void Reset()
         {
+            _nextDurableDecisionReplay = 0f;
             Seq.Reset(); lock (_durableHeld) { foreach (var lease in _durableHeld.Values.ToArray()) lease.Dispose();
             _durableHeld.Clear(); } _held.Clear(); _hostCurtained.Clear(); _unanswered.Clear(); _rewards.Clear();
+            _durableRewards.Clear();
         }
         internal static void ClearDurableCarrierState()
         {
@@ -205,6 +235,8 @@ namespace Multiplayer.Network.Sync
         /// it once. Consumed by <see cref="MarkResolvedInstance"/>.</summary>
         private static readonly Dictionary<string, MissionOutcomeMirror.RewardWire> _rewards =
             new Dictionary<string, MissionOutcomeMirror.RewardWire>();
+        private static readonly Dictionary<OccurrenceId, MissionOutcomeMirror.RewardWire> _durableRewards =
+            new Dictionary<OccurrenceId, MissionOutcomeMirror.RewardWire>();
 
         /// <summary>The bound. A peer that is loading a geoscape holds windows for SECONDS, not minutes, so
         /// this is a wide margin over a legitimate burst (the host raised two the frame after a mission ended
@@ -338,6 +370,9 @@ namespace Multiplayer.Network.Sync
                                 string.IsNullOrEmpty(p.SiteRef) ? "site:none" : p.SiteRef,
                                 string.IsNullOrEmpty(p.VehicleRef) ? "vehicle:none" : p.VehicleRef });
                     DurableWindowRegistry.EnqueuePriorityOccurrence(store, occurrence);
+                    Bound.Remove(ev); Bound.Add(ev, new RaiseBinding { Seq = seq, TriggerCount =
+                        RaiseTriggerCount(ev.Record == null ? GeoscapeEventRecordState.Triggered : ev.Record.State,
+                            ev.Record == null ? 0 : ev.Record.TriggerCount), Occurrence = occurrence });
                     var request = DurableWindowRegistry.LastQueuedRequest(r =>
                         r.State is UIStateGeoscapeEvent ui && ReferenceEquals(ui.Event, ev));
                     if (request != null) WindowOrder.BindDurable(request, occurrence);
@@ -478,6 +513,8 @@ namespace Multiplayer.Network.Sync
             catch { return true; }                  // unreadable ⇒ story choice ⇒ the event mirrors
         }
 
+        internal static bool ChoiceHasOutcomePayload(GeoEventChoice choice) => HasOutcomePayload(choice);
+
         // ─── CLIENT: rebuild the REAL context and push the NATIVE window ───
 
         /// <summary>THE validity decision, pure so RailCheck L39 can falsify it headless: may this payload
@@ -508,11 +545,41 @@ namespace Multiplayer.Network.Sync
             if (surfaceId == SurfaceIds.GeoEventReward)
             {
                 if (engine == null || engine.IsHost) return true;
+                if (!IsAuthoritativeRewardSender(engine.Session.HostPeerId, senderPeerId))
+                {
+                    Debug.LogError("[MP][events] rejected decision/reward payload from non-host peer " + senderPeerId);
+                    return true;
+                }
                 try
                 {
                     using (var ms = new MemoryStream(payload))
                     using (var r = new BinaryReader(ms, Encoding.UTF8))
                     {
+                        int marker = r.ReadByte();
+                        if (marker == DurableDecisionPayload)
+                        {
+                            var decision = EventSync.ReadDecision(r);
+                            if (r.BaseStream.Position != r.BaseStream.Length) throw new InvalidDataException("decision trailing bytes");
+                            var store = DurableInboxSaveBridge.ActiveStore;
+                            if (store == null || !store.InstallAuthoritativeDecision(decision))
+                                throw new InvalidDataException("authoritative decision could not install");
+                            UiEventMap.FireDurableChoice(GeoLevel());
+                            Debug.Log("[MP][events] durable result installed for " + decision.Occurrence.TriggerId);
+                            return true;
+                        }
+                        if (marker == DurableRewardPayload)
+                        {
+                            var occurrence = EventSync.ReadOccurrence(r);
+                            var durableWire = MissionOutcomeMirror.DecodeRaw(r);
+                            if (r.BaseStream.Position != r.BaseStream.Length)
+                                throw new InvalidDataException("durable reward trailing bytes");
+                            _durableRewards[occurrence] = durableWire;
+                            string named = occurrence.SubjectIds.FirstOrDefault(x =>
+                                x.StartsWith("event:", StringComparison.Ordinal));
+                            if (named != null) RestampLiveInstance(named.Substring(6), durableWire);
+                            return true;
+                        }
+                        r.BaseStream.Position = 0;
                         string eventId = r.ReadString();
                         var wire = MissionOutcomeMirror.DecodeRaw(r);
                         _rewards[eventId] = wire;
@@ -538,6 +605,9 @@ namespace Multiplayer.Network.Sync
             return true;
         }
 
+        internal static bool IsAuthoritativeRewardSender(ulong? hostPeerId, ulong senderPeerId) =>
+            hostPeerId.HasValue && hostPeerId.Value == senderPeerId;
+
         /// <summary>
         /// Replay every raise that arrived while this peer had no geoscape, in the HOST's own arrival order.
         /// Driven from <c>SyncEngine.Tick</c> (client-only inside), because there is no single native edge
@@ -560,6 +630,7 @@ namespace Multiplayer.Network.Sync
         internal static void DrainHeldRaises(NetworkEngine engine)
         {
             if (engine == null || !engine.IsActiveSession) { _held.Clear(); _hostCurtained.Clear(); return; }
+            if (engine.IsHost) { EventSync.RecoverPendingDurableChoices(); HostRebroadcastLockedDecisions(); }
             // The host no longer walks away from this drain: it has a hold of its OWN now (the curtain), and
             // exempting it here is what let its intro dialogs run ahead of every client's cutscene.
             if (engine.IsHost) { DrainHostCurtained(engine); return; }
@@ -748,7 +819,7 @@ namespace Multiplayer.Network.Sync
             var rec = es.GetEventRecord(p.EventId) ?? new GeoscapeEventRecord(p.EventId, geo.Timing.Now);
             var geoEvent = new GeoscapeEvent(shown, context) { Record = rec };
             int raiseTrigger = RaiseTriggerCount(rec.State, rec.TriggerCount);
-            Bound.Add(geoEvent, new RaiseBinding { Seq = seq, TriggerCount = raiseTrigger });
+            Bound.Add(geoEvent, new RaiseBinding { Seq = seq, TriggerCount = raiseTrigger, Occurrence = durableOccurrence });
 
             // The host's OWN priority, so this peer's queue orders the window exactly as the host's did.
             var request = new GeoscapeViewStateSwitchRequest(new UIStateGeoscapeEvent(geoEvent), p.Priority)
@@ -912,7 +983,7 @@ namespace Multiplayer.Network.Sync
             if (ctrl == null || !ShowingRealChoices(ctrl, ev)) return true;
             if (InSession && IsFrozen(ev, out var winner))
             {
-                if (DismissOnResolution(winner != null, winner?.Outcome != null))
+                if (!DurableChoiceLocked(ev) && DismissOnResolution(winner != null, winner?.Outcome != null))
                 {
                     Debug.Log("[MP][events] closing the open picker for '" + ev.EventID + "' — the record is resolved " +
                               "with no choice this peer can click through (winner=" +
@@ -1136,6 +1207,13 @@ namespace Multiplayer.Network.Sync
         internal static bool DismissOnResolution(bool hasWinner, bool winnerHasOutcome) =>
             !hasWinner || !winnerHasOutcome;
 
+        private static bool DurableChoiceLocked(GeoscapeEvent ev)
+        {
+            OccurrenceId occurrence; var store = DurableInboxSaveBridge.ActiveStore;
+            return store != null && TryGetDurableOccurrence(ev, out occurrence) && store.Canonical.Decisions.Any(x =>
+                x.Occurrence.Equals(occurrence) && x.Phase == SharedChoicePhase.ChoiceLocked);
+        }
+
         /// <summary>Is this dialog's answer already decided, and by which choice? The ledger is the
         /// REPLICATED record, never the instance: <c>GeoscapeEvent.IsCompleted</c> is per-INSTANCE
         /// (GeoscapeEvent.cs:36) and a mirrored instance over a resolved record reports false. An empty
@@ -1167,7 +1245,7 @@ namespace Multiplayer.Network.Sync
         private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<GeoscapeEvent, RaiseBinding>
             Bound = new System.Runtime.CompilerServices.ConditionalWeakTable<GeoscapeEvent, RaiseBinding>();
 
-        private sealed class RaiseBinding { public uint Seq; public int TriggerCount; }
+        private sealed class RaiseBinding { public uint Seq; public int TriggerCount; public OccurrenceId Occurrence; }
 
         private static int RaiseTriggerOf(GeoscapeEvent ev) =>
             ev != null && Bound.TryGetValue(ev, out var b) ? b.TriggerCount : 0;
@@ -1284,6 +1362,10 @@ namespace Multiplayer.Network.Sync
         /// arrived yet renders as no list rather than as a crash.</summary>
         private static GeoFactionReward StubReward(string eventId)
         {
+            OccurrenceId occurrence;
+            if (TryFindDurableOccurrence(eventId, out occurrence) &&
+                _durableRewards.TryGetValue(occurrence, out var durableWire))
+                return MissionOutcomeMirror.Build(GeoLevel(), durableWire, "Encounter");
             if (eventId != null && _rewards.TryGetValue(eventId, out var wire))
                 return MissionOutcomeMirror.Build(GeoLevel(), wire, "Encounter");
             return new GeoFactionReward { ApplyResult = new GeoFactionRewardApplyResult() };
@@ -1508,8 +1590,9 @@ namespace Multiplayer.Network.Sync
         /// actually noticed missing, then new units, revealed sites, damaged aircraft and the rest) ride
         /// <c>MissionOutcomeMirror</c>'s generic row codec as stable ADDRESSES and are re-resolved on the
         /// receiving peer. Same codec as 0xBB, extended once rather than twice.</summary>
-        internal static void HostBroadcastReward(string eventId, GeoFactionReward reward)
+        internal static void HostBroadcastReward(GeoscapeEvent source, GeoFactionReward reward)
         {
+            string eventId = source?.EventID;
             var result = reward?.ApplyResult;
             if (result == null || string.IsNullOrEmpty(eventId)) return;
             var engine = NetworkEngine.Instance;
@@ -1520,7 +1603,11 @@ namespace Multiplayer.Network.Sync
                 using (var ms = new MemoryStream())
                 using (var w = new BinaryWriter(ms, Encoding.UTF8))
                 {
-                    w.Write(eventId);
+                    OccurrenceId occurrence;
+                    bool durable = TryGetDurableOccurrence(source, out occurrence) ||
+                                   TryFindDurableOccurrence(eventId, out occurrence);
+                    if (durable) { w.Write(DurableRewardPayload); EventSync.WriteOccurrence(w, occurrence); }
+                    else w.Write(eventId);
                     MissionOutcomeMirror.Encode(w, result);
                     body = ms.ToArray();
                 }
@@ -1532,11 +1619,60 @@ namespace Multiplayer.Network.Sync
                 // what the clients hold.
                 using (var back = new MemoryStream(body))
                 using (var r = new BinaryReader(back, Encoding.UTF8))
-                { r.ReadString(); _rewards[eventId] = MissionOutcomeMirror.DecodeRaw(r); }
+                {
+                    OccurrenceId occurrence;
+                    if (TryGetDurableOccurrence(source, out occurrence) || TryFindDurableOccurrence(eventId, out occurrence))
+                    { r.ReadByte(); EventSync.ReadOccurrence(r); _durableRewards[occurrence] = MissionOutcomeMirror.DecodeRaw(r); }
+                    else { r.ReadString(); _rewards[eventId] = MissionOutcomeMirror.DecodeRaw(r); }
+                }
                 Debug.Log("[MP][events] HOST reward for '" + eventId + "' broadcast");
             }
             catch (Exception ex)
             { Debug.LogError("[MP][events] reward broadcast for '" + eventId + "' failed: " + ex); }
+        }
+
+        internal static void HostBroadcastDurableReward(OccurrenceId occurrence, byte[] encodedReward)
+        {
+            if (encodedReward == null || encodedReward.Length == 0) return;
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(DurableRewardPayload); EventSync.WriteOccurrence(w, occurrence); w.Write(encodedReward);
+                engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                    SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventReward, SyncKind.StateDelta, ms.ToArray())));
+            }
+        }
+
+        internal static void HostBroadcastDurableDecision(SharedChoiceDecision decision)
+        {
+            var engine = NetworkEngine.Instance;
+            if (decision == null || engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            try
+            {
+                byte[] body;
+                using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms, Encoding.UTF8))
+                { w.Write(DurableDecisionPayload); EventSync.WriteDecision(w, decision); body = ms.ToArray(); }
+                engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                    SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventReward, SyncKind.StateDelta, body)));
+            }
+            catch (Exception ex) { Debug.LogError("[MP][events] durable decision broadcast failed: " + ex); }
+        }
+
+        internal static void HostRebroadcastLockedDecisions()
+        {
+            var engine = NetworkEngine.Instance; var store = DurableInboxSaveBridge.ActiveStore;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost || store == null ||
+                Time.realtimeSinceStartup < _nextDurableDecisionReplay) return;
+            _nextDurableDecisionReplay = Time.realtimeSinceStartup + 1f;
+            foreach (var decision in store.Canonical.Decisions.Where(x => x.Phase == SharedChoicePhase.ChoiceLocked &&
+                store.Ledger.AllEntries.Any(e => e.Occurrence.Equals(x.Occurrence) &&
+                    e.Lifecycle != InboxLifecycle.Removed && e.Lifecycle != InboxLifecycle.Dismissed)).ToArray())
+            {
+                HostBroadcastDurableReward(decision.Occurrence, decision.RewardPayload);
+                HostBroadcastDurableDecision(decision);
+            }
         }
     }
 
@@ -1555,7 +1691,7 @@ namespace Multiplayer.Network.Sync
     internal static class EventRewardBroadcast
     {
         private static void Postfix(GeoscapeEvent __instance, GeoFactionReward __result) =>
-            EventPopup.HostBroadcastReward(__instance?.EventID, __result);
+            EventPopup.HostBroadcastReward(__instance, __result);
     }
 
     /// <summary>
@@ -1658,7 +1794,11 @@ namespace Multiplayer.Network.Sync
                 return false;
             }
 
-            if (IntentRail.ShouldRunNative()) return true;   // HOST / solo / inside an apply: the click decides it
+            if (IntentRail.ShouldRunNative())
+            {
+                if (SyncApplyScope.Active) return true;
+                return !EventSync.TryHostLocalDurableAnswer(__instance, ev, choice);
+            }
 
             // The wire carries the INDEX into the def's Choices, which is what CompleteEvent works in
             // (GeoscapeEvent.cs:97); -1 is native's "no choice" resolution (:562-566).
@@ -1675,8 +1815,18 @@ namespace Multiplayer.Network.Sync
             // this the repaint cannot tell the answerer from an observer and paints the answerer the replay —
             // asking it to click its own answer a second time (EventPopup.ConsumeOwnAnswer).
             EventPopup.NoteOwnAnswer(ev, index);
+            OccurrenceId occurrence;
+            var store = DurableInboxSaveBridge.ActiveStore;
+            if (!EventPopup.TryGetDurableOccurrence(ev, out occurrence) || store == null)
+            { Debug.LogWarning("[MP][events] answer dropped — dialog has no exact durable occurrence"); return false; }
+            string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
+            var entry = store.Ledger.AllEntries.Where(x => x.Occurrence.Equals(occurrence) &&
+                string.Equals(x.Membership.PlayerGuid, local, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(x => x.Membership.Epoch).FirstOrDefault();
+            if (entry == null) { Debug.LogWarning("[MP][events] answer dropped — no active local entitlement"); return false; }
             IntentRail.Send(SurfaceIds.GeoEventIntent, EventSync.OpAnswer, "answer '" + id + "' choice=" + index,
-                            w => { w.Write(id); w.Write(index); });
+                            w => EventSync.WriteDurableAnswer(w, occurrence, entry.Membership,
+                                entry.LifecycleRevision, id, index));
             return false;
         }
     }

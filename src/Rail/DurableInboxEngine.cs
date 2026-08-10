@@ -476,4 +476,282 @@ namespace Multiplayer.Network.Sync
         }
 
     }
+
+    internal interface IDurableSharedChoiceEffect
+    {
+        IReadOnlyList<DurableEffectStep> Prepare(EffectToken token);
+        DurableEffectObservation Observe(SharedChoiceDecision decision, DurableEffectStep step);
+        void Apply(SharedChoiceDecision decision, DurableEffectStep step);
+    }
+
+    internal enum DurableEffectObservation { Before, After, Diverged }
+
+    internal sealed class DelegateDurableChoiceEffect : IDurableSharedChoiceEffect
+    {
+        private readonly Func<EffectToken, IReadOnlyList<DurableEffectStep>> _prepare;
+        private readonly Action<SharedChoiceDecision, DurableEffectStep> _apply;
+        private readonly Func<SharedChoiceDecision, DurableEffectStep, DurableEffectObservation> _observe;
+        internal DelegateDurableChoiceEffect(Func<EffectToken, IReadOnlyList<DurableEffectStep>> prepare,
+            Action<SharedChoiceDecision, DurableEffectStep> apply,
+            Func<SharedChoiceDecision, DurableEffectStep, DurableEffectObservation> observe)
+        { _prepare = prepare ?? throw new ArgumentNullException(nameof(prepare));
+          _apply = apply ?? throw new ArgumentNullException(nameof(apply));
+          _observe = observe ?? throw new ArgumentNullException(nameof(observe)); }
+        internal DelegateDurableChoiceEffect(Action<SharedChoiceDecision> apply,
+            Func<SharedChoiceDecision, DurableEffectObservation> observe,
+            string beforeFact = "unanswered", string afterFact = "applied")
+            : this(token => new[] { new DurableEffectStep("effect", "delegate", beforeFact, afterFact) },
+                (decision, step) => apply(decision), (decision, step) => observe(decision)) { }
+        internal DelegateDurableChoiceEffect(Action<SharedChoiceDecision, Action<SharedEffectReceipt>> apply,
+            Func<SharedChoiceDecision, DurableEffectObservation> observe,
+            string beforeFact, string afterFact)
+            : this(token => new[] { new DurableEffectStep("effect", "delegate", beforeFact, afterFact) },
+                (decision, step) => apply(decision, _ => { }), (decision, step) => observe(decision)) { }
+        public IReadOnlyList<DurableEffectStep> Prepare(EffectToken token) => _prepare(token);
+        public void Apply(SharedChoiceDecision decision, DurableEffectStep step) => _apply(decision, step);
+        public DurableEffectObservation Observe(SharedChoiceDecision decision, DurableEffectStep step) => _observe(decision, step);
+    }
+
+    internal enum SharedChoiceCrashPoint
+    {
+        PendingCommitted,
+        NativeEffectReturned,
+        EffectAppliedCommitted,
+        ChoiceLockedBeforeResponse
+    }
+
+    /// <summary>
+    /// Host-only durable transaction for an ordinary shared event choice. No peer readiness is consulted:
+    /// the first CAS that journals EffectPending wins. Every entitled copy keeps its own lifecycle while its
+    /// canonical choice/result is frozen, so AFK, tactical and suspended peers can read and dismiss later.
+    /// </summary>
+    internal sealed class DurableSharedChoiceEngine
+    {
+        private readonly DurableInboxStore _store;
+        private readonly IDurableSharedChoiceEffect _effect;
+        private readonly Action<OccurrenceId> _repaint;
+        internal Action<SharedChoiceCrashPoint> CrashProbe { get; set; }
+
+        internal DurableSharedChoiceEngine(DurableInboxStore store, IDurableSharedChoiceEffect effect,
+            Action<OccurrenceId> repaint)
+        { _store = store ?? throw new ArgumentNullException(nameof(store)); _effect = effect ?? throw new ArgumentNullException(nameof(effect));
+          _repaint = repaint ?? throw new ArgumentNullException(nameof(repaint)); }
+
+        internal bool TryAnswer(OccurrenceId occurrence, MembershipId winner, CanonicalChoiceId choice,
+            CanonicalResultId result, IEnumerable<CanonicalRewardItemId> rewards, Func<bool> validate,
+            out SharedChoiceDecision decision)
+        {
+            decision = null;
+            if (validate == null) throw new ArgumentNullException(nameof(validate));
+            if (!choice.Occurrence.Equals(occurrence) || !result.Occurrence.Equals(occurrence)) return false;
+            var rewardArray = (rewards ?? throw new ArgumentNullException(nameof(rewards))).ToArray();
+            if (rewardArray.Any(x => !x.Occurrence.Equals(occurrence))) return false;
+
+            for (int attempt = 0; attempt < 64; attempt++)
+            {
+                var canonical = _store.Canonical;
+                var existing = canonical.Decisions.SingleOrDefault(x => x.Occurrence.Equals(occurrence));
+                if (existing != null) return Recover(existing, out decision);
+                var ledger = _store.Ledger;
+                MemberPresence presence;
+                if (!ledger.Members.TryGetValue(winner, out presence) || !MemberPresenceRules.IsEnrolled(presence) ||
+                    !ledger.AllEntries.Any(x => x.Occurrence.Equals(occurrence) && x.Membership.Equals(winner))) return false;
+                bool valid;
+                try { valid = validate(); } catch { return false; }
+                if (!valid) return false; // remains Unanswered: no journal, charge, grant or lock
+                var token = new EffectToken(occurrence, "effect:" + occurrence.TriggerId);
+                IReadOnlyList<DurableEffectStep> prepared;
+                try { prepared = _effect.Prepare(token); } catch { return false; }
+                if (prepared == null || prepared.Count == 0 || prepared.Any(x => x.State != DurableEffectStepState.Prepared)) return false;
+                var pending = new SharedChoiceDecision(occurrence, token, choice, result, rewardArray,
+                    winner, SharedChoicePhase.EffectPending, prepared);
+                var entries = ledger.AllEntries.Select(x => x.Occurrence.Equals(occurrence)
+                    ? new InboxEntry(x.Occurrence, x.Membership, x.Lifecycle, choice,
+                        x.LifecycleRevision, x.TombstoneRevision, x.HostOrderKey,
+                        x.SuspensionReason, x.Checkpoint, x.TerminalReason)
+                    : x).ToArray();
+                var next = new HostLedger(entries, checked(ledger.CommittedRevision + 1), ledger.Members);
+                if (!_store.CommitWithCanonical(ledger, next, canonical.WithDecision(pending))) continue;
+                Probe(SharedChoiceCrashPoint.PendingCommitted);
+                return Recover(pending, out decision);
+            }
+            return false;
+        }
+
+        /// <summary>Production opaque-campaign path. PRE is written after EffectPending is committed;
+        /// native CompleteEvent runs once between PRE and POST; ChoiceLocked is committed before POST is
+        /// snapshotted. Any failure is owned by the coordinator's mandatory PRE reload boundary.</summary>
+        internal bool TryAnswerCheckpointed(OccurrenceId occurrence, MembershipId winner,
+            CanonicalChoiceId choice, CanonicalResultId result, IEnumerable<CanonicalRewardItemId> rewards,
+            Func<bool> validate, Func<EffectToken, DurableEffectTransactionCoordinator> coordinatorFactory,
+            Action executeNativeOnce, Action<SharedChoiceDecision> broadcast, out SharedChoiceDecision decision)
+        {
+            decision = null;
+            if (validate == null || coordinatorFactory == null || executeNativeOnce == null || broadcast == null)
+                throw new ArgumentNullException("checkpointed choice dependency");
+            if (!choice.Occurrence.Equals(occurrence) || !result.Occurrence.Equals(occurrence)) return false;
+            var rewardArray = (rewards ?? throw new ArgumentNullException(nameof(rewards))).ToArray();
+            if (rewardArray.Any(x => !x.Occurrence.Equals(occurrence))) return false;
+            SharedChoiceDecision pending = null;
+            for (int attempt = 0; attempt < 64 && pending == null; attempt++)
+            {
+                var canonical = _store.Canonical;
+                var existing = canonical.Decisions.SingleOrDefault(x => x.Occurrence.Equals(occurrence));
+                if (existing != null) { decision = existing; return existing.Phase == SharedChoicePhase.ChoiceLocked; }
+                var ledger = _store.Ledger; MemberPresence presence;
+                if (!ledger.Members.TryGetValue(winner, out presence) || !MemberPresenceRules.IsEnrolled(presence) ||
+                    !ledger.AllEntries.Any(x => x.Occurrence.Equals(occurrence) && x.Membership.Equals(winner))) return false;
+                bool valid; try { valid = validate(); } catch { return false; } if (!valid) return false;
+                var token = new EffectToken(occurrence, "effect:" + occurrence.TriggerId);
+                // Canonical choice/result/reward/RNG-derived facts are all in the pending journal before PRE.
+                var barrierStep = new DurableEffectStep("campaign-checkpoint", "native-complete-event",
+                    "checkpoint:PRE", "checkpoint:POST");
+                var candidate = new SharedChoiceDecision(occurrence, token, choice, result, rewardArray, winner,
+                    SharedChoicePhase.EffectPending, new[] { barrierStep });
+                var entries = ledger.AllEntries.Select(x => x.Occurrence.Equals(occurrence)
+                    ? new InboxEntry(x.Occurrence, x.Membership, x.Lifecycle, choice, x.LifecycleRevision,
+                        x.TombstoneRevision, x.HostOrderKey, x.SuspensionReason, x.Checkpoint, x.TerminalReason) : x).ToArray();
+                var next = new HostLedger(entries, checked(ledger.CommittedRevision + 1), ledger.Members);
+                if (_store.CommitWithCanonical(ledger, next, canonical.WithDecision(candidate))) pending = candidate;
+            }
+            if (pending == null) return false;
+            SharedChoiceDecision locked = null;
+            try
+            {
+                coordinatorFactory(pending.EffectToken).Execute(occurrence, pending.EffectToken, executeNativeOnce, () =>
+                {
+                if (!PersistAppliedStep(occurrence, "campaign-checkpoint"))
+                    throw new InvalidOperationException("could not commit durable campaign effect receipt");
+                var live = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(occurrence));
+                if (!Advance(live, SharedChoicePhase.EffectApplied))
+                    throw new InvalidOperationException("could not commit EffectApplied");
+                live = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(occurrence));
+                if (!Advance(live, SharedChoicePhase.ChoiceLocked))
+                    throw new InvalidOperationException("could not commit ChoiceLocked");
+                locked = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(occurrence));
+                }, _ =>
+                {
+                _repaint(occurrence);
+                broadcast(locked ?? throw new InvalidOperationException("POST verified without ChoiceLocked"));
+                });
+            }
+            catch (DurableEffectPreCheckpointException)
+            {
+                if (!_store.RollbackUncheckpointedDecision(pending))
+                    throw new InvalidOperationException("PRE failed and pending authority could not roll back");
+                return false;
+            }
+            decision = locked;
+            return locked != null;
+        }
+
+        internal int RecoverPending()
+        {
+            int recovered = 0;
+            foreach (var pending in _store.Canonical.Decisions
+                .Where(x => x.Phase != SharedChoicePhase.ChoiceLocked).ToArray())
+            { SharedChoiceDecision ignored; if (Recover(pending, out ignored)) recovered++; }
+            return recovered;
+        }
+
+        internal bool ResumeCheckpointed(SharedChoiceDecision pending,
+            DurableEffectTransactionCoordinator coordinator, Action executeNativeOnce,
+            Action<SharedChoiceDecision> broadcast, out SharedChoiceDecision locked)
+        {
+            locked = null;
+            if (pending == null || pending.Phase != SharedChoicePhase.EffectPending) return false;
+            SharedChoiceDecision completed = null;
+            coordinator.Execute(pending.Occurrence, pending.EffectToken, executeNativeOnce, () =>
+            {
+                if (!PersistAppliedStep(pending.Occurrence, "campaign-checkpoint"))
+                    throw new InvalidOperationException("could not resume campaign checkpoint receipt");
+                var live = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(pending.Occurrence));
+                if (!Advance(live, SharedChoicePhase.EffectApplied)) throw new InvalidOperationException("resume EffectApplied failed");
+                live = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(pending.Occurrence));
+                if (!Advance(live, SharedChoicePhase.ChoiceLocked)) throw new InvalidOperationException("resume ChoiceLocked failed");
+                completed = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(pending.Occurrence));
+            }, _ => { _repaint(pending.Occurrence); broadcast(completed); });
+            locked = completed; return completed != null;
+        }
+
+        private bool Recover(SharedChoiceDecision known, out SharedChoiceDecision decision)
+        {
+            SharedChoiceDecision local = null;
+            bool result = _store.WithEffectGate(known.Occurrence, () => RecoverLocked(known, out local));
+            decision = local; return result;
+        }
+
+        private bool RecoverLocked(SharedChoiceDecision known, out SharedChoiceDecision decision)
+        {
+            decision = null;
+            for (int attempt = 0; attempt < 64; attempt++)
+            {
+                var current = _store.Canonical.Decisions.SingleOrDefault(x => x.Occurrence.Equals(known.Occurrence));
+                if (current == null || !SameAnswer(current, known)) return false;
+                if (current.Phase == SharedChoicePhase.ChoiceLocked) { decision = current; return true; }
+                if (current.Phase == SharedChoicePhase.EffectPending)
+                {
+                    foreach (var step in current.EffectSteps.Where(x => x.State == DurableEffectStepState.Prepared).ToArray())
+                    {
+                        DurableEffectObservation observation;
+                        try { observation = _effect.Observe(current, step); } catch { return false; }
+                        if (observation == DurableEffectObservation.Diverged) return false;
+                        if (observation == DurableEffectObservation.Before)
+                        {
+                            try { _effect.Apply(current, step); } catch { return false; }
+                            Probe(SharedChoiceCrashPoint.NativeEffectReturned);
+                            try { observation = _effect.Observe(current, step); } catch { return false; }
+                            if (observation != DurableEffectObservation.After) return false;
+                        }
+                        if (!PersistAppliedStep(current.Occurrence, step.Key)) return false;
+                        current = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(current.Occurrence));
+                    }
+                    if (!Advance(current, SharedChoicePhase.EffectApplied)) continue;
+                    Probe(SharedChoiceCrashPoint.EffectAppliedCommitted);
+                    continue;
+                }
+                if (current.Phase == SharedChoicePhase.EffectApplied)
+                {
+                    if (!Advance(current, SharedChoicePhase.ChoiceLocked)) continue;
+                    var locked = _store.Canonical.Decisions.Single(x => x.Occurrence.Equals(current.Occurrence));
+                    _repaint(locked.Occurrence); // queued/suspended state was committed with pending first
+                    Probe(SharedChoiceCrashPoint.ChoiceLockedBeforeResponse);
+                    decision = locked; return true;
+                }
+            }
+            return false;
+        }
+
+        private bool Advance(SharedChoiceDecision expected, SharedChoicePhase phase)
+        {
+            var ledger = _store.Ledger; var canonical = _store.Canonical;
+            var live = canonical.Decisions.SingleOrDefault(x => x.Occurrence.Equals(expected.Occurrence));
+            if (live == null || live.Phase != expected.Phase || !SameAnswer(live, expected)) return false;
+            var next = ledger.WithAuthority(checked(ledger.CommittedRevision + 1), ledger.Members);
+            var advanced = phase == SharedChoicePhase.ChoiceLocked
+                ? live.WithPhase(phase, next.CommittedRevision) : live.WithPhase(phase);
+            return _store.CommitWithCanonical(ledger, next, canonical.WithDecision(advanced));
+        }
+
+        private bool PersistAppliedStep(OccurrenceId occurrence, string key)
+        {
+            for (int attempt = 0; attempt < 32; attempt++)
+            {
+                var ledger = _store.Ledger; var canonical = _store.Canonical;
+                var live = canonical.Decisions.Single(x => x.Occurrence.Equals(occurrence));
+                var step = live.EffectSteps.Single(x => x.Key == key);
+                if (step.State == DurableEffectStepState.Applied) return true;
+                var next = ledger.WithAuthority(checked(ledger.CommittedRevision + 1), ledger.Members);
+                if (_store.CommitWithCanonical(ledger, next, canonical.WithDecision(live.WithAppliedStep(key)))) return true;
+            }
+            return false;
+        }
+
+        private static bool SameAnswer(SharedChoiceDecision a, SharedChoiceDecision b) =>
+            a.EffectToken.Equals(b.EffectToken) && a.Choice.Equals(b.Choice) && a.Result.Equals(b.Result) &&
+            a.Rewards.SequenceEqual(b.Rewards) && a.Winner.Equals(b.Winner) && a.EffectSteps.Count == b.EffectSteps.Count &&
+            a.EffectSteps.Zip(b.EffectSteps, (x, y) => x.Key == y.Key && x.Operation == y.Operation &&
+                x.BeforeFact == y.BeforeFact && x.AfterFact == y.AfterFact).All(x => x);
+        private void Probe(SharedChoiceCrashPoint point) { var probe = CrashProbe; if (probe != null) probe(point); }
+    }
 }

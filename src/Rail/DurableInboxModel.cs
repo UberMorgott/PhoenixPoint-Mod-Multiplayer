@@ -226,6 +226,114 @@ namespace Multiplayer.Network.Sync
             EventId, Title, Narrative, NativePriority, NativeDataIdentity);
     }
 
+    internal readonly struct EffectToken : IEquatable<EffectToken>, IComparable<EffectToken>
+    {
+        internal readonly OccurrenceId Occurrence;
+        internal readonly string Value;
+        internal EffectToken(OccurrenceId occurrence, string value)
+        { Occurrence = occurrence; Value = InboxIdentity.Required(value, nameof(value)); }
+        public bool Equals(EffectToken other) => Occurrence.Equals(other.Occurrence) &&
+            string.Equals(Value, other.Value, StringComparison.Ordinal);
+        public override bool Equals(object obj) => obj is EffectToken other && Equals(other);
+        public override int GetHashCode() => InboxIdentity.Hash(Occurrence.GetHashCode(), Value);
+        public int CompareTo(EffectToken other)
+        { int c = Occurrence.CompareTo(other.Occurrence); return c != 0 ? c : string.Compare(Value, other.Value, StringComparison.Ordinal); }
+    }
+
+    internal enum SharedChoicePhase : byte { EffectPending, EffectApplied, ChoiceLocked }
+    internal enum DurableEffectStepState : byte { Prepared, Applied }
+    internal enum SharedEffectReceipt : byte { None, ChargeApplied, RewardApplied, NativeCompleted }
+
+    internal sealed class DurableEffectStep : IEquatable<DurableEffectStep>
+    {
+        internal DurableEffectStep(string key, string operation, string beforeFact, string afterFact,
+            DurableEffectStepState state = DurableEffectStepState.Prepared)
+        {
+            Key = InboxIdentity.Required(key, nameof(key)); Operation = InboxIdentity.Required(operation, nameof(operation));
+            BeforeFact = InboxIdentity.Required(beforeFact, nameof(beforeFact)); AfterFact = InboxIdentity.Required(afterFact, nameof(afterFact));
+            if (!Enum.IsDefined(typeof(DurableEffectStepState), state)) throw new ArgumentOutOfRangeException(nameof(state));
+            State = state;
+        }
+        internal string Key { get; }
+        internal string Operation { get; }
+        internal string BeforeFact { get; }
+        internal string AfterFact { get; }
+        internal DurableEffectStepState State { get; }
+        internal DurableEffectStep Applied() => new DurableEffectStep(Key, Operation, BeforeFact, AfterFact, DurableEffectStepState.Applied);
+        public bool Equals(DurableEffectStep other) => other != null && Key == other.Key && Operation == other.Operation &&
+            BeforeFact == other.BeforeFact && AfterFact == other.AfterFact && State == other.State;
+        public override bool Equals(object obj) => Equals(obj as DurableEffectStep);
+        public override int GetHashCode() => InboxIdentity.Hash(Key, Operation, BeforeFact, AfterFact, (byte)State);
+    }
+
+    internal sealed class SharedChoiceDecision : IEquatable<SharedChoiceDecision>
+    {
+        internal const int MaxRewardPayloadBytes = 4 * 1024 * 1024;
+
+        internal SharedChoiceDecision(OccurrenceId occurrence, EffectToken effectToken, CanonicalChoiceId choice,
+            CanonicalResultId result, IEnumerable<CanonicalRewardItemId> rewards, MembershipId winner,
+            SharedChoicePhase phase, IEnumerable<DurableEffectStep> effectSteps = null, ulong sharedRevision = 0,
+            byte[] rewardPayload = null)
+        {
+            if (!Enum.IsDefined(typeof(SharedChoicePhase), phase)) throw new ArgumentOutOfRangeException(nameof(phase));
+            if (!effectToken.Occurrence.Equals(occurrence) || !choice.Occurrence.Equals(occurrence) ||
+                !result.Occurrence.Equals(occurrence)) throw new ArgumentException("foreign shared-choice namespace");
+            var copy = (rewards ?? throw new ArgumentNullException(nameof(rewards))).ToArray();
+            if (copy.Any(x => !x.Occurrence.Equals(occurrence)) || copy.Distinct().Count() != copy.Length)
+                throw new ArgumentException("non-canonical shared-choice rewards", nameof(rewards));
+            Array.Sort(copy);
+            Occurrence = occurrence; EffectToken = effectToken; Choice = choice; Result = result;
+            Rewards = new ReadOnlyCollection<CanonicalRewardItemId>(copy); Winner = winner; Phase = phase;
+            var steps = (effectSteps ?? Enumerable.Empty<DurableEffectStep>()).ToArray();
+            if (steps.Any(x => x == null) || steps.GroupBy(x => x.Key, StringComparer.Ordinal).Any(x => x.Count() != 1))
+                throw new ArgumentException("duplicate durable effect step", nameof(effectSteps));
+            EffectSteps = new ReadOnlyCollection<DurableEffectStep>(steps);
+            if (phase == SharedChoicePhase.ChoiceLocked && sharedRevision == 0)
+                throw new ArgumentException("locked decision requires authoritative shared revision", nameof(sharedRevision));
+            SharedRevision = sharedRevision;
+            var payload = rewardPayload ?? Array.Empty<byte>();
+            if (payload.Length > MaxRewardPayloadBytes)
+                throw new ArgumentOutOfRangeException(nameof(rewardPayload), "reward payload exceeds the durable wire/save bound");
+            RewardPayload = (byte[])payload.Clone();
+        }
+        internal OccurrenceId Occurrence { get; }
+        internal EffectToken EffectToken { get; }
+        internal CanonicalChoiceId Choice { get; }
+        internal CanonicalResultId Result { get; }
+        internal IReadOnlyList<CanonicalRewardItemId> Rewards { get; }
+        internal MembershipId Winner { get; }
+        internal SharedChoicePhase Phase { get; }
+        internal IReadOnlyList<DurableEffectStep> EffectSteps { get; }
+        internal ulong SharedRevision { get; }
+        internal byte[] RewardPayload { get; }
+        internal string BeforeFact => EffectSteps.Count == 0 ? "unanswered" : EffectSteps[0].BeforeFact;
+        internal string AfterFact => EffectSteps.Count == 0 ? "applied" : EffectSteps[0].AfterFact;
+        internal SharedEffectReceipt Receipt => EffectSteps.Count != 0 && EffectSteps.All(x => x.State == DurableEffectStepState.Applied)
+            ? SharedEffectReceipt.NativeCompleted : SharedEffectReceipt.None;
+        internal SharedChoiceDecision WithPhase(SharedChoicePhase phase) =>
+            new SharedChoiceDecision(Occurrence, EffectToken, Choice, Result, Rewards, Winner, phase, EffectSteps,
+                phase == SharedChoicePhase.ChoiceLocked ? SharedRevision : 0, RewardPayload);
+        internal SharedChoiceDecision WithPhase(SharedChoicePhase phase, ulong sharedRevision) =>
+            new SharedChoiceDecision(Occurrence, EffectToken, Choice, Result, Rewards, Winner, phase, EffectSteps, sharedRevision, RewardPayload);
+        internal SharedChoiceDecision WithAppliedStep(string key) =>
+            new SharedChoiceDecision(Occurrence, EffectToken, Choice, Result, Rewards, Winner, Phase,
+                EffectSteps.Select(x => x.Key == key ? x.Applied() : x), SharedRevision, RewardPayload);
+        internal SharedChoiceDecision WithRewards(IEnumerable<CanonicalRewardItemId> rewards) =>
+            new SharedChoiceDecision(Occurrence, EffectToken, Choice, Result, rewards, Winner, Phase,
+                EffectSteps, SharedRevision, RewardPayload);
+        internal SharedChoiceDecision WithRewardPayload(byte[] payload) =>
+            new SharedChoiceDecision(Occurrence, EffectToken, Choice, Result, Rewards, Winner, Phase,
+                EffectSteps, SharedRevision, payload);
+        public bool Equals(SharedChoiceDecision other) => other != null && Occurrence.Equals(other.Occurrence) &&
+            EffectToken.Equals(other.EffectToken) && Choice.Equals(other.Choice) && Result.Equals(other.Result) &&
+            Rewards.SequenceEqual(other.Rewards) && Winner.Equals(other.Winner) && Phase == other.Phase &&
+            EffectSteps.SequenceEqual(other.EffectSteps) && SharedRevision == other.SharedRevision &&
+            RewardPayload.SequenceEqual(other.RewardPayload);
+        public override bool Equals(object obj) => Equals(obj as SharedChoiceDecision);
+        public override int GetHashCode() => InboxIdentity.Hash(Occurrence.GetHashCode(), EffectToken.GetHashCode(),
+            Choice.GetHashCode(), Result.GetHashCode(), Winner.GetHashCode(), (byte)Phase);
+    }
+
     internal sealed class InboxMessage
     {
         internal InboxMessageKind Kind { get; }

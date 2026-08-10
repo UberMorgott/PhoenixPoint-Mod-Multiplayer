@@ -21,10 +21,30 @@ namespace RailCheck
             }, 4);
             var baseLedger = ledger.WithAuthority(3, ledger.Members);
             var store = new DurableInboxStore(baseLedger);
-            var canonical = DurableInboxCanonicalState.Empty.With(occurrence, choice, result, new[] { reward });
+            var canonical = DurableInboxCanonicalState.Empty.With(occurrence, choice, result, new[] { reward })
+                .WithDecision(new SharedChoiceDecision(occurrence, new EffectToken(occurrence, "effect-stable"),
+                    choice, result, new[] { reward }, member, SharedChoicePhase.ChoiceLocked,
+                    Array.Empty<DurableEffectStep>(), 4, new byte[] { 4, 3, 2, 1 }));
             if (!store.CommitWithCanonical(store.Ledger, ledger, canonical))
                 yield return "L383 atomic-ledger-canonical-commit-refused";
             var root = store.CreateSaveRoot(); // production path: no test-only codec identity parameters
+
+            var boundaryDecision = canonical.Decisions[0].WithRewardPayload(
+                new byte[SharedChoiceDecision.MaxRewardPayloadBytes]);
+            var boundaryCanonical = canonical.WithDecision(boundaryDecision);
+            var boundaryStore = new DurableInboxStore(baseLedger);
+            if (!boundaryStore.CommitWithCanonical(boundaryStore.Ledger, ledger, boundaryCanonical))
+                yield return "L383 exact-boundary-reward-payload-commit-refused";
+            else
+            {
+                DurableInboxRestore boundaryRestore; string boundaryRefusal;
+                if (!DurableInboxSaveCodec.TryRestore(boundaryStore.CreateSaveRoot(), new TypedResolver(
+                    new[] { "site", "soldier" }, new[] { "choice-stable-b" },
+                    new[] { "result-stable-a" }, new[] { "soldier|reward-stable-c" }),
+                    out boundaryRestore, out boundaryRefusal) ||
+                    boundaryRestore.Canonical.Decisions.Single().RewardPayload.Length != SharedChoiceDecision.MaxRewardPayloadBytes)
+                    yield return "L383 exact-boundary-reward-payload-did-not-roundtrip-save";
+            }
 
             var failing = new DurableInboxStore(baseLedger) { WriteRecord = _ => false };
             if (failing.CommitWithCanonical(failing.Ledger, ledger, canonical) ||
@@ -45,6 +65,13 @@ namespace RailCheck
             else if (!restored.Canonical.Choices.Single().Equals(choice) ||
                      !restored.Canonical.Results.Single().Equals(result) ||
                      !restored.Canonical.Rewards.Single().Equals(reward) ||
+                     restored.Canonical.Decisions.Count != 1 ||
+                     restored.Canonical.Decisions[0].EffectToken.Value != "effect-stable" ||
+                     restored.Canonical.Decisions[0].Phase != SharedChoicePhase.ChoiceLocked ||
+                     restored.Canonical.Decisions[0].BeforeFact != "unanswered" ||
+                     restored.Canonical.Decisions[0].AfterFact != "applied" ||
+                     !restored.Canonical.Decisions[0].RewardPayload.SequenceEqual(new byte[] { 4, 3, 2, 1 }) ||
+                     restored.Canonical.Decisions[0].EffectSteps.Count != 0 ||
                      !restored.Ledger.Get(occurrence, member).Choice.Equals(choice))
                 yield return "L383 production-store-lost-stable-canonical-identities";
 

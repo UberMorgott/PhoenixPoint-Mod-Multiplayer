@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Globalization;
+using System.Text;
 using Base.Core;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
@@ -8,6 +11,7 @@ using PhoenixPoint.Common.Core;
 using PhoenixPoint.Geoscape.Core;
 using PhoenixPoint.Geoscape.Events;
 using PhoenixPoint.Geoscape.Levels;
+using PhoenixPoint.Geoscape.View.ViewModules;
 using UnityEngine;
 
 namespace Multiplayer.Network.Sync
@@ -16,7 +20,7 @@ namespace Multiplayer.Network.Sync
     /// Geoscape EVENT-WINDOW answer family (surface 0xB4, law 1): the client's choice click is BLOCKED
     /// at its presentation seam (<see cref="EventChoiceClientLock"/>, block-first per
     /// <see cref="IntentRail.ShouldRunNative"/>) and relayed here as
-    /// <c>answer(eventId, choiceIndex)</c>; the HOST runs the same native funnel the local click would
+    /// <c>answer(fullOccurrence, membershipEpoch, expectedRevision, eventId, choiceIndex)</c>; the HOST runs the same native funnel the local click would
     /// have — <c>GeoscapeEvent.CompleteEvent</c> (GeoscapeEvent.cs:86) — and the outcome reaches every
     /// peer as ordinary 0xAC deltas: the record's own leaves (<c>_state</c>/<c>_selectedChoice</c>/
     /// <c>_completedAt</c>, docs/rail-baseline.txt:240-247) plus whatever roots the reward touched
@@ -40,8 +44,109 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     public static class EventSync
     {
-        internal const byte OpAnswer = 1;       // [eventId:string][choiceIndex:i32]
+        internal const byte OpAnswer = 1;       // DWI2 + full occurrence + membership epoch + expected revision + eventId + choiceIndex
         internal const byte OpSetVariable = 2;  // [name:string][value:i32]
+        private const uint DurableAnswerMagic = 0x32495744; // DWI2
+
+        internal static void WriteDurableAnswer(BinaryWriter w, OccurrenceId occurrence, MembershipId membership,
+            ulong expectedRevision, string eventId, int index)
+        {
+            w.Write(DurableAnswerMagic); w.Write(occurrence.EventId); w.Write(occurrence.TriggerId);
+            w.Write(occurrence.SubjectIds.Count); foreach (var subject in occurrence.SubjectIds) w.Write(subject);
+            w.Write(membership.PlayerGuid); w.Write(membership.Epoch); w.Write(expectedRevision);
+            w.Write(eventId); w.Write(index);
+        }
+
+        internal static bool TryReadDurableAnswer(BinaryReader r, out OccurrenceId occurrence,
+            out MembershipId membership, out ulong expectedRevision, out string eventId, out int index)
+        {
+            occurrence = default(OccurrenceId); membership = default(MembershipId); expectedRevision = 0;
+            eventId = null; index = -1; long start = r.BaseStream.Position;
+            if (r.BaseStream.Length - start < 4 || r.ReadUInt32() != DurableAnswerMagic)
+            { r.BaseStream.Position = start; return false; }
+            string kind = ReadBoundedString(r), trigger = ReadBoundedString(r); int count = r.ReadInt32();
+            if (count <= 0 || count > 64) throw new InvalidDataException("durable answer subject count");
+            var subjects = new string[count]; for (int i = 0; i < count; i++) subjects[i] = ReadBoundedString(r);
+            occurrence = new OccurrenceId(kind, trigger, subjects);
+            membership = new MembershipId(ReadBoundedString(r), r.ReadUInt64()); expectedRevision = r.ReadUInt64();
+            eventId = ReadBoundedString(r); index = r.ReadInt32();
+            if (r.BaseStream.Position != r.BaseStream.Length) throw new InvalidDataException("durable answer trailing bytes");
+            return true;
+        }
+
+        internal static void WriteOccurrence(BinaryWriter w, OccurrenceId occurrence)
+        {
+            w.Write(occurrence.EventId); w.Write(occurrence.TriggerId); w.Write(occurrence.SubjectIds.Count);
+            foreach (var subject in occurrence.SubjectIds) w.Write(subject);
+        }
+
+        internal static OccurrenceId ReadOccurrence(BinaryReader r)
+        {
+            string kind = ReadBoundedString(r), trigger = ReadBoundedString(r); int count = r.ReadInt32();
+            if (count <= 0 || count > 64) throw new InvalidDataException("occurrence subject count");
+            var subjects = new string[count];
+            for (int i = 0; i < subjects.Length; i++) subjects[i] = ReadBoundedString(r);
+            return new OccurrenceId(kind, trigger, subjects);
+        }
+
+        internal static bool SenderOwnsMembership(string senderPlayerGuid, MembershipId addressed) =>
+            !string.IsNullOrWhiteSpace(senderPlayerGuid) &&
+            string.Equals(addressed.PlayerGuid, senderPlayerGuid, StringComparison.OrdinalIgnoreCase);
+
+        internal static void WriteDecision(BinaryWriter w, SharedChoiceDecision d)
+        {
+            w.Write(d.Occurrence.EventId); w.Write(d.Occurrence.TriggerId); w.Write(d.Occurrence.SubjectIds.Count);
+            foreach (var subject in d.Occurrence.SubjectIds) w.Write(subject);
+            w.Write(d.EffectToken.Value); w.Write(d.Choice.Value); w.Write(d.Result.Value);
+            w.Write(d.Winner.PlayerGuid); w.Write(d.Winner.Epoch); w.Write((byte)d.Phase);
+            w.Write(d.EffectSteps.Count); foreach (var step in d.EffectSteps)
+            { w.Write(step.Key); w.Write(step.Operation); w.Write(step.BeforeFact); w.Write(step.AfterFact); w.Write((byte)step.State); }
+            w.Write(d.SharedRevision);
+            w.Write(d.Rewards.Count); foreach (var reward in d.Rewards) { w.Write(reward.SubjectId); w.Write(reward.Value); }
+            w.Write(d.RewardPayload.Length); w.Write(d.RewardPayload);
+        }
+
+        internal static SharedChoiceDecision ReadDecision(BinaryReader r)
+        {
+            string eventKind = ReadBoundedString(r), trigger = ReadBoundedString(r); int subjectsCount = r.ReadInt32();
+            if (subjectsCount <= 0 || subjectsCount > 64) throw new InvalidDataException("decision subject count");
+            var subjects = new string[subjectsCount]; for (int i = 0; i < subjects.Length; i++) subjects[i] = ReadBoundedString(r);
+            var occurrence = new OccurrenceId(eventKind, trigger, subjects);
+            var token = new EffectToken(occurrence, ReadBoundedString(r)); var choice = new CanonicalChoiceId(occurrence, ReadBoundedString(r));
+            var result = new CanonicalResultId(occurrence, ReadBoundedString(r)); var winner = new MembershipId(ReadBoundedString(r), r.ReadUInt64());
+            var phase = (SharedChoicePhase)r.ReadByte(); int stepCount = r.ReadInt32();
+            if (stepCount < 0 || stepCount > 256) throw new InvalidDataException("decision step count");
+            var steps = new DurableEffectStep[stepCount]; for (int i = 0; i < steps.Length; i++)
+                steps[i] = new DurableEffectStep(ReadBoundedString(r), ReadBoundedString(r), ReadBoundedString(r), ReadBoundedString(r),
+                    (DurableEffectStepState)r.ReadByte());
+            ulong sharedRevision = r.ReadUInt64();
+            int rewardCount = r.ReadInt32();
+            if (rewardCount < 0 || rewardCount > 1024) throw new InvalidDataException("decision reward count");
+            var rewards = new CanonicalRewardItemId[rewardCount];
+            for (int i = 0; i < rewards.Length; i++) rewards[i] = new CanonicalRewardItemId(occurrence, ReadBoundedString(r), ReadBoundedString(r));
+            int payloadLength = r.ReadInt32();
+            if (payloadLength < 0 || payloadLength > SharedChoiceDecision.MaxRewardPayloadBytes) throw new InvalidDataException("decision reward payload length");
+            byte[] payload = r.ReadBytes(payloadLength); if (payload.Length != payloadLength) throw new EndOfStreamException();
+            return new SharedChoiceDecision(occurrence, token, choice, result, rewards, winner, phase, steps, sharedRevision, payload);
+        }
+
+        private static string ReadBoundedString(BinaryReader r, int maxBytes = 4096)
+        {
+            int length = 0, shift = 0;
+            for (int i = 0; i < 5; i++)
+            {
+                byte b = r.ReadByte(); length |= (b & 0x7f) << shift;
+                if ((b & 0x80) == 0)
+                {
+                    if (length < 0 || length > maxBytes) throw new InvalidDataException("bounded string length");
+                    byte[] bytes = r.ReadBytes(length);
+                    if (bytes.Length != length) throw new EndOfStreamException();
+                    return new UTF8Encoding(false, true).GetString(bytes);
+                }
+                shift += 7;
+            }
+            throw new InvalidDataException("invalid string length prefix");
+        }
 
         /// <summary>The forced re-emit scope for a rejected answer — the "ES" ROOT, not a per-record path.
         /// <c>EncounterRecords</c> classifies <see cref="FieldClass.EntityList"/> (docs/rail-baseline.txt:470),
@@ -98,8 +203,11 @@ namespace Multiplayer.Network.Sync
 
         private static void HandleAnswer(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
-            string eventId = r.ReadString();
-            int index = r.ReadInt32();
+            OccurrenceId addressed; MembershipId addressedMember; ulong expectedRevision;
+            string eventId; int index;
+            bool exact = TryReadDurableAnswer(r, out addressed, out addressedMember, out expectedRevision, out eventId, out index);
+            if (!exact)
+            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "legacy eventId-only answer refused: full durable occurrence required", true, RecordScope); return; }
 
             var geo = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>();
             var es = geo?.EventSystem;
@@ -114,23 +222,42 @@ namespace Multiplayer.Network.Sync
                                   " for event '" + eventId + "' on the host", RecordScope);
                 return;
             }
-            string why = Validate(rec.State, index, data.Choices == null ? 0 : data.Choices.Count);
-            // NOTIFY: the popup this peer answered is already gone from its screen, and the only reason its
-            // answer can die is that ANOTHER peer answered first (record state). Vanilla has no control to
-            // grey here — single-player cannot lose a race for an event — so without a word the player just
-            // watched a choice evaporate.
-            if (why != null)
-            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "event '" + eventId + "': " + why,
-                                true /* notify */, RecordScope); return; }
-
             // Prefer the host's OWN live instance: it carries the real Context (site + vehicle) the reward
             // and any mission launch are applied against. Otherwise synthesise the same shape the game
             // uses for its own re-entry (GeoscapeView.ToMarketplace:735-738) — the site is legitimately
             // null for site-less events.
             var ev = EventPopup.LiveInstance(geo.View, eventId)
                      ?? new GeoscapeEvent(data, new GeoscapeEventContext(es.FindEventLocation(eventId), geo.ViewerFaction)) { Record = rec };
-            var choice = index < 0 ? null : data.Choices[index];
+            var choice = index < 0 || data.Choices == null || index >= data.Choices.Count ? null : data.Choices[index];
             var faction = geo.ViewerFaction;
+
+            string namedEvent = addressed.SubjectIds.FirstOrDefault(x => x.StartsWith("event:", StringComparison.Ordinal));
+            if (namedEvent != "event:" + eventId)
+            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "answer occurrence does not name event '" + eventId + "'", true, RecordScope); return; }
+            Multiplayer.Network.ClientInfo sender;
+            if (!engine.Session.Clients.TryGetValue(senderPeerId, out sender) ||
+                !SenderOwnsMembership(sender.PlayerGuid.ToString("D"), addressedMember))
+            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "answer membership does not belong to sender", true, RecordScope); return; }
+            InboxEntry addressedEntry = null;
+            try { addressedEntry = DurableInboxSaveBridge.ActiveStore?.Ledger.Get(addressed, addressedMember); }
+            catch (InvalidOperationException) { }
+            if (addressedEntry == null || addressedEntry.LifecycleRevision != expectedRevision)
+            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "stale occurrence lifecycle revision", true, RecordScope); return; }
+
+            bool durableAccepted;
+            if (TryDurableOrdinaryAnswer(addressed, addressedMember, eventId, index, data.Choices.Count, rec, ev,
+                choice, faction, out durableAccepted))
+            {
+                if (!durableAccepted)
+                    IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "event '" + eventId +
+                        "': durable shared answer was invalid or could not be committed", true, RecordScope);
+                return;
+            }
+
+            string why = Validate(rec.State, index, data.Choices == null ? 0 : data.Choices.Count);
+            if (why != null)
+            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "event '" + eventId + "': " + why,
+                                true /* notify */, RecordScope); return; }
 
             // The UI layer's own charge (UIModuleSiteEncounters.cs:571-573) — the client must never pay
             // locally (law 3), so the winner's cost comes out of the host's wallet and rides back as a delta.
@@ -163,6 +290,174 @@ namespace Multiplayer.Network.Sync
                 MissionEncounterNav.FinishOwnEncounterWindow(geo.View, eventId, true);   // :611
                 geo.View.LaunchMission(mission, ev.Context.Vehicle);                     // :612
             }
+        }
+
+        /// <summary>Task-8 ordinary shared-choice funnel. Mission-start choices deliberately remain on the
+        /// pre-existing path until Task 9 gives them their distinct offer/preparation transaction.</summary>
+        private static MembershipId DurableMember(DurableInboxStore store, string player, OccurrenceId occurrence) =>
+            store == null ? default(MembershipId) : store.Ledger.AllEntries.Where(x => x.Occurrence.Equals(occurrence) &&
+                string.Equals(x.Membership.PlayerGuid, player, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(x => x.Membership.Epoch).Select(x => x.Membership).FirstOrDefault();
+
+        private static bool TryDurableOrdinaryAnswer(OccurrenceId occurrence, MembershipId winner, string eventId,
+            int index, int choiceCount, GeoscapeEventRecord record, GeoscapeEvent ev, GeoEventChoice choice,
+            GeoFaction faction, out bool accepted)
+        {
+            accepted = false;
+            if (EventPopup.StartsMission(choice)) return false;
+            if (choice?.Outcome?.Cinematic != null || choice?.Outcome?.GameOverVictoryFaction != null)
+            {
+                Debug.LogError("[MP][events] durable choice refused before PRE: cinematic/game-over is an " +
+                    "external transition not covered by campaign-checkpoint idempotence");
+                return true;
+            }
+            var store = DurableInboxSaveBridge.ActiveStore;
+            if (store == null || !store.Ledger.Contains(occurrence)) return false;
+
+            string choiceValue = index < 0 ? "choice:none" : choice?.Text?.LocalizationKey;
+            if (string.IsNullOrWhiteSpace(choiceValue) || (index >= 0 && ev.EventData.Choices.Count(x =>
+                string.Equals(x?.Text?.LocalizationKey, choiceValue, StringComparison.Ordinal)) != 1)) return true;
+            string resultValue = choice?.Outcome?.OutcomeText?.General?.LocalizationKey;
+            if (string.IsNullOrWhiteSpace(resultValue)) resultValue = "result:none:" + choiceValue;
+            var canonicalChoice = new CanonicalChoiceId(occurrence, choiceValue);
+            var canonicalResult = new CanonicalResultId(occurrence, resultValue);
+            var canonicalRewards = CanonicalRewards(occurrence, choice, resultValue);
+            var durable = new DurableSharedChoiceEngine(store, new DelegateDurableChoiceEffect(_ => { },
+                _ => DurableEffectObservation.Diverged),
+                EventPopup.RepaintDurableChoice);
+            SharedChoiceDecision stored;
+            accepted = durable.TryAnswerCheckpointed(occurrence, winner, canonicalChoice, canonicalResult,
+                canonicalRewards, () => Validate(record.State, index, choiceCount) == null,
+                token => new DurableEffectTransactionCoordinator(new DurableEffectPhoenixCheckpointBackend(token)),
+                () =>
+                {
+                    using (EventRewardTransaction.Begin(occurrence, store))
+                    {
+                        if (record.State != GeoscapeEventRecordState.Triggered)
+                            throw new InvalidOperationException("native event diverged after PRE checkpoint");
+                        if (choice != null && choice.Requirments != null)
+                            faction.Wallet.Take(choice.Requirments.Resources, OperationReason.Gift);
+                        ev.CompleteEvent(choice != null && choice.Outcome == null ? null : choice, faction);
+                    }
+                }, locked =>
+                {
+                    EventPopup.HostBroadcastDurableReward(locked.Occurrence, locked.RewardPayload);
+                    EventPopup.HostBroadcastDurableDecision(locked);
+                    DurableEffectTransactionBarrier.FlushCommittedOutbound();
+                }, out stored);
+            if (accepted)
+            {
+                Debug.Log("[MP][events] durable choice locked '" + eventId + "' token=" + stored.EffectToken.Value +
+                    " winner=" + stored.Winner.PlayerGuid + "/" + stored.Winner.Epoch);
+            }
+            return true;
+        }
+
+        private static CanonicalRewardItemId[] CanonicalRewards(OccurrenceId occurrence, GeoEventChoice choice,
+            string resultValue)
+        {
+            if (choice?.Outcome == null) return Array.Empty<CanonicalRewardItemId>();
+            string subject = occurrence.SubjectIds.First(); var values = new List<string>();
+            if (choice.Outcome.Resources != null)
+                values.AddRange(choice.Outcome.Resources.Select(x => "resource:" + x.Type + ":" +
+                    x.Value.ToString("R", CultureInfo.InvariantCulture)));
+            if (choice.Outcome.Items != null)
+                values.AddRange(choice.Outcome.Items.Where(x => x.ItemDef != null).Select(x =>
+                    "item:" + Convert.ToString(x.ItemDef.Guid, CultureInfo.InvariantCulture) + ":" + x.Quantity));
+            // Every other native outcome field remains represented by the stable result identity, so a
+            // non-empty effect can never be journaled as an empty reward set merely because it is diplomacy,
+            // a variable, a unit or a site rather than wallet/storage.
+            if (values.Count == 0 && EventPopup.ChoiceHasOutcomePayload(choice)) values.Add("outcome:" + resultValue);
+            return values.Distinct(StringComparer.Ordinal).OrderBy(x => x, StringComparer.Ordinal)
+                .Select(x => new CanonicalRewardItemId(occurrence, subject, x)).ToArray();
+        }
+
+        internal static bool TryHostLocalDurableAnswer(UIModuleSiteEncounters module, GeoscapeEvent ev,
+            GeoEventChoice choice)
+        {
+            var network = NetworkEngine.Instance;
+            if (network == null || !network.IsActiveSession || !network.IsHost) return false;
+            if (EventPopup.StartsMission(choice)) return false;
+            OccurrenceId occurrence; var store = DurableInboxSaveBridge.ActiveStore;
+            if (store == null || !EventPopup.TryGetDurableOccurrence(ev, out occurrence))
+            { Debug.LogError("[MP][events] host-local answer blocked — no exact durable occurrence"); return true; }
+            string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
+            var winner = DurableMember(store, local, occurrence);
+            InboxEntry entry;
+            try { entry = store.Ledger.Get(occurrence, winner); }
+            catch { Debug.LogError("[MP][events] host-local answer blocked — no active local entitlement"); return true; }
+            int index = ev.EventData?.Choices == null ? -1 : ev.EventData.Choices.IndexOf(choice);
+            var record = ev.Record ?? EventPopup.LiveRecord(ev.EventID, null);
+            bool accepted;
+            bool handled = TryDurableOrdinaryAnswer(occurrence, winner, ev.EventID, index,
+                ev.EventData?.Choices?.Count ?? 0, record, ev, choice, module.Context.ViewerFaction, out accepted);
+            if (!handled || !accepted)
+            { Debug.LogWarning("[MP][events] host-local durable answer refused for '" + ev.EventID + "'"); return true; }
+            EventPopup.NoteOwnAnswer(ev, index);
+            EventPopup.ReplayResolution(module, ev, choice);
+            return true;
+        }
+
+        internal static int RecoverPendingDurableChoices()
+        {
+            var network = NetworkEngine.Instance;
+            var geo = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>();
+            var store = DurableInboxSaveBridge.ActiveStore;
+            if (network == null || !network.IsActiveSession || !network.IsHost || geo?.EventSystem == null || store == null)
+                return 0;
+            int recovered = 0;
+            // Finish a POST reload only after the loaded save has installed its locked durable journal.
+            foreach (var locked in store.Canonical.Decisions.Where(x => x.Phase == SharedChoicePhase.ChoiceLocked))
+                if (DurableEffectTransactionBarrier.TryExitInstalled(locked.EffectToken))
+                { EventPopup.RepaintDurableChoice(locked.Occurrence); EventPopup.HostBroadcastDurableDecision(locked); recovered++; }
+            foreach (var pending in store.Canonical.Decisions.Where(x => x.Phase != SharedChoicePhase.ChoiceLocked).ToArray())
+            {
+                if (DurableEffectTransactionBarrier.RecoveryLoadInFlight(pending.EffectToken)) continue;
+                try
+                {
+                    var backend = new DurableEffectPhoenixCheckpointBackend(pending.EffectToken);
+                    var coordinator = new DurableEffectTransactionCoordinator(backend);
+                    DurableEffectCheckpoint post;
+                    if (backend.TryFindCheckpoint(pending.Occurrence, pending.EffectToken,
+                        DurableEffectCheckpointKind.Committed, out post))
+                    {
+                        coordinator.Recover(pending.Occurrence, pending.EffectToken, _ => { });
+                        continue;
+                    }
+                    string subject = pending.Occurrence.SubjectIds.FirstOrDefault(x => x.StartsWith("event:", StringComparison.Ordinal));
+                    string eventId = subject?.Substring("event:".Length);
+                    var data = string.IsNullOrEmpty(eventId) ? null : geo.EventSystem.GetEventByID(eventId, canFail: true)?.GeoscapeEventData;
+                    var record = string.IsNullOrEmpty(eventId) ? null : geo.EventSystem.GetEventRecord(eventId);
+                    if (data == null || record?.State != GeoscapeEventRecordState.Triggered)
+                        throw new InvalidOperationException("verified PRE did not restore Triggered event");
+                    var matches = data.Choices.Where(x => string.Equals(x?.Text?.LocalizationKey,
+                        pending.Choice.Value, StringComparison.Ordinal)).ToArray();
+                    GeoEventChoice choice = pending.Choice.Value == "choice:none" ? null :
+                        matches.Length == 1 ? matches[0] : throw new InvalidOperationException("pending choice cannot resolve uniquely");
+                    var ev = EventPopup.LiveInstance(geo.View, eventId) ?? new GeoscapeEvent(data,
+                        new GeoscapeEventContext(geo.EventSystem.FindEventLocation(eventId), geo.ViewerFaction)) { Record = record };
+                    var durable = new DurableSharedChoiceEngine(store, new DelegateDurableChoiceEffect(_ => { },
+                        _ => DurableEffectObservation.Diverged), EventPopup.RepaintDurableChoice);
+                    SharedChoiceDecision locked;
+                    durable.ResumeCheckpointed(pending, coordinator, () =>
+                    {
+                        using (EventRewardTransaction.Begin(pending.Occurrence, store))
+                        {
+                            if (choice != null && choice.Requirments != null)
+                                geo.ViewerFaction.Wallet.Take(choice.Requirments.Resources, OperationReason.Gift);
+                            ev.CompleteEvent(choice != null && choice.Outcome == null ? null : choice, geo.ViewerFaction);
+                        }
+                    }, decision =>
+                    {
+                        EventPopup.HostBroadcastDurableReward(decision.Occurrence, decision.RewardPayload);
+                        EventPopup.HostBroadcastDurableDecision(decision);
+                        DurableEffectTransactionBarrier.FlushCommittedOutbound();
+                    }, out locked);
+                }
+                catch (Exception ex)
+                { Debug.LogError("[MP][events] durable choice recovery remains frozen pending authoritative reload: " + ex); }
+            }
+            return recovered;
         }
 
         /// <summary>HOST: replay the client's variable write through the game's OWN setter. NEVER the
@@ -398,6 +693,7 @@ namespace Multiplayer.Network.Sync
             return false;
         }
     }
+
 
     /// <summary>
     /// The same backstop at the class's OTHER funnel: <c>GeoscapeEvent.CompleteMarketplaceEvent</c>

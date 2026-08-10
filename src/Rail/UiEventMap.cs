@@ -172,6 +172,15 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>READ-direction durable-choice nudge. The ledger/canonical transaction is committed
+        /// before this is called; routing through the real event-system kind reaches OpenUiRepaint and its
+        /// native UIStateGeoscapeEvent entry without closing or re-opening another player's dialog.</summary>
+        internal static void FireDurableChoice(GeoLevelController geo)
+        {
+            if (geo?.EventSystem == null) return;
+            Fire(new HashSet<object> { geo.EventSystem }, geo);
+        }
+
         private static readonly MethodInfo UpdateStatsMethod =
             AccessTools.Method(typeof(GeoCharacter), "UpdateStats"); // private (bool recalculateBodparts)
         private static readonly MethodInfo AddAbilitiesFromItemsMethod =

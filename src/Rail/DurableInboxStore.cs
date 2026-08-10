@@ -83,6 +83,7 @@ namespace Multiplayer.Network.Sync
         private DurableInboxCanonicalState _canonical;
         private readonly DurableInboxCanonicalState _snapshotCanonical;
         private readonly HashSet<OccurrenceId> _unservable;
+        private readonly Dictionary<OccurrenceId, object> _effectGates = new Dictionary<OccurrenceId, object>();
         private readonly Dictionary<OccurrenceId, KeyValuePair<ulong, TerminalReason>> _terminalBoundaries =
             new Dictionary<OccurrenceId, KeyValuePair<ulong, TerminalReason>>();
         internal DurableCarrierRegistry Carriers { get; }
@@ -163,6 +164,7 @@ namespace Multiplayer.Network.Sync
                     if (canonicalCandidate.Choices.Select(x => x.Occurrence)
                         .Concat(canonicalCandidate.Results.Select(x => x.Occurrence))
                         .Concat(canonicalCandidate.Rewards.Select(x => x.Occurrence))
+                        .Concat(canonicalCandidate.Decisions.Select(x => x.Occurrence))
                         .Any(x => !candidate.Contains(x))) return false;
                     if (!(ValidateCandidate ?? (_ => true))(candidate)) return false;
                     record = new DurableInboxJournalRecord(candidate.CommittedRevision,
@@ -178,6 +180,76 @@ namespace Multiplayer.Network.Sync
                 _journal.Add(record);
                 _ledger = candidate;
                 _canonical = nextCanonical ?? _canonical;
+                return true;
+            }
+        }
+
+        internal bool InstallAuthoritativeDecision(SharedChoiceDecision decision)
+        {
+            if (decision == null || decision.Phase != SharedChoicePhase.ChoiceLocked || decision.SharedRevision == 0) return false;
+            lock (_gate)
+            {
+                var expected = _ledger; var canonical = _canonical;
+                var existing = canonical.Decisions.SingleOrDefault(x => x.Occurrence.Equals(decision.Occurrence));
+                if (existing != null && existing.Phase == SharedChoicePhase.ChoiceLocked) return existing.Equals(decision);
+                if (existing != null && existing.SharedRevision >= decision.SharedRevision) return false;
+                if (existing != null && (!existing.Choice.Equals(decision.Choice) ||
+                    !existing.Result.Equals(decision.Result) || !existing.Winner.Equals(decision.Winner) ||
+                    !existing.EffectToken.Equals(decision.EffectToken))) return false;
+                if (!expected.Contains(decision.Occurrence)) return false;
+                var entries = expected.AllEntries.Select(x => x.Occurrence.Equals(decision.Occurrence)
+                    ? new InboxEntry(x.Occurrence, x.Membership, x.Lifecycle, decision.Choice,
+                        x.LifecycleRevision, x.TombstoneRevision, x.HostOrderKey,
+                        x.SuspensionReason, x.Checkpoint, x.TerminalReason) : x).ToArray();
+                // A peer installs the host's shared decision; it must not mint a host authority revision
+                // merely because its local read/open/dismiss lifecycle has moved further meanwhile.
+                ulong authorityRevision = Math.Max(expected.CommittedRevision, decision.SharedRevision);
+                _ledger = DurableInboxReducer.CloneAndValidate(new HostLedger(entries, authorityRevision, expected.Members));
+                _canonical = canonical.WithDecision(decision);
+                return true;
+            }
+        }
+
+        internal bool ReplacePendingDecisionRewards(OccurrenceId occurrence,
+            IEnumerable<CanonicalRewardItemId> rewards, byte[] rewardPayload = null)
+        {
+            lock (_gate)
+            {
+                var pending = _canonical.Decisions.SingleOrDefault(x => x.Occurrence.Equals(occurrence));
+                if (pending == null || pending.Phase == SharedChoicePhase.ChoiceLocked ||
+                    _ledger.CommittedRevision == ulong.MaxValue) return false;
+                var nextDecision = pending.WithRewards(rewards);
+                if (rewardPayload != null) nextDecision = nextDecision.WithRewardPayload(rewardPayload);
+                var nextCanonical = _canonical.WithDecision(nextDecision);
+                var next = new HostLedger(_ledger.AllEntries, _ledger.CommittedRevision + 1, _ledger.Members);
+                return CommitWithCanonical(_ledger, next, nextCanonical);
+            }
+        }
+
+        internal T WithEffectGate<T>(OccurrenceId occurrence, Func<T> action)
+        {
+            object gate;
+            lock (_gate)
+            { if (!_effectGates.TryGetValue(occurrence, out gate)) _effectGates.Add(occurrence, gate = new object()); }
+            lock (gate) return action();
+        }
+
+        internal bool RollbackUncheckpointedDecision(SharedChoiceDecision pending)
+        {
+            lock (_gate)
+            {
+                var live = _canonical.Decisions.SingleOrDefault(x => x.Occurrence.Equals(pending.Occurrence));
+                if (live == null || live.Phase != SharedChoicePhase.EffectPending || !live.Equals(pending) ||
+                    _ledger.CommittedRevision == 0 || _journal.Count == 0 ||
+                    _journal[_journal.Count - 1].Revision != _ledger.CommittedRevision) return false;
+                var entries = _ledger.AllEntries.Select(x => x.Occurrence.Equals(pending.Occurrence)
+                    ? new InboxEntry(x.Occurrence, x.Membership, x.Lifecycle, default(CanonicalChoiceId),
+                        x.LifecycleRevision, x.TombstoneRevision, x.HostOrderKey, x.SuspensionReason,
+                        x.Checkpoint, x.TerminalReason) : x).ToArray();
+                _journal.RemoveAt(_journal.Count - 1);
+                _ledger = DurableInboxReducer.CloneAndValidate(new HostLedger(entries,
+                    _ledger.CommittedRevision - 1, _ledger.Members));
+                _canonical = _canonical.WithoutDecision(pending.Occurrence);
                 return true;
             }
         }

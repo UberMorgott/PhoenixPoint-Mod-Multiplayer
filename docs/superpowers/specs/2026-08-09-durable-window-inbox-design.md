@@ -234,6 +234,17 @@
 - If suspension capture fails, do not preempt the ordinary window; keep priority work queued and report the failure.
 - If shared-answer validation fails, leave `Unanswered`; do not charge, grant, lock, or dismiss.
 - If the shared effect succeeds but response delivery fails, persist `ChoiceLocked` and resend the confirmed result; never apply twice.
+- For arbitrary campaign effects, occurrence-token idempotence is implemented as a two-checkpoint rollback
+  transaction, not as a receipt written after an opaque native call. A unique verified PRE checkpoint contains
+  `EffectPending`, the selected occurrence/choice, canonical reward inputs, and the campaign's serialized RNG
+  state before native execution. Native-generated identities/results are recovered by restoring that exact PRE
+  state and are captured concretely in POST; the design does not pretend they exist before generation. The
+  host freezes simulation, input, intents, outbound deltas and non-owner saves until synchronous native completion
+  is followed by a unique verified POST checkpoint containing `ChoiceLocked`. Recovery selects verified POST when
+  present; otherwise it authoritatively reloads PRE before retrying. A partial in-memory world is never allowed to
+  continue or save. Non-campaign external side effects that cannot be represented by the campaign checkpoint are
+  outside this guarantee. Gameplay-visible external effects (cinematics/game-over transitions) fail closed before
+  the transaction begins; diagnostic telemetry is non-authoritative and outside occurrence idempotence.
 - If Start cannot create `DeploymentPreparing`, retain the mission offer and report failure; do not consume its sole carrier.
 - If launch fails validation, remain `Preparing`, repaint current facts, and expose the refusal. Never wait for another player.
 - If subject identity cannot resolve after native campaign load or active-epoch reconciliation, quarantine the occurrence as unservable and request authoritative reconciliation; do not bind by display text or list index.
