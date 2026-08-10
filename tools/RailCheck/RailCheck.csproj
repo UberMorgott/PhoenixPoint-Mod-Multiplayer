@@ -30,5 +30,11 @@
       <HintPath>$(GameManaged)\UnityEngine.UI.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <!-- Assembly-CSharp signatures the laws reflect over mention Collider (PhysicsModule); without it
+         the harness fails to compile with CS0012 even though no law names the type itself. -->
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(GameManaged)\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 </Project>
