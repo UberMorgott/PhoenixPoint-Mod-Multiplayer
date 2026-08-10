@@ -1289,6 +1289,9 @@ namespace Multiplayer.Network.Sync
             internal string SiteRef;
             internal string VehicleRef;
             internal string HostTriggerId;
+            /// <summary>One line per watch, not one per frame: Step polls from SyncEngine.Tick, so an
+            /// unconditional "waiting for a map state" log would be a spew.</summary>
+            internal bool PresentationDeferred;
             internal float ResolvedAt;   // realtimeSinceStartup of the first tick the record read Completed
         }
 
@@ -1466,9 +1469,13 @@ namespace Multiplayer.Network.Sync
                 return;
             }
 
-            // DWI owns presentation. Arrival records a live priority candidate, but never navigates this peer.
-            // The durable scheduler will consume it only after DurableWindowRegistry.MayPresent admits the
-            // peer's own fully-started Geoscape map surface.
+            // DWI owns the RANKING; the peer's own map surface owns the MOMENT, and this seam owns the
+            // NAVIGATION. ae2099d handed presentation to "the durable scheduler" — but
+            // DurableInboxEngine.TryPresentNext has NO production caller, so a Queued DeploymentPreparing
+            // entry is drained by nobody and every client that answered a mission start stayed on the
+            // geoscape (live 2026-08-10, both clients: "priority occurrence ready … presentation remains
+            // behind DurableWindowRegistry.MayPresent", and neither ever moved). L197's restored
+            // arrival-opens-nothing arm is what keeps the call here.
             if (engine.IsHost)
             {
                 w.HostTriggerId = HostTrigger(w.HostTriggerId);
@@ -1481,10 +1488,33 @@ namespace Multiplayer.Network.Sync
                     subjects);
                 DurableWindowRegistry.EnqueuePriorityOccurrence(store, occurrence);
             }
+            // NOT a quorum and NOT a yank (P13 + the owner's 2026-08-10 nuance): the gate reads THIS peer's
+            // own view state only. On a geoscape map state the preparation screen opens immediately; on
+            // Research/Manufacturing/anything else the watch simply stays armed and presents the moment the
+            // player returns to the map. Nothing waits on another human.
+            var viewState = view.CurrentViewState?.GetType();
+            if (!DurableWindowRegistry.MayPresent(true, viewState))
+            {
+                if (!w.PresentationDeferred)
+                {
+                    w.PresentationDeferred = true;
+                    Debug.Log("[MP][brief] deployment-deferred '" + key + "' — " + because + " and the mission " +
+                              "has arrived, but this peer is on " + (viewState == null ? "no view state" :
+                              viewState.Name) + ", which is not a geoscape map surface. The watch stays armed " +
+                              "and opens the preparation screen the moment this peer is back on the map; no " +
+                              "peer is pulled out of the screen it is using and nothing waits on a player.");
+                }
+                return;
+            }
             _watched.Remove(key);
-            Debug.Log("[MP][mission] priority occurrence ready for '" + key + "' at " + w.SiteRef + " — " +
-                      because + "; presentation remains behind DurableWindowRegistry.MayPresent and no peer " +
-                      "was forced out of its current screen.");
+            var container = IdentityResolver.Resolve(geo, w.VehicleRef, null) as GeoVehicle
+                            ?? view.GetVehicleOnSite(site);
+            view.LaunchMission(mission, container);                                  // ToDeploymentState:596
+            Debug.Log("[MP][brief] deployment-presented '" + key + "' at " + w.SiteRef + " on " +
+                      (engine.IsHost ? "HOST" : "CLIENT") + " — " + because + "; the preparation screen was " +
+                      "opened from the MISSION'S ARRIVAL through the game's own LaunchMission, from " +
+                      (viewState == null ? "the map" : viewState.Name) + ". Nothing waited on a dialog " +
+                      "teardown and nothing waited on another player.");
         }
     }
 

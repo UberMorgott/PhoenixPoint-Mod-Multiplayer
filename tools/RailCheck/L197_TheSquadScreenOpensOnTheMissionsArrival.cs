@@ -143,6 +143,22 @@ namespace RailCheck
                         .Any(m => m.Name == "EnqueuePriorityOccurrence"))
                 yield return "L197 arrival-records-nothing: MissionArrivalNav.Step does not record the durable " +
                              "priority occurrence for the Geoscape-gated scheduler.";
+            // RESTORED 2026-08-10, after being replaced by the arm above in ae2099d. Recording the occurrence
+            // is NOT presenting it: DurableInboxEngine.TryPresentNext has no production caller, so the queue
+            // the hand-off relied on is drained by nothing. With only the record arm in place the harness
+            // stayed green while BOTH clients sat on the geoscape after answering a mission start ("priority
+            // occurrence ready … presentation remains behind DurableWindowRegistry.MayPresent", live
+            // 2026-08-10) — this arm is exactly the "green harness, missing screen" it was written against,
+            // and it must be held TOGETHER with the record arm, never traded for it.
+            if (!Program.Callees(step, typeof(GeoscapeView).Assembly).Any(m => m.Name == "LaunchMission"))
+                yield return "L197 arrival-opens-nothing: MissionArrivalNav.Step never reaches " +
+                             "GeoscapeView.LaunchMission, so every arm above is about a watch that decides " +
+                             "correctly and then does nothing — green harness, missing screen.";
+            if (!Program.Callees(step, typeof(MissionArrivalNav).Assembly).Any(m => m.Name == "MayPresent"))
+                yield return "L197 arrival-yanks-a-peer: MissionArrivalNav.Step opens the screen without asking " +
+                             "DurableWindowRegistry.MayPresent. A peer reading Research or queueing " +
+                             "Manufacturing must not be dragged to the squad screen by somebody else's answer; " +
+                             "the gate is also what lets the watch stay armed until this peer is back on the map.";
 
             // ── (d) NO QUORUM: the pure decisions read no peer at all ────────────────
             var peerish = new[] { "NetworkEngine", "SessionManager", "PingTable", "PeerListEntry",
