@@ -32,7 +32,7 @@ namespace RailCheck
                 new[]{member}));
             var flaky=new Carrier{Throws=1}; retryStore.Carriers.Register(offer,DurableCarrierClass.NativeCurrent,flaky);
             int retryDeltas=0; var retryEngine=new DurableMissionOfferEngine(retryStore,d=>retryDeltas++);
-            if(retryEngine.TryStart(offer,prep,_=>true,out refusal)||retryDeltas!=1||retryStore.Journal.Count!=1||
+            if(retryEngine.TryStart(offer,prep,_=>true,out refusal)||retryDeltas!=1||retryStore.Ledger.CommittedRevision!=2||
                 retryStore.Carriers.Count(offer)!=1||!retryStore.Ledger.Contains(prep))
                 yield return "L390 teardown-failure-lost-durable-successor-or-retryable-offer-carrier";
             if(!retryEngine.TryStart(offer,prep,_=>true,out refusal)||retryDeltas!=1||flaky.Removed!=1||

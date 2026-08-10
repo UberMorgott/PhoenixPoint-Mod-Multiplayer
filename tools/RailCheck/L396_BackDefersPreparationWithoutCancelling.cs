@@ -121,16 +121,11 @@ namespace RailCheck
             if (DeploymentWindowClose.TryReenterDeferredForMission(ambiguous, member, "M#4", out rebound))
                 yield return "L396 ambiguous-occurrence-was-guessed-instead-of-requiring-one-exact-predecessor";
 
-            DurableInboxRestore restored; string saveRefusal;
+            // Session state: a rebuilt store must still carry the deferral and its preparation revision.
             var savedDeferred = Make(InboxLifecycle.Deferred);
-            if (!DurableInboxSaveCodec.TryRestore(savedDeferred.CreateSaveRoot(), null, out restored, out saveRefusal) ||
-                restored.Ledger.Get(occurrence, member).Lifecycle != InboxLifecycle.Deferred ||
-                restored.Ledger.Get(occurrence, member).PreparationRevision != 3)
-                yield return "L396 schema9-save-roundtrip-lost-the-deferred-lifecycle";
-            if (!DurableInboxSaveCodec.TryRestore(DurableInboxSaveCodec.CreateSchema1ForMigrationTest(
-                    savedDeferred.Ledger), null, out restored, out saveRefusal) ||
-                restored.Ledger.Get(occurrence, member).Lifecycle != InboxLifecycle.Deferred)
-                yield return "L396 legacy-save-migration-lost-a-still-enrolled-deferral";
+            var rebuilt = new DurableInboxStore(savedDeferred.Ledger).Ledger.Get(occurrence, member);
+            if (rebuilt.Lifecycle != InboxLifecycle.Deferred || rebuilt.PreparationRevision != 3)
+                yield return "L396 store-rebuild-lost-the-deferred-lifecycle-or-preparation-revision";
 
             var rollback = Make(InboxLifecycle.Deferred); var rollbackEngine = new DurableInboxEngine(rollback, member, new ProbeCarrier());
             if (!rollbackEngine.TryRestoreDeferredAfterFailedBack(occurrence, 2) ||

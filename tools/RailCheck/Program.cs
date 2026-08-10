@@ -353,13 +353,10 @@ namespace RailCheck
             Add(laws, () => L371_AMidSessionParityDiffIsSaidOutLoud.Check());
             Add(laws, () => L372_OneDeploymentCapForTheScreenAndTheValidator.Check());
             Add(laws, () => L391_ALifecycleRevisionNeverRunsBackward.Check());
-            Add(laws, () => L394_ACompactionNeedsProofNoDurableSourceCanNameIt.Check());
             Add(laws, () => L395_TerminalRemovalReachesEveryCarrier.Check());
             Add(laws, () => L396_BackDefersPreparationWithoutCancelling.Check());
-            Add(laws, () => L379_AHostOrderSurvivesTheNativeSaveBlob.Check());
             Add(laws, () => L380_APriorityWindowSuspendsBeforeItPreempts.Check());
             Add(laws, () => L382_AChoiceLockRetainsEveryPlayersWindow.Check());
-            Add(laws, () => L383_ACanonicalResultNeverRebindsByListPosition.Check());
             Add(laws, () => L384_ACancelledOfferStaysLocal.Check());
             Add(laws, () => L385_AStartCreatesOneSharedPreparation.Check());
             Add(laws, () => L386_ACollaborativePreparationEditRepaintsEveryCopy.Check());

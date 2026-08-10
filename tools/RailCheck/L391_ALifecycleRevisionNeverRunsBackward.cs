@@ -20,16 +20,9 @@ namespace RailCheck
             if (!host.Tombstone(tombstoned, 4))
                 yield return "L391 pre-save-tombstone-refused";
 
+            // The inbox is session state now: "reload" is a fresh store rebuilt from the same ledger.
             var saveStore = new DurableInboxStore(host.Ledger);
-            var root = saveStore.CreateSaveRoot();
-            DurableInboxRestore restored; string refusal;
-            if (!DurableInboxSaveCodec.TryRestore(root, null, out restored, out refusal))
-            {
-                yield return "L391 active-epoch-save-root-refused: " + refusal;
-                yield break;
-            }
-            var restoredStore = new DurableInboxStore(restored.Ledger, restored.Canonical, restored.Journal,
-                restored.SnapshotLedger, restored.SnapshotCanonical);
+            var restoredStore = new DurableInboxStore(saveStore.Ledger, saveStore.Canonical);
             var afterLoad = new HostInboxSequencer(restoredStore.Ledger);
             if (afterLoad.Reconnect(member).Single(entry => entry.Occurrence.Equals(occurrence)).Lifecycle != InboxLifecycle.Open ||
                 afterLoad.Reconnect(member).Single(entry => entry.Occurrence.Equals(occurrence)).LifecycleRevision != 2)

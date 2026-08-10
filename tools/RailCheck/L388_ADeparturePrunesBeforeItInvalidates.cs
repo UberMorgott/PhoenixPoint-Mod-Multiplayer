@@ -174,10 +174,10 @@ namespace RailCheck
             },1,batchMembers));
             var plans = new[] { new SourceRevalidationPlan(occurrence,"V#1",before,after,false),
                 new SourceRevalidationPlan(sibling,"V#1",before,after,false) };
-            var atomic = BatchStore(); atomic.WriteRecord = _ => false;
+            var atomic = BatchStore(); atomic.ValidateCandidate = _ => false;
             if (new DurableSourceRevalidationEngine(atomic,(o,m)=>{}).TryRevalidateBatch(plans,out batch,out refusal) ||
                 atomic.Ledger.CommittedRevision != 1 || atomic.Ledger.AllEntries.Any(x=>x.PreparationRevision!=0))
-                yield return "L388 failed-batch-writer-left-a-partial-sibling-transition";
+                yield return "L388 failed-batch-commit-left-a-partial-sibling-transition";
             atomic = BatchStore();
             if (!new DurableSourceRevalidationEngine(atomic,(o,m)=>{}).TryRevalidateBatch(plans,out batch,out refusal) ||
                 atomic.Ledger.CommittedRevision != 2 || atomic.Ledger.AllEntries.Any(x=>x.PreparationRevision!=1) ||
@@ -194,7 +194,7 @@ namespace RailCheck
             if(!errors.IsEmpty||wins!=2||concurrent.Ledger.CommittedRevision!=3||
                 concurrent.Ledger.AllEntries.Any(x=>x.PreparationRevision!=1))
                 yield return "L388 concurrent-distinct-departures-were-not-serialized-without-loss";
-            var reentrant=BatchStore();bool nested=false;reentrant.WriteRecord=_=>{
+            var reentrant=BatchStore();bool nested=false;reentrant.ValidateCandidate=_=>{
                 SourceRevalidationBatchDelta x;string w;nested=new DurableSourceRevalidationEngine(reentrant,(o,m)=>{})
                     .TryRevalidateBatch(new[]{plans[1]},out x,out w);return true;};
             if(!new DurableSourceRevalidationEngine(reentrant,(o,m)=>{}).TryRevalidateBatch(

@@ -69,20 +69,9 @@ namespace RailCheck
             if (DurableInboxCodec.TryDecodeLedger(unknownSchema, out ignoredUnknown, out unknownRefusal))
                 yield return "L380 unknown-canonical-schema-was-accepted";
 
-            var legacyLedger = new HostLedger(new[] { Entry(ordinary, member, InboxLifecycle.Open, 1) }, 2,
-                new[] { member });
-            DurableInboxRestore legacy; string legacyRefusal;
-            var legacyRoot = DurableInboxSaveCodec.CreateSchema1ForMigrationTest(legacyLedger);
-            if (!DurableInboxSaveCodec.TryRestore(legacyRoot, null, out legacy, out legacyRefusal) ||
-                legacy.Ledger.Get(ordinary, member).Lifecycle != InboxLifecycle.Open ||
-                legacy.Ledger.Get(ordinary, member).Checkpoint != null)
-                yield return "L380 schema1-root-did-not-migrate: " + legacyRefusal;
-            var v2 = DurableInboxSaveCodec.Create(store.Ledger, Array.Empty<DurableInboxJournalRecord>(),
-                DurableInboxCanonicalState.Empty);
-            DurableInboxRestore v2Restore = null; string v2Refusal = null;
-            if (v2.Schema != DurableInboxSaveCodec.Schema || !DurableInboxSaveCodec.TryRestore(v2, null, out v2Restore, out v2Refusal) ||
-                !checkpoint.Equals(v2Restore.Ledger.Get(ordinary, member).Checkpoint))
-                yield return "L380 schema2-checkpoint-root-did-not-roundtrip: " + v2Refusal;
+            // A rebuilt session store must still carry the suspended window's exact checkpoint.
+            if (!checkpoint.Equals(new DurableInboxStore(store.Ledger).Ledger.Get(ordinary, member).Checkpoint))
+                yield return "L380 store-rebuild-lost-the-suspension-checkpoint";
 
             DismissPriority(store, priority, member);
             if (!engine.TryResumeSuspended(true, typeof(UIStateNothingSelected)) || carrier.CallbackCount != 0 ||
@@ -127,7 +116,7 @@ namespace RailCheck
             var casEngine = new DurableInboxEngine(casStore, member, casCarrier);
             casEngine.TryPreempt(ordinary, priority, true, typeof(UIStateNothingSelected));
             DismissPriority(casStore, priority, member);
-            casStore.WriteRecord = _ => false;
+            casStore.ValidateCandidate = _ => false;
             if (casEngine.TryResumeSuspended(true, typeof(UIStateNothingSelected)) || casCarrier.Abandoned == 0 ||
                 casCarrier.Finalized != 0 || casStore.Ledger.Get(ordinary, member).Lifecycle != InboxLifecycle.Suspended)
                 yield return "L380 restore-cas-failure-left-native-open-or-regressed-durable-state";

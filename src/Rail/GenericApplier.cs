@@ -2203,6 +2203,11 @@ namespace Multiplayer.Network.Sync
     internal static class GeoscapeStartedPatch
     {
         [HarmonyPostfix]
-        public static void Postfix() => GenericApplier.MarkGeoscapeStarted();
+        public static void Postfix()
+        {
+            GenericApplier.MarkGeoscapeStarted();
+            // The durable window inbox lives for one geoscape session; this is its only creation seam.
+            Multiplayer.Network.Sync.DurableInboxSaveBridge.OpenSessionStore();
+        }
     }
 }

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Multiplayer.Network.Sync;
@@ -46,11 +47,6 @@ namespace RailCheck
                     out roundTripRefusal) || roundTrip.AllEntries.Any(x =>
                     x.TerminalReason != TerminalReason.Invalidated || x.TombstoneRevision != 5))
                 yield return "L395 terminal-reason-did-not-survive-ledger-roundtrip";
-            DurableInboxRestore saveRestore;
-            if (!DurableInboxSaveCodec.TryRestore(terminal.CreateSaveRoot(), null, out saveRestore,
-                    out roundTripRefusal) || saveRestore.Ledger.AllEntries.Any(x =>
-                    x.TerminalReason != TerminalReason.Invalidated || x.TombstoneRevision != 5))
-                yield return "L395 terminal-reason-did-not-survive-save-roundtrip";
             var classes = Enum.GetValues(typeof(DurableCarrierClass)).Cast<DurableCarrierClass>().ToArray();
             var callbacks = new int[classes.Length];
             Action<TerminalReason> Remove(DurableCarrierClass kind) => _ => callbacks[Array.IndexOf(classes, kind)]++;
@@ -101,15 +97,7 @@ namespace RailCheck
                 new InboxEntry(occurrence, memberB, InboxLifecycle.Removed, default(CanonicalChoiceId),
                     5, 5, order)
             }, 8);
-            DurableInboxRestore legacyUnknownRestore;
-            if (!DurableInboxSaveCodec.TryRestore(
-                    DurableInboxSaveCodec.CreateSchema1ForMigrationTest(legacyUnknownLedger), null,
-                    out legacyUnknownRestore, out refusal))
-            {
-                yield return "L395 legacy-terminal-migration-refused: " + refusal;
-                yield break;
-            }
-            var legacyUnknown = new DurableInboxStore(legacyUnknownRestore.Ledger);
+            var legacyUnknown = new DurableInboxStore(legacyUnknownLedger);
             if (new DurableInboxEngine(legacyUnknown, memberA, new FakeCarrier()).RemoveAllCarriers(
                     occurrence, TerminalReason.Invalidated, 5, out refusal) || string.IsNullOrEmpty(refusal))
                 yield return "L395 legacy-terminal-without-reason-authorized-teardown";
@@ -158,23 +146,24 @@ namespace RailCheck
             DurableInboxSaveBridge.ActiveStore = new DurableInboxStore(new HostLedger(Array.Empty<InboxEntry>()));
             if (swapRemoved != 1 || oldStore.Carriers.Count(swapOccurrence) != 0)
                 yield return "L395 store-swap-retained-old-carrier-or-lease";
-            var extractStore = new DurableInboxStore(new HostLedger(new[] { swapEntry }, 1)); int extractRemoved = 0;
-            DurableInboxSaveBridge.ActiveStore = extractStore;
-            EventPopup.BindDeferredCarrier(extractStore, swapOccurrence, _ => extractRemoved++);
-            DurableInboxSaveBridge.Extract(Array.Empty<object>()).ToArray();
-            if (extractRemoved != 1 || extractStore.Carriers.Count(swapOccurrence) != 0 ||
+            // The store's real teardown edge is GeoLevelController.OnLevelEnd.  Drive the production
+            // prefix itself: it must drop the store AND every carrier bound to it.
+            var teardown = typeof(WindowQueueSync).GetNestedType("DurableCarrierLevelTeardownPatch",
+                    BindingFlags.NonPublic)?.GetMethod("Prefix", BindingFlags.NonPublic | BindingFlags.Static);
+            if (teardown == null) { yield return "L395 premise-changed: level-teardown-prefix-disappeared"; yield break; }
+            var teardownStore = new DurableInboxStore(new HostLedger(new[] { swapEntry }, 1)); int teardownRemoved = 0;
+            DurableInboxSaveBridge.ActiveStore = teardownStore;
+            EventPopup.BindDeferredCarrier(teardownStore, swapOccurrence, _ => teardownRemoved++);
+            teardown.Invoke(null, null);
+            if (teardownRemoved != 1 || teardownStore.Carriers.Count(swapOccurrence) != 0 ||
                 DurableInboxSaveBridge.ActiveStore != null)
-                yield return "L395 extract-retained-old-store-carriers";
+                yield return "L395 level-teardown-retained-the-store-or-its-carriers";
 
-            DurableInboxSaveBridge.Extract(new object[] { terminal.CreateSaveRoot() }).ToArray();
-            var reconcileOld = new DurableInboxStore(new HostLedger(new[] { swapEntry }, 1)); int reconcileRemoved = 0;
-            DurableInboxSaveBridge.ActiveStore = reconcileOld;
-            EventPopup.BindDeferredCarrier(reconcileOld, swapOccurrence, _ => reconcileRemoved++);
-            string reconcileRefusal;
-            if (!DurableInboxSaveBridge.ReconcileAndInstall(new Resolver(), out reconcileRefusal) ||
-                reconcileRemoved != 1 || reconcileOld.Carriers.Count(swapOccurrence) != 0 ||
-                ReferenceEquals(DurableInboxSaveBridge.ActiveStore, reconcileOld))
-                yield return "L395 reconcile-retained-old-store-carriers: " + reconcileRefusal;
+            // The only creation seam is the geoscape-start callback, and it is gated on an active co-op
+            // session: no session must mint no store, or every solo campaign grows a phantom inbox.
+            DurableInboxSaveBridge.OpenSessionStore();
+            if (DurableInboxSaveBridge.ActiveStore != null)
+                yield return "L395 session-store-was-opened-without-an-active-co-op-session";
             DurableInboxSaveBridge.ActiveStore = null;
             foreach (var failure in StoreAbandonBarrier(memberA)) yield return failure;
         }
@@ -272,14 +261,6 @@ namespace RailCheck
             public bool Restore(OccurrenceId occurrence, InboxWindowCheckpoint checkpoint) { Callbacks++; return false; }
             public void Abandon(OccurrenceId occurrence) { Callbacks++; }
             public void FinalizeRestore(OccurrenceId occurrence) { Callbacks++; }
-        }
-
-        private sealed class Resolver : IDurableInboxStableResolver
-        {
-            public bool SubjectExists(string subjectId) => true;
-            public bool ChoiceExists(OccurrenceId occurrence, string choiceId) => true;
-            public bool ResultExists(OccurrenceId occurrence, string resultId) => true;
-            public bool RewardExists(OccurrenceId occurrence, string subjectId, string rewardId) => true;
         }
     }
 }

@@ -410,7 +410,16 @@ namespace Multiplayer.Network.Sync
 
         [HarmonyPatch(typeof(GeoLevelController), "OnLevelEnd")]
         private static class DurableCarrierLevelTeardownPatch
-        { private static void Prefix() => ClearDurableRuntimeCarriers(); }
+        {
+            // Dropping the store is what ends the durable inbox session.  Its setter already clears the
+            // runtime carriers when the value changes; the explicit call covers the no-store case and is
+            // idempotent, so this is one teardown, not two.
+            private static void Prefix()
+            {
+                DurableInboxSaveBridge.ActiveStore = null;
+                ClearDurableRuntimeCarriers();
+            }
+        }
 
         [HarmonyPatch(typeof(UIStateGeoscapeEvent), "ExitState")]
         private static class DurableEventSilentExitPatch

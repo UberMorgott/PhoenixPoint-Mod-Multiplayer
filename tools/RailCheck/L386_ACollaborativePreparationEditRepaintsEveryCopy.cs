@@ -65,11 +65,11 @@ namespace RailCheck
                 DeploymentWindowClose.AuthorizePreparationMember(host,a,new DurablePreparationEditContext(wrongOccurrence,1))||
                 DeploymentWindowClose.AuthorizePreparationMember(host,a,new DurablePreparationEditContext(occurrence,0)))
                 yield return "L386 sender-membership-open-entitlement-or-exact-revision-was-not-authorized-strictly";
-            var failed=Make();failed.WriteRecord=_=>false;int failedNative=0;
+            var failed=Make();failed.ValidateCandidate=_=>false;int failedNative=0;
             if(new DurablePreparationEditEngine(failed,_=>{}).TryApply(new DurablePreparationEditContext(occurrence,0),
                     ()=>true,()=>{failedNative++;return true;},()=>{},null,out refusal)||failedNative!=0||failed.Ledger.CommittedRevision!=1||
                 failed.Ledger.AllEntries.Any(x=>x.PreparationRevision!=0))
-                yield return "L386 journal-preflight-failure-allowed-native-mutation";
+                yield return "L386 commit-preflight-failure-allowed-native-mutation";
             foreach(var capacityFailure in new Action<DurableInboxStore>[] {
                 s=>s.PreparationMaterializationProbe=()=>{throw new Exception("materialize");},
                 s=>s.PreparationCapacityProbe=()=>{throw new Exception("capacity");}})
@@ -78,7 +78,7 @@ namespace RailCheck
                 if(new DurablePreparationEditEngine(preflight,_=>{}).TryApply(
                        new DurablePreparationEditContext(occurrence,0),()=>true,
                        ()=>{preflightNative++;return true;},()=>{},new[]{"V#2","U#4","V#2"},out refusal)||
-                   preflightNative!=0||preflight.Ledger.CommittedRevision!=1||preflight.Journal.Count!=0)
+                   preflightNative!=0||preflight.Ledger.CommittedRevision!=1)
                     yield return "L386 materialization-or-capacity-failure-reached-native-mutation";
             }
             var rollbackStore=Make();int nativeState=7,rollbacks=0;
@@ -118,7 +118,7 @@ namespace RailCheck
                     nestedAccepted=nestedStore.Commit(before,before.WithAuthority(before.CommittedRevision+1,before.Members));
                     return true;
                 },()=>{},new[]{"V#2","U#4","V#2"},out refusal)||nestedAccepted||nestedNative!=1||
-                nestedStore.Ledger.CommittedRevision!=2||nestedStore.Journal.Count!=1||
+                nestedStore.Ledger.CommittedRevision!=2||
                 nestedStore.Ledger.AllEntries.Any(x=>x.PreparationRevision!=1))
                 yield return "L386 reentrant-store-write-was-not-rejected-before-it-could-be-lost";
             var recursiveStore=Make();DurablePreparationEditEngine recursiveEngine=null;
@@ -133,7 +133,7 @@ namespace RailCheck
                     return true;
                 },()=>{},new[]{"U#4"},out refusal)||recursiveAccepted||recursiveOuterNative!=1||
                 recursiveInnerNative!=0||recursiveStore.Ledger.CommittedRevision!=2||
-                recursiveStore.Journal.Count!=1||recursiveStore.Ledger.AllEntries.Any(x=>x.PreparationRevision!=1))
+                recursiveStore.Ledger.AllEntries.Any(x=>x.PreparationRevision!=1))
                 yield return "L386 recursive-preparation-engine-cleared-or-bypassed-the-outer-transition-guard";
             var reentrant=Make();int reentrantNative=0;DurablePreparationEditEngine reentrantEngine=null;
             reentrantEngine=new DurablePreparationEditEngine(reentrant,d=>{string why;reentrantEngine.TryApply(
@@ -154,10 +154,6 @@ namespace RailCheck
             var schema4=(byte[])messageBytes.Clone();schema4[0]=4;
             if(ledgerBytes[4]!=6||messageBytes[0]!=5||DurableInboxCodec.TryDecode(schema4,out ignoredMessage,out refusal))
                 yield return "L386 message-v5-and-ledger-v6-schemas-were-not-split-or-schema4-was-accepted";
-            DurableInboxRestore restored;
-            if(!DurableInboxSaveCodec.TryRestore(host.CreateSaveRoot(),null,out restored,out refusal)||
-                restored.Ledger.AllEntries.Any(x=>x.PreparationRevision!=1||x.PreparationAuthorityRevision!=2))
-                yield return "L386 save-schema9-did-not-roundtrip-preparation-state";
 
             var context=new DurablePreparationEditContext(occurrence,17);byte[] contextBytes;
             using(var ms=new MemoryStream()){using(var w=new BinaryWriter(ms,System.Text.Encoding.UTF8,true))DurablePreparationEditContext.Write(w,context);contextBytes=ms.ToArray();}
