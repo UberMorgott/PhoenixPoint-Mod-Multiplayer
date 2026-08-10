@@ -127,7 +127,7 @@ namespace Multiplayer.Network.Sync
     internal static class DurableInboxSaveCodec
     {
         internal const string Magic = "Multiplayer.DurableInbox/v1";
-        internal const int Schema = 7;
+        internal const int Schema = 8;
         private const int MaxCount = 65535;
         private const int MaxString = 4096;
 
@@ -168,6 +168,23 @@ namespace Multiplayer.Network.Sync
             root.Crc = ComputeRootCrc(root); return root;
         }
 
+        internal static DurableInboxSaveRoot CreateSchema6ForMigrationTest(HostLedger ledger)
+        {
+            var root = new DurableInboxSaveRoot { Schema = 6,
+                Snapshot = EncodeSnapshot(ledger, Array.Empty<CanonicalChoiceId>(), Array.Empty<CanonicalResultId>(),
+                    Array.Empty<CanonicalRewardItemId>(), Array.Empty<SharedChoiceDecision>(), false),
+                Journal = Array.Empty<byte[]>(), SnapshotRevision = ledger.CommittedRevision };
+            root.Crc = ComputeRootCrc(root); return root;
+        }
+        internal static DurableInboxSaveRoot CreateSchema7ForMigrationTest(HostLedger ledger)
+        {
+            var root = new DurableInboxSaveRoot { Schema = 7,
+                Snapshot = EncodeSnapshot(ledger, Array.Empty<CanonicalChoiceId>(), Array.Empty<CanonicalResultId>(),
+                    Array.Empty<CanonicalRewardItemId>(), Array.Empty<SharedChoiceDecision>(), false),
+                Journal = Array.Empty<byte[]>(), SnapshotRevision = ledger.CommittedRevision };
+            root.Crc = ComputeRootCrc(root); return root;
+        }
+
         internal static bool TryRestore(DurableInboxSaveRoot root, IDurableInboxStableResolver resolver,
             out DurableInboxRestore restore, out string refusal)
         {
@@ -175,7 +192,7 @@ namespace Multiplayer.Network.Sync
             try
             {
                 if (root == null || root.Magic != Magic ||
-                    (root.Schema != 1 && root.Schema != 2 && root.Schema != 3 && root.Schema != 4 && root.Schema != 5 && root.Schema != 6 && root.Schema != Schema))
+                    (root.Schema != 1 && root.Schema != 2 && root.Schema != 3 && root.Schema != 4 && root.Schema != 5 && root.Schema != 6 && root.Schema != 7 && root.Schema != Schema))
                     throw new InvalidDataException("unknown durable inbox save root");
                 if (root.Snapshot == null || root.Journal == null || root.Crc != ComputeRootCrc(root)) throw new InvalidDataException("durable inbox CRC mismatch");
                 if (root.Schema >= 6) ValidateTransactionMarker(root);
@@ -240,7 +257,7 @@ namespace Multiplayer.Network.Sync
 
         private static byte[] EncodeSnapshot(HostLedger ledger, IEnumerable<CanonicalChoiceId> choices,
             IEnumerable<CanonicalResultId> results, IEnumerable<CanonicalRewardItemId> rewards,
-            IEnumerable<SharedChoiceDecision> decisions)
+            IEnumerable<SharedChoiceDecision> decisions, bool includeLinks = true)
         {
             using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms))
             {
@@ -259,6 +276,11 @@ namespace Multiplayer.Network.Sync
                         if (e.TerminalReason.HasValue) w.Write((byte)e.TerminalReason.Value);
                     }
                     w.Write((byte)e.SuspensionReason); WriteOptionalCheckpoint(w, e.Checkpoint);
+                    if (includeLinks)
+                    {
+                        w.Write(e.SupersededBy.HasValue); if (e.SupersededBy.HasValue) WriteOccurrence(w, e.SupersededBy.Value);
+                        w.Write(e.Predecessor.HasValue); if (e.Predecessor.HasValue) WriteOccurrence(w, e.Predecessor.Value);
+                    }
                 }
                 WriteIdentities(w, choices ?? Enumerable.Empty<CanonicalChoiceId>(), (bw, x) => { WriteOccurrence(bw, x.Occurrence); WriteString(bw, x.Value); });
                 WriteIdentities(w, results ?? Enumerable.Empty<CanonicalResultId>(), (bw, x) => { WriteOccurrence(bw, x.Occurrence); WriteString(bw, x.Value); });
@@ -299,8 +321,14 @@ namespace Multiplayer.Network.Sync
                     if (schema >= 4 && tombstone != 0 && r.ReadBoolean()) terminalReason = ReadEnum<TerminalReason>(r);
                     var reason = schema >= 2 ? ReadEnum<InboxSuspensionReason>(r) : InboxSuspensionReason.None;
                     var checkpoint = schema >= 2 ? ReadOptionalCheckpoint(r, schema) : null;
+                    OccurrenceId? supersededBy = null, predecessor = null;
+                    if (schema >= 8)
+                    {
+                        if (r.ReadBoolean()) supersededBy = ReadOccurrence(r);
+                        if (r.ReadBoolean()) predecessor = ReadOccurrence(r);
+                    }
                     entries.Add(new InboxEntry(occurrence, member, lifecycle, choice, lifecycleRevision, tombstone, order,
-                        reason, checkpoint, terminalReason));
+                        reason, checkpoint, terminalReason, supersededBy, predecessor));
                 }
                 choices = ReadIdentities(r, br => { var o = ReadOccurrence(br); return new CanonicalChoiceId(o, ReadString(br)); });
                 results = ReadIdentities(r, br => { var o = ReadOccurrence(br); return new CanonicalResultId(o, ReadString(br)); });

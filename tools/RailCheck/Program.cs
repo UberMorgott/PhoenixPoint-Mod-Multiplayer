@@ -365,6 +365,9 @@ namespace RailCheck
             Add(laws, () => L381_AFirstValidSharedAnswerAppliesOneDurableEffect.Check());
             Add(laws, () => L382_AChoiceLockRetainsEveryPlayersWindow.Check());
             Add(laws, () => L383_ACanonicalResultNeverRebindsByListPosition.Check());
+            Add(laws, () => L384_ACancelledOfferStaysLocal.Check());
+            Add(laws, () => L385_AStartCreatesOneSharedPreparation.Check());
+            Add(laws, () => L390_AStartNeedsNoPeerReadiness.Check());
             Add(laws, () => L378_WindowsPresentOnlyOnTheGeoscape.Check());
             Add(laws, () => L393_EveryRoutedWindowFamilyHasAVerdict.Check());
             Add(laws, () => L401_OnlyExactNativeRaisersArePriority.Check());

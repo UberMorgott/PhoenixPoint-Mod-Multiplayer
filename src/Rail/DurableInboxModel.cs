@@ -389,10 +389,13 @@ namespace Multiplayer.Network.Sync
         internal HostOrderKey HostOrderKey { get; }
         internal InboxSuspensionReason SuspensionReason { get; }
         internal InboxWindowCheckpoint Checkpoint { get; }
+        internal OccurrenceId? SupersededBy { get; }
+        internal OccurrenceId? Predecessor { get; }
         internal InboxEntry(OccurrenceId occurrence, MembershipId membership, InboxLifecycle lifecycle,
             CanonicalChoiceId choice, ulong lifecycleRevision, ulong tombstoneRevision, HostOrderKey hostOrderKey,
             InboxSuspensionReason suspensionReason = InboxSuspensionReason.None,
-            InboxWindowCheckpoint checkpoint = null, TerminalReason? terminalReason = null)
+            InboxWindowCheckpoint checkpoint = null, TerminalReason? terminalReason = null,
+            OccurrenceId? supersededBy = null, OccurrenceId? predecessor = null)
         {
             if (!string.Equals(hostOrderKey.TriggerId, occurrence.TriggerId, StringComparison.Ordinal))
                 throw new ArgumentException("foreign order namespace", nameof(hostOrderKey));
@@ -403,6 +406,11 @@ namespace Multiplayer.Network.Sync
             if (terminalReason.HasValue && (lifecycle != InboxLifecycle.Removed || tombstoneRevision == 0))
                 throw new ArgumentException("only tombstones name a terminal reason", nameof(terminalReason));
             TerminalReason = terminalReason;
+            if (supersededBy.HasValue && (!terminalReason.HasValue || terminalReason.Value != Multiplayer.Network.Sync.TerminalReason.Superseded))
+                throw new ArgumentException("only a superseded tombstone names its successor", nameof(supersededBy));
+            if (predecessor.HasValue && predecessor.Value.Equals(occurrence))
+                throw new ArgumentException("successor cannot precede itself", nameof(predecessor));
+            SupersededBy = supersededBy; Predecessor = predecessor;
             if (!Enum.IsDefined(typeof(InboxSuspensionReason), suspensionReason))
                 throw new ArgumentOutOfRangeException(nameof(suspensionReason));
             if ((lifecycle == InboxLifecycle.Suspended) != (suspensionReason != InboxSuspensionReason.None))
@@ -415,12 +423,12 @@ namespace Multiplayer.Network.Sync
         internal InboxEntry WithLifecycle(InboxLifecycle lifecycle, ulong revision) =>
             lifecycle == InboxLifecycle.Suspended
                 ? new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision,
-                    HostOrderKey, SuspensionReason, Checkpoint)
+                    HostOrderKey, SuspensionReason, Checkpoint, predecessor: Predecessor)
                 : new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision, HostOrderKey,
-                    terminalReason: TerminalReason);
+                    terminalReason: TerminalReason, supersededBy: SupersededBy, predecessor: Predecessor);
         internal InboxEntry Suspend(InboxSuspensionReason reason, InboxWindowCheckpoint checkpoint, ulong revision) =>
             new InboxEntry(Occurrence, Membership, InboxLifecycle.Suspended, Choice, revision, TombstoneRevision,
-                HostOrderKey, reason, checkpoint);
+                HostOrderKey, reason, checkpoint, predecessor: Predecessor);
     }
 
     internal sealed class HostLedger
@@ -437,6 +445,24 @@ namespace Multiplayer.Network.Sync
                 throw new ArgumentException("occurrence has inconsistent host order", nameof(entries));
             if (copy.Any(e => e.HostOrderKey.CampaignOrdinal > committedRevision))
                 throw new ArgumentException("host order exceeds committed revision", nameof(entries));
+            foreach (var successorGroup in copy.Where(e => e.Predecessor.HasValue).GroupBy(e => e.Occurrence))
+            {
+                var predecessors = successorGroup.Select(e => e.Predecessor.Value).Distinct().ToArray();
+                if (predecessors.Length != 1 || successorGroup.Count() != copy.Count(e => e.Occurrence.Equals(successorGroup.Key)))
+                    throw new ArgumentException("successor has inconsistent predecessor linkage", nameof(entries));
+                var predecessorEntries = copy.Where(e => e.Occurrence.Equals(predecessors[0])).ToArray();
+                if (predecessorEntries.Length == 0 || predecessorEntries.Any(e => !e.SupersededBy.HasValue ||
+                    !e.SupersededBy.Value.Equals(successorGroup.Key) || e.TerminalReason != Multiplayer.Network.Sync.TerminalReason.Superseded) ||
+                    !successorGroup.Key.SubjectIds.SequenceEqual(predecessors[0].SubjectIds, StringComparer.Ordinal))
+                    throw new ArgumentException("dangling or foreign successor linkage", nameof(entries));
+            }
+            foreach (var predecessorGroup in copy.Where(e => e.SupersededBy.HasValue).GroupBy(e => e.Occurrence))
+            {
+                var successors = predecessorGroup.Select(e => e.SupersededBy.Value).Distinct().ToArray();
+                if (successors.Length != 1 || predecessorGroup.Count() != copy.Count(e => e.Occurrence.Equals(predecessorGroup.Key)) ||
+                    !copy.Any(e => e.Occurrence.Equals(successors[0]) && e.Predecessor.HasValue && e.Predecessor.Value.Equals(predecessorGroup.Key)))
+                    throw new ArgumentException("dangling or inconsistent supersession linkage", nameof(entries));
+            }
             // Schema-less ledgers have no explicit presence, so their inferred enrolled members resume at the
             // neutral Loading gate. Explicit Disconnected is invalid here; pre-v3 decoders end it through
             // LegacyMembershipMigration before constructing the current ledger.
@@ -494,7 +520,7 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
                 var revision = checked(entry.LifecycleRevision + 1);
                 return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed, entry.Choice,
                     revision, Math.Max(entry.TombstoneRevision, revision), entry.HostOrderKey,
-                    terminalReason: TerminalReason.MembershipEnded);
+                    terminalReason: TerminalReason.MembershipEnded, predecessor: entry.Predecessor);
             }).ToArray();
             return new HostLedger(migrated, committedRevision,
                 memberArray.Where(pair => pair.Value != MemberPresence.Disconnected));
@@ -591,7 +617,7 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
                     changed = true;
                     return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
                         entry.Choice, Math.Max(entry.LifecycleRevision, revision), revision, entry.HostOrderKey,
-                        terminalReason: reason);
+                        terminalReason: reason, predecessor: entry.Predecessor);
                 });
                 if (!changed) return false;
                 var committedRevision = checked(CommittedRevision + 1);
@@ -613,7 +639,7 @@ internal enum MemberPresence { Active, Disconnected, Loading, Tactical, NonGeosc
                         var revision = checked(entry.LifecycleRevision + 1);
                         return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
                             entry.Choice, revision, Math.Max(entry.TombstoneRevision, revision), entry.HostOrderKey,
-                            terminalReason: TerminalReason.MembershipEnded);
+                            terminalReason: TerminalReason.MembershipEnded, predecessor: entry.Predecessor);
                     })
                     .ToArray();
                 var committedRevision = checked(CommittedRevision + 1);

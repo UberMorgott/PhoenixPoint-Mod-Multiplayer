@@ -298,6 +298,24 @@ namespace Multiplayer.Network.Sync
             return _registry.RemoveAll(occurrence, reason, out refusal);
         }
 
+        internal bool CancelMissionOfferLocal(OccurrenceId occurrence)
+        {
+            if (!DurableWindowRegistry.IsMissionOfferOccurrence(occurrence)) return false;
+            for (int attempt = 0; attempt < 32; attempt++)
+            {
+                var expected = _store.Ledger; InboxEntry entry;
+                try { entry = expected.Get(occurrence, _member); } catch { return false; }
+                if (entry.Lifecycle == InboxLifecycle.Dismissed) return true;
+                if (entry.Lifecycle == InboxLifecycle.Removed) return false;
+                var dismissed = entry.WithLifecycle(InboxLifecycle.Dismissed,
+                    checked(entry.LifecycleRevision + 1));
+                var next = expected.Replace(dismissed).WithAuthority(
+                    checked(expected.CommittedRevision + 1), expected.Members);
+                if (_store.Commit(expected, next)) return true;
+            }
+            return false;
+        }
+
         internal bool TryPresentNext(bool geoscapeStarted, Type currentViewState)
         {
             if (!DurableWindowRegistry.MayPresent(geoscapeStarted, currentViewState)) return false;
@@ -448,7 +466,7 @@ namespace Multiplayer.Network.Sync
                 ulong lifecycle = checked(current.LifecycleRevision + 1);
                 var removed = new InboxEntry(current.Occurrence, current.Membership, InboxLifecycle.Removed,
                     current.Choice, lifecycle, Math.Max(current.TombstoneRevision, lifecycle), current.HostOrderKey,
-                    terminalReason: TerminalReason.Invalidated);
+                    terminalReason: TerminalReason.Invalidated, predecessor: current.Predecessor);
                 var next = expected.Replace(removed).WithAuthority(checked(expected.CommittedRevision + 1), expected.Members);
                 try { if (_store.Commit(expected, next)) return false; } catch { }
             }
@@ -475,6 +493,58 @@ namespace Multiplayer.Network.Sync
             try { _carrier.Abandon(occurrence); } catch { }
         }
 
+    }
+
+    internal sealed class DeploymentTransitionDelta
+    {
+        internal DeploymentTransitionDelta(OccurrenceId offer, OccurrenceId preparation, HostOrderKey order,
+            ulong tombstoneRevision, TerminalReason reason)
+        { Offer = offer; Preparation = preparation; Order = order; TombstoneRevision = tombstoneRevision; Reason = reason; }
+        internal OccurrenceId Offer { get; } internal OccurrenceId Preparation { get; }
+        internal HostOrderKey Order { get; } internal ulong TombstoneRevision { get; } internal TerminalReason Reason { get; }
+    }
+
+    internal sealed class DurableMissionOfferEngine
+    {
+        private readonly DurableInboxStore _store;
+        private readonly Action<DeploymentTransitionDelta> _terminalDelta;
+        internal DurableMissionOfferEngine(DurableInboxStore store, Action<DeploymentTransitionDelta> terminalDelta)
+        { _store = store ?? throw new ArgumentNullException(nameof(store));
+          _terminalDelta = terminalDelta ?? throw new ArgumentNullException(nameof(terminalDelta)); }
+
+        internal bool TryStart(OccurrenceId offer, OccurrenceId preparation,
+            Func<HostLedger, bool> validate, out string refusal)
+        {
+            string local = null;
+            bool result = _store.WithTransitionGate(offer, () =>
+            {
+                ulong terminalRevision;
+                if (!_store.TryStartDeployment(offer, preparation, validate, out terminalRevision))
+                {
+                    var authoritative = _store.Ledger.AllEntries.FirstOrDefault(x => x.Predecessor.HasValue &&
+                        x.Predecessor.Value.Equals(offer));
+                    local = authoritative == null ? "deployment preparation could not be committed" :
+                        "offer already transitioned to " + authoritative.Occurrence.EventId + "/" + authoritative.Occurrence.TriggerId;
+                    return false;
+                }
+                var successor = _store.Ledger.AllEntries.First(x => x.Occurrence.Equals(preparation));
+                if (!_store.HasTransitionDelta(offer))
+                {
+                    try { _terminalDelta(new DeploymentTransitionDelta(offer, preparation,
+                        successor.HostOrderKey, terminalRevision, TerminalReason.Superseded)); }
+                    catch { local = "authoritative terminal delta failed"; return false; }
+                    _store.MarkTransitionDelta(offer);
+                }
+                if (_store.IsTransitionTeardownComplete(offer)) return true;
+                string teardown;
+                bool authorized = _store.AuthorizeCarrierRemoval(offer, TerminalReason.Superseded,
+                    terminalRevision, out teardown);
+                bool removed = authorized && _store.Carriers.RemoveAll(offer, TerminalReason.Superseded, out teardown);
+                if (!removed) { local = teardown; return false; }
+                _store.MarkTransitionTeardownComplete(offer); return true;
+            });
+            refusal = local; return result;
+        }
     }
 
     internal interface IDurableSharedChoiceEffect

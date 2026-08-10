@@ -84,6 +84,9 @@ namespace Multiplayer.Network.Sync
         private readonly DurableInboxCanonicalState _snapshotCanonical;
         private readonly HashSet<OccurrenceId> _unservable;
         private readonly Dictionary<OccurrenceId, object> _effectGates = new Dictionary<OccurrenceId, object>();
+        private readonly Dictionary<OccurrenceId, object> _transitionGates = new Dictionary<OccurrenceId, object>();
+        private readonly HashSet<OccurrenceId> _transitionDeltaEmitted = new HashSet<OccurrenceId>();
+        private readonly HashSet<OccurrenceId> _transitionTeardownComplete = new HashSet<OccurrenceId>();
         private readonly Dictionary<OccurrenceId, KeyValuePair<ulong, TerminalReason>> _terminalBoundaries =
             new Dictionary<OccurrenceId, KeyValuePair<ulong, TerminalReason>>();
         internal DurableCarrierRegistry Carriers { get; }
@@ -144,6 +147,70 @@ namespace Multiplayer.Network.Sync
         internal Func<HostLedger, bool> ValidateCandidate { get; set; } = _ => true;
 
         internal bool Commit(HostLedger expected, HostLedger next) => CommitWithCanonical(expected, next, null);
+
+        /// <summary>One host-serialized offer-to-preparation journal record.  The successor and every
+        /// fresh entitlement become durable in the same record that supersedes the offer, so native
+        /// carrier teardown can never consume the last recoverable route to the mission.</summary>
+        internal bool TryStartDeployment(OccurrenceId offer, OccurrenceId successor,
+            Func<HostLedger, bool> validate, out ulong tombstoneRevision)
+        {
+            tombstoneRevision = 0;
+            lock (_gate)
+            {
+                var existing = _ledger.AllEntries.FirstOrDefault(x => x.Predecessor.HasValue &&
+                    x.Predecessor.Value.Equals(offer));
+                if (!DurableWindowRegistry.IsMissionOfferOccurrence(offer) || validate == null ||
+                    !successor.SubjectIds.SequenceEqual(offer.SubjectIds, StringComparer.Ordinal)) return false;
+                if (existing != null) { tombstoneRevision = _ledger.AllEntries.Where(x => x.Occurrence.Equals(offer))
+                    .Select(x => x.TombstoneRevision).Aggregate(0UL, Math.Max);
+                    return existing.Occurrence.Equals(successor); }
+                var offers = _ledger.AllEntries.Where(x => x.Occurrence.Equals(offer)).ToArray();
+                if (offers.Length == 0 || offers.All(x => x.Lifecycle == InboxLifecycle.Removed) ||
+                    _ledger.Contains(successor) || successor.Equals(offer) ||
+                    !string.Equals(successor.EventId, "DeploymentPreparing", StringComparison.Ordinal)) return false;
+                bool valid; try { valid = validate(_ledger); } catch { return false; }
+                if (!valid || _ledger.CommittedRevision == ulong.MaxValue) return false;
+                ulong revision = _ledger.CommittedRevision + 1;
+                var successorOrder = new HostOrderKey(revision, successor.TriggerId);
+                var terminal = offers.Select(x => new InboxEntry(x.Occurrence, x.Membership,
+                    InboxLifecycle.Removed, x.Choice, Math.Max(x.LifecycleRevision + 1, revision), revision,
+                    x.HostOrderKey, terminalReason: TerminalReason.Superseded, supersededBy: successor,
+                    predecessor: x.Predecessor)).ToArray();
+                var retained = _ledger.AllEntries.Where(x => !x.Occurrence.Equals(offer));
+                var fresh = _ledger.Members.Keys.Select(member => new InboxEntry(successor, member,
+                    InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, successorOrder,
+                    predecessor: offer));
+                var next = new HostLedger(retained.Concat(terminal).Concat(fresh), revision, _ledger.Members);
+                if (!CommitWithCanonical(_ledger, next, null)) return false;
+                tombstoneRevision = revision; return true;
+            }
+        }
+
+        internal bool InstallDeploymentTransition(DeploymentTransitionDelta delta)
+        {
+            if (delta == null || delta.Reason != TerminalReason.Superseded ||
+                !delta.Order.TriggerId.Equals(delta.Preparation.TriggerId, StringComparison.Ordinal) ||
+                !delta.Preparation.SubjectIds.SequenceEqual(delta.Offer.SubjectIds, StringComparer.Ordinal)) return false;
+            lock (_gate)
+            {
+                var existing = _ledger.AllEntries.FirstOrDefault(x => x.Predecessor.HasValue &&
+                    x.Predecessor.Value.Equals(delta.Offer));
+                if (existing != null) return existing.Occurrence.Equals(delta.Preparation) &&
+                    existing.HostOrderKey.Equals(delta.Order);
+                var offers = _ledger.AllEntries.Where(x => x.Occurrence.Equals(delta.Offer)).ToArray();
+                if (offers.Length == 0 || delta.Order.CampaignOrdinal > delta.TombstoneRevision) return false;
+                ulong localRevision = checked(Math.Max(_ledger.CommittedRevision, delta.TombstoneRevision) + 1);
+                var terminal = offers.Select(x => new InboxEntry(x.Occurrence, x.Membership, InboxLifecycle.Removed,
+                    x.Choice, Math.Max(x.LifecycleRevision + 1, delta.TombstoneRevision), delta.TombstoneRevision,
+                    x.HostOrderKey, terminalReason: delta.Reason, supersededBy: delta.Preparation,
+                    predecessor: x.Predecessor));
+                var fresh = _ledger.Members.Keys.Select(m => new InboxEntry(delta.Preparation, m,
+                    InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, delta.Order, predecessor: delta.Offer));
+                var next = new HostLedger(_ledger.AllEntries.Where(x => !x.Occurrence.Equals(delta.Offer))
+                    .Concat(terminal).Concat(fresh), localRevision, _ledger.Members);
+                return CommitWithCanonical(_ledger, next, null);
+            }
+        }
 
         internal bool CommitWithCanonical(HostLedger expected, HostLedger next, DurableInboxCanonicalState nextCanonical)
         {
@@ -233,6 +300,21 @@ namespace Multiplayer.Network.Sync
             { if (!_effectGates.TryGetValue(occurrence, out gate)) _effectGates.Add(occurrence, gate = new object()); }
             lock (gate) return action();
         }
+
+        internal T WithTransitionGate<T>(OccurrenceId occurrence, Func<T> action)
+        {
+            object gate; lock (_gate)
+            { if (!_transitionGates.TryGetValue(occurrence, out gate)) _transitionGates.Add(occurrence, gate = new object()); }
+            lock (gate) return action();
+        }
+        internal bool MarkTransitionDelta(OccurrenceId occurrence)
+        { lock (_gate) return _transitionDeltaEmitted.Add(occurrence); }
+        internal bool HasTransitionDelta(OccurrenceId occurrence)
+        { lock (_gate) return _transitionDeltaEmitted.Contains(occurrence); }
+        internal bool IsTransitionTeardownComplete(OccurrenceId occurrence)
+        { lock (_gate) return _transitionTeardownComplete.Contains(occurrence); }
+        internal void MarkTransitionTeardownComplete(OccurrenceId occurrence)
+        { lock (_gate) _transitionTeardownComplete.Add(occurrence); }
 
         internal bool RollbackUncheckpointedDecision(SharedChoiceDecision pending)
         {

@@ -255,6 +255,10 @@ namespace Multiplayer.Network.Sync
             "Modal:" + ModalType.InfestedHavenBrief,
         };
 
+        internal static bool IsMissionOfferOccurrence(OccurrenceId occurrence) =>
+            PriorityOccurrenceFamilies.Contains(occurrence.EventId) &&
+            occurrence.EventId.StartsWith("Modal:", StringComparison.Ordinal);
+
         internal static OccurrenceId? MatchPriorityOccurrence(DurableInboxStore store, string family,
             string trigger, string stableSubject)
         {

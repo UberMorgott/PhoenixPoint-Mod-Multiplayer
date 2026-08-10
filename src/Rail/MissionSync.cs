@@ -6,6 +6,7 @@ using System.Reflection;
 using Base.Core;
 using Base.Defs;
 using HarmonyLib;
+using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Common.Core;
 using PhoenixPoint.Common.Levels.Missions;
 using PhoenixPoint.Common.Utils;
@@ -56,6 +57,113 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     public static class MissionSync
     {
+        internal static bool StartDurableOffer(DurableInboxStore store, OccurrenceId offer,
+            OccurrenceId preparation, Func<HostLedger, bool> validate, out string refusal)
+        {
+            var engine = new DurableMissionOfferEngine(store, delta =>
+            {
+                BroadcastDeploymentTransition(delta);
+                OpenUiRepaint.MarkDirty();
+            });
+            return engine.TryStart(offer, preparation, validate, out refusal);
+        }
+
+        internal static void BroadcastDeploymentTransition(DeploymentTransitionDelta delta)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, SyncProtocol.EncodeEnvelope(
+                SurfaceIds.GeoWindowIntent, SyncKind.StateDelta, DurableInboxCodec.EncodeDeploymentTransition(delta))));
+        }
+
+        internal static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
+        {
+            if (surfaceId != SurfaceIds.GeoWindowIntent || payload == null || payload.Length == 0 ||
+                payload[0] != DurableInboxCodec.DeploymentTransitionOp) return false;
+            DeploymentTransitionDelta delta; string decodeRefusal;
+            if (!DurableInboxCodec.TryDecodeDeploymentTransition(payload, out delta, out decodeRefusal)) return false;
+            if (engine == null || engine.IsHost || engine.Session == null ||
+                !IsAuthoritativeTransitionSender(engine.Session.HostPeerId, senderPeerId)) return true;
+            var store = DurableInboxSaveBridge.ActiveStore; if (store == null) return true;
+            if (store.InstallDeploymentTransition(delta))
+            {
+                string refusal;
+                if (store.AuthorizeCarrierRemoval(delta.Offer, delta.Reason, delta.TombstoneRevision, out refusal))
+                    store.Carriers.RemoveAll(delta.Offer, delta.Reason, out refusal);
+                OpenUiRepaint.MarkDirty();
+            }
+            return true;
+        }
+        internal static bool IsAuthoritativeTransitionSender(ulong? hostPeerId, ulong senderPeerId) =>
+            hostPeerId.HasValue && hostPeerId.Value == senderPeerId;
+
+        private static void WriteOccurrence(BinaryWriter w, OccurrenceId o)
+        { WriteBounded(w,o.EventId); WriteBounded(w,o.TriggerId); if(o.SubjectIds.Count>1024)throw new InvalidDataException();
+          w.Write((ushort)o.SubjectIds.Count); foreach (var s in o.SubjectIds) WriteBounded(w,s); }
+        private static OccurrenceId ReadOccurrence(BinaryReader r)
+        { string e=ReadBounded(r), t=ReadBounded(r); int n=r.ReadUInt16(); if(n<=0||n>1024) throw new InvalidDataException();
+          var s=new string[n]; for(int i=0;i<n;i++) s[i]=ReadBounded(r); return new OccurrenceId(e,t,s); }
+        private static void WriteBounded(BinaryWriter w,string value)
+        { var bytes=new System.Text.UTF8Encoding(false,true).GetBytes(value??""); if(bytes.Length==0||bytes.Length>4096)throw new InvalidDataException();
+          w.Write((ushort)bytes.Length);w.Write(bytes); }
+        private static string ReadBounded(BinaryReader r)
+        { int n=r.ReadUInt16();if(n<=0||n>4096)throw new InvalidDataException("invalid bounded string");var b=r.ReadBytes(n);
+          if(b.Length!=n)throw new EndOfStreamException();return new System.Text.UTF8Encoding(false,true).GetString(b); }
+
+        internal static bool TryResolveDurableMissionOffer(GeoMission mission, out DurableInboxStore store,
+            out MembershipId member, out OccurrenceId offer)
+        {
+            store = DurableInboxSaveBridge.ActiveStore; member = default(MembershipId); offer = default(OccurrenceId);
+            if (store == null || mission == null || !WindowQueueSync.TryLocalMember(store, out member)) return false;
+            var localMember = member;
+            string subject = DurableWindowRegistry.StableMissionSubject(mission);
+            if (string.IsNullOrEmpty(subject)) return false;
+            var matches = store.Ledger.AllEntries.Where(x => x.Membership.Equals(localMember) &&
+                x.Lifecycle != InboxLifecycle.Removed && DurableWindowRegistry.IsMissionOfferOccurrence(x.Occurrence) &&
+                x.Occurrence.SubjectIds.Contains(subject, StringComparer.Ordinal)).Select(x => x.Occurrence).Distinct().ToArray();
+            if (matches.Length != 1) return false; offer = matches[0]; return true;
+        }
+
+        internal static bool HandleDurableMissionOfferAnswer(ModalType modalType, ModalResult result,
+            GeoMission mission)
+        {
+            DurableInboxStore store; MembershipId member; OccurrenceId offer;
+            if (!GeoWindowCoverage.IsPerPeerAnswer(modalType, mission) ||
+                !TryResolveDurableMissionOffer(mission, out store, out member, out offer)) return false;
+            return HandleDurableMissionOfferAnswer(store, member, offer, result, mission);
+        }
+
+        internal static bool HandleDurableMissionOfferAnswer(DurableInboxStore store, MembershipId member,
+            OccurrenceId offer, ModalResult result, GeoMission mission)
+        {
+            if (store == null || mission == null || !DurableWindowRegistry.IsMissionOfferOccurrence(offer) ||
+                !store.Ledger.AllEntries.Any(x => x.Membership.Equals(member) && x.Occurrence.Equals(offer))) return false;
+            if (result != ModalResult.Confirm)
+                return WindowQueueSync.CancelDurableMissionOffer(store, member, offer);
+            var network = NetworkEngine.Instance;
+            if (network != null && network.IsActiveSession && !network.IsHost)
+            {
+                IntentRail.Send(SurfaceIds.GeoMissionIntent, OpStartDurableOffer,
+                    "start durable offer " + offer.TriggerId, w =>
+                    { WriteOccurrence(w, offer); WriteBounded(w,member.PlayerGuid); w.Write(member.Epoch); });
+                return true;
+            }
+            var preparation = new OccurrenceId("DeploymentPreparing", "deployment:" + offer.TriggerId,
+                offer.SubjectIds);
+            string refusal;
+            return StartDurableOffer(store, offer, preparation, ledger =>
+                ReferenceEquals(mission.Site?.ActiveMission, mission) &&
+                offer.SubjectIds.Contains(DurableWindowRegistry.StableMissionSubject(mission), StringComparer.Ordinal),
+                out refusal);
+        }
+
+        internal static bool RunNativeMissionOfferAnswer(bool inSession, bool perPeerClass, bool isConfirm,
+            bool durableResolved, Func<bool> durableAction)
+        {
+            if (!inSession || !perPeerClass) return true;
+            if (durableResolved && durableAction != null && durableAction()) return false;
+            return isConfirm; // legacy/unresolved Confirm keeps native LaunchMission; Cancel keeps the prior local-only gate
+        }
         internal const byte OpLaunch = 1;  // [siteRef][n:u16][charRef × n]
 
         /// <summary>The countdown veto (<see cref="DeployCountdown"/>), on the surface the Deploy press
@@ -72,6 +180,7 @@ namespace Multiplayer.Network.Sync
         /// Body <c>[siteRef][missionTypeDef guid][zoneIndex:i16]</c>; the zone is an INDEX into
         /// <c>haven.Zones</c> because a haven zone has no rail identity of its own.</summary>
         internal const byte OpPrepareHaven = 3;
+        internal const byte OpStartDurableOffer = 4;
 
         internal static void RegisterIntents()
         {
@@ -81,8 +190,54 @@ namespace Multiplayer.Network.Sync
                     [OpLaunch] = HandleLaunch,
                     [OpCancelLaunch] = DeployCountdown.HandleCancel,
                     [OpPrepareHaven] = HandlePrepareHaven,
+                    [OpStartDurableOffer] = HandleStartDurableOffer,
                 });
         }
+
+        private static void HandleStartDurableOffer(NetworkEngine engine, ulong senderPeerId, uint nonce,
+            byte op, BinaryReader r)
+        {
+            OccurrenceId offer; MembershipId member;
+            try { offer = ReadOccurrence(r); member = new MembershipId(ReadBounded(r), r.ReadUInt64());
+                if (r.BaseStream.Position != r.BaseStream.Length) throw new InvalidDataException("trailing durable Start bytes"); }
+            catch (Exception ex) { RejectDurableStart(senderPeerId, null, "malformed bounded request: " + ex.Message); return; }
+            var store = DurableInboxSaveBridge.ActiveStore;
+            ClientInfo sender;
+            string siteRef = offer.SubjectIds.FirstOrDefault(x => x.StartsWith("S#", StringComparison.Ordinal));
+            if (engine?.Session == null || !engine.Session.Clients.TryGetValue(senderPeerId, out sender))
+            { RejectDurableStart(senderPeerId, siteRef, "sender is not an authenticated session client"); return; }
+            if (!string.Equals(sender.PlayerGuid.ToString("D"), member.PlayerGuid, StringComparison.OrdinalIgnoreCase))
+            { RejectDurableStart(senderPeerId, siteRef, "membership identity does not belong to the sender"); return; }
+            if (store == null) { RejectDurableStart(senderPeerId, siteRef, "durable inbox store is unavailable"); return; }
+            if (!store.Ledger.Members.ContainsKey(member))
+            { RejectDurableStart(senderPeerId, siteRef, "membership epoch is not enrolled"); return; }
+            if (!store.Ledger.AllEntries.Any(x => x.Occurrence.Equals(offer) && x.Membership.Equals(member)))
+            { RejectDurableStart(senderPeerId, siteRef, "offer entitlement is absent"); return; }
+            var geo = GenericApplier.StartedGeoLevel();
+            if (geo == null) { RejectDurableStart(senderPeerId, siteRef, "host geoscape is unavailable"); return; }
+            var site = IdentityResolver.Resolve(geo, siteRef, null) as GeoSite;
+            if (site == null) { RejectDurableStart(senderPeerId, siteRef, "offer site identity does not resolve"); return; }
+            var mission = site.ActiveMission;
+            if (mission == null) { RejectDurableStart(senderPeerId, siteRef, "site has no active mission"); return; }
+            string stable = DurableWindowRegistry.StableMissionSubject(mission);
+            if (string.IsNullOrEmpty(stable) || !offer.SubjectIds.Contains(stable, StringComparer.Ordinal))
+            { RejectDurableStart(senderPeerId, siteRef, "active mission identity does not match the offer"); return; }
+            var preparation = new OccurrenceId("DeploymentPreparing", "deployment:" + offer.TriggerId, offer.SubjectIds);
+            string refusal; if (!StartDurableOffer(store, offer, preparation, ledger =>
+                ReferenceEquals(site.ActiveMission, mission) && offer.SubjectIds.Contains(stable, StringComparer.Ordinal), out refusal))
+                RejectDurableStart(senderPeerId, siteRef, "persistence/transition refused: " + (refusal ?? "unknown"));
+        }
+
+        internal static string DurableStartRefusalText(string why)
+        {
+            var text = "durable mission Start refused: " + (string.IsNullOrWhiteSpace(why) ? "unspecified" : why);
+            return text.Length <= 512 ? text : text.Substring(0, 512);
+        }
+        internal static void EmitDurableStartRefusal(string why, Action<string, bool> emit)
+        { if (emit == null) throw new ArgumentNullException(nameof(emit)); emit(DurableStartRefusalText(why), true); }
+        private static void RejectDurableStart(ulong peer, string siteRef, string why) =>
+            IntentRail.Reject(SurfaceIds.GeoMissionIntent, peer, DurableStartRefusalText(why), true,
+                string.IsNullOrEmpty(siteRef) ? null : siteRef);
 
         private static GeoLevelController GeoLevel()
         {
@@ -1265,10 +1420,20 @@ namespace Multiplayer.Network.Sync
         {
             var engine = NetworkEngine.Instance;
             bool inSession = engine != null && engine.IsActiveSession;
-            if (!inSession || result == ModalResult.Confirm) return true;   // solo, or the launching gesture
+            if (!inSession) return true;
             try
             {
-                if (Runs(true, GeoWindowCoverage.IsPerPeerAnswer(modalType, modalData), false)) return true;
+                bool perPeer = GeoWindowCoverage.IsPerPeerAnswer(modalType, modalData);
+                if (!perPeer) return true;
+                // Both native arms are suppressed for a durable offer. Confirm may reach LaunchMission only
+                // after the successor journal exists; Cancel is only this member's lifecycle and never the
+                // native GeoMission.Cancel at ModalResultCallback:825.
+                bool resolved = MissionSync.TryResolveDurableMissionOffer(modalData as GeoMission,
+                    out var durableStore, out var durableMember, out var durableOffer);
+                if (MissionSync.RunNativeMissionOfferAnswer(true, true, result == ModalResult.Confirm, resolved, () =>
+                    MissionSync.HandleDurableMissionOfferAnswer(durableStore, durableMember, durableOffer,
+                        result, modalData as GeoMission))) return true;
+                if (Runs(true, perPeer, false)) return true;
                 if (_logged.Add(modalType + ":" + result))
                     Debug.Log("[MP][mission] '" + modalType + "' answered " + result + " on THIS PEER ONLY — the " +
                               "game's own arm here is GeoMission.Cancel (ModalResultCallback:825-826), which " +

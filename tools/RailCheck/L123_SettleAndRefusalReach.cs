@@ -255,6 +255,10 @@ namespace RailCheck
                 "Multiplayer.Tactical.TacticalTurnSync.HandleEndTurn",
                 "Multiplayer.Tactical.TacticalTurnSync.HandleLeaveBattle",
                 "Multiplayer.Network.Sync.MissionSync.Reject",
+                // DWI-10: a peer pressed a live Start button, but host-serialized membership/offer/mission
+                // identity or durable persistence refused it. Every case is co-op/protocol-only and the
+                // exact offer carrier deliberately stays open for retry, so without this line the click is dead.
+                "Multiplayer.Network.Sync.MissionSync.RejectDurableStart",
                 "Multiplayer.Network.Sync.EventSync.HandleAnswer",
                 // L146: two peers commanded ONE soldier and this peer lost the race. Purely co-op-invented —
                 // single player cannot produce a second commander, so vanilla has no control to grey and the

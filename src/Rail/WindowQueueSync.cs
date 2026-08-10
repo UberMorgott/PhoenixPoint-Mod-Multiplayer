@@ -75,6 +75,36 @@ namespace Multiplayer.Network.Sync
     /// </summary>
     internal static class WindowQueueSync
     {
+        internal static bool CancelDurableMissionOffer(DurableInboxStore store,
+            MembershipId member, OccurrenceId offer)
+        {
+            // Lifecycle-only by design.  This seam owns no GeoMission and therefore cannot accidentally
+            // reach GeoMission.Cancel or mutate another member's entitlement.
+            return new DurableInboxEngine(store, member, new NoPresentationCarrier())
+                .CancelMissionOfferLocal(offer);
+        }
+        internal static bool DurableMissionOfferBindingMatches(DurableInboxStore store, MembershipId member,
+            OccurrenceId occurrence, string stableMissionSubject) => store != null &&
+            DurableWindowRegistry.IsMissionOfferOccurrence(occurrence) && !string.IsNullOrEmpty(stableMissionSubject) &&
+            occurrence.SubjectIds.Contains(stableMissionSubject, StringComparer.Ordinal) &&
+            store.Ledger.AllEntries.Any(x => x.Membership.Equals(member) && x.Occurrence.Equals(occurrence) &&
+                x.Lifecycle != InboxLifecycle.Removed);
+        internal static bool FinishDurableMissionOfferAnswer(ModalResult result, Func<bool> durableAction,
+            Action closeWithoutCallback)
+        {
+            bool accepted = durableAction != null && durableAction();
+            if (result != ModalResult.Confirm && accepted && closeWithoutCallback != null) closeWithoutCallback();
+            return false; // exact durable Confirm never reaches LaunchMission before successor persistence
+        }
+
+        private sealed class NoPresentationCarrier : IDurableWindowCarrierAdapter
+        {
+            public InboxWindowCheckpoint Capture(OccurrenceId occurrence) => null;
+            public bool Present(OccurrenceId occurrence) => false;
+            public bool Restore(OccurrenceId occurrence, InboxWindowCheckpoint checkpoint) => false;
+            public void Abandon(OccurrenceId occurrence) { }
+            public void FinalizeRestore(OccurrenceId occurrence) { }
+        }
         [ThreadStatic] private static bool _durableSilentExit;
         [ThreadStatic] private static bool _durableRestoreActive;
         [ThreadStatic] private static bool _durableEnginePresentation;
@@ -286,7 +316,7 @@ namespace Multiplayer.Network.Sync
                 .ConfirmNativePresented(occurrence);
         }
 
-        private static bool TryLocalMember(DurableInboxStore store, out MembershipId member)
+        internal static bool TryLocalMember(DurableInboxStore store, out MembershipId member)
         {
             string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
             var found = store.Ledger.Members.Keys.Where(x => string.Equals(x.PlayerGuid, local,
@@ -787,7 +817,34 @@ namespace Multiplayer.Network.Sync
         [HarmonyPatch(typeof(UIStateGeoModal), nameof(UIStateGeoModal.FinishDialog))]
         internal static class FinishDialogAnswer
         {
-            private static void Prefix(ModalResult res) => _pendingResult = (byte)res;
+            private static bool Prefix(UIStateGeoModal __instance, ModalResult res)
+            {
+                _pendingResult = (byte)res;
+                var view = GenericApplier.StartedGeoLevel()?.View;
+                var query = view == null ? null : SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
+                var request = CurrentRequestField?.GetValue(query) as GeoscapeViewStateSwitchRequest;
+                OccurrenceId occurrence;
+                var store = DurableInboxSaveBridge.ActiveStore; MembershipId member;
+                var mission = __instance?.ModalData as GeoMission;
+                if (!ReferenceEquals(request?.State, __instance) || !WindowOrder.TryGetDurable(request, out occurrence) ||
+                    store == null || !TryLocalMember(store, out member) || mission == null ||
+                    !DurableMissionOfferBindingMatches(store, member, occurrence,
+                        DurableWindowRegistry.StableMissionSubject(mission)))
+                    return true;
+                bool accepted = false;
+                FinishDurableMissionOfferAnswer(res, () => accepted = MissionSync.HandleDurableMissionOfferAnswer(
+                    store, member, occurrence, res, mission), () =>
+                    {
+                        _durableSilentExit = true;
+                        try { view.FinishQueriedState(); }
+                        finally { _durableSilentExit = false; }
+                        UntrackDurableNativeCarrier(request, occurrence);
+                    });
+                _pendingResult = ResultNone;
+                if (!accepted) Debug.LogWarning("[MP][inbox] durable mission offer answer retained for retry: " +
+                    occurrence.TriggerId + " result=" + res);
+                return false;
+            }
         }
 
         /// <summary>Half two: the SEND, at the mirror image of the host's own chokepoint —
@@ -802,7 +859,7 @@ namespace Multiplayer.Network.Sync
         internal static class FinishQueriedStateCapture
         {
             private static void Prefix(GeoscapeView __instance)
-            { MarkDurableDismissed(__instance); SendAdvance(__instance); }
+            { if (!_durableSilentExit) { MarkDurableDismissed(__instance); SendAdvance(__instance); } }
         }
 
         /// <summary>Half three, and the ONLY blocking seam in this family: the asset-deployment prompt's one

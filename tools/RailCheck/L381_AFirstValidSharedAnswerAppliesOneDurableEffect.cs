@@ -297,7 +297,7 @@ namespace RailCheck
                 pre381.CheckpointId);
             var preRoot = Mark(saveStore.CreateSaveRoot(), pre381, 0, computeCrc);
             var postRoot = Mark(saveStore.CreateSaveRoot(), post381, 9, computeCrc);
-            var schema6 = saveStore.CreateSaveRoot(); schema6.Schema = 6;
+            var schema6 = DurableInboxSaveCodec.CreateSchema6ForMigrationTest(saveStore.Ledger);
             schema6.Crc = (uint)computeCrc.Invoke(null, new object[] { schema6 });
             if (!DurableInboxSaveCodec.TryRestore(schema6, null, out malformedRestore, out malformedRefusal))
                 yield return "L381 schema6-immediate-predecessor-save-was-not-migratable";

@@ -83,6 +83,7 @@ namespace Multiplayer.Network.Sync
                 // whether MpDiag is on or off — an unclaimed surface would fall through to the value rail.
                 // Client-side inside, and it applies nothing: it logs one [MP][clockphase] line.
                 || ClockPhaseDiag.HandleInbound(_engine, peer, surfaceId, payload)
+                || MissionSync.HandleInbound(_engine, peer, surfaceId, payload)
                 || IntentRail.HandleInbound(_engine, peer, surfaceId, payload)
                 || GenericApplier.HandleInbound(_engine, peer, surfaceId, payload);
         }

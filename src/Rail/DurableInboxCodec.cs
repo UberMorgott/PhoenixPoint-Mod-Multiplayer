@@ -9,10 +9,13 @@ namespace Multiplayer.Network.Sync
 {
     internal static class DurableInboxCodec
     {
-        private const byte Schema = 4;
+        private const byte Schema = 5;
         private const uint LedgerMagic = 0x34495744; // DWI4, cannot alias the first four bytes of a framed ledger
         private const uint LegacyLedgerMagic = 0x33495744; // DWI3
         private const uint LedgerTail = 0xCCA6A8BB;
+        internal const byte DeploymentTransitionOp = 0x44;
+        private const byte DeploymentTransitionSchema = 1;
+        private const uint DeploymentTransitionTail = 0x44915AC3;
         private const int MaxStringBytes = 4096;
         private const int MaxCollection = 1024;
         private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
@@ -147,6 +150,10 @@ namespace Multiplayer.Network.Sync
                         writer.Write(entry.Checkpoint.NativePriority);
                         WriteLooseString(writer, entry.Checkpoint.NativeDataIdentity);
                     }
+                    writer.Write(entry.SupersededBy.HasValue);
+                    if (entry.SupersededBy.HasValue) WriteOccurrence(writer, entry.SupersededBy.Value);
+                    writer.Write(entry.Predecessor.HasValue);
+                    if (entry.Predecessor.HasValue) WriteOccurrence(writer, entry.Predecessor.Value);
                 }
                 body = stream.ToArray();
             }
@@ -155,6 +162,39 @@ namespace Multiplayer.Network.Sync
                 writer.Write(LedgerMagic); writer.Write(Schema); writer.Write(body.Length); writer.Write(body);
                 writer.Write(Crc32.Compute(body)); writer.Write(LedgerTail); return framed.ToArray();
             }
+        }
+
+        internal static byte[] EncodeDeploymentTransition(DeploymentTransitionDelta delta)
+        {
+            if (delta == null) throw new ArgumentNullException(nameof(delta)); byte[] body;
+            using (var ms=new MemoryStream()) using(var w=new BinaryWriter(ms,StrictUtf8))
+            { WriteOccurrence(w,delta.Offer); WriteOccurrence(w,delta.Preparation); w.Write(delta.Order.CampaignOrdinal);
+              WriteString(w,delta.Order.TriggerId); w.Write(delta.TombstoneRevision); w.Write((byte)delta.Reason); body=ms.ToArray(); }
+            if(body.Length>ushort.MaxValue) throw new ArgumentOutOfRangeException(nameof(delta),"deployment transition exceeds frame bound");
+            using(var ms=new MemoryStream()) using(var w=new BinaryWriter(ms,StrictUtf8))
+            { w.Write(DeploymentTransitionOp); w.Write(DeploymentTransitionSchema); w.Write((ushort)body.Length);
+              w.Write(body); w.Write(Crc32.Compute(body)); w.Write(DeploymentTransitionTail); return ms.ToArray(); }
+        }
+
+        internal static bool TryDecodeDeploymentTransition(byte[] payload, out DeploymentTransitionDelta delta,
+            out string refusal)
+        {
+            delta=null; refusal=null;
+            try { using(var ms=new MemoryStream(payload??Array.Empty<byte>(),false)) using(var r=new BinaryReader(ms,StrictUtf8))
+            {
+                if(r.ReadByte()!=DeploymentTransitionOp) throw new InvalidDataException("not a deployment transition op");
+                if(r.ReadByte()!=DeploymentTransitionSchema) throw new InvalidDataException("unknown deployment transition schema");
+                int length=r.ReadUInt16(); if(length<=0||length>ushort.MaxValue||ms.Length-ms.Position!=length+8)
+                    throw new InvalidDataException("invalid deployment transition frame length");
+                var body=r.ReadBytes(length); if(body.Length!=length||r.ReadUInt32()!=Crc32.Compute(body)||
+                    r.ReadUInt32()!=DeploymentTransitionTail||ms.Position!=ms.Length) throw new InvalidDataException("invalid deployment transition frame");
+                using(var bs=new MemoryStream(body,false)) using(var br=new BinaryReader(bs,StrictUtf8))
+                { var offer=ReadOccurrence(br); var prep=ReadOccurrence(br); var order=new HostOrderKey(br.ReadUInt64(),ReadString(br));
+                  ulong revision=br.ReadUInt64(); byte raw=br.ReadByte(); if(!Enum.IsDefined(typeof(TerminalReason),raw)||bs.Position!=bs.Length)
+                    throw new InvalidDataException("invalid deployment transition body");
+                  delta=new DeploymentTransitionDelta(offer,prep,order,revision,(TerminalReason)raw); return true; }
+            }} catch(Exception ex) when(ex is ArgumentException||ex is InvalidDataException||ex is EndOfStreamException||ex is IOException||ex is OverflowException)
+            { refusal=ex.Message; return false; }
         }
 
         internal static bool TryDecodeLedger(byte[] payload, out HostLedger ledger, out string refusal)
@@ -173,7 +213,7 @@ namespace Multiplayer.Network.Sync
                     if (framed)
                     {
                         ledgerSchema = payload[4];
-                        if (ledgerSchema != 3 && ledgerSchema != Schema)
+                        if (ledgerSchema != 3 && ledgerSchema != 4 && ledgerSchema != Schema)
                             throw new InvalidDataException("unknown ledger schema");
                         bodyPayload = new byte[length]; Buffer.BlockCopy(payload, 9, bodyPayload, 0, length);
                         if (BitConverter.ToUInt32(payload, 9 + length) != Crc32.Compute(bodyPayload))
@@ -231,9 +271,16 @@ namespace Multiplayer.Network.Sync
                                     ReadLooseString(reader), ReadLooseString(reader), reader.ReadInt32(), ReadLooseString(reader))
                                 : new InboxWindowCheckpoint(phase, selection, read);
                         }
+                        OccurrenceId? supersededBy = null, predecessor = null;
+                        if (ledgerSchema >= 5)
+                        {
+                            if (reader.ReadBoolean()) supersededBy = ReadOccurrence(reader);
+                            if (reader.ReadBoolean()) predecessor = ReadOccurrence(reader);
+                        }
                         entries.Add(new InboxEntry(occurrence, membership,
                             (InboxLifecycle)rawLifecycle, choice, lifecycleRevision, tombstoneRevision,
-                            new HostOrderKey(ordinal, orderTrigger), reason, checkpoint, terminalReason));
+                            new HostOrderKey(ordinal, orderTrigger), reason, checkpoint, terminalReason,
+                            supersededBy, predecessor));
                     }
                     if (stream.Position != stream.Length) throw new InvalidDataException("trailing ledger bytes");
                     ledger = ledgerSchema < Schema
