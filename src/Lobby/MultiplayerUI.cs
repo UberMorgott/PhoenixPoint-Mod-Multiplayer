@@ -444,7 +444,10 @@ namespace Multiplayer.UI
         internal void OnGateJoinFriend(ulong lobbyId)
         {
             _gate?.HideForNativeScreen();
-            SteamInvite.JoinFriendLobby(lobbyId);
+            // Through SteamProbe, never SteamInvite directly: naming that type in THIS method's body is
+            // what fails to JIT on a GOG/Epic box, and the throw lands at OnGateJoinFriend's call site
+            // where no try of ours exists (SteamInvite.cs:393-408).
+            SteamProbe.JoinFriendLobby(lobbyId);
         }
 
         /// <summary>
@@ -468,7 +471,7 @@ namespace Multiplayer.UI
         /// </summary>
         internal string JoinPrefill()
         {
-            var clip = GUIUtility.systemCopyBuffer;
+            var clip = ClipboardText();
             // All THREE published forms, because the host publishes whichever is shortest for what it
             // has (GetSessionInviteCode): 8-symbol InviteCode, 10-symbol ConnectCode, 13/19 UnifiedCode.
             // Miss one and that host's code falls through to the 127.0.0.1 default the joiner must delete.
@@ -513,8 +516,15 @@ namespace Multiplayer.UI
             NetworkEngine.Instance.StartHost(DefaultDirectPort);
             // Publish a friends-only Steam lobby advertising our SteamID64 so "Invite via Steam" (and the
             // friends-list Join Game) work. Fire-and-forget: the lobby is ready a beat later (reported via
-            // SteamInvite.Report); the invite button below no-ops loudly until then. Harmless off Steam.
-            SteamInvite.HostPublish();
+            // SteamProbe.Report); the invite button below no-ops loudly until then. Harmless off Steam.
+            //
+            // THROUGH SteamProbe, AND THAT IS WHY HOSTING WORKS OFF STEAM AT ALL. This method used to name
+            // SteamInvite here in its own body. SteamInvite holds Lobby? statics, so where Facepunch is
+            // absent (GOG/Epic) the type cannot load, the JIT fails while compiling THIS method, and the
+            // throw surfaces at StartHostAndOpenLobby's call site — before NetworkEngine.Create() above ever
+            // ran. CREATE SESSION did nothing whatsoever for every non-Steam player. The shim keeps the name
+            // out of this body (SteamInvite.cs:393-408, RailCheck L155 arm (g)).
+            SteamProbe.HostPublish();
             // Steam-free reachability: ask the router (UPnP) to forward TCP+UDP 14242 to this PC so a
             // GOG/Epic host is directly joinable across the internet. Fire-and-forget off the main
             // thread; the unified invite code prefers the resulting WAN endpoint once it lands (rail
@@ -617,48 +627,8 @@ namespace Multiplayer.UI
             // success so no mid-start join can race in. NO ready quorum — see LobbyController.
             RefreshGateFacts(out int clientCount, out bool saveChosen);
 
-            // Shared reopen path: the gate passed and we LOCKED the lobby, but the start could not
-            // proceed (HostStartSession returned false OR threw in its synchronous portion —
-            // timing.Start / first MoveNext of HostSerializeAndSendCrt). Reopen instead of leaving the
-            // lobby permanently dead-locked: unlock the FSM, undo the visible commit side effects
-            // (overlay + early curtain drop), re-show the lobby, and warn. The cached facts are intact,
-            // so the gate is satisfied again on reopen.
-            void ReopenAfterFailedStart()
-            {
-                _lobbyController.CancelStart();
-                // AND DROP THE HOST'S OWN READY. Without this the reopened lobby is instantly back in the
-                // state that armed the countdown — everybody ready, gate open — so it would re-arm, fail,
-                // and stack another warning box, forever. Same mechanism the cancel uses, same reason:
-                // the arm condition has to actually stop being true. The host re-readies when it has
-                // decided what to do about the failure.
-                NetworkEngine.Instance?.Session?.SetHostReady(false);
-                HideLoadOverlay();
-                LiftCurtainEarly();
-                // …and the clients we curtained at the press must come back with us: LiftCurtainEarly is the
-                // HOST's screen only, and no save transfer will ever start to lift theirs.
-                NetworkEngine.Instance?.SaveTransfer?.BroadcastLoadBoundaryAbort("host start failed");
-                var failBox = GameUtl.GetMessageBox();
-                if (failBox != null)
-                {
-                    _lobby?.HideForNativeScreen();
-                    failBox.ShowSimplePrompt("Failed to start session. Please try again.",
-                        MessageBoxIcon.Warning, MessageBoxButtons.OK,
-                        delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
-                }
-                else
-                {
-                    _lobby?.Show();
-                }
-            }
-
             if (_lobbyController.CommitStart())
             {
-                // THE ENTER HALF, at the seam where the boundary is DECIDED. DropCurtainEarly below is the
-                // HOST's own screen; on its own it is exactly the asymmetry the user reported — the host
-                // curtains at the press and every client keeps a live, clickable lobby until its first save
-                // byte lands. Broadcast-and-go: no ack, no quorum, the very next statement is our own load.
-                engine.SaveTransfer?.BroadcastLoadBoundaryBegin("lobby-play");
-                DropCurtainEarly();           // phase-1 looks like one seamless vanilla load
                 // NOTE: do NOT show the load overlay here — there is deliberately no show entry point.
                 // Its visibility is fully state-driven (LoadOverlayController.Update →
                 // LoadOverlayVisibility.ShouldShow) and gates on the NATIVE load-start (LoadPhaseStarted =
@@ -668,15 +638,28 @@ namespace Multiplayer.UI
                 bool started;
                 try
                 {
+                    // THE ENTER HALF, at the seam where the boundary is DECIDED. DropCurtainEarly below is
+                    // the HOST's own screen; on its own it is exactly the asymmetry the user reported — the
+                    // host curtains at the press and every client keeps a live, clickable lobby until its
+                    // first save byte lands. Broadcast-and-go: no ack, no quorum, the very next statement is
+                    // our own load.
+                    //
+                    // INSIDE THE TRY, and the ORDER IS UNCHANGED (L143 pins the announce order, not the
+                    // handler). These two ran AFTER CommitStart() locked the lobby but OUTSIDE this try, so
+                    // a throw from either escaped Update with State=Starting and IsLocked=true and
+                    // ReopenAfterFailedStart — sitting right below, written for exactly this — could never
+                    // be reached: the lobby was dead for the rest of the run.
+                    engine.SaveTransfer?.BroadcastLoadBoundaryBegin("lobby-play");
+                    DropCurtainEarly();           // phase-1 looks like one seamless vanilla load
                     started = engine.SaveTransfer?.HostStartSession(_pendingChosenSave) ?? false;
                 }
                 catch (System.Exception e)
                 {
-                    // The synchronous portion of HostStartSession threw AFTER the lobby was locked.
-                    // Without this the exception would escape with the gate stuck false forever → dead
-                    // Play button. Run the EXACT SAME reopen sequence as the started==false branch, log
-                    // the cause, and swallow (the user is informed via the same warning box).
-                    Debug.LogError("[Multiplayer] HostStartSession threw during start: " + e);
+                    // The synchronous portion of the start threw AFTER the lobby was locked. Without this
+                    // the exception would escape with the gate stuck false forever → dead lobby. Run the
+                    // EXACT SAME reopen sequence as the started==false branch, log the cause, and swallow
+                    // (the user is informed via the same warning box).
+                    Debug.LogError("[Multiplayer] the host start threw after the lobby locked: " + e);
                     ReopenAfterFailedStart();
                     return;
                 }
@@ -702,6 +685,47 @@ namespace Multiplayer.UI
                 mb.ShowSimplePrompt(why,
                     MessageBoxIcon.Warning, MessageBoxButtons.OK,
                     delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+            }
+        }
+
+        /// <summary>
+        /// Shared reopen path: the gate passed and we LOCKED the lobby, but the start could not proceed
+        /// (HostStartSession returned false, or anything in the locked window threw). Reopen instead of
+        /// leaving the lobby permanently dead-locked: unlock the FSM, undo the visible commit side effects
+        /// (overlay + early curtain drop), re-show the lobby, and warn. The cached facts are intact, so the
+        /// gate is satisfied again on reopen.
+        ///
+        /// A METHOD AND NOT A LOCAL FUNCTION, because the OTHER caller cannot reach a local one: the
+        /// countdown dispatch in <c>Update</c> is what invokes the start nowadays, and a throw that got past
+        /// <c>OnLobbyPlay</c> used to escape <c>Update</c> with the lobby locked and this recovery
+        /// unreachable. Idempotent — <c>LobbyController.CancelStart</c> no-ops outside Starting, and both
+        /// curtain halves are no-ops when nothing was dropped.
+        /// </summary>
+        private void ReopenAfterFailedStart()
+        {
+            _lobbyController.CancelStart();
+            // AND DROP THE HOST'S OWN READY. Without this the reopened lobby is instantly back in the
+            // state that armed the countdown — everybody ready, gate open — so it would re-arm, fail,
+            // and stack another warning box, forever. Same mechanism the cancel uses, same reason:
+            // the arm condition has to actually stop being true. The host re-readies when it has
+            // decided what to do about the failure.
+            NetworkEngine.Instance?.Session?.SetHostReady(false);
+            HideLoadOverlay();
+            LiftCurtainEarly();
+            // …and the clients we curtained at the press must come back with us: LiftCurtainEarly is the
+            // HOST's screen only, and no save transfer will ever start to lift theirs.
+            NetworkEngine.Instance?.SaveTransfer?.BroadcastLoadBoundaryAbort("host start failed");
+            var failBox = GameUtl.GetMessageBox();
+            if (failBox != null)
+            {
+                _lobby?.HideForNativeScreen();
+                failBox.ShowSimplePrompt("Failed to start session. Please try again.",
+                    MessageBoxIcon.Warning, MessageBoxButtons.OK,
+                    delegate (MessageBoxCallbackResult _) { _lobby?.Show(); }, this);
+            }
+            else
+            {
+                _lobby?.Show();
             }
         }
 
@@ -1156,6 +1180,19 @@ namespace Multiplayer.UI
                 return;
             }
 
+            // KILL A RUNNING SAVE COUNTDOWN BEFORE THE NATIVE SCREEN GOES UP. The gate above is
+            // ClientsReady, which deliberately excludes _saveChosen and _hostReady — so this button is
+            // pressable while a SAVE countdown is already ticking, and nothing here used to stop it.
+            // CanStart stayed true (the host's own screen does not change the roster), the clock reached
+            // zero underneath the native new-game screen, and OnLobbyPlay dropped the curtain and loaded
+            // the OLD SAVE while the host was picking difficulty for a fresh campaign. Cancel is the
+            // existing mechanism and it is NOT a wait on anybody (P13): it stops the clock and clears the
+            // host's OWN ready, which is what keeps the gate closed — and therefore the countdown
+            // un-armed — for as long as the host is off in the native flow. The host re-readies when it
+            // comes back. Every peer's open lobby repaints from the CLEAR this broadcasts
+            // (LobbyCountdown.Clear → 0x49 → HandleCountdown, drawn by CountdownPanel).
+            if (LobbyCountdown.Running) LobbyCountdown.Cancel(engine, null);
+
             _lobby?.HideForNativeScreen();
             if (!NewCampaignInterceptPatch.OpenNativeNewGameScreen())
             {
@@ -1439,11 +1476,32 @@ namespace Multiplayer.UI
         // a placeholder that resolved to nothing) must stay silent, and the early return here is the one
         // place that decides it. LobbyPanel.MakeCopyableValue is the only caller and the only builder of
         // copyable cells, so the ack it hangs off this bool covers every copy target there will be.
+        /// GUARDED, and at THIS one seam rather than at each caller: systemCopyBuffer is a native OLE call
+        /// and the copy is never worth taking a screen down for. A failure returns false, so a caller's
+        /// acknowledgement stays honest.
         public bool CopyToClipboard(string text)
         {
             if (string.IsNullOrEmpty(text)) return false;
-            GUIUtility.systemCopyBuffer = text;
+            try { GUIUtility.systemCopyBuffer = text; }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning("[Multiplayer] clipboard write failed (" + e.GetType().Name +
+                                 "); nothing was copied.");
+                return false;
+            }
             return true;
+        }
+
+        /// <summary>The read half of the same seam — a clipboard that throws must not take the join
+        /// prefill (and with it the whole join screen) down. Empty is the honest answer.</summary>
+        private static string ClipboardText()
+        {
+            try { return GUIUtility.systemCopyBuffer; }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning("[Multiplayer] clipboard read failed (" + e.GetType().Name + ").");
+                return "";
+            }
         }
 
         // ─── Invite code (host's own short join code) ──────────────────────
@@ -1461,7 +1519,7 @@ namespace Multiplayer.UI
         {
             var code = SteamProbe.LocalInviteCode();
             if (string.IsNullOrEmpty(code)) { ShowSteamNotAvailable(); return; }
-            GUIUtility.systemCopyBuffer = code;
+            CopyToClipboard(code);
             var mb = GameUtl.GetMessageBox();
             mb?.ShowSimplePrompt($"Invite code copied:\n{code}\n\nYour friend pastes it into JOIN A GAME.",
                 MessageBoxIcon.Information, MessageBoxButtons.OK, null, this);
@@ -1823,18 +1881,37 @@ namespace Multiplayer.UI
                 //
                 // The gate is re-projected from the live roster on every one of these frames, so the
                 // countdown dies the moment it closes (see LobbyCountdown.HostTick). HostTick self-guards
-                // on IsHost, and CanStart is false outside HostLobby / once the lobby locks, so this is a
-                // no-op everywhere except an open host lobby.
+                // on IsHost — but the ARGUMENT is evaluated BEFORE that guard can help, so the gate
+                // projection is short-circuited here instead: EvaluateStartGate → RefreshGateFacts →
+                // GetLobbyRoster → BuildPeerList allocates a fresh List EVERY FRAME, and without these two
+                // terms it did so on every client and all the way through the in-game session, where no
+                // lobby exists and the answer is a foregone false. HostTick still runs every frame (the
+                // NEW CAMPAIGN route does not read the gate at all and must keep ticking).
                 //
                 // TWO ROUTES, ONE CLOCK. The same five seconds also guard the NEW CAMPAIGN confirm, which
                 // the intercept REFUSES while this runs and which is re-issued here when it reaches zero
                 // (NewCampaignInterceptPatch.CommitNewCampaign — the only caller, and the only door to
                 // world creation). Which one fired rides the return value, so neither start grows a
                 // second path beside itself.
-                switch (LobbyCountdown.HostTick(engine, EvaluateStartGate()))
+                //
+                // GUARDED, because the two fires below are the whole start: a throw out of either used to
+                // escape Update with the lobby LOCKED (CommitStart already ran) and ReopenAfterFailedStart
+                // unreachable — a lobby that could never start again and never said why.
+                try
                 {
-                    case LobbyCountdown.Route.Save: OnLobbyPlay(); break;
-                    case LobbyCountdown.Route.NewCampaign: NewCampaignInterceptPatch.CommitNewCampaign(); break;
+                    bool startGate = engine.IsHost && _lobbyController.State == LobbyState.HostLobby
+                                     && EvaluateStartGate();
+                    switch (LobbyCountdown.HostTick(engine, startGate))
+                    {
+                        case LobbyCountdown.Route.Save: OnLobbyPlay(); break;
+                        case LobbyCountdown.Route.NewCampaign: NewCampaignInterceptPatch.CommitNewCampaign(); break;
+                    }
+                }
+                catch (System.Exception e)
+                {
+                    Debug.LogError("[Multiplayer] the lobby countdown dispatch threw — reopening the lobby " +
+                                   "rather than leaving it locked forever: " + e);
+                    ReopenAfterFailedStart();
                 }
 
                 if (_barStatusText != null)
@@ -1924,7 +2001,7 @@ namespace Multiplayer.UI
                 // Open Steam's invite dialog for the host lobby (published at host start). SteamInvite
                 // reports its own stage (overlay opened, or "lobby not ready — try again") so the button
                 // is never a silent no-op; when the friend accepts, the Steam-P2P join path auto-connects.
-                SteamInvite.OpenInviteOverlay();
+                SteamProbe.OpenInviteOverlay();
             }
             catch { ShowSteamNotAvailable(); }
         }
@@ -2065,7 +2142,7 @@ namespace Multiplayer.UI
                 if (engine != null)
                 {
                     var text = GetCopyableInfo(engine);
-                    GUIUtility.systemCopyBuffer = text;
+                    CopyToClipboard(text);
                     var mb = GameUtl.GetMessageBox();
                     if (mb != null)
                         mb.ShowSimplePrompt($"Copied to clipboard:\n{text}",

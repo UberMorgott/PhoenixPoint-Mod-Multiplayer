@@ -76,7 +76,7 @@ namespace RailCheck
     ///       yields exactly ONE attempt of its own transport, under BOTH origins. The origin is about a
     ///       unified code only; a legacy kind that started varying with it would mean a pasted bare Steam
     ///       id had lost its Steam attempt. The short code is NOT in this table — see (e).
-    ///   (e) <c>short-code-lost-its-tcp-leg</c> — a 10-symbol ConnectCode (<c>JoinKind.StunCode</c>) yields
+    ///   (e) <c>short-code-lost-its-tcp-leg</c> — an 11-symbol ConnectCode (<c>JoinKind.StunCode</c>) yields
     ///       [DirectIP, StunUDP] in that order, under BOTH origins. It names an ENDPOINT, and TCP-to-it
     ///       then punch-to-it is one technology, so this does not weaken (a)/(c). Until 2026-08-10 this arm
     ///       of <c>Build</c> emitted the punch ALONE — no TCP leg at all, so every pasted short code ran the
@@ -97,6 +97,21 @@ namespace RailCheck
     ///       twice itself — every member must resolve, and the IL walk must reach <c>RefreshControls</c>,
     ///       the call that CLOSES Refresh, so a reader that died early reports itself instead of
     ///       accusing the gate.
+    ///   (g) <c>entry-point-names-steaminvite</c> — the entry points must not be able to DIE on a machine
+    ///       with no Steam at all. <c>SteamInvite</c> holds <c>Lobby?</c> statics, so where Facepunch is
+    ///       absent (GOG / Epic) the type cannot load and the JIT fails while COMPILING any method that
+    ///       names it — surfacing at that method's CALL site, one frame up and outside its own try. On
+    ///       2026-08-10 <c>StartHostAndOpenLobby</c> still named <c>SteamInvite.HostPublish</c> in its own
+    ///       body, so on every non-Steam install CREATE SESSION threw before <c>NetworkEngine.Create()</c>
+    ///       ran: hosting was dead, and not one line of it was Steam's business.
+    ///       <c>OnGateJoinFriend</c> and the invite-overlay button had the same shape. So the rule, pinned
+    ///       here by IL: NO method of <c>MultiplayerUI</c> may reference a <c>SteamInvite</c> member except
+    ///       <c>WireSteamInviteCore</c>, the one NoInlining core written to be the isolated fault (its
+    ///       caller <c>WireSteamInvite</c> holds the catch). Everything else goes through
+    ///       <c>SteamProbe</c>. Guarded by its own positive control — WireSteamInviteCore must still be
+    ///       seen naming SteamInvite, or the IL reader found nothing and the sweep is vacuous. Its one
+    ///       blind spot, stated: <c>Program.Callees</c> reads method references, so a body that touches
+    ///       only a SteamInvite FIELD would not be seen.
     ///   (d) POSITIVE CONTROL. A vacuous sweep is the likeliest silent regression here and it is cheap:
     ///       delete the SteamP2P line entirely and (a) and (c)'s direct/stun cases stay green forever. So
     ///       the law asserts that <c>Build</c> DOES emit SteamP2P where it must — arm (b)'s first attempt
@@ -127,6 +142,11 @@ namespace RailCheck
             // whole "an unguarded arm passes while checking nothing" rule exists to stop. It shares no
             // premise with them, so it has no business sharing their exit.
             foreach (var v in SteamAffordanceGated()) yield return v;
+
+            // ARM (g), for the same reason: it shares no premise with Build's signature or StunCode's kind,
+            // so it must not share their exit either. It is also the one arm about the mod being ABLE TO RUN
+            // rather than about which technology it picks.
+            foreach (var v in EntryPointsKeepSteamOutOfTheirBodies()) yield return v;
 
             var builds = typeof(JoinPlan).GetMethods(BindingFlags.Public | BindingFlags.Static |
                                                      BindingFlags.DeclaredOnly)
@@ -203,14 +223,14 @@ namespace RailCheck
             {
                 yield return "L155 premise-changed: JoinTarget.Stun no longer yields JoinKind.StunCode " +
                              "(got " + stunTarget.Kind + "), so the short-code arm below is testing some " +
-                             "other branch of Build. The 10-symbol ConnectCode is the whole free-services " +
+                             "other branch of Build. The 11-symbol ConnectCode is the whole free-services " +
                              "join path — re-point this arm at whatever kind it classifies as now.";
                 yield break;
             }
             foreach (var origin in new[] { JoinOrigin.PastedCode, JoinOrigin.SteamInvite })
                 foreach (var v in Expect("short-code-lost-its-tcp-leg", stunTarget, true, origin,
                          new[] { TransportType.DirectIP, TransportType.StunUDP },
-                         "A 10-symbol code names an ENDPOINT, and both legs to that endpoint are the same " +
+                         "An 11-symbol code names an ENDPOINT, and both legs to that endpoint are the same " +
                          "technology — TCP to it, then the punch to it — so this is not the cross-technology " +
                          "cascade the rest of this law forbids. The punch ALONE is what this arm used to " +
                          "return, and that is a data-loss shape, not a preference: StunTransport.Send is a " +
@@ -315,6 +335,67 @@ namespace RailCheck
                              "'is Steam running' — a constant here greys nothing (or greys everything) " +
                              "while the lobby, the join screen and JoinPlan all keep believing they share " +
                              "a signal with each other.";
+        }
+
+        /// <summary>
+        /// ARM (g) — THE JIT BOUNDARY IS WHERE THE MOD SAYS IT IS.
+        ///
+        /// See the class summary. One sweep over every method MultiplayerUI declares (nested closures
+        /// included, because a click handler is a lambda): the only one allowed to reference a SteamInvite
+        /// member is WireSteamInviteCore, which exists to be that fault and is called from inside a try.
+        /// Anything else naming the type is a method that cannot be COMPILED on a GOG/Epic box, and the
+        /// throw lands at its caller where nothing of ours is waiting for it.
+        /// </summary>
+        private static IEnumerable<string> EntryPointsKeepSteamOutOfTheirBodies()
+        {
+            const BindingFlags All = BindingFlags.Public | BindingFlags.NonPublic |
+                                     BindingFlags.Instance | BindingFlags.Static;
+
+            var mod = typeof(JoinPlan).Assembly;
+            var ui = mod.GetType("Multiplayer.UI.MultiplayerUI");
+            var core = ui?.GetMethod("WireSteamInviteCore", All);
+            if (ui == null || core == null)
+            {
+                yield return "L155 premise-changed: MultiplayerUI or its WireSteamInviteCore no longer " +
+                             "resolves, so nothing checks that the Steam glue stays behind the one " +
+                             "NoInlining core that is allowed to name SteamInvite. Re-point this arm at " +
+                             "whatever the isolated core is called now — do not delete it: without it a " +
+                             "single SteamInvite reference in a UI method kills that whole entry point on " +
+                             "every non-Steam install, and never on a developer's machine.";
+                yield break;
+            }
+
+            var bodies = new List<MethodBase>();
+            foreach (var t in new[] { ui }.Concat(ui.GetNestedTypes(All)))
+                bodies.AddRange(t.GetMethods(All).Cast<MethodBase>().Concat(t.GetConstructors(All)));
+
+            bool coreStillNamesIt = false;
+            foreach (var m in bodies)
+            {
+                List<MethodBase> calls;
+                try { calls = Program.Callees(m, mod).ToList(); } catch { continue; }
+                if (!calls.Any(c => c.DeclaringType == typeof(SteamInvite))) continue;
+                if (m.MetadataToken == core.MetadataToken && m.Module == core.Module)
+                { coreStillNamesIt = true; continue; }
+
+                yield return "L155 entry-point-names-steaminvite: " + m.DeclaringType.Name + "." + m.Name +
+                             " references a SteamInvite member in its own body. SteamInvite's Lobby? " +
+                             "statics make the type unloadable where Facepunch is absent, and the JIT fails " +
+                             "while COMPILING this method — the throw surfaces at its CALL site, one frame " +
+                             "up, outside any try this method holds. That is not a lost Steam feature, it " +
+                             "is the whole method dying: StartHostAndOpenLobby named HostPublish here and " +
+                             "CREATE SESSION did nothing at all for every GOG/Epic player, because " +
+                             "NetworkEngine.Create() on the first line never ran. Route it through a " +
+                             "SteamProbe NoInlining shim (SteamInvite.cs:393-408), or put it in " +
+                             "WireSteamInviteCore, whose caller holds the catch.";
+            }
+
+            if (!coreStillNamesIt)
+                yield return "L155 sweep-is-vacuous: NO method of MultiplayerUI was seen referencing " +
+                             "SteamInvite at all — not even WireSteamInviteCore, which exists to. Either " +
+                             "the IL reader found nothing (in which case every verdict above is trivially " +
+                             "green and this arm guards nothing), or the wiring core was renamed and this " +
+                             "arm needs re-pointing at it.";
         }
 
         /// <summary>Does <paramref name="from"/> reach <paramref name="target"/>, walking only through

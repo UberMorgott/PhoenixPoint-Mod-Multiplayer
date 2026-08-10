@@ -320,3 +320,63 @@ is the code this session deleted on purpose.
   fragmentation bound, where it is dropped silently for the WHOLE lobby.
 - **NOT fixed, deliberately:** `SurfaceSeq.IsStreamRestart` at `last == 1` — see the new "Known gap
   next to L85" section in `docs/laws.md`. It needs an epoch id, not a widened comparison.
+
+---
+
+## 10. Audit fixes, 2026-08-10 (lobby / durable inbox / join codes)
+
+- **Hosting was dead for every non-Steam (GOG/Epic) player, and nothing said so.**
+  `MultiplayerUI.StartHostAndOpenLobby` named `SteamInvite.HostPublish()` in its own body.
+  `SteamInvite` holds `Lobby?` statics, so where Facepunch is absent the type cannot load, the JIT
+  fails while COMPILING that method, and the throw surfaces at the CALL site — before
+  `NetworkEngine.Create()` on the method's first line. CREATE SESSION did nothing at all. Same
+  shape in `OnGateJoinFriend` and the invite-overlay button. All three now route through new
+  `SteamProbe.HostPublish` / `JoinFriendLobby` / `OpenInviteOverlay` `NoInlining` shims
+  (`src/Transport/SteamInvite.cs:409-…`). **The rule is now pinned by L155 arm (g):** NO method of
+  `MultiplayerUI` may reference a `SteamInvite` member except `WireSteamInviteCore`, the one core
+  written to be the isolated fault. Add a new Steam call anywhere in that class and L155 turns red.
+- **A throw in the countdown dispatch used to lock the lobby forever.**
+  `ReopenAfterFailedStart` was a LOCAL function inside `OnLobbyPlay`, so `Update`'s dispatch could
+  not reach it; and `BroadcastLoadBoundaryBegin` + `DropCurtainEarly` ran after `CommitStart()`
+  locked the lobby but outside the try. Both moved inside (order preserved — L143 pins the announce
+  order), the local function is now a private method, and the `LobbyCountdown.HostTick` switch in
+  `Update` is wrapped so ANY throw routes to it.
+- **A live SAVE countdown no longer fires under the native NEW GAME screen.**
+  `OnLobbyNewCampaign` gates on `ClientsReady`, which excludes `_saveChosen` and `_hostReady`, so
+  the button opened while the five-second SAVE clock ran; `CanStart` stayed true and at zero
+  `OnLobbyPlay` loaded the OLD SAVE underneath the open native screen. The press now takes the
+  host's OWN cancel (`LobbyCountdown.Cancel(engine, null)`), which also clears the host's ready and
+  therefore holds the gate shut for as long as the host is in the native flow. **Not a quorum** —
+  nobody waits on anybody; the peers' open lobbies repaint off the CLEAR broadcast
+  (`LobbyCountdown.Clear` → 0x49 → `HandleCountdown` → `CountdownPanel`). New law **L410**.
+- **A retried shared answer no longer charges the shared wallet twice.**
+  `EventSync`'s durable native lambda does `Wallet.Take` then `CompleteEvent`; the engine is
+  deliberately non-transactional (`DurableInboxEngine.cs:966-969`) and its catch rolls back only the
+  ledger, while the lambda's `record.State == Triggered` re-entry guard still passes — so the retry
+  paid again, silently, out of everybody's resources. `EventSync.ClaimWalletCharge` (keyed
+  occurrence+choice) makes take-and-complete recover as a unit; cleared at the store swap in
+  `DurableInboxSession.ActiveStore`'s setter because trigger ids restart with a new store. A REFUND
+  was rejected on purpose: `Wallet.Take` clamps to what the wallet holds (`Wallet.cs:55`), so
+  giving the full pack back can mint resources. New law **L409**.
+- **`DurableWindowRegistry.EnqueuePriorityOccurrence` / `EnqueueCapturedPriority` no longer throw.**
+  `CommitWithCanonical` returns false DETERMINISTICALLY while `_nativeTransitionActive`
+  (`DurableInboxStore.cs:391`) and when validation refuses (`:405-411`), so all 32 attempts failed
+  together and the `InvalidOperationException` was guaranteed — escaping a Harmony Postfix on a
+  native UI transition. Both now log loudly and return `false` / `null`; every caller already
+  ignored the value or handled the null, so the window still opens, merely not durable-mirrored.
+  `ponytail:` there is no deferred retry because there is no durable per-frame host pump to hang one
+  on. If these start appearing in Player.log, add one where the geoscape tick already runs.
+- **`ConnectCode` grew a check symbol** (`src/Join/ConnectCode.cs`), the same weighted mod-32 scheme
+  `InviteCode` uses. **The format changed: 10 symbols "4-2-4" → 11 symbols "4-3-4"**, and old codes
+  are rejected. Safe because codes are session-ephemeral and two builds that disagree cannot play
+  together anyway (the parity/version gate refuses the join). `SmartJoinParser` now reads
+  `ConnectCode.TotalSymbols` rather than a literal 10.
+- **`EvaluateStartGate()` no longer runs every frame all session.** It was an ARGUMENT, evaluated
+  before `HostTick`'s own `IsHost` guard, so `RefreshGateFacts` → `GetLobbyRoster` → `BuildPeerList`
+  allocated a List per frame on hosts, clients and in-game alike. Short-circuited behind
+  `engine.IsHost && _lobbyController.State == LobbyState.HostLobby`. `HostTick` itself still runs
+  every frame — the NEW CAMPAIGN route does not read the gate.
+- **Clipboard writes are guarded at the one shared sink** (`MultiplayerUI.CopyToClipboard`, plus a
+  `ClipboardText()` read helper); the three ad-hoc `GUIUtility.systemCopyBuffer` writes now route
+  through it.
+- **Not touched:** `RecoverPendingDurableChoices` — the audit's "dead code" claim was ruled FALSE.

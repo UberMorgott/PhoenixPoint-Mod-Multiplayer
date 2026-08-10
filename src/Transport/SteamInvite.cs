@@ -418,6 +418,15 @@ namespace Multiplayer.Transport
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static void CallHandleColdStart() => SteamInvite.HandleColdStart();
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void CallHostPublish() => SteamInvite.HostPublish();
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void CallJoinFriendLobby(ulong lobbyId) => SteamInvite.JoinFriendLobby(lobbyId);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static void CallOpenInviteOverlay() => SteamInvite.OpenInviteOverlay();
+
         /// <summary>True when local Steam is running. False — never a throw — when it is not, or when
         /// there is no Steam runtime in this process at all.</summary>
         internal static bool IsAlive()
@@ -455,6 +464,38 @@ namespace Multiplayer.Transport
         {
             if (_unavailable) return;
             try { CallHandleColdStart(); }
+            catch (Exception e) { Latch(e); }
+        }
+
+        /// <summary>Publish the friends-only Steam lobby that advertises this host. THE HOST PATH RUNS
+        /// THROUGH HERE AND NOT THROUGH SteamInvite DIRECTLY: <c>StartHostAndOpenLobby</c> used to name
+        /// SteamInvite in its own body, so on a GOG/Epic box the JIT failed while compiling that method and
+        /// the throw landed at its CALL site — before <c>NetworkEngine.Create()</c>, i.e. CREATE SESSION did
+        /// nothing at all for every non-Steam player. Fire-and-forget and harmless off Steam.</summary>
+        internal static void HostPublish()
+        {
+            if (_unavailable) return;
+            try { CallHostPublish(); }
+            catch (Exception e) { Latch(e); }
+        }
+
+        /// <summary>Enter a friend's advertised lobby (the friends-list row). Same JIT boundary as
+        /// <see cref="HostPublish"/>; a no-op where there is no Steam, which is also the only place the
+        /// friends list can be empty enough for the row not to exist.</summary>
+        internal static void JoinFriendLobby(ulong lobbyId)
+        {
+            if (_unavailable) return;
+            try { CallJoinFriendLobby(lobbyId); }
+            catch (Exception e) { Latch(e); }
+        }
+
+        /// <summary>Open Steam's own invite dialog for the published lobby. Same JIT boundary again: the
+        /// caller's try/catch could not have caught this, because the failure is raised while COMPILING the
+        /// method that names SteamInvite and surfaces one frame up.</summary>
+        internal static void OpenInviteOverlay()
+        {
+            if (_unavailable) return;
+            try { CallOpenInviteOverlay(); }
             catch (Exception e) { Latch(e); }
         }
 
