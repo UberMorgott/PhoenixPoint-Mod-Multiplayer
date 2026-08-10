@@ -1850,8 +1850,17 @@ namespace Multiplayer.UI
         private void UpdateReadyButtonLabel()
         {
             if (_readyButtonLabel == null) return;
-            _readyButtonLabel.text = _parityLocked ? "MODS MISMATCH"
-                : _needsSave ? "CHOOSE A SAVE"
+            // SEVEN GLYPHS IS THE CELL, and that is why these two read the way they do. The clone's label
+            // keeps the PREFAB's own wide main-menu rect (CapCloneFont's note), so best-fit measures
+            // against THAT and the RectMask2D in AddCloneLayoutElement clips whatever overhangs the 160-px
+            // footer cell. "✓ READY" is the widest string known to survive that window. "MODS MISMATCH"
+            // and "CHOOSE A SAVE" are thirteen, so both were clipped to their middle few glyphs and a
+            // greyed button reading "S MISMA" is indistinguishable from no READY button at all — which is
+            // exactly what a three-instance test reported on 2026-08-10, with every client parity-locked
+            // and the host on the new-campaign route. The reason still has a full-length home: the roster
+            // row's "!" badge lists the exact diffs.
+            _readyButtonLabel.text = _parityLocked ? "MODS ✗"
+                : _needsSave ? "NO SAVE"
                 : _localReady ? "✓ READY" : "READY";
         }
 
