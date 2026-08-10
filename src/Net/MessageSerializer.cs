@@ -140,7 +140,9 @@ namespace Multiplayer.Network.MessageLayer
         }
 
         // PEER_LIST (PlayerListUpdate): authoritative lobby roster.
-        public static byte[] SerializePeerList(List<PeerListEntry> peers)
+        // <paramref name="inviteCode"/> is the HOST's unified invite code, a SESSION-level fact carried
+        // on the roster rather than on a packet of its own — see the trailing block at the bottom.
+        public static byte[] SerializePeerList(List<PeerListEntry> peers, string inviteCode = null)
         {
             using (var ms = new MemoryStream())
             using (var bw = new BinaryWriter(ms))
@@ -169,12 +171,23 @@ namespace Multiplayer.Network.MessageLayer
                 bw.Write(true);
                 foreach (var peer in peers)
                     bw.Write((byte)((peer.Paused ? 1 : 0) | (peer.TacReady ? 2 : 0)));
+                // HOST INVITE CODE — ONE string for the whole message, not one per peer. It rides the
+                // roster for the same reason the two blocks above do: the roster is already the
+                // host→all broadcast that is already coalesced to one flush per frame, so carrying it
+                // here costs no new packet id, no new handler and no new dispatch arm. Append-only, so
+                // a legacy reader stops before it.
+                bw.Write(true);
+                bw.Write(inviteCode ?? "");
                 return ms.ToArray();
             }
         }
 
         public static List<PeerListEntry> DeserializePeerList(byte[] data)
+            => DeserializePeerList(data, out _);
+
+        public static List<PeerListEntry> DeserializePeerList(byte[] data, out string inviteCode)
         {
+            inviteCode = "";
             using (var ms = new MemoryStream(data))
             using (var br = new BinaryReader(ms))
             {
@@ -206,6 +219,10 @@ namespace Multiplayer.Network.MessageLayer
                         peers[i].Paused = (status & 1) != 0;
                         peers[i].TacReady = (status & 2) != 0;
                     }
+                // Trailing host-invite-code block (see the writer). Absent on a sender that predates it,
+                // which reads as "no code yet" — exactly what an unknown value should look like.
+                if (ms.Position < ms.Length && br.ReadBoolean())
+                    inviteCode = br.ReadString();
                 return peers;
             }
         }

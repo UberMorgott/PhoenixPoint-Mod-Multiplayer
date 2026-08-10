@@ -1,5 +1,6 @@
 using System;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.Events;
 using UnityEngine.UI;
 
@@ -89,9 +90,21 @@ namespace Multiplayer.UI
             return btn;
         }
 
-        // Minimal uGUI InputField built from code (background Image + Text + placeholder).
+        /// <summary>
+        /// Minimal uGUI InputField built from code (background Image + Text + placeholder).
+        ///
+        /// THERE IS NO CALLBACK PARAMETER, AND THAT IS THE POINT. This used to take an
+        /// <c>onEndEdit</c> action — and Unity's legacy InputField raises <c>onEndEdit</c> on DESELECT as
+        /// well as on Enter, so a handler hung there turns "the player clicked somewhere else" into "the
+        /// player pressed the button": on the join screen, clicking the address box and then the friends
+        /// list below it started a connection nobody asked for; in the lobby, clicking out of the chat box
+        /// broadcast a half-typed line. This uGUI build has no <c>onSubmit</c> event to move to (it landed
+        /// in a later UnityEngine.UI than the game ships), so the submit key is read where it can be told
+        /// apart from a deselect — see <see cref="SubmittedThisFrame"/>, polled by the panel that owns the
+        /// field. Losing focus now does exactly what it should: nothing, with the typed text left alone.
+        /// </summary>
         public static InputField CreateInputField(GameObject parent, string name, string initial,
-            Vector2 pos, Vector2 size, Vector2 anchor, Action<string> onEndEdit)
+            Vector2 pos, Vector2 size, Vector2 anchor)
         {
             var go = new GameObject(name);
             go.transform.SetParent(parent.transform, false);
@@ -115,10 +128,32 @@ namespace Multiplayer.UI
             input.text = initial ?? "";
             input.lineType = InputField.LineType.SingleLine;
             input.characterLimit = 24;
-            if (onEndEdit != null)
-                input.onEndEdit.AddListener((UnityAction<string>)(v => onEndEdit(v)));
 
             return input;
+        }
+
+        /// <summary>
+        /// True on the frame the player pressed Enter INTO <paramref name="field"/> — the deliberate act
+        /// <see cref="CreateInputField"/> refuses to confuse with losing focus. Poll it from the owning
+        /// panel's per-frame tick.
+        ///
+        /// The focus test is "focused OR still the EventSystem's selection" on purpose. A single-line
+        /// InputField DEACTIVATES ITSELF the moment it sees Enter (inside the EventSystem's own Update,
+        /// whose order against ours Unity does not fix), so <c>isFocused</c> alone loses the keypress on
+        /// whichever frame that Update happens to run first. Deactivating does not clear the SELECTION,
+        /// which is why the selection survives the race; a genuine click elsewhere clears both, so a
+        /// deselected field still answers false.
+        /// </summary>
+        public static bool SubmittedThisFrame(InputField field)
+        {
+            if (field == null || !field.gameObject.activeInHierarchy) return false;
+            if (!field.isFocused)
+            {
+                var es = EventSystem.current;   // == on purpose: this is a liveness question, not identity
+                if (es == null || !ReferenceEquals(es.currentSelectedGameObject, field.gameObject))
+                    return false;
+            }
+            return Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter);
         }
     }
 }

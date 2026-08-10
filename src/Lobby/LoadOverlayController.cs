@@ -67,6 +67,10 @@ namespace Multiplayer.UI
         }
 
         private Canvas _canvas;
+        // Kept so the visible frames can re-apply the aspect-adaptive match: this canvas lives for the
+        // whole process, so the match ConfigureScaler computed at build is stale after any resolution /
+        // windowed change. Mirrors LobbyPanel._scaler and MultiplayerUI._barScaler.
+        private CanvasScaler _scaler;
         private GameObject _plate;
         private RectTransform _plateRect;
         private readonly List<Row> _rows = new List<Row>();
@@ -84,7 +88,8 @@ namespace Multiplayer.UI
             _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             _canvas.overrideSorting = true;
             _canvas.sortingOrder = 7000; // floor; EnsureAboveCurtain() raises it to the measured curtain+1
-            LobbyTheme.ConfigureScaler(go.AddComponent<CanvasScaler>());
+            _scaler = go.AddComponent<CanvasScaler>();
+            LobbyTheme.ConfigureScaler(_scaler);
             // Display-only: no GraphicRaycaster, and every Graphic below is raycastTarget=false. This
             // canvas sits over the loading screen and must never eat a click meant for the game.
 
@@ -176,6 +181,11 @@ namespace Multiplayer.UI
         /// built only when the number of seats changes.</summary>
         private void Refresh(NetworkEngine engine)
         {
+            // Aspect-adaptive match, recomputed while the overlay is up (one float write) rather than
+            // once at build: the canvas is persistent and the player can change resolution between two
+            // loads. Only the visible frames need it — nothing reads the scaler while the canvas is off.
+            if (_scaler != null) _scaler.matchWidthOrHeight = LobbyTheme.CurrentMatch;
+
             var session = engine.Session;
             var tracker = engine.SaveTransfer.Tracker;
 

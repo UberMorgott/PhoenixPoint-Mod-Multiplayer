@@ -28,7 +28,6 @@ namespace Multiplayer.UI
         private CanvasScaler _scaler;   // kept so Refresh() can re-apply the aspect-adaptive match live
 
         private GameObject _root;
-        private Text _roleText;
         private Text _connectText;
 
         // Interactive controls. Rename moved to the native prompt (own-row click → OnLobbyRenamePrompt),
@@ -39,24 +38,17 @@ namespace Multiplayer.UI
         // Local optimistic ready flag — flipped on click for instant label feedback, then re-synced
         // from authoritative roster state (me.Ready) in RefreshControls.
         private bool _localReady;
-        private Button _playButton;
-        // The native PhoenixGeneralButton controller on the cloned Play button (resolved via
-        // reflection — the mod can't reference the type). Its Update() repaints ONLY when its own
-        // IsEnabled/VisualHovered/VisualPressed change, NOT when BaseButton.interactable changes, so
-        // writing interactable alone leaves the button stale (greyed) until a real pointer-enter.
+        // THE FOOTER'S CENTRE: what campaign this lobby is queued on. Same sentence on the host and on
+        // every client, off the same authoritative Session.ChosenSaveName — nobody should have to ask
+        // which save they are about to be pulled into.
+        private Text _queuedCampaign;
+        // The READY button's native PhoenixGeneralButton controller + last-applied interactable state
+        // (resolved via reflection — the mod can't reference the type). Its Update() repaints ONLY when
+        // its own IsEnabled/VisualHovered/VisualPressed change, NOT when BaseButton.interactable changes,
+        // so writing interactable alone leaves the button stale (greyed) until a real pointer-enter.
         // SetInteractable(bool) is the complete native "appear now" path: it sets BaseButton.interactable,
         // flips IsEnabled, runs the animator and calls UpdateColorElements() — no pointer needed.
-        // object/MethodInfo because the type isn't referenceable at compile time.
-        private object _playButtonCtrl;
-        private System.Reflection.MethodInfo _playButtonSetInteractable;
-        // Cached last-applied Play-button visual state (active + interactable). Refresh() runs every
-        // frame, so we force an immediate visual refresh ONLY on a real transition (e.g. the moment
-        // the second player's Ready arrives), never every frame. -1 = not yet applied.
-        private int _playActiveCache = -1;
-        private int _playInteractableCache = -1;
-        // Parity soft-gate: the READY button's native controller + last-applied interactable state
-        // (mirror of the Play button's repaint machinery — cloned native buttons repaint only via
-        // SetInteractable, see RefreshPlayButtonVisual). -1 = not yet applied.
+        // object/MethodInfo because the type isn't referenceable at compile time. -1 = not yet applied.
         private object _readyButtonCtrl;
         private System.Reflection.MethodInfo _readyButtonSetInteractable;
         private int _readyInteractableCache = -1;
@@ -68,18 +60,26 @@ namespace Multiplayer.UI
         private int _newCampaignInteractableCache = -1;
         // True while the LOCAL player's own roster row carries parity diffs → READY locked.
         private bool _parityLocked;
+        // True on a HOST with no chosen save → READY locked (there is nothing to be ready for, and
+        // SessionManager.SetHostReady refuses it anyway).
+        private bool _needsSave;
 
         // ─── Full-screen 5-zone layout ─────────────────────────────────────
         private Text _inviteCodeValue;   // ONE unified invite code (click-to-copy), refreshed live
-        private Text _railSaveValue;
-        private Button _chooseSaveBtn;
+        // THE HOST'S ADDRESS LINES — one per local IPv4 plus the UPnP endpoint, each click-to-copy.
+        // Host-only (the whole group is one SetActive) and repainted only when the underlying list
+        // actually changes; see RefreshAddresses for the two reference compares that decide that.
+        private GameObject _addressGroup;
+        private readonly List<AddressLine> _addressLines = new List<AddressLine>();
+        private object _addressesShownFor;   // the LanIpResolver list instance last painted
+        private object _upnpShownFor;        // the MappedEndpoint instance last painted
         private Button _newCampaignBtn;
-        private Button _inviteBtn;
-        // Connect-rail SHARE + SAVE section roots (host-only): gated on/off per frame like _chooseSaveBtn.
-        // The JOIN section (and its button) stay always-visible. Section roots own the header + body so
-        // hiding the whole section (header + separator + controls) is a single SetActive.
-        private GameObject _shareSection;
-        private GameObject _saveSection;
+        // HOST-ONLY CELLS, each toggled by one SetActive per frame. They hold the CLONE ROOT, not the
+        // returned Button: a cloned native button is nested inside its clone root, so deactivating the
+        // inner Button alone would leave the clone's frame still drawn (see CellRoot).
+        private GameObject _inviteBtnCell;      // INVITE VIA STEAM — opens the HOST's Steam lobby overlay
+        private GameObject _chooseSaveCell;     // footer: CHOOSE SAVE…
+        private GameObject _newCampaignCell;    // footer: NEW CAMPAIGN…
 
         // Chat zone. Version diff drives a cheap re-render; we track the subscribed session so we
         // re-bind (and drop the old handler) when the session instance is re-created on Join.
@@ -94,30 +94,73 @@ namespace Multiplayer.UI
         private readonly List<Text> _chatRows = new List<Text>();
         private InputField _chatInput;
 
-        // JOIN button — lives in the connect rail's always-visible "JOIN A GAME" section (moved out of
-        // the footer). Wired to OnLobbyJoinPrompt (unchanged native join path).
-        private Button _joinButton;
+        // THERE IS NO JOIN BUTTON IN THE LOBBY. It moved footer → rail → session card and has now left
+        // entirely: joining is its own screen behind the gate (NetworkGatePanel), and a JOIN control
+        // inside a session you are already in is an offer to abandon it, drawn on the card whose whole
+        // job is bringing other people in.
 
         // Roster rows (player list). Pooled: one row GameObject per slot, reused across refreshes.
         private GameObject _rosterArea;
         private readonly List<RosterRow> _rows = new List<RosterRow>();
-        // Pool index of the row currently rendering the LOCAL player ("you"), refreshed each frame in
-        // RefreshRoster. The rename pencil's onClick re-checks against this so a pooled row reused for
-        // another peer never renames the wrong one. -1 = local row not currently shown.
-        private int _myRowIndex = -1;
+
+        // SELF CARD — the local player, drawn ABOVE the "PLAYERS (n)" header instead of inside the list.
+        // It owns the rename control outright, which is why no list row carries a pencil any more: the
+        // card is ALWAYS the local player, so the "am I renaming the right peer?" question that the old
+        // pooled-row pencil had to re-ask on every click cannot be asked wrong here.
+        private GameObject _selfCard;
+        private Text _selfName;
+        private Text _selfHostChip;
+        private Text _selfStatus;      // local transfer/load line; hidden when there is nothing to say
+
+        // Last player count written into the header. Refresh runs every frame and the count moves a
+        // handful of times per lobby, so the interpolation is done on change, not per frame.
+        private int _rosterCountShown = -1;
 
         // Roster row height feeds LayoutElement.minHeight; theme-scaled so rows grow with UiScale.
         private static float RowHeight => LobbyTheme.ScaledRowHeight;
 
+        // Fully transparent — the roster row's tint plate when the row is neither the host's nor tinted.
+        private static readonly Color Transparent = new Color(0f, 0f, 0f, 0f);
+
+        /// <summary>Host marker, drawn left of the host's nickname — <see cref="LobbyTheme.HostCrown"/>,
+        /// which ASKS the captured font whether it has the crown and hands back a short ASCII label when it
+        /// does not (a missing glyph renders blank, with no fallback of Unity's own). The host row also
+        /// carries a VISIBLE tint (<see cref="LobbyTheme.HostRowTint"/>), so no information lives only in a
+        /// glyph even if the probe is somehow wrong.</summary>
+        private static string HostCrown => LobbyTheme.HostCrown;
+
         private class RosterRow
         {
             public GameObject Go;
-            public Text ReadyLabel;    // col 1: far-left fixed-width ready check ("✓" when ready, else blank)
-            public Text NameLabel;     // col 2: bare nickname, left-aligned, fills remaining width
-            public Button WarnBtn;     // col 3: parity warning badge ("!"); shown only on a mismatched row,
-                                       //        click → exact diff list via the native message box
-            public Button RenameBtn;   // col 4: far-right pencil; shown/interactable only on the local row
+            public Image Tint;         // row backing plate: lit for the host's row, clear otherwise
+            public Text Crown;         // col 1: host crown, blank on every other row
+            public Text NameLabel;     // col 2: nickname — FLEXES, so a long one stops clipping
+            public Text StatusChip;    // col 3: the status IN WORDS ("READY" / "SEAT HELD" / progress)
+            public Button WarnBtn;     // col 4: parity badge ("MODS ≠"); click → exact diff list
+            public Image[] Bars;       // col 5: the tactical panel's 4-bar meter, reused
+            public Text PingText;      // col 5: "N ms", or an em-dash when there is no sample
             public string ParityDiffs; // current row's diff text ("" = OK) — read by WarnBtn's onClick
+            public int PingShown;      // last ms painted; the "N ms" string is rebuilt only on a change
+            // "Player <id>" for a peer that has not named itself. Cached exactly like PingShown and for
+            // the same reason: PaintRow runs every frame and the concat is otherwise a per-frame alloc
+            // for a string that only changes when the row is reused for a different peer.
+            public ulong FallbackNameFor;
+            public string FallbackName;
+        }
+
+        // Same cache for the self card's own unnamed-peer label (RefreshSelfCard also runs every frame).
+        private ulong _selfFallbackFor;
+        private string _selfFallbackName;
+
+        /// <summary>"Player &lt;id&gt;" for a peer with no nickname, allocated once per (row, peer).</summary>
+        private static string FallbackName(ulong steamId, ref ulong cachedFor, ref string cached)
+        {
+            if (cached == null || cachedFor != steamId)
+            {
+                cachedFor = steamId;
+                cached = "Player " + steamId;
+            }
+            return cached;
         }
 
         // SINGLE visibility lever = the lobby's own overlay Canvas GameObject. While that GO is
@@ -208,8 +251,8 @@ namespace Multiplayer.UI
             rect.anchoredPosition = Vector2.zero;
             rect.localScale = Vector3.one;
 
-            // ROOT layout: a VerticalLayoutGroup stacks TopBar / MainRow / Footer top-to-bottom and
-            // owns all vertical placement (replaces the old per-zone anchoredPosition Y math). Padding
+            // ROOT layout: a VerticalLayoutGroup stacks MainRow / Footer top-to-bottom and owns all
+            // vertical placement (replaces the old per-zone anchoredPosition Y math). Padding
             // keeps zones off the screen edges on ultrawide; childForceExpandWidth lets each row span
             // the full width while childForceExpandHeight=false lets MainRow's flexibleHeight absorb
             // all the leftover vertical space.
@@ -241,7 +284,6 @@ namespace Multiplayer.UI
             // visibility levers OFF; Show() is the only thing that turns them back on.
             try
             {
-                BuildTopBar();
                 BuildMainRow();
                 BuildFooter();
             }
@@ -257,49 +299,17 @@ namespace Multiplayer.UI
             }
         }
 
-        // TOP BAR: title + subtitle (no X/4 counter — small count lives in the roster header).
-        private void BuildTopBar()
-        {
-            // A framed header card whose height is fixed (LE.minHeight 78, flexibleHeight 0) so the
-            // root VLG never stretches it — MainRow takes the slack. Title/subtitle are stacked by an
-            // inner VLG (no manual anchoredPosition).
-            var bar = new GameObject("TopBar");
-            bar.transform.SetParent(_root.transform, false);
-            bar.AddComponent<RectTransform>();
-            AddFramedPanel(bar);
+        // THERE IS NO TOP BAR. It held a static "CO-OP LOBBY" title and one subtitle that said either the
+        // player's role ("your lobby" / "joined lobby") or the chosen save — and every word of that is
+        // said better elsewhere: the save by the footer's QUEUED line (off the same authoritative
+        // Session.ChosenSaveName), the role by the self card's HOST chip and the roster's crowned host
+        // row. A framed card ~100px tall repeating what two other surfaces already say is exactly the
+        // vertical space the roster and the chat wanted.
 
-            var titleH = LobbyTheme.ScaledHeaderFontSize + LobbyTheme.ScaledPadding;
-            var subH = LobbyTheme.ScaledSubFontSize + LobbyTheme.ScaledPadding / 2;
-
-            var le = LE(bar);
-            le.minHeight = titleH + subH + LobbyTheme.ScaledPadding;
-            le.flexibleHeight = 0;
-
-            var vlg = bar.AddComponent<VerticalLayoutGroup>();
-            vlg.childAlignment = TextAnchor.MiddleCenter;
-            vlg.spacing = 2;
-            vlg.childControlWidth = true;
-            vlg.childControlHeight = true;
-            vlg.childForceExpandWidth = true;
-            vlg.childForceExpandHeight = false;
-
-            var title = UiToolkit.CreateText(bar, "Title", Vector2.zero,
-                new Vector2(540, titleH), "CO-OP LOBBY", LobbyTheme.ScaledHeaderFontSize,
-                TextAnchor.MiddleCenter, new Vector2(0.5f, 1f));
-            title.color = LobbyTheme.Accent;   // amber page title (accent highlight)
-            LE(title.gameObject).minHeight = titleH;
-
-            _roleText = UiToolkit.CreateText(bar, "Subtitle", Vector2.zero,
-                new Vector2(540, subH), "your lobby", LobbyTheme.ScaledSubFontSize,
-                TextAnchor.MiddleCenter, new Vector2(0.5f, 1f));
-            _roleText.color = LobbyTheme.SubText;
-            LE(_roleText.gameObject).minHeight = subH;
-        }
-
-        // MAIN ROW: three equal-height cards (ConnectColumn / ChatColumn / PlayersColumn) sharing the
-        // row width 1:2:1 via per-column LayoutElement.flexibleWidth under childForceExpandWidth. Takes
-        // ALL leftover vertical space (LE.flexibleHeight 1) so the row stretches to fill between the
-        // fixed-height TopBar and Footer.
+        // MAIN ROW: TWO columns, 3:2. LEFT (PlayersColumn, 60%) is the self card and the roster — the
+        // thing players actually read, so it gets the width. RIGHT (RightColumn, 40%) stacks a compact
+        // SESSION card over the chat. Takes ALL leftover vertical space (LE.flexibleHeight 1) so the row
+        // stretches to fill everything above the fixed-height Footer.
         private void BuildMainRow()
         {
             var mainRow = new GameObject("MainRow");
@@ -316,179 +326,276 @@ namespace Multiplayer.UI
             hlg.childForceExpandWidth = true;
             hlg.childForceExpandHeight = true;
 
-            BuildConnectRail(mainRow);
-            BuildChatZone(mainRow);
             BuildRosterZone(mainRow);
+            BuildRightColumn(mainRow);
         }
 
-        // LEFT COLUMN "Connect": STUN code (click-to-copy), Save block, Choose Save / Invite buttons.
-        // LEFT COLUMN "Connect": three labeled sections stacked top-to-bottom, each a themed header +
-        // thin separator + its controls. SHARE (host-only: STUN code to copy + Invite-via-Steam),
-        // SAVE (host-only: chosen save value + Choose Save…), JOIN (always: Join a game…). Host-only
-        // sections are gated on/off per frame in Refresh (mirror of the old _chooseSaveBtn gate); JOIN
-        // is moved here out of the footer so the footer keeps only Leave / Ready / Play.
-        private void BuildConnectRail(GameObject parent)
+        /// <summary>
+        /// A MAIN-ROW COLUMN'S SHARE OF THE ROW — and the reason it is THREE writes, not one.
+        ///
+        /// flexibleWidth alone does not give a ratio. HorizontalOrVerticalLayoutGroup hands every child
+        /// its own min/preferred width FIRST and divides only the SURPLUS by flexibility, and a column's
+        /// min/preferred is whatever its widest descendant reports (LayoutUtility.GetPreferredWidth even
+        /// floors preferred at min). So the longest label inside a column silently bought that column
+        /// extra width, and the actual split was a number nobody chose and nobody could read off the
+        /// weights. Pinning min AND preferred to 0 makes a column contribute nothing to the pre-share
+        /// pass, so the row divides EXACTLY by the weights.
+        ///
+        /// The price: a column no longer pushes back when its own content will not fit. That is paid for
+        /// by hand — every fixed cell inside a column carries a real minWidth and each column's summed
+        /// content minimum is checked against its share (see the per-row notes below).
+        /// </summary>
+        private static void PinColumnWidth(GameObject column, float weight)
         {
-            var rail = new GameObject("ConnectColumn");
-            rail.transform.SetParent(parent.transform, false);
-            rail.AddComponent<RectTransform>();
-            AddFramedPanel(rail);
+            var le = LE(column);
+            le.minWidth = 0;
+            le.preferredWidth = 0;
+            le.flexibleWidth = weight;
+        }
 
-            LE(rail).flexibleWidth = 1;
+        // RIGHT COLUMN (40%): NOT a card of its own — a bare vertical container that stacks the compact
+        // SESSION card (fixed height, sized by its own rows) over the chat card (flexibleHeight 1, so
+        // the chat takes every pixel the session card leaves). The frame belongs to the two cards
+        // inside; a third frame around them would just be a box around two boxes.
+        private void BuildRightColumn(GameObject parent)
+        {
+            var col = new GameObject("RightColumn");
+            col.transform.SetParent(parent.transform, false);
+            col.AddComponent<RectTransform>();
 
+            PinColumnWidth(col, 2f);
+
+            var vlg = col.AddComponent<VerticalLayoutGroup>();
+            vlg.padding = new RectOffset(0, 0, 0, 0);
+            vlg.spacing = LobbyTheme.ScaledPadding;
+            vlg.childControlWidth = true;
+            vlg.childControlHeight = true;
+            vlg.childForceExpandWidth = true;
+            vlg.childForceExpandHeight = false;
+
+            BuildSessionCard(col);
+            BuildChatZone(col);
+        }
+
+        // SESSION CARD — EVERY WAY INTO THIS SESSION, listed in the order a player would try them:
+        //
+        //   1. INVITE VIA STEAM — the one control that needs no address at all.
+        //   2. THE CONNECT CODE — copyable, and visible to clients too.
+        //   3. THE ADDRESSES, host-only, one per line and each copyable: every local IPv4 the machine
+        //      answers on (so the Radmin / ZeroTier / Hamachi adapter is listed beside the ordinary LAN
+        //      one, labelled with the interface that carries it), then the UPnP-forwarded internet
+        //      endpoint when the router actually opened one.
+        //
+        // ONE CONTROL PER ROW, and that is a fix, not a preference. INVITE VIA STEAM used to share a row
+        // with the code and was drawn over it. The card interior is 658 logical px at UiScale 1.4 and
+        // that row's summed minimum was only 501 (code cell 210 + gap 11 + button 280), so nothing was
+        // being crushed to zero — what overran was the cloned native button's LABEL, which keeps the
+        // prefab's own rect (sized for the full-width main-menu column) no matter how small the cell
+        // around it gets, and no Text clips itself. Alone on a 658 px row it has nothing to overrun, and
+        // AddCloneLayoutElement now best-fits every clone label into its cell as the second half of it.
+        //
+        // THERE IS NO JOIN BUTTON HERE ANY MORE. Joining lives behind the gate now (NetworkGatePanel's
+        // join screen, reached from NETWORK GAME → JOIN SESSION); a "JOIN A GAME…" button inside a
+        // session you are already in offered to tear that session down from the card whose entire job is
+        // getting other people into it. Its prompt (MultiplayerUI.OnLobbyJoinPrompt) went with it.
+        //
+        // WHO SEES WHAT. The invite key is for EVERYONE — a client that cannot read the key its own
+        // session is reachable at has nothing to forward to a friend, which is the whole reason the
+        // host publishes it (SessionManager.HostInviteCode). Only the ADDRESS lines are gated: they are
+        // the host machine's own addresses and mean nothing said by a client.
+        private void BuildSessionCard(GameObject parent)
+        {
             var pad = LobbyTheme.ScaledPadding;
-            var vlg = rail.AddComponent<VerticalLayoutGroup>();
-            vlg.padding = new RectOffset(pad, pad, pad, pad);
-            vlg.spacing = pad;
+            var labelH = LobbyTheme.ScaledSubFontSize + pad / 2;
+
+            var card = new GameObject("SessionCard");
+            card.transform.SetParent(parent.transform, false);
+            card.AddComponent<RectTransform>();
+            AddFramedPanel(card);
+
+            // No minHeight: the card's own VerticalLayoutGroup already reports the exact preferred height
+            // of its rows, and a hand-written minHeight would be a second number to keep in step with
+            // them. flexibleHeight 0 is the whole of "do not stretch"; the chat below absorbs the slack.
+            LE(card).flexibleHeight = 0;
+
+            var vlg = card.AddComponent<VerticalLayoutGroup>();
+            vlg.padding = new RectOffset(pad, pad, pad / 2, pad / 2);
+            vlg.spacing = pad / 2;
             vlg.childControlWidth = true;
             vlg.childControlHeight = true;
             vlg.childForceExpandWidth = true;
             vlg.childForceExpandHeight = false;
             vlg.childAlignment = TextAnchor.UpperLeft;
 
-            var labelH = LobbyTheme.ScaledSubFontSize + pad / 2;
-
-            // ── SECTION "SHARE" (host-only): how others connect to you ──────────
-            _shareSection = AddRailSection(rail, "SHARE");
-
-            var stunLabel = UiToolkit.CreateText(_shareSection, "InviteLabel", Vector2.zero,
-                new Vector2(260, labelH), "INVITE CODE (click to copy):",
-                LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            stunLabel.color = LobbyTheme.SubText;
-            LE(stunLabel.gameObject).minHeight = labelH;
-
-            // ONE unified invite code: carries Steam id and/or public endpoint, so a friend pastes this
-            // single string into JOIN A GAME and the client cascades Steam → hole-punch → direct. Value
-            // refreshed live in Refresh() (self-heals as UPnP/STUN discovery + Steam become ready).
-            _inviteCodeValue = MakeCopyableValue(_shareSection, "InviteValue", () => _owner.GetOwnUnifiedCode());
-            LE(_inviteCodeValue.transform.parent.gameObject).minHeight = LobbyTheme.ScaledRowHeight;
-
-            _inviteBtn = NativeWidgetFactory.CloneMenuButton(_shareSection.transform, "InviteBtn",
-                "INVITE VIA STEAM", () => _owner.InvitePlayers());
-            if (_inviteBtn != null)
-                AddCloneLayoutElement(_inviteBtn, _shareSection.transform, RailButtonSize.x, RailButtonSize.y);
-            else
-            {
-                _inviteBtn = UiToolkit.CreateButton(_shareSection, "InviteBtn", "INVITE VIA STEAM",
-                    Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
-                    () => _owner.InvitePlayers());
-                LE(_inviteBtn.gameObject).preferredHeight = RailButtonSize.y;
-            }
-
-            // ── SECTION "SAVE" (host-only): the campaign save to load ───────────
-            _saveSection = AddRailSection(rail, "SESSION SAVE");
-
-            _railSaveValue = UiToolkit.CreateText(_saveSection, "SaveValue", Vector2.zero,
-                new Vector2(248, labelH * 2), "(none)", LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
-            LE(_railSaveValue.gameObject).minHeight = labelH * 2;
-
-            _chooseSaveBtn = NativeWidgetFactory.CloneMenuButton(_saveSection.transform, "ChooseSaveBtn",
-                "CHOOSE SAVE…", () => _owner.OnLobbyChooseSave());
-            if (_chooseSaveBtn != null)
-                AddCloneLayoutElement(_chooseSaveBtn, _saveSection.transform, RailButtonSize.x, RailButtonSize.y);
-            else
-            {
-                _chooseSaveBtn = UiToolkit.CreateButton(_saveSection, "ChooseSaveBtn", "CHOOSE SAVE…",
-                    Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
-                    () => _owner.OnLobbyChooseSave());
-                LE(_chooseSaveBtn.gameObject).preferredHeight = RailButtonSize.y;
-            }
-
-            // P0 new-campaign bootstrap: start a FRESH campaign instead of picking a save (host runs
-            // the native new-game flow; clients auto-join at the first geoscape frame). Lives in the
-            // host-gated SAVE section, so it inherits the host-only visibility.
-            _newCampaignBtn = NativeWidgetFactory.CloneMenuButton(_saveSection.transform, "NewCampaignBtn",
-                "NEW CAMPAIGN…", () => _owner.OnLobbyNewCampaign());
-            if (_newCampaignBtn != null)
-                AddCloneLayoutElement(_newCampaignBtn, _saveSection.transform, RailButtonSize.x, RailButtonSize.y);
-            else
-            {
-                _newCampaignBtn = UiToolkit.CreateButton(_saveSection, "NewCampaignBtn", "NEW CAMPAIGN…",
-                    Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
-                    () => _owner.OnLobbyNewCampaign());
-                LE(_newCampaignBtn.gameObject).preferredHeight = RailButtonSize.y;
-            }
-
-            // Same one-time controller resolution the PLAY button does, for the same reason: a cloned
-            // native button repaints its greyed visual only through SetInteractable, never off
-            // Button.interactable alone.
-            if (_newCampaignBtn != null)
-            {
-                var ncPgb = HarmonyLib.AccessTools.TypeByName(
-                    "PhoenixPoint.Common.View.ViewControllers.PhoenixGeneralButton");
-                if (ncPgb != null)
-                {
-                    _newCampaignCtrl = _newCampaignBtn.GetComponentInParent(ncPgb)
-                        ?? _newCampaignBtn.GetComponentInChildren(ncPgb);
-                    if (_newCampaignCtrl != null)
-                        _newCampaignSetInteractable =
-                            HarmonyLib.AccessTools.Method(ncPgb, "SetInteractable", new[] { typeof(bool) });
-                }
-            }
-
-            // ── SECTION "JOIN" (always): join someone else's game ───────────────
-            var joinSection = AddRailSection(rail, "JOIN A GAME");
-
-            _joinButton = NativeWidgetFactory.CloneMenuButton(joinSection.transform, "JoinBtn",
-                "JOIN A GAME…", () => _owner.OnLobbyJoinPrompt());
-            if (_joinButton != null)
-                AddCloneLayoutElement(_joinButton, joinSection.transform, RailButtonSize.x, RailButtonSize.y);
-            else
-            {
-                _joinButton = UiToolkit.CreateButton(joinSection, "JoinBtn", "JOIN A GAME…",
-                    Vector2.zero, RailButtonSize, new Vector2(0f, 1f),
-                    () => _owner.OnLobbyJoinPrompt());
-                LE(_joinButton.gameObject).preferredHeight = RailButtonSize.y;
-            }
-        }
-
-        // Build a rail SECTION: a child GameObject (its own top-aligned VLG) holding an amber section
-        // header + a thin themed separator line; controls are then added to the returned GameObject by
-        // the caller. Returning the section root lets the caller SetActive the WHOLE section (header +
-        // separator + controls) in one call for host-gating.
-        private GameObject AddRailSection(GameObject rail, string title)
-        {
-            var pad = LobbyTheme.ScaledPadding;
-
-            var section = new GameObject($"Section_{title}");
-            section.transform.SetParent(rail.transform, false);
-            section.AddComponent<RectTransform>();
-            var svlg = section.AddComponent<VerticalLayoutGroup>();
-            svlg.padding = new RectOffset(0, 0, 0, 0);
-            svlg.spacing = pad / 2;
-            svlg.childControlWidth = true;
-            svlg.childControlHeight = true;
-            svlg.childForceExpandWidth = true;
-            svlg.childForceExpandHeight = false;
-            svlg.childAlignment = TextAnchor.UpperLeft;
-
+            // ONE header + separator for the whole card, where there used to be three.
             var hdrH = LobbyTheme.ScaledSectionHeaderFontSize + pad / 2;
-            var hdr = UiToolkit.CreateText(section, "Hdr", Vector2.zero,
-                new Vector2(260, hdrH), title, LobbyTheme.ScaledSectionHeaderFontSize,
+            var hdr = UiToolkit.CreateText(card, "Hdr", Vector2.zero,
+                new Vector2(260, hdrH), "SESSION", LobbyTheme.ScaledSectionHeaderFontSize,
                 TextAnchor.UpperLeft, new Vector2(0f, 1f));
             hdr.color = LobbyTheme.Accent;
             hdr.fontStyle = FontStyle.Bold;
             var hle = LE(hdr.gameObject); hle.minHeight = hdrH; hle.flexibleHeight = 0;
 
-            // Thin separator line under the header (a themed flat Image at fixed height).
             var sep = new GameObject("Separator");
-            sep.transform.SetParent(section.transform, false);
+            sep.transform.SetParent(card.transform, false);
             sep.AddComponent<RectTransform>();
-            var sepImg = sep.AddComponent<Image>();
-            sepImg.color = LobbyTheme.Separator;
-            var sepLe = LE(sep); sepLe.minHeight = LobbyTheme.ScaledSeparatorThickness; sepLe.flexibleHeight = 0;
+            sep.AddComponent<Image>().color = LobbyTheme.Separator;
+            var sepLe = LE(sep);
+            sepLe.minHeight = LobbyTheme.ScaledSeparatorThickness;
+            sepLe.flexibleHeight = 0;
 
-            return section;
+            // ── 1. INVITE VIA STEAM (everyone), alone on its own row ────────────
+            // Steam allows an explicit overlay invite from any lobby MEMBER — friends-only governs who
+            // may BROWSE a lobby, not who may invite into it — and a client that accepted an invite is a
+            // member of exactly that lobby (SteamInvite.JoinLobby keeps the handle). So a joiner can pull
+            // their own friends in instead of asking the host to. OpenInviteOverlay says so out loud when
+            // neither a published nor a joined lobby exists yet.
+            var inviteRow = AddCardRow(card, "InviteRow");
+            var inviteBtn = AddCardButton(inviteRow, "InviteBtn", "INVITE VIA STEAM",
+                SessionButtonSize, () => _owner.InvitePlayers());
+            _inviteBtnCell = CellRoot(inviteBtn, inviteRow.transform);
+
+            // ── 2. THE CONNECT CODE (everyone) ──────────────────────────────────
+            var shareSection = AddCardGroup(card, "ShareGroup");
+
+            var stunLabel = UiToolkit.CreateText(shareSection, "InviteLabel", Vector2.zero,
+                new Vector2(260, labelH), "INVITE CODE (click to copy):",
+                LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            stunLabel.color = LobbyTheme.SubText;
+            LE(stunLabel.gameObject).minHeight = labelH;
+
+            var shareRow = AddCardRow(shareSection, "ShareRow");
+            // AddCardRow's floor is the BUTTON height, and this row holds no button — it holds the code
+            // cell, which is a row-height cell. A LayoutElement outranks its own layout group (priority 1
+            // vs 0), so the group's honest 62 lost to the row's 56 and the code's plate bled 3 px past
+            // the row top and bottom. Raise the floor to what is actually in the row.
+            LE(shareRow).minHeight = LobbyTheme.ScaledRowHeight;
+
+            // ONE unified invite code: carries Steam id and/or public endpoint, so a friend pastes this
+            // single string into the join screen and the client cascades Steam → hole-punch → direct.
+            // Value refreshed live in Refresh() (self-heals as UPnP/STUN discovery + Steam become ready).
+            //
+            // It is the only cell in its row, and still the one allowed to give up width — hence the
+            // flex, and hence the clip (MakeCopyableValue's RectMask2D). A truncated code is still a
+            // correct COPY, because the click copies the live value, not the drawn glyphs.
+            _inviteCodeValue = MakeCopyableValue(shareRow, "InviteValue", () => _owner.GetSessionInviteCode());
+            var codeW = LobbyTheme.Scale(150);
+            var codeLe = LE(_inviteCodeValue.transform.parent.gameObject);
+            codeLe.minHeight = LobbyTheme.ScaledRowHeight;
+            codeLe.minWidth = codeW;
+            codeLe.preferredWidth = codeW;
+            codeLe.flexibleWidth = 1;
+
+            // ── 3. THE ADDRESSES (HOST only), one per line, each copyable ───────
+            // Every local IPv4 with the adapter that carries it, then the UPnP-forwarded internet
+            // endpoint. Rows are built on demand in RefreshAddresses; this is just the labelled box they
+            // land in. The whole group is one SetActive, so a client never sees the host's addresses.
+            _addressGroup = AddCardGroup(card, "AddressGroup");
+            var addrLabel = UiToolkit.CreateText(_addressGroup, "AddressLabel", Vector2.zero,
+                new Vector2(260, labelH), "ADDRESSES (click to copy):",
+                LobbyTheme.ScaledSubFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
+            addrLabel.color = LobbyTheme.SubText;
+            LE(addrLabel.gameObject).minHeight = labelH;
+            _addressGroup.SetActive(false);   // shown per frame in Refresh, host only
         }
 
-        // Click-to-copy value text: a button whose label is the live value; click copies it.
+        // A vertical GROUP inside the session card: a plain VLG container holding a label and the row of
+        // controls under it. Its whole subtree is one SetActive — that is what keeps host-gating a single
+        // toggle now that the titled section roots are gone.
+        private static GameObject AddCardGroup(GameObject card, string name)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(card.transform, false);
+            go.AddComponent<RectTransform>();
+            var vlg = go.AddComponent<VerticalLayoutGroup>();
+            vlg.padding = new RectOffset(0, 0, 0, 0);
+            vlg.spacing = LobbyTheme.ScaledPadding / 4;
+            vlg.childControlWidth = true;
+            vlg.childControlHeight = true;
+            vlg.childForceExpandWidth = true;
+            vlg.childForceExpandHeight = false;
+            vlg.childAlignment = TextAnchor.UpperLeft;
+            return go;
+        }
+
+        // A horizontal ROW of controls inside the session card. Fixed height (the buttons it holds are a
+        // fixed height), so the card's own preferred height is the sum of its rows and nothing stretches.
+        private static GameObject AddCardRow(GameObject parent, string name)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(parent.transform, false);
+            go.AddComponent<RectTransform>();
+            var le = LE(go); le.minHeight = SessionButtonSize.y; le.flexibleHeight = 0;
+            var hlg = go.AddComponent<HorizontalLayoutGroup>();
+            hlg.spacing = LobbyTheme.ScaledPadding / 2;
+            hlg.childControlWidth = true;
+            hlg.childControlHeight = true;
+            hlg.childForceExpandWidth = false;
+            hlg.childForceExpandHeight = true;
+            hlg.childAlignment = TextAnchor.MiddleLeft;
+            return go;
+        }
+
+        // One card/footer button: the cloned native menu button when one can be cloned, else the
+        // from-code fallback — and either way a FIXED cell. minWidth as well as preferredWidth, the same
+        // discipline every roster-row cell carries: preferredWidth alone leaves a LayoutElement's
+        // effective minimum at ZERO, so the first sibling whose preferred width overran the row squeezed
+        // the button to nothing while the text that overran it kept drawing. (The clone path already
+        // pins both, in AddCloneLayoutElement; the fallback path did not, and now does.)
+        /// (internal, not private: <see cref="NetworkGatePanel"/> builds its buttons through this same
+        /// helper rather than re-deriving the clone-or-fallback + fixed-cell rules a second time.)
+        internal static Button AddCardButton(GameObject row, string name, string label, Vector2 size,
+                                            System.Action onClick)
+        {
+            var w = size.x;
+            var h = size.y;
+
+            var btn = NativeWidgetFactory.CloneMenuButton(row.transform, name, label, onClick);
+            if (btn != null)
+            {
+                AddCloneLayoutElement(btn, row.transform, w, h);
+                return btn;
+            }
+
+            btn = UiToolkit.CreateButton(row, name, label, Vector2.zero, size,
+                new Vector2(0f, 0.5f), onClick);
+            var le = LE(btn.gameObject);
+            le.minWidth = w; le.preferredWidth = w;
+            le.minHeight = h; le.preferredHeight = h;
+            le.flexibleWidth = 0;
+            return btn;
+        }
+
+        /// <summary>The GameObject to SetActive when gating a button cell on/off. A cloned native button
+        /// is returned NESTED inside its clone root, so toggling the returned Button's own GameObject
+        /// would hide the label and leave the clone's frame drawn; ResolveCloneRoot walks up to the child
+        /// of <paramref name="container"/>, and hands back the from-code button unchanged when there was
+        /// no clone.</summary>
+        private static GameObject CellRoot(Button btn, Transform container)
+        {
+            if (btn == null) return null;
+            var root = ResolveCloneRoot(btn.transform, container);
+            return root != null ? root.gameObject : null;
+        }
+
+        /// <summary>SetActive, but only on a real transition (Refresh runs every frame).</summary>
+        private static void SetCellActive(GameObject cell, bool on)
+        {
+            if (cell != null && cell.activeSelf != on) cell.SetActive(on);
+        }
+
         // Click-to-copy value text: a button whose label is the live value; click copies it. The
-        // button rect is owned by the parent layout group (caller sets the LayoutElement.minHeight).
+        // button rect is owned by the parent layout group (caller sets the LayoutElement min/preferred).
         private Text MakeCopyableValue(GameObject parent, string name, System.Func<string> getValue)
         {
             var btn = UiToolkit.CreateButton(parent, name, "", Vector2.zero,
                 new Vector2(240, LobbyTheme.ScaledRowHeight),
                 new Vector2(0f, 1f), () => _owner.CopyToClipboard(getValue()));
+            // The value is the one cell in its row that flexes, so it is the one that can be handed less
+            // width than its text needs — and its label is a CreateText, i.e. horizontalOverflow =
+            // Overflow, which would draw the tail of a long invite code straight over the button beside
+            // it. RectMask2D clips it to its own rect, the same fix the roster's nickname cell carries.
+            btn.gameObject.AddComponent<RectMask2D>();
             var label = btn.GetComponentInChildren<Text>();
             if (label != null)
             {
@@ -500,7 +607,9 @@ namespace Multiplayer.UI
             return label;
         }
 
-        // CENTER CHAT: native scroller (fallback plain rect) + inline input + Send.
+        // CHAT CARD: header + scrolling log (plain rect host) + inline input + Send. Now the LOWER half
+        // of the right column rather than the middle of three columns, so it claims its space
+        // vertically: flexibleHeight 1 takes everything the fixed-height session card above leaves.
         private void BuildChatZone(GameObject parent)
         {
             var chat = new GameObject("ChatColumn");
@@ -508,7 +617,7 @@ namespace Multiplayer.UI
             chat.AddComponent<RectTransform>();
             AddFramedPanel(chat);
 
-            LE(chat).flexibleWidth = 2;   // center widest (1:2:1)
+            LE(chat).flexibleHeight = 1;
 
             var pad = LobbyTheme.ScaledPadding;
             var vlg = chat.AddComponent<VerticalLayoutGroup>();
@@ -565,21 +674,30 @@ namespace Multiplayer.UI
             irhlg.childForceExpandWidth = false;
             irhlg.childForceExpandHeight = true;
 
-            // Both the Enter key (InputField.onEndEdit) and the SEND button route through ONE helper
-            // (SendCurrentChatInput) so the input text is read, empty-checked, sent, and cleared
+            // Both the Enter key (polled in Refresh — see UiToolkit.SubmittedThisFrame for why it is NOT
+            // hung on InputField.onEndEdit, which also fires on DESELECT and so broadcast a half-typed
+            // line the moment the player clicked anywhere else) and the SEND button route through ONE
+            // helper (SendCurrentChatInput) so the input text is read, empty-checked, sent, and cleared
             // identically on every path. The send goes via OnLobbyChatSend → SessionManager.SendChat,
             // which on the host echoes locally (sender sees their own line) and on a client relays to
             // the host who broadcasts it back — so the sender always sees their message.
+            // Same fixed-cell/flexible-cell discipline as the roster row and the session card: SEND is a
+            // fixed cell and pins minWidth (preferredWidth alone leaves its effective minimum at zero),
+            // the input flexes but keeps a floor so it can never be squeezed to an unusable sliver.
+            var inputMinW = LobbyTheme.Scale(120);
             _chatInput = UiToolkit.CreateInputField(inputRow, "ChatInput", "",
-                Vector2.zero, new Vector2(220, inputH), new Vector2(0f, 0f),
-                _ => SendCurrentChatInput());
-            LE(_chatInput.gameObject).flexibleWidth = 1;
+                Vector2.zero, new Vector2(220, inputH), new Vector2(0f, 0f));
+            var cile = LE(_chatInput.gameObject);
+            cile.minWidth = inputMinW;
+            cile.preferredWidth = inputMinW;
+            cile.flexibleWidth = 1;
 
             var sendW = LobbyTheme.Scale(90);
             var send = UiToolkit.CreateButton(inputRow, "ChatSend", "SEND",
                 Vector2.zero, new Vector2(sendW, inputH), new Vector2(0f, 0f),
                 SendCurrentChatInput);
-            var sndle = LE(send.gameObject); sndle.preferredWidth = sendW; sndle.flexibleWidth = 0;
+            var sndle = LE(send.gameObject);
+            sndle.minWidth = sendW; sndle.preferredWidth = sendW; sndle.flexibleWidth = 0;
         }
 
         // Single chat-send entry point shared by the SEND button and the Enter key. Reads the current
@@ -595,7 +713,9 @@ namespace Multiplayer.UI
             _chatInput.text = "";
         }
 
-        // RIGHT ROSTER: header with small count + scrollable rows (re-uses the existing pool).
+        // LEFT COLUMN (60%): the self card, then the "PLAYERS (n)" header, then the scrollable rows
+        // (re-uses the existing pool). The roster is the thing players actually look at, so it is the
+        // wide half of the two-column page.
         private void BuildRosterZone(GameObject parent)
         {
             var players = new GameObject("PlayersColumn");
@@ -603,7 +723,11 @@ namespace Multiplayer.UI
             players.AddComponent<RectTransform>();
             AddFramedPanel(players);
 
-            LE(players).flexibleWidth = 1;
+            // 3 of 3+2. A roster row carries a crown, a flexing nickname, a word status chip, a parity
+            // badge and a ping meter — 548 logical px of summed MINIMUM at UiScale 1.4 — and the previous
+            // three-column split left barely single digits of slack over that. See PinColumnWidth for why
+            // the weight is only a true ratio once min/preferred are pinned to 0.
+            PinColumnWidth(players, 3f);
 
             var pad = LobbyTheme.ScaledPadding;
             var vlg = players.AddComponent<VerticalLayoutGroup>();
@@ -613,6 +737,10 @@ namespace Multiplayer.UI
             vlg.childControlHeight = true;
             vlg.childForceExpandWidth = true;
             vlg.childForceExpandHeight = false;
+
+            // The self card is created BEFORE the header, so the column's VerticalLayoutGroup (which
+            // orders purely by sibling index) puts it above "PLAYERS (n)".
+            BuildSelfCard(players);
 
             var hdrH = LobbyTheme.ScaledBodyFontSize + pad / 2;
             _connectText = UiToolkit.CreateText(players, "PlayersHdr", Vector2.zero,
@@ -640,9 +768,124 @@ namespace Multiplayer.UI
             ConfigureScrollContent(rosterRect, padding: 0);
         }
 
-        // FOOTER: Leave (left) … Ready (client) / Play (host) (right), pushed apart by a flexible
-        // Spacer. Fixed height (LE.minHeight, flexibleHeight 0); buttons laid out by a
-        // HorizontalLayoutGroup so there is zero fractional-X math. (JOIN moved to the connect rail.)
+        // THE SELF CARD: who YOU are, at a fixed place at the top of the roster zone rather than at
+        // whichever list position the ordering happened to give you this frame. One framed card holding
+        // the nickname (large), a HOST chip when this peer is the host, and the rename control — the ONLY
+        // rename control in the panel now.
+        private void BuildSelfCard(GameObject parent)
+        {
+            var pad = LobbyTheme.ScaledPadding;
+            var nameH = LobbyTheme.ScaledSelfNameFontSize + pad / 2;
+            var lineH = LobbyTheme.ScaledSubFontSize + pad / 4;
+            var icon = LobbyTheme.ScaledIconButtonSize;
+
+            _selfCard = new GameObject("SelfCard");
+            _selfCard.transform.SetParent(parent.transform, false);
+            _selfCard.AddComponent<RectTransform>();
+            AddFramedPanel(_selfCard, LobbyTheme.CardBackground, LobbyTheme.CardBorder);
+
+            var cle = LE(_selfCard);
+            cle.minHeight = nameH + lineH + pad;
+            cle.flexibleHeight = 0;
+
+            var vlg = _selfCard.AddComponent<VerticalLayoutGroup>();
+            vlg.padding = new RectOffset(pad, pad, pad / 2, pad / 2);
+            vlg.spacing = LobbyTheme.Scale(2);
+            vlg.childControlWidth = true;
+            vlg.childControlHeight = true;
+            vlg.childForceExpandWidth = true;
+            vlg.childForceExpandHeight = false;
+            vlg.childAlignment = TextAnchor.UpperLeft;
+
+            // Top line: nickname (flexes) · HOST · RENAME.
+            var top = new GameObject("Top");
+            top.transform.SetParent(_selfCard.transform, false);
+            top.AddComponent<RectTransform>();
+            var tle = LE(top); tle.minHeight = Mathf.Max(nameH, icon); tle.flexibleHeight = 0;
+            var hlg = top.AddComponent<HorizontalLayoutGroup>();
+            hlg.spacing = pad / 2;
+            hlg.childControlWidth = true;
+            hlg.childControlHeight = true;
+            hlg.childForceExpandWidth = false;
+            hlg.childForceExpandHeight = true;
+            hlg.childAlignment = TextAnchor.MiddleLeft;
+
+            _selfName = UiToolkit.CreateText(top, "SelfName", Vector2.zero,
+                new Vector2(LobbyTheme.ScaledRosterNameWidth, nameH), "",
+                LobbyTheme.ScaledSelfNameFontSize, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
+            _selfName.color = LobbyTheme.BodyText;
+            _selfName.fontStyle = FontStyle.Bold;
+            // Same three writes as the roster row's name cell, for the same reason: preferredWidth so the
+            // nickname's length cannot inflate the group's total and squeeze the tags beside it, and the
+            // clip so a long one is truncated rather than drawn over them. (The tags below pin minWidth
+            // for the other half of it.)
+            _selfName.gameObject.AddComponent<RectMask2D>();
+            var snle = LE(_selfName.gameObject);
+            snle.minWidth = LobbyTheme.ScaledRosterNameWidth;
+            snle.preferredWidth = LobbyTheme.ScaledRosterNameWidth;
+            snle.flexibleWidth = 1;
+
+            // NO "YOU" TAG. The card is a framed card of its own, above the PLAYERS header rather than
+            // in the list, carrying the only RENAME control on the page — it cannot be anyone else, and
+            // a label saying so was one more thing to read for no information.
+
+            // Accent (the game's captured WarningUIColor) is used here as a ROLE highlight, the same way
+            // every section header on this page uses it — not as a "good state" colour, which is the one
+            // thing it must never be (it can arrive RED; see LoadOverlayController.cs:254).
+            var hostW = LobbyTheme.Scale(48);
+            _selfHostChip = UiToolkit.CreateText(top, "HostChip", Vector2.zero, new Vector2(hostW, lineH),
+                "HOST", LobbyTheme.ScaledSubFontSize, TextAnchor.MiddleCenter, new Vector2(0.5f, 0.5f));
+            _selfHostChip.color = LobbyTheme.Accent;
+            _selfHostChip.fontStyle = FontStyle.Bold;
+            var hcle = LE(_selfHostChip.gameObject);
+            hcle.minWidth = hostW; hcle.preferredWidth = hostW; hcle.flexibleWidth = 0;
+            _selfHostChip.gameObject.SetActive(false);   // shown per frame in RefreshSelfCard
+
+            // The rename control, reusing the EXACT existing rename path (OnLobbyRenamePrompt → native
+            // prompt → SendRename) — only the widget it hangs off moved.
+            var renameW = LobbyTheme.Scale(96);
+            var renameBtn = NativeWidgetFactory.CloneMenuButton(top.transform, "RenameBtn", "RENAME",
+                () => _owner.OnLobbyRenamePrompt());
+            if (renameBtn != null)
+                AddCloneLayoutElement(renameBtn, top.transform, renameW, icon);
+            else
+            {
+                renameBtn = UiToolkit.CreateButton(top, "RenameBtn", "RENAME",
+                    Vector2.zero, new Vector2(renameW, icon), new Vector2(1f, 0.5f),
+                    () => _owner.OnLobbyRenamePrompt());
+                var rle = LE(renameBtn.gameObject);
+                rle.minWidth = renameW;
+                rle.preferredWidth = renameW; rle.preferredHeight = icon; rle.flexibleWidth = 0;
+            }
+
+            // Second line: MY OWN transfer/load progress. It followed the local player up here from the
+            // list row whose ready-check used to carry it — this is the one peer whose progress this
+            // machine knows exactly (ProgressFor's isMe arm).
+            _selfStatus = UiToolkit.CreateText(_selfCard, "SelfStatus", Vector2.zero,
+                new Vector2(LobbyTheme.ScaledRosterNameWidth, lineH), "",
+                LobbyTheme.ScaledSubFontSize, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
+            _selfStatus.color = LobbyTheme.SubText;
+            var stle = LE(_selfStatus.gameObject); stle.minHeight = lineH; stle.flexibleHeight = 0;
+            _selfStatus.gameObject.SetActive(false);
+        }
+
+        // FOOTER, left → right: LEAVE · CHOOSE SAVE… · NEW CAMPAIGN… · «spacer» · the QUEUED line ·
+        // «spacer» · READY. Fixed height (LE.minHeight, flexibleHeight 0); everything laid out by a
+        // HorizontalLayoutGroup so there is zero fractional-X math. (JOIN lives in the session card.)
+        //
+        // THE CAMPAIGN CONTROLS ARE HERE BECAUSE THE CAMPAIGN LINE IS. They used to sit in the right-hand
+        // session card, a column away from the one sentence that says which campaign is queued; the
+        // button that changes that sentence now stands next to it. Nothing about WHO MAY PRESS THEM
+        // changed: both are hidden off the host (the SetActive the SaveGroup root used to carry, split
+        // into the two cells that group held), and NEW CAMPAIGN keeps its own separate interactable gate
+        // on EvaluateNewCampaignGate.
+        //
+        // WIDTH BUDGET (UiScale 1.4, logical px; the root VLG's 3×22 side padding leaves 1788):
+        //   LEAVE 224 + CHOOSE SAVE… 280 + NEW CAMPAIGN… 280 + QUEUED 504 + READY 224 = 1512,
+        //   plus 6 gaps × 11 = 66  →  1578 of 1788, i.e. 210 px of slack with both host-only cells shown.
+        // Every one of those cells pins minWidth, the QUEUED label included: a cell carrying only
+        // preferredWidth has an effective minimum of ZERO and is squeezed to nothing (drawn over by
+        // whichever sibling overran) instead of pushing back — the bug this file already fixed once.
         private void BuildFooter()
         {
             var footer = new GameObject("Footer");
@@ -668,25 +911,84 @@ namespace Multiplayer.UI
                 _leaveButton = UiToolkit.CreateButton(footer, "LeaveBtn", "LEAVE",
                     Vector2.zero, FooterButtonSize, new Vector2(0f, 0f),
                     () => _owner.OnLobbyLeave());
-                LE(_leaveButton.gameObject).preferredWidth = FooterButtonSize.x;
+                var lle = LE(_leaveButton.gameObject);
+                lle.minWidth = FooterButtonSize.x; lle.preferredWidth = FooterButtonSize.x;
             }
 
-            // Flexible spacer pushes the remaining buttons to the right edge. (JOIN moved out of the
-            // footer into the connect rail's "JOIN A GAME" section; the footer now carries only
-            // Leave (left) … Ready / Play (right).)
+            // THE CAMPAIGN CONTROLS, host-only, immediately left of the line they change. Both stay
+            // separate widgets with separate gating (see the header note) — CHOOSE SAVE… opens the save
+            // picker, NEW CAMPAIGN… bootstraps a fresh one, and merging them would have to invent a rule
+            // for which of the two a single button means.
+            var chooseSaveBtn = AddCardButton(footer, "ChooseSaveBtn", "CHOOSE SAVE…",
+                CampaignButtonSize, () => _owner.OnLobbyChooseSave());
+            _chooseSaveCell = CellRoot(chooseSaveBtn, footer.transform);
+
+            // P0 new-campaign bootstrap: start a FRESH campaign instead of picking a save (host runs the
+            // native new-game flow; clients auto-join at the first geoscape frame).
+            _newCampaignBtn = AddCardButton(footer, "NewCampaignBtn", "NEW CAMPAIGN…",
+                CampaignButtonSize, () => _owner.OnLobbyNewCampaign());
+            _newCampaignCell = CellRoot(_newCampaignBtn, footer.transform);
+
+            // Same one-time controller resolution the READY button does, for the same reason: a cloned
+            // native button repaints its greyed visual only through SetInteractable, never off
+            // Button.interactable alone.
+            if (_newCampaignBtn != null)
+            {
+                var ncPgb = HarmonyLib.AccessTools.TypeByName(
+                    "PhoenixPoint.Common.View.ViewControllers.PhoenixGeneralButton");
+                if (ncPgb != null)
+                {
+                    _newCampaignCtrl = _newCampaignBtn.GetComponentInParent(ncPgb)
+                        ?? _newCampaignBtn.GetComponentInChildren(ncPgb);
+                    if (_newCampaignCtrl != null)
+                        _newCampaignSetInteractable =
+                            HarmonyLib.AccessTools.Method(ncPgb, "SetInteractable", new[] { typeof(bool) });
+                }
+            }
+
+            // Flexible spacer, then the QUEUED CAMPAIGN line, then a second flexible spacer: the label
+            // sits in the footer's true centre with the left-hand cluster pinned left and Ready pinned
+            // right, and no fractional-X math anywhere. (JOIN moved out of the footer and now sits in the
+            // session card's JOIN row.)
             var spacer = new GameObject("Spacer");
             spacer.transform.SetParent(footer.transform, false);
             spacer.AddComponent<RectTransform>();
             LE(spacer).flexibleWidth = 1;
 
-            // Ready: a plain cloned MENU BUTTON acting as a toggle — same widget family as
-            // Leave/Join/Play, which render cleanly in a LayoutElement slot. (The old approach cloned a
+            _queuedCampaign = UiToolkit.CreateText(footer, "QueuedCampaign", Vector2.zero,
+                new Vector2(LobbyTheme.Scale(360), FooterButtonSize.y), "",
+                LobbyTheme.ScaledRowFontSize, TextAnchor.MiddleCenter, new Vector2(0.5f, 0.5f));
+            _queuedCampaign.color = LobbyTheme.SubText;
+            _queuedCampaign.raycastTarget = false;   // a label in the middle of a button row must eat nothing
+            _queuedCampaign.horizontalOverflow = HorizontalWrapMode.Wrap;
+            var qle = LE(_queuedCampaign.gameObject);
+            // minWidth AS WELL AS preferredWidth: the footer now carries two more fixed cells, and a
+            // label with preferredWidth alone reports an effective minimum of zero — it would be the
+            // first thing crushed to nothing the moment the row got tight, which is exactly the sentence
+            // the whole footer exists to show.
+            qle.minWidth = LobbyTheme.Scale(360);
+            qle.preferredWidth = LobbyTheme.Scale(360);
+            qle.flexibleWidth = 0;
+
+            var spacer2 = new GameObject("Spacer2");
+            spacer2.transform.SetParent(footer.transform, false);
+            spacer2.AddComponent<RectTransform>();
+            LE(spacer2).flexibleWidth = 1;
+
+            // READY: a plain cloned MENU BUTTON acting as a toggle — same widget family as Leave/Join,
+            // which render cleanly in a LayoutElement slot. (The old approach cloned a
             // GameOptionViewController option-row whose internal layout + "NEEDS TEXT" placeholder leaked
-            // OUTSIDE its wrapper; the menu button has no such stray children.) The button is CLIENT-ONLY —
-            // OnLobbyToggleReady is a no-op for the host (the host is the starter, it has no Ready), so the
-            // button is host-gated OFF (mirror of _playButton/_chooseSaveBtn, inverted). Authoritative
-            // client ready state arrives via the roster and is re-synced into _localReady + the label in
-            // RefreshControls. Created here, then frame-gated by host-state in RefreshControls.
+            // OUTSIDE its wrapper; the menu button has no such stray children.)
+            //
+            // EVERY PLAYER HAS ONE, THE HOST INCLUDED, and it is the footer's only primary control — the
+            // PLAY button that used to sit beside it is GONE. When every row in the lobby reads READY the
+            // session starts itself on a five-second countdown (LobbyCountdown); nobody presses go. The
+            // host's toggle writes SessionManager.HostReady, which has always ridden the roster and which
+            // the start gate now reads (LobbyController.PeersReady).
+            //
+            // Authoritative ready state arrives via the roster and is re-synced into _localReady + the
+            // label in RefreshControls, on BOTH sides — the host's own row carries HostReady, so the same
+            // one line of code serves host and client.
             _readyButton = NativeWidgetFactory.CloneMenuButton(footer.transform, "ReadyBtn", "READY",
                 () =>
                 {
@@ -697,9 +999,10 @@ namespace Multiplayer.UI
             if (_readyButton != null)
             {
                 AddCloneLayoutElement(_readyButton, footer.transform, FooterButtonSize.x, FooterButtonSize.y);
-                // Parity soft-gate: resolve the clone's native PhoenixGeneralButton controller ONCE so
-                // the READY lock can repaint the greyed visual immediately (same machinery + reasons as
-                // the Play button below — interactable alone doesn't repaint a cloned native button).
+                // READY LOCK repaint: resolve the clone's native PhoenixGeneralButton controller ONCE so
+                // the greyed visual appears immediately — interactable alone doesn't repaint a cloned
+                // native button. Two things lock this button: a client's parity mismatch, and a HOST with
+                // no save chosen (there is nothing to be ready FOR, and SetHostReady refuses it anyway).
                 var readyPgbType = HarmonyLib.AccessTools.TypeByName(
                     "PhoenixPoint.Common.View.ViewControllers.PhoenixGeneralButton");
                 if (readyPgbType != null)
@@ -721,52 +1024,16 @@ namespace Multiplayer.UI
                         _owner.OnLobbyToggleReady(_localReady);
                         UpdateReadyButtonLabel();
                     });
-                LE(_readyButton.gameObject).preferredWidth = FooterButtonSize.x;
+                var rdle = LE(_readyButton.gameObject);
+                rdle.minWidth = FooterButtonSize.x; rdle.preferredWidth = FooterButtonSize.x;
             }
             _readyButtonLabel = _readyButton != null ? _readyButton.GetComponentInChildren<Text>() : null;
             UpdateReadyButtonLabel();
 
-            // Client-only: hide the Ready button for the host at creation (it is meaningless for the
-            // starter, and OnLobbyToggleReady no-ops for the host). Mirrors the host-only visibility of
-            // _chooseSaveBtn/_playButton, inverted. RefreshControls keeps this in sync each frame.
-            var engine = NetworkEngine.Instance;
-            if (_readyButton != null)
-            {
-                var clientShow = engine == null || !engine.IsHost;
-                if (_readyButton.gameObject.activeSelf != clientShow)
-                    _readyButton.gameObject.SetActive(clientShow);
-            }
-
-            // Play (host).
-            _playButton = NativeWidgetFactory.CloneMenuButton(footer.transform, "PlayBtn", "PLAY ▸",
-                () => _owner.OnLobbyPlay());
-            if (_playButton != null)
-            {
-                AddCloneLayoutElement(_playButton, footer.transform, FooterButtonSize.x, FooterButtonSize.y);
-
-                // Resolve the native PhoenixGeneralButton controller on the clone ONCE. It lives on the
-                // prefab root that also carries BaseButton; the cloned child Button is at-or-below it, so
-                // GetComponentInParent(type) finds it. Fall back to GetComponentInChildren if the layout
-                // ever puts the controller below the Button. We then drive its SetInteractable(bool) to
-                // repaint the enabled/greyed visual immediately (see RefreshPlayButtonVisual).
-                var pgbType = HarmonyLib.AccessTools.TypeByName(
-                    "PhoenixPoint.Common.View.ViewControllers.PhoenixGeneralButton");
-                if (pgbType != null)
-                {
-                    _playButtonCtrl = _playButton.GetComponentInParent(pgbType)
-                        ?? _playButton.GetComponentInChildren(pgbType);
-                    if (_playButtonCtrl != null)
-                        _playButtonSetInteractable =
-                            HarmonyLib.AccessTools.Method(pgbType, "SetInteractable", new[] { typeof(bool) });
-                }
-            }
-            else
-            {
-                _playButton = UiToolkit.CreateButton(footer, "PlayBtn", "PLAY ▸",
-                    Vector2.zero, FooterButtonSize, new Vector2(0f, 0f),
-                    () => _owner.OnLobbyPlay());
-                LE(_playButton.gameObject).preferredWidth = FooterButtonSize.x;
-            }
+            // NO PLAY BUTTON. There used to be one right here, host-only, greyed on the same gate. It is
+            // gone on purpose and must not come back: with a countdown that arms the instant everybody is
+            // ready, a second control that starts the session immediately is a way to skip the five
+            // seconds the other players were promised to cancel in.
         }
 
         // FRAMED PANEL: a themed card backing Image on the zone root (native sliced sprite frame via
@@ -782,7 +1049,8 @@ namespace Multiplayer.UI
         }
 
         // Default-coloured overload used by every zone (themed card fill + card border).
-        private static void AddFramedPanel(GameObject zone)
+        // internal: NetworkGatePanel's friends card is the same kind of card and uses the same skin.
+        internal static void AddFramedPanel(GameObject zone)
         {
             AddFramedPanel(zone, LobbyTheme.CardBackground, LobbyTheme.CardBorder);
         }
@@ -791,13 +1059,18 @@ namespace Multiplayer.UI
         // full-width main-menu column, so dropped unmodified into a lobby zone it overflows; we
         // constrain every clone to a rect that fits its zone (growing with UiScale) and cap its label
         // font so the text stays inside that rect.
-        private static Vector2 RailButtonSize => new Vector2(LobbyTheme.Scale(220), LobbyTheme.Scale(40));
+        private static Vector2 SessionButtonSize => new Vector2(LobbyTheme.Scale(200), LobbyTheme.Scale(40));
         private static Vector2 FooterButtonSize => new Vector2(LobbyTheme.Scale(160), LobbyTheme.Scale(44));
+        // The footer's campaign controls: FOOTER height (they stand in the footer's button row) but
+        // 200 wide rather than 160 — "NEW CAMPAIGN…" is thirteen glyphs plus an ellipsis and the clone's
+        // label is capped at ScaledClonedButtonFontCap, not shrunk to fit. See BuildFooter's budget.
+        private static Vector2 CampaignButtonSize => new Vector2(LobbyTheme.Scale(200), FooterButtonSize.y);
         private static int ClonedButtonFontCap => LobbyTheme.ScaledClonedButtonFontCap;
 
         // Get-or-add a LayoutElement on a GameObject (caller sets the size fields). Centralises the
-        // null-coalescing pattern used throughout the layout-driven build.
-        private static LayoutElement LE(GameObject go)
+        // null-coalescing pattern used throughout the layout-driven build. internal so the gate panel
+        // shares it instead of growing a second copy.
+        internal static LayoutElement LE(GameObject go)
         {
             return go.GetComponent<LayoutElement>() ?? go.AddComponent<LayoutElement>();
         }
@@ -819,14 +1092,28 @@ namespace Multiplayer.UI
             return t;
         }
 
-        // Cap the label font on a cloned widget so a large menu-sized glyph run fits its constrained
-        // rect (the prefab text is sized for the full-width menu column).
+        // KEEP A CLONE'S LABEL INSIDE THE CELL WE GAVE IT.
+        //
+        // Capping the font was only half of it, and the missing half is what drew INVITE VIA STEAM over
+        // the invite code beside it. A LayoutElement constrains the clone ROOT; it says nothing about the
+        // prefab's own label rect inside, which is sized for the full-width main-menu column and does not
+        // shrink when the root does — and no uGUI Text clips itself. So after capping, ask the label to
+        // FIT: best-fit shrinks it only when it genuinely does not fit (resizeTextMaxSize is the capped
+        // size, so a label that already fits renders identically), and Wrap keeps a long one from
+        // reaching sideways into its neighbour while it does.
+        //
+        // Same three writes as CountdownPanel.FitInsideRect and TacticalReadySync, for the same reason.
         private static void CapCloneFont(Transform start)
         {
             if (start == null) return;
             var label = start.GetComponentInChildren<Text>(true);
-            if (label != null && label.fontSize > ClonedButtonFontCap)
+            if (label == null) return;
+            if (label.fontSize > ClonedButtonFontCap)
                 label.fontSize = ClonedButtonFontCap;
+            label.resizeTextForBestFit = true;
+            label.resizeTextMaxSize = label.fontSize > 0 ? label.fontSize : ClonedButtonFontCap;
+            label.resizeTextMinSize = 8;
+            label.horizontalOverflow = HorizontalWrapMode.Wrap;
         }
 
         // Size a cloned native button via a LayoutElement on its clone ROOT (the parent LayoutGroup
@@ -849,6 +1136,12 @@ namespace Multiplayer.UI
             root.localScale = Vector3.one;
 
             var le = LE(root.gameObject);
+            // minWidth as well as preferredWidth: a cloned native button is a FIXED cell wherever it is
+            // dropped, and preferredWidth alone leaves its effective minimum at zero — so the first time a
+            // sibling's preferred width overran the group (a long nickname in a roster row) the button was
+            // squeezed to nothing while the text that overran it kept drawing. Same pair, same reason, as
+            // every from-code fixed cell in CreateRow.
+            le.minWidth = w;
             le.preferredWidth = w;
             le.preferredHeight = h;
             le.flexibleWidth = 0;
@@ -991,43 +1284,180 @@ namespace Multiplayer.UI
             // Subscribe once to chat events (session may be re-created on Join).
             EnsureChatSubscription(engine);
 
-            // TOP BAR subtitle: host hint or chosen save.
-            if (_roleText != null)
+            // FOOTER CENTRE: what this lobby is queued on. Read off the AUTHORITATIVE broadcast value
+            // (Session.ChosenSaveName — the same single source of truth the start gate keys on, mirrored
+            // onto every client by the 0x43 SetSave packet), so host and clients read one identical
+            // sentence and nobody has to ask which campaign the countdown is about to pull them into.
+            if (_queuedCampaign != null)
             {
-                var chosen = engine.Session?.ChosenSaveName;
-                _roleText.text = string.IsNullOrEmpty(chosen)
-                    ? (engine.IsHost ? "your lobby" : "joined lobby")
-                    : $"save: {chosen}";
+                var queued = engine.Session?.ChosenSaveName;
+                _queuedCampaign.text = string.IsNullOrEmpty(queued)
+                    ? "NEW CAMPAIGN QUEUED"
+                    : "QUEUED: " + queued;
             }
 
-            // CONNECT RAIL values.
-            if (_inviteCodeValue != null) _inviteCodeValue.text = _owner.GetOwnUnifiedCode();
-            if (_railSaveValue != null)
+            // THE INVITE KEY — read by BOTH sides, and PUBLISHED by the host. On the host this string is
+            // recomputed here every frame anyway (it self-heals as UPnP/STUN discovery and Steam become
+            // ready), so handing each new value to the session costs one string compare and is what
+            // carries the key to every client on the next roster broadcast.
+            if (_inviteCodeValue != null)
             {
-                var n = engine.Session?.ChosenSaveName;
-                var m = engine.Session?.ChosenSaveMeta;
-                _railSaveValue.text = string.IsNullOrEmpty(n) ? "(none)"
-                    : (string.IsNullOrEmpty(m) ? n : $"{n}\n{m}");
+                var code = _owner.GetSessionInviteCode();
+                if (engine.IsHost) engine.Session?.PublishHostInviteCode(code);
+                _inviteCodeValue.text = code;
             }
-            // Host-only rail sections (SHARE + SAVE): visible only to the host (clients only see JOIN).
-            // Gating the whole section root hides its header + separator + controls together; mirrors
-            // the old per-button gate. JOIN's section stays always-visible.
-            if (_shareSection != null && _shareSection.activeSelf != engine.IsHost)
-                _shareSection.SetActive(engine.IsHost);
-            if (_saveSection != null && _saveSection.activeSelf != engine.IsHost)
-                _saveSection.SetActive(engine.IsHost);
 
-            // CHAT: re-render only when the log changed.
+            // THE STEAM INVITE BUTTON IS FOR EVERYONE, NOT JUST THE HOST (see BuildSessionCard).
+            SetCellActive(_inviteBtnCell, true);
+            // HOST-ONLY: the address lines are the host machine's own addresses.
+            RefreshAddresses(engine);
+
+            // HOST-ONLY FOOTER CELLS: the two campaign controls. Byte-for-byte the visibility rule the
+            // SaveGroup root carried before they moved down here.
+            SetCellActive(_chooseSaveCell, engine.IsHost);
+            SetCellActive(_newCampaignCell, engine.IsHost);
+
+            // CHAT: Enter sends. Polled here rather than wired to the field, because the only event this
+            // uGUI build offers (onEndEdit) also fires on deselect — clicking out of the box used to send.
+            if (UiToolkit.SubmittedThisFrame(_chatInput)) SendCurrentChatInput();
+
+            // …and re-render only when the log changed.
             if (_chat.Version != _chatRenderedVersion)
             {
                 RenderChat();
                 _chatRenderedVersion = _chat.Version;
             }
 
-            // ROSTER + controls.
+            // ROSTER + controls. The count still names EVERY player, the local one included — the self
+            // card lifted "you" out of the list, not out of the lobby.
             var roster = RefreshRoster(engine);
-            if (_connectText != null) _connectText.text = $"PLAYERS ({roster.Count})";
+            if (_connectText != null && roster.Count != _rosterCountShown)
+            {
+                _rosterCountShown = roster.Count;
+                _connectText.text = $"PLAYERS ({roster.Count})";
+            }
             RefreshControls(engine, roster);
+        }
+
+        // One address line: the copyable cell, its label, and the bare "ip:port" the click puts on the
+        // clipboard. The label reads "Ethernet — 192.168.1.23:14242"; the COPY is just the endpoint,
+        // because the adapter name is for the human choosing a line, not for the parser reading it.
+        private sealed class AddressLine
+        {
+            public GameObject Cell;
+            public Text Label;
+            public string Endpoint;
+        }
+
+        /// <summary>
+        /// THE HOST'S ADDRESS LIST — every way in that is a typeable address, newest state each frame.
+        ///
+        ///   • ONE LINE PER LOCAL IPv4, labelled with its adapter. Not just the default-route one: the
+        ///     entire point of Radmin / ZeroTier / Hamachi is a peer reachable on an adapter that is not
+        ///     the default route, and the old socket-to-8.8.8.8 resolver could only ever return the one
+        ///     that was (see LanIpResolver).
+        ///   • THE UPnP ENDPOINT, labelled as the internet address, ONLY when the router actually opened
+        ///     one. That mapping is a real TCP forward to the direct port — it is exactly the "works
+        ///     without touching the router" case — and the line simply does not exist when it is null.
+        ///
+        /// AND NEVER THE STUN ENDPOINT. It is the obvious third thing to print here and it must not be:
+        /// its port is the UDP NAT mapping, NOT the TCP listener. Pasted as "1.2.3.4:PORT" a friend's
+        /// SmartJoinParser reads a DirectIp and DirectTransport dials TCP at a UDP port and times out.
+        /// The STUN endpoint belongs in the encoded key above, which already carries the flags that say
+        /// how to reach it (JoinPlan cascades Steam → hole-punch → direct). Do not add it as a line.
+        ///
+        /// The port on every line is <see cref="Multiplayer.Util.SmartJoinParser.DefaultDirectPort"/>
+        /// because that is literally what DirectTransport binds (it exposes no bound port to ask).
+        ///
+        /// COST: two reference compares per frame. LanIpResolver hands back the SAME list instance until
+        /// it re-enumerates (10 s TTL — a cable plugged in after the lobby opened appears, a per-frame
+        /// syscall sweep does not happen), and UpnpPortMapper.Current is a single instance that is set
+        /// once; so unless one of those two objects changed there is nothing to rebuild.
+        /// </summary>
+        private void RefreshAddresses(NetworkEngine engine)
+        {
+            if (_addressGroup == null) return;
+            if (!engine.IsHost) { SetCellActive(_addressGroup, false); return; }
+
+            var addrs = Multiplayer.Util.LanIpResolver.LocalIPv4Addresses();
+            var upnp = Multiplayer.Net.UpnpPortMapper.Current;
+            if (!ReferenceEquals(addrs, _addressesShownFor) || !ReferenceEquals(upnp, _upnpShownFor))
+            {
+                _addressesShownFor = addrs;
+                _upnpShownFor = upnp;
+                PaintAddressLines(addrs, upnp);
+            }
+
+            SetCellActive(_addressGroup, CountVisibleAddressLines() > 0);
+        }
+
+        // ponytail: at most MaxAddressLines rows. The card sizes itself from its rows and the chat below
+        // absorbs what it leaves, so a handful of extra adapters just makes the card taller — but a box
+        // with twenty VPN adapters would push the chat off the bottom, and this is the one line that
+        // stops it. Raise it (or give the group its own scroller) if a real machine ever hits it.
+        private const int MaxAddressLines = 8;
+
+        private void PaintAddressLines(List<Multiplayer.Util.LanIpResolver.LocalAddress> addrs,
+                                       Multiplayer.Net.MappedEndpoint upnp)
+        {
+            var port = Multiplayer.Util.SmartJoinParser.DefaultDirectPort;
+            var dash = LobbyTheme.EmDash;
+
+            var i = 0;
+            for (int a = 0; a < addrs.Count && i < MaxAddressLines; a++, i++)
+                SetAddressLine(i, addrs[a].Interface + "  " + dash + "  " + addrs[a].Ip + ":" + port,
+                               addrs[a].Ip + ":" + port);
+
+            if (upnp != null && i < MaxAddressLines)
+            {
+                var ep = upnp.ToEndPoint();
+                SetAddressLine(i, "Internet (UPnP)  " + dash + "  " + ep, ep.ToString());
+                i++;
+            }
+
+            for (int spare = i; spare < _addressLines.Count; spare++)
+                SetCellActive(_addressLines[spare].Cell, false);
+        }
+
+        private int CountVisibleAddressLines()
+        {
+            var n = 0;
+            for (int i = 0; i < _addressLines.Count; i++)
+                if (_addressLines[i].Cell != null && _addressLines[i].Cell.activeSelf) n++;
+            return n;
+        }
+
+        // Pooled, exactly like the roster rows: a line is created once and then only re-labelled, so a
+        // re-enumeration costs no GameObject churn. The copy closure reads the LINE's current endpoint
+        // rather than capturing a value, which is what makes reuse safe.
+        private void SetAddressLine(int index, string label, string endpoint)
+        {
+            while (_addressLines.Count <= index)
+            {
+                var line = new AddressLine();
+                var text = MakeCopyableValue(_addressGroup, "Address" + _addressLines.Count,
+                                             () => line.Endpoint);
+                line.Label = text;
+                line.Cell = text.transform.parent.gameObject;
+                // Sub-size, not row-size: these are secondary lines and eight of them at ScaledRowHeight
+                // would be half the card. Still a real minWidth — every fixed cell in this file carries
+                // one, and the flex plus MakeCopyableValue's RectMask2D handles a long adapter name.
+                var h = LobbyTheme.ScaledSubFontSize + LobbyTheme.ScaledPadding / 2;
+                var le = LE(line.Cell);
+                le.minHeight = h; le.preferredHeight = h; le.flexibleHeight = 0;
+                le.minWidth = LobbyTheme.Scale(150);
+                le.preferredWidth = LobbyTheme.Scale(150);
+                le.flexibleWidth = 1;
+                line.Label.fontSize = LobbyTheme.ScaledSubFontSize;
+                line.Label.fontStyle = FontStyle.Normal;
+                line.Label.color = LobbyTheme.SubText;
+                _addressLines.Add(line);
+            }
+
+            var row = _addressLines[index];
+            row.Endpoint = endpoint;
+            if (row.Label.text != label) row.Label.text = label;
+            SetCellActive(row.Cell, true);
         }
 
         private void EnsureChatSubscription(NetworkEngine engine)
@@ -1063,6 +1493,16 @@ namespace Multiplayer.UI
                 var t = UiToolkit.CreateText(_chatContent.gameObject, $"ChatRow{_chatRows.Count}",
                     Vector2.zero, new Vector2(0, rowH), "", LobbyTheme.ScaledRowFontSize,
                     TextAnchor.UpperLeft, new Vector2(0f, 1f));
+                // WRAP, not the CreateText default Overflow. Chat lines are arbitrary user text and a
+                // system notice is a whole sentence; the chat now lives in a 40%-wide column, so on
+                // Overflow a long line drew its tail out through the card frame and across the roster.
+                // Wrapping is the right answer here (unlike the roster nickname, which is clipped —
+                // there the row height is fixed and the columns beside it must stay aligned): the log
+                // stacks top-down with a ContentSizeFitter, so a taller row simply pushes the rest down.
+                // LE.preferredHeight is deliberately LEFT UNSET so the Text's own wrapped preferred
+                // height (measured against the width the layout pass already gave it) drives the row;
+                // minHeight only reserves the single-line case.
+                t.horizontalOverflow = HorizontalWrapMode.Wrap;
                 var le = LE(t.gameObject);
                 le.minHeight = rowH;
                 le.flexibleWidth = 1;
@@ -1088,89 +1528,46 @@ namespace Multiplayer.UI
             // Find my own row to read my current ready/nickname state.
             PeerListEntry me = null;
             foreach (var p in roster)
-            {
-                var isMe = engine.IsHost ? p.IsHost : p.PlayerGuid == localGuid;
-                if (isMe) { me = p; break; }
-            }
+                if (IsMe(p, engine, localGuid)) { me = p; break; }
 
-            // Ready button: CLIENT-ONLY. Keep it host-gated OFF each frame (mirror of _playButton's
-            // host-gate, inverted). On the host we must NOT re-show it and must NOT re-sync _localReady /
-            // relabel it — the host's roster row is always Ready=false (HostReady), so re-syncing would
-            // flip the optimistic click back and make the button flicker. The host has no Ready.
+            // READY: EVERY player has it, the host included — one path, no host branch. The host's own
+            // roster self-entry carries SessionManager.HostReady, so `me.Ready` is the authoritative truth
+            // on both sides and this single re-sync overrides any optimistic click flip with it (after a
+            // reconnect, or when the host refused the ready), without re-invoking OnLobbyToggleReady.
+            _localReady = me != null && me.Ready;
+
+            // THE TWO LOCKS.
+            //  • a CLIENT whose own roster row carries host-computed parity diffs (label names the reason;
+            //    the row's "!" badge click shows the exact diffs). The host ALSO ignores a READY from a
+            //    mismatched client (SetClientReady), so this is UX — authority stays host-side.
+            //  • the HOST with no save chosen. Readying would arm nothing (CanStart still needs the save)
+            //    and SetHostReady refuses it host-authoritatively, so the button says so instead of
+            //    looking pressable and doing nothing.
+            _parityLocked = !engine.IsHost && me != null
+                && !Multiplayer.Network.Parity.ParityComparer.ReadyAllowed(me.ParityDiffs);
+            _needsSave = engine.IsHost && string.IsNullOrEmpty(engine.Session?.ChosenSaveName);
             if (_readyButton != null)
             {
-                var clientShow = !engine.IsHost;
-                if (_readyButton.gameObject.activeSelf != clientShow)
-                    _readyButton.gameObject.SetActive(clientShow);
-            }
-            if (!engine.IsHost)
-            {
-                // Client path: re-sync the local flag from authoritative roster state (me.Ready) and
-                // relabel the button. This overrides any optimistic click flip with the truth (e.g. after
-                // a reconnect or if the host's view differs), without re-invoking OnLobbyToggleReady.
-                _localReady = me != null && me.Ready;
-
-                // Parity soft-gate READY LOCK: my own roster row carries host-computed diffs → grey the
-                // button (label names the reason; the row's "!" badge click shows the exact diffs). The
-                // host ALSO ignores a READY from a mismatched client (SetClientReady), so this lock is
-                // UX only — authority stays host-side. Repaint via the native SetInteractable path on a
-                // real transition only (cache guard), mirroring the Play button.
-                _parityLocked = me != null
-                    && !Multiplayer.Network.Parity.ParityComparer.ReadyAllowed(me.ParityDiffs);
-                if (_readyButton != null)
+                var interactable = !_parityLocked && !_needsSave;
+                _readyButton.interactable = interactable;
+                var interactableNow = interactable ? 1 : 0;
+                // The cloned native button's greyed visual is driven by its PhoenixGeneralButton
+                // controller, which repaints ONLY when its own IsEnabled changes (via SetInteractable) —
+                // NOT when BaseButton.interactable changes. Fire on a real transition only.
+                if (interactableNow != _readyInteractableCache)
                 {
-                    var interactable = !_parityLocked;
-                    _readyButton.interactable = interactable;
-                    var interactableNow = interactable ? 1 : 0;
-                    if (interactableNow != _readyInteractableCache)
+                    _readyInteractableCache = interactableNow;
+                    if (_readyButtonCtrl != null && _readyButtonSetInteractable != null)
                     {
-                        _readyInteractableCache = interactableNow;
-                        if (_readyButtonCtrl != null && _readyButtonSetInteractable != null)
+                        try { _readyButtonSetInteractable.Invoke(_readyButtonCtrl, new object[] { interactable }); }
+                        catch (System.Exception e)
                         {
-                            try { _readyButtonSetInteractable.Invoke(_readyButtonCtrl, new object[] { interactable }); }
-                            catch (System.Exception e)
-                            {
-                                UnityEngine.Debug.LogError("[Multiplayer] Ready button repaint failed: " + e.Message);
-                            }
+                            UnityEngine.Debug.LogError("[Multiplayer] Ready button repaint failed: " + e.Message);
                         }
                     }
                 }
-                UpdateReadyButtonLabel();
             }
-
-            // Play button: host only, enabled ONLY when the FULL start gate is open. The visual reads
-            // the SAME controller gate the press path uses (LobbyController.CanStart, via the single
-            // MultiplayerUI projection) — clients>=1 && all clients ready && save chosen && HostLobby &&
-            // !locked. So the button greys for host-alone, any client un-ready, NO save chosen, and once
-            // the lobby locks on start, exactly matching OnLobbyPlay (no second, drifting rule = Bug B).
-            // Cloned native buttons self-manage their disabled visuals from Button.interactable
-            // (UIInteractableColorController/Animator on the prefab), so gate via interactable.
-            if (_playButton != null)
-            {
-                var playable = engine.IsHost && (MultiplayerUI.Instance?.EvaluateStartGate() ?? false);
-
-                var activeNow = engine.IsHost ? 1 : 0;
-                if (_playButton.gameObject.activeSelf != engine.IsHost)
-                    _playButton.gameObject.SetActive(engine.IsHost);
-
-                var interactableNow = playable ? 1 : 0;
-                _playButton.interactable = playable;
-
-                // The cloned native button's enabled/greyed visual is driven by its PhoenixGeneralButton
-                // controller, which repaints ONLY when its own IsEnabled changes (via SetInteractable) —
-                // NOT when BaseButton.interactable changes. So when the second player's Ready flips
-                // AllReady false→true (remote peer-ready path) OR the host toggles its own Ready (local
-                // path) — both flow through here — we must drive SetInteractable so the button appears
-                // immediately, without a pointer-enter. Fire ONLY on a real transition (the cache guard
-                // is per-instance and changes only when playable/active actually flips, so it covers BOTH
-                // the local and remote paths) to avoid repainting every frame.
-                if (activeNow != _playActiveCache || interactableNow != _playInteractableCache)
-                {
-                    _playActiveCache = activeNow;
-                    _playInteractableCache = interactableNow;
-                    RefreshPlayButtonVisual(playable);
-                }
-            }
+            UpdateReadyButtonLabel();
 
             // NEW CAMPAIGN: greys on the SAME lobby readiness gate, minus the chosen-save half (a fresh
             // campaign picks no save). Same press-time projection the button's handler re-checks, so the
@@ -1195,45 +1592,34 @@ namespace Multiplayer.UI
             }
         }
 
-        // Make the Play button's enabled/greyed visual appear immediately, without a pointer-enter.
-        // The clone is driven by the native PhoenixGeneralButton controller, whose Update() repaints
-        // only when ITS OWN IsEnabled/VisualHovered/VisualPressed change — not when BaseButton.interactable
-        // changes. SetInteractable(bool) is the complete native path: it sets BaseButton.interactable,
-        // flips IsEnabled, advances the animator (SetAnimationState → _animator.Update(0f)) and calls
-        // ResetButtonAnimations → UpdateColorElements(). The old approach (toggling Button.enabled +
-        // LayoutRebuilder + Canvas.ForceUpdateCanvases) did nothing because it never touched the
-        // controller, so it has been dropped.
-        private void RefreshPlayButtonVisual(bool playable)
-        {
-            if (_playButtonSetInteractable != null && _playButtonCtrl != null)
-            {
-                try { _playButtonSetInteractable.Invoke(_playButtonCtrl, new object[] { playable }); }
-                catch (System.Exception e)
-                {
-                    UnityEngine.Debug.LogError("[Multiplayer] Play button repaint failed: " + e.Message);
-                }
-            }
-            else if (_playButton != null)
-            {
-                // Fallback (controller unresolved, e.g. the UiToolkit-created non-native button): just
-                // set interactable, which IS sufficient for a plain Unity Selectable.
-                _playButton.interactable = playable;
-            }
-        }
-
         // Reflect the current local ready state on the ready button's label. Call after a click flip and
         // whenever RefreshControls re-syncs _localReady from authoritative roster state. "✓ READY" =
-        // readied up; "READY" = press to ready up.
+        // readied up (press to take it back); "READY" = press to ready up. A locked button names its own
+        // reason: the parity row's "!" badge click shows the exact diff list, and a host with no campaign
+        // queued is told what is missing rather than being handed a dead control.
         private void UpdateReadyButtonLabel()
         {
             if (_readyButtonLabel == null) return;
-            // Parity soft-gate: the locked button itself names the reason (the row's "!" badge click
-            // shows the exact diff list).
             _readyButtonLabel.text = _parityLocked ? "MODS MISMATCH"
+                : _needsSave ? "CHOOSE A SAVE"
                 : _localReady ? "✓ READY" : "READY";
         }
 
+        /// <summary>
+        /// "IS THIS ROW ME", and the ONLY place that question is answered.
+        ///
+        /// The two sides ask it differently and must: the host's self-entry is stamped with that machine's
+        /// own LocalSteamId and a guid no client can match, so a client matches on <c>PlayerGuid</c> while
+        /// the host simply takes the row flagged <c>IsHost</c>. This lived in THREE copies — the rename
+        /// gate, the row paint and the display order — which is three chances for a rename to land on the
+        /// wrong peer while each copy looks correct on its own.
+        /// </summary>
+        private static bool IsMe(PeerListEntry p, NetworkEngine engine, System.Guid localGuid)
+            => engine.IsHost ? p.IsHost : p.PlayerGuid == localGuid;
+
         // Rebuild/refresh the player rows from the unified lobby roster (host self-entry + clients).
+        // The LOCAL player is NOT emitted into the list — it is the self card above the header. The list
+        // is therefore "everyone else", and nothing more.
         private List<PeerListEntry> RefreshRoster(NetworkEngine engine)
         {
             var roster = engine.Session?.GetLobbyRoster() ?? new List<PeerListEntry>();
@@ -1241,88 +1627,141 @@ namespace Multiplayer.UI
 
             // (B) ORDER for display: HOST first, then the LOCAL player ("you"), then everyone else in
             // their existing wire order. Render-only reorder — SessionManager / the wire order is left
-            // untouched. The local match uses the SAME isMe test as the rename gate (host→IsHost,
-            // client→PlayerGuid). When you ARE the host, host==you, so this collapses to host-then-others.
+            // untouched. "you" is skipped when the rows are painted, but it stays in the ordered list
+            // because RefreshControls reads its Ready/parity state off the returned roster.
             roster = OrderForDisplay(roster, engine, localGuid);
 
-            // Grow the row pool to match.
-            while (_rows.Count < roster.Count)
-                _rows.Add(CreateRow(_rows.Count));
+            var st = engine.SaveTransfer;
+            var transferActive = st != null && st.TransferActive;
 
-            // Track which pool slot now renders the local player so the rename pencil can re-check
-            // ownership on click (reset first; set when we find the local row below).
-            _myRowIndex = -1;
-
-            for (var i = 0; i < _rows.Count; i++)
+            PeerListEntry me = null;
+            var slot = 0;
+            foreach (var p in roster)
             {
-                var row = _rows[i];
-                if (i >= roster.Count)
-                {
-                    if (row.Go.activeSelf) row.Go.SetActive(false);
-                    continue;
-                }
-
-                if (!row.Go.activeSelf) row.Go.SetActive(true);
-
-                var p = roster[i];
-                var name = string.IsNullOrEmpty(p.Nickname)
-                    ? (p.IsHost ? "Host" : $"Player {p.SteamId}")
-                    : p.Nickname;
-
-                // "you" = host's own row (IsHost) on the host; the GUID-matching row on a client.
-                var isMe = engine.IsHost ? p.IsHost : p.PlayerGuid == localGuid;
-                if (isMe) _myRowIndex = i;
-
-                // COL 2 — NICKNAME only (no "(you)" tag, no role text). The local row is identified by
-                // its rename pencil, so no extra marker is needed.
-                row.NameLabel.text = name;
-                row.NameLabel.color = LobbyTheme.BodyText;
-
-                // COL 1 — READY CHECK: green "✓" when a client is ready, blank otherwise. The host has no
-                // ready state (it starts the game; HostReady is always false) → always blank.
-                var ready = !p.IsHost && p.Ready;
-                row.ReadyLabel.text = ready ? "✓" : "";
-                row.ReadyLabel.color = LobbyTheme.ReadyText;
-
-                // During an active save transfer, tint the check blue as a subtle download cue (the
-                // green-✓-when-ready remains the primary signal).
-                var st = engine.SaveTransfer;
-                if (st != null && st.TransferActive)
-                {
-                    var progress = ProgressFor(engine, st, p, isMe);
-                    if (progress != null)
-                    {
-                        row.ReadyLabel.text = "✓";
-                        row.ReadyLabel.color = new Color(0.7f, 0.8f, 1f);
-                    }
-                }
-
-                // PARITY badge: shown only when this peer's row carries diffs (host sees it on the
-                // mismatched client's row; the client sees it on its OWN row). Click → exact diff list.
-                row.ParityDiffs = p.ParityDiffs ?? "";
-                if (row.WarnBtn != null)
-                {
-                    var warn = row.ParityDiffs.Length > 0;
-                    if (row.WarnBtn.gameObject.activeSelf != warn)
-                        row.WarnBtn.gameObject.SetActive(warn);
-                }
-
-                // RENAME pencil: shown + interactable ONLY on the local player's own row (the onClick
-                // also re-checks _myRowIndex, so a pooled row can never rename the wrong peer).
-                if (row.RenameBtn != null)
-                {
-                    if (row.RenameBtn.gameObject.activeSelf != isMe)
-                        row.RenameBtn.gameObject.SetActive(isMe);
-                    row.RenameBtn.interactable = isMe;
-                }
+                if (IsMe(p, engine, localGuid)) { me = p; continue; }
+                while (_rows.Count <= slot) _rows.Add(CreateRow(_rows.Count));
+                PaintRow(_rows[slot], p, engine, st, transferActive);
+                slot++;
             }
 
+            // NO OPEN-SEAT PLACEHOLDERS. There used to be a dashed "OPEN SLOT" row for every unfilled
+            // seat up to a hard-coded four — a number that was never the session capacity (that is 50)
+            // and gated nothing, so the rows were three lines of furniture answering a question nobody
+            // asked. The roster shows who is here.
+            for (var i = slot; i < _rows.Count; i++)
+                if (_rows[i].Go.activeSelf) _rows[i].Go.SetActive(false);
+
+            RefreshSelfCard(me, engine, st, transferActive);
             return roster;
+        }
+
+        // Paint one OCCUPIED row from its roster entry. Pure assignment — no allocation beyond the
+        // "N ms" string, which PaintPing rebuilds only when the reading actually moves (this runs every
+        // frame from MultiplayerUI.Update).
+        private static void PaintRow(RosterRow row, PeerListEntry p, NetworkEngine engine,
+                                     SaveTransferCoordinator st, bool transferActive)
+        {
+            if (!row.Go.activeSelf) row.Go.SetActive(true);
+
+            // A peer that stopped answering is HELD, not gone: its seat, slot and guid are all still
+            // its own (L84), so the row STAYS — dimmed, wearing SEAT HELD. Removing it would say the
+            // player left, which is the one thing that has not happened.
+            var held = p.Paused;
+            var body = held ? LobbyTheme.MutedText : LobbyTheme.BodyText;
+
+            // WHO THE HOST IS, IN A SECOND PLACE THAN THE CROWN. The wash is a LIGHTENED CardBackground —
+            // the old CardBackground tint was the exact colour of the panel behind it, i.e. nothing at all.
+            // It stays lit on a HELD host row too: a host that has gone quiet is still the host, and that is
+            // precisely the row a reader needs to identify.
+            row.Tint.color = p.IsHost ? LobbyTheme.HostRowTint : Transparent;
+
+            row.Crown.text = p.IsHost ? HostCrown : "";
+            row.Crown.color = held ? LobbyTheme.MutedText : LobbyTheme.Accent;
+
+            row.NameLabel.text = string.IsNullOrEmpty(p.Nickname)
+                ? (p.IsHost ? "Host" : FallbackName(p.SteamId, ref row.FallbackNameFor, ref row.FallbackName))
+                : p.Nickname;
+            row.NameLabel.color = body;
+
+            // THE STATUS IN WORDS, one cell, in the order the words can be true. A held seat outranks
+            // readiness because a peer that has gone silent is not "not ready", it is not here, and its
+            // last-known readiness is the one thing this cell must not repeat. A live transfer outranks
+            // readiness because it is what is actually happening to that peer right now.
+            if (held)
+            {
+                row.StatusChip.text = "SEAT HELD";
+                row.StatusChip.color = LobbyTheme.MutedText;
+            }
+            else
+            {
+                var progress = transferActive ? ProgressFor(engine, st, p, false) : null;
+                if (progress != null)
+                {
+                    row.StatusChip.text = progress;
+                    row.StatusChip.color = LobbyTheme.SubText;
+                }
+                else if (!p.IsHost && p.Ready)
+                {
+                    row.StatusChip.text = "READY";
+                    row.StatusChip.color = LobbyTheme.ReadyText;
+                }
+                else row.StatusChip.text = "";
+            }
+
+            // PARITY badge: shown only when this peer's row carries diffs (host sees it on the
+            // mismatched client's row; the client sees it on its OWN row). Click → exact diff list.
+            row.ParityDiffs = p.ParityDiffs ?? "";
+            var warn = row.ParityDiffs.Length > 0;
+            if (row.WarnBtn.gameObject.activeSelf != warn) row.WarnBtn.gameObject.SetActive(warn);
+
+            PaintPing(row, PingTable.PingMsFor(engine.Session, engine, p));
+        }
+
+        // The meter and the number, side by side. The string is rebuilt ONLY when the reading changes:
+        // this runs per row per frame and the sample moves once a cadence (PingTable.CadenceMs), so
+        // formatting it every frame would be a garbage tail for a number that is not moving.
+        private static void PaintPing(RosterRow row, int ms)
+        {
+            PlayerPanel.PaintBars(row.Bars, ms);
+            if (ms == row.PingShown) return;
+            row.PingShown = ms;
+            // NO SAMPLE IS SAID OUT LOUD (law L145): an em-dash, never a stale number, and nothing here
+            // or anywhere else waits for the sample that did not arrive. Via the theme, because an em-dash
+            // the captured font does not carry would render BLANK — i.e. as "nothing to report", the one
+            // reading this cell must never give.
+            row.PingText.text = ms < 0 ? LobbyTheme.EmDash : ms + " ms";
+            row.PingText.color = ms < 0 ? LobbyTheme.MutedText : LobbyTheme.SubText;
+        }
+
+        // Repaint the self card from the local player's own roster entry. A null entry means the roster
+        // has not arrived yet (a client before its first PEER_LIST) — the card hides rather than invent a
+        // name the host has not confirmed.
+        private void RefreshSelfCard(PeerListEntry me, NetworkEngine engine,
+                                     SaveTransferCoordinator st, bool transferActive)
+        {
+            if (_selfCard == null) return;
+
+            var show = me != null;
+            if (_selfCard.activeSelf != show) _selfCard.SetActive(show);
+            if (!show) return;
+
+            _selfName.text = string.IsNullOrEmpty(me.Nickname)
+                ? (me.IsHost ? "Host" : FallbackName(me.SteamId, ref _selfFallbackFor, ref _selfFallbackName))
+                : me.Nickname;
+
+            if (_selfHostChip.gameObject.activeSelf != me.IsHost)
+                _selfHostChip.gameObject.SetActive(me.IsHost);
+
+            var progress = transferActive ? ProgressFor(engine, st, me, true) : null;
+            var hasProgress = progress != null;
+            if (_selfStatus.gameObject.activeSelf != hasProgress)
+                _selfStatus.gameObject.SetActive(hasProgress);
+            if (hasProgress) _selfStatus.text = progress;
         }
 
         // Render-only reorder: HOST first, then the LOCAL player ("you"), then the rest in their original
         // order. Builds a NEW list (the source list from GetLobbyRoster is a fresh copy, but we don't
-        // mutate it to keep this side-effect free). isMe matches the rename/own-row gate exactly.
+        // mutate it to keep this side-effect free).
         private static List<PeerListEntry> OrderForDisplay(List<PeerListEntry> roster, NetworkEngine engine, System.Guid localGuid)
         {
             if (roster == null || roster.Count <= 1) return roster ?? new List<PeerListEntry>();
@@ -1335,10 +1774,7 @@ namespace Multiplayer.UI
                 if (p.IsHost) { host = p; break; }
 
             foreach (var p in roster)
-            {
-                var isMe = engine.IsHost ? p.IsHost : p.PlayerGuid == localGuid;
-                if (isMe) { me = p; break; }
-            }
+                if (IsMe(p, engine, localGuid)) { me = p; break; }
 
             if (host != null) ordered.Add(host);
             if (me != null && !ReferenceEquals(me, host)) ordered.Add(me);
@@ -1349,15 +1785,22 @@ namespace Multiplayer.UI
             return ordered;
         }
 
-        // Returns a progress/loading string for a roster row during an active transfer, or null to
-        // fall back to ready status. Reliable subset: my own exact download %, and (on the host) each
-        // client's reported download %. Phase-2 game-load % is an OPEN SDK item (not shown).
+        // Returns a progress/loading string during an active transfer, or null to fall back to ready
+        // status. Reliable subset: my own exact download %, and (on the host) each client's reported
+        // download %. Phase-2 game-load % is an OPEN SDK item (not shown).
+        //
+        // TWO LENGTHS, ON PURPOSE — and the isMe arm is exactly the split. The SELF CARD's second line is
+        // a full-width line of its own and keeps the human sentence. A ROW's status chip is
+        // ScaledRosterStatusWidth (sized for "SEAT HELD") and is right-aligned with Overflow, so
+        // "downloading 100%" there did not shorten the chip, it spilled LEFT across the nickname for the
+        // whole duration of every transfer. The percentage and one short word say the same thing inside
+        // the chip; widening the chip would have paid for it out of the nickname's width.
         private static string ProgressFor(NetworkEngine engine, SaveTransferCoordinator st,
             PeerListEntry p, bool isMe)
         {
             if (isMe)
             {
-                if (st.IsBarrierPending) return "loaded — waiting";
+                if (st.IsBarrierPending) return $"loaded {LobbyTheme.EmDash} waiting";
                 var pct = st.LocalDownloadPercent;
                 if (pct >= 0 && pct < 100) return $"downloading {pct}%";
                 if (engine.IsHost) return "sending save";
@@ -1368,26 +1811,32 @@ namespace Multiplayer.UI
             if (engine.IsHost && !p.IsHost)
             {
                 if (st.TryGetPeerDownloadPercent(p.SteamId, out var cpct))
-                    return cpct >= 100 ? "loaded — waiting" : $"downloading {cpct}%";
+                    return cpct >= 100 ? "WAITING" : cpct + "%";
             }
             return null;
         }
 
-        // Build ONE structured roster row: a fixed-width HLG container holding, left→right,
-        // (1) a fixed-width NAME label, (2) a flexible spacer, (3) a fixed-width themed STATUS label,
-        // (4) a far-right square rename PENCIL button (shown/interactable only on the local row).
-        // The row container fills the roster column (flexibleWidth 1) so every row is identical width;
-        // the inner fixed widths keep the name column and the status/pencil cluster aligned across rows.
-        // Build ONE structured roster row: a fixed-width HLG container holding, left→right,
-        // (1) a fixed-width NAME label, (2) a flexible spacer, (3) a fixed-width themed STATUS label,
-        // (4) a far-right square rename PENCIL button (shown/interactable only on the local row).
-        // The row container fills the roster column (flexibleWidth 1) so every row is identical width;
-        // the inner fixed widths keep the name column and the status/pencil cluster aligned across rows.
+        // Build ONE structured roster row: an HLG container holding, left→right, (1) the host CROWN cell,
+        // (2) the NICKNAME, which FLEXES, (3) the word STATUS chip, (4) the "MODS ≠" parity badge, and
+        // (5) the right-aligned PING meter. The row spans the roster column (flexibleWidth 1) so every row
+        // is the same width, and the fixed cells keep the right-hand cluster aligned down the list.
+        //
+        // There is NO rename control here. It moved to the self card, which is always the local player —
+        // so the "does this pooled slot still render me?" re-check the old pencil needed on every click
+        // has no way left to be got wrong.
         private RosterRow CreateRow(int index)
         {
             var go = new GameObject($"Row{index}");
             go.transform.SetParent(_rosterArea.transform, false);
             go.AddComponent<RectTransform>();
+
+            // Row tint plate, added on the row root BEFORE its children so it sits behind them (the same
+            // ordering trick the page backdrop uses). raycastTarget off: a full-width Image across every
+            // row would otherwise be a surface that swallows clicks meant for the badge on top of it.
+            var tint = go.AddComponent<Image>();
+            tint.color = Transparent;
+            tint.raycastTarget = false;
+
             // The RosterContent VerticalLayoutGroup positions/sizes the row; LE feeds its min height and
             // lets it span the full column width (uniform row width across the pool).
             var le = LE(go);
@@ -1404,74 +1853,144 @@ namespace Multiplayer.UI
             hlg.childForceExpandHeight = true;
             hlg.childAlignment = TextAnchor.MiddleLeft;
 
-            var icon = LobbyTheme.ScaledIconButtonSize;
+            // EVERY FIXED CELL BELOW SETS minWidth AS WELL AS preferredWidth, and that pair is the whole
+            // of finding 1. A LayoutElement with preferredWidth alone has an effective MINIMUM of zero, so
+            // the moment the group's total preferred exceeded the row the crown, the chip, the badge and
+            // the meter were all shrunk toward nothing while the nickname — a CreateText label, i.e.
+            // horizontalOverflow = Overflow — went on drawing at full length straight over them. minWidth
+            // is what makes a fixed cell actually fixed; the nickname is then the only cell with anything
+            // to give.
 
-            // (1) READY CHECK — far-left fixed-width column. Shows a green "✓" when the player is ready,
-            // blank otherwise (host has no ready state → blank). Text + color set per-frame in RefreshRoster.
-            var readyLabel = UiToolkit.CreateText(go, "Ready", Vector2.zero,
-                new Vector2(icon, RowHeight), "",
-                LobbyTheme.ScaledRowFontSize, TextAnchor.MiddleCenter, new Vector2(0.5f, 0.5f));
-            var rdle = LE(readyLabel.gameObject);
-            rdle.preferredWidth = icon;
-            rdle.flexibleWidth = 0;
+            // (1) CROWN — far-left, the host's marker. Text + colour set per frame in PaintRow. Sized off
+            // the RESOLVED marker, because a font with no crown gets the wider ASCII stand-in instead
+            // (LobbyTheme.HostCrown), and a stand-in that does not fit its cell is the same bug again.
+            var crownW = LobbyTheme.Scale(LobbyTheme.HostCrown.Length > 1 ? 50 : 22);
+            var crown = UiToolkit.CreateText(go, "Crown", Vector2.zero, new Vector2(crownW, RowHeight), "",
+                LobbyTheme.ScaledBodyFontSize, TextAnchor.MiddleCenter, new Vector2(0.5f, 0.5f));
+            var crle = LE(crown.gameObject);
+            crle.minWidth = crownW; crle.preferredWidth = crownW; crle.flexibleWidth = 0;
 
-            // (2) NICKNAME — bare player name, left-aligned, fills the remaining width so the pencil sits
-            // hard against the right edge. Color is the themed body color (set per-frame in RefreshRoster).
+            // (2) NICKNAME — the ONLY cell that gives up width, and the only one that has to be clipped.
+            // preferredWidth is pinned to the same base minimum so the nickname's LENGTH stops inflating
+            // the group's total preferred width (which is what dragged every other cell toward its
+            // minimum); flexibleWidth 1 still hands it all the slack the fixed cells leave. The
+            // RectMask2D — the only mask in the mod, and deliberately on this one cell rather than on the
+            // row — clips the label to its own rect, so a nickname too long for the space it won is
+            // TRUNCATED instead of painted over the status chip beside it.
             var nameLabel = UiToolkit.CreateText(go, "Name", Vector2.zero,
                 new Vector2(LobbyTheme.ScaledRosterNameWidth, RowHeight), "",
-                LobbyTheme.ScaledRowFontSize, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
+                LobbyTheme.ScaledBodyFontSize, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
+            nameLabel.gameObject.AddComponent<RectMask2D>();
             var nle = LE(nameLabel.gameObject);
+            nle.minWidth = LobbyTheme.ScaledRosterNameWidth;
             nle.preferredWidth = LobbyTheme.ScaledRosterNameWidth;
             nle.flexibleWidth = 1;
 
-            // (3) PARITY warning badge — a small native-cloned button ("!", warning tint), hidden unless
-            // the row's peer has parity diffs (toggled per-frame in RefreshRoster, same pattern as the
-            // pencil). Click → the EXACT host-computed diff list via the native message box (the lobby
-            // has no hover-tooltip mechanism; the message box is this mod's canonical detail surface).
-            // Reads the CURRENT pool row's diffs by index so a reused row never shows stale text.
+            // (3) STATUS CHIP — the row's state in WORDS ("READY" / "SEAT HELD" / a transfer line), not a
+            // glyph. The bare "✓" it replaces needed a legend nobody has.
+            var chipW = LobbyTheme.ScaledRosterStatusWidth;
+            var statusChip = UiToolkit.CreateText(go, "Status", Vector2.zero,
+                new Vector2(chipW, RowHeight), "", LobbyTheme.ScaledSubFontSize,
+                TextAnchor.MiddleRight, new Vector2(1f, 0.5f));
+            statusChip.fontStyle = FontStyle.Bold;
+            var scle = LE(statusChip.gameObject);
+            scle.minWidth = chipW; scle.preferredWidth = chipW; scle.flexibleWidth = 0;
+
+            // (4) PARITY badge — a small native-cloned button, hidden unless the row's peer has parity
+            // diffs (toggled per frame in PaintRow). Click → the EXACT host-computed diff list via the
+            // native message box (the lobby has no hover-tooltip mechanism; the message box is this mod's
+            // canonical detail surface). Reads the CURRENT pool row's diffs by index so a reused row never
+            // shows stale text.
             System.Action showDiffs = () =>
             {
                 if (index < _rows.Count) _owner.OnLobbyShowParityDiffs(_rows[index].ParityDiffs);
             };
-            var warnBtn = NativeWidgetFactory.CloneMenuButton(go.transform, "ParityWarnBtn", "!",
+            // The label goes through the theme: "≠" is not a character the captured menu font is known to
+            // carry, and a badge whose whole text is one missing glyph is a blank button.
+            var warnW = LobbyTheme.Scale(64);
+            var warnLabel = LobbyTheme.ParityBadgeLabel;
+            var warnBtn = NativeWidgetFactory.CloneMenuButton(go.transform, "ParityWarnBtn", warnLabel,
                 () => showDiffs());
             if (warnBtn != null)
-                AddCloneLayoutElement(warnBtn, go.transform, icon, icon);
+                AddCloneLayoutElement(warnBtn, go.transform, warnW, LobbyTheme.ScaledIconButtonSize);
             else
             {
-                warnBtn = UiToolkit.CreateButton(go, "ParityWarnBtn", "!",
-                    Vector2.zero, new Vector2(icon, icon), new Vector2(1f, 0.5f),
+                warnBtn = UiToolkit.CreateButton(go, "ParityWarnBtn", warnLabel,
+                    Vector2.zero, new Vector2(warnW, LobbyTheme.ScaledIconButtonSize), new Vector2(1f, 0.5f),
                     () => showDiffs());
                 var wle = LE(warnBtn.gameObject);
-                wle.preferredWidth = icon; wle.preferredHeight = icon; wle.flexibleWidth = 0;
+                wle.preferredWidth = warnW;
+                wle.preferredHeight = LobbyTheme.ScaledIconButtonSize;
+                wle.flexibleWidth = 0;
             }
-            // Warning tint on the badge glyph so it reads as "attention", not a normal action button.
+            // Warning tint on the badge so it reads as "attention", not a normal action button.
             var warnTxt = warnBtn.GetComponentInChildren<Text>();
-            if (warnTxt != null) warnTxt.color = new Color(1f, 0.75f, 0.2f);
-            warnBtn.gameObject.SetActive(false); // hidden until RefreshRoster sees diffs
-
-            // (4) RENAME pencil — a small native-cloned button on the far right. The onClick re-checks
-            // live ownership (this pool slot must currently render the local player, tracked in
-            // _myRowIndex) so a pooled row reused for another peer can never rename the wrong one; the
-            // button is also hidden/disabled for non-local rows each frame in RefreshRoster. Reuse the
-            // EXACT existing rename path (OnLobbyRenamePrompt → native prompt → SendRename), untouched.
-            var renameBtn = NativeWidgetFactory.CloneMenuButton(go.transform, "RenameBtn", "✎",
-                () => { if (index == _myRowIndex) _owner.OnLobbyRenamePrompt(); });
-            if (renameBtn != null)
-                AddCloneLayoutElement(renameBtn, go.transform, icon, icon);
-            else
+            if (warnTxt != null)
             {
-                renameBtn = UiToolkit.CreateButton(go, "RenameBtn", "✎",
-                    Vector2.zero, new Vector2(icon, icon), new Vector2(1f, 0.5f),
-                    () => { if (index == _myRowIndex) _owner.OnLobbyRenamePrompt(); });
-                var rle = LE(renameBtn.gameObject);
-                rle.preferredWidth = icon; rle.preferredHeight = icon; rle.flexibleWidth = 0;
+                warnTxt.color = new Color(1f, 0.75f, 0.2f);
+                warnTxt.fontSize = LobbyTheme.ScaledSubFontSize;
             }
+            warnBtn.gameObject.SetActive(false); // hidden until PaintRow sees diffs
+
+            // (5) PING — the TACTICAL panel's meter, not a second one: PlayerPanel owns the bar geometry
+            // and the thresholds law L159 pins, and this cell reuses both rather than growing a copy that
+            // could disagree about what a colour means. The number sits beside the bars permanently; the
+            // tactical panel swaps it in on hover only because it overhangs a live battle map, and a lobby
+            // row has the room for both.
+            // THE CELL IS LAID OUT, NOT PLACED ONCE. It used to pin the bars to its bottom-left by
+            // anchoredPosition and give the number a sizeDelta of exactly "cell − bars − gap", a sum that
+            // consumed the cell whole: any shrink of the cell slid the number left over the meter, and
+            // nothing re-ran. It also assumed the two scale together, which they do not — BarsWidth is
+            // built from Mathf.Max-floored values that stop shrinking at small UiScale while a Scale(72)
+            // cell keeps going, so the number's share collapsed at UiScale 0.5 with the bars unchanged.
+            //
+            // Now: an HLG with a fixed METER slot (minWidth = BarsWidth, so the bars' own floor IS the
+            // slot's floor) and the number beside it, and the cell's width is DERIVED from those two
+            // rather than picked — so the two can no longer overlap at any UiScale. The cell pins its own
+            // minWidth for the same reason every other fixed cell above does.
+            //
+            // The number's slot is 4 em wide: the widest thing it ever holds is "9999 ms" (~3.6 em in any
+            // proportional face), and expressing it in the FONT SIZE is what keeps it correct at a UiScale
+            // the bars' integer floors have stopped tracking.
+            var meterW = PlayerPanel.BarsWidth;
+            var msW = LobbyTheme.ScaledSubFontSize * 4;
+            var gapW = LobbyTheme.Scale(4);
+            var pingW = meterW + gapW + msW;
+
+            var cellGo = new GameObject("Ping");
+            cellGo.transform.SetParent(go.transform, false);
+            cellGo.AddComponent<RectTransform>();
+            var ple = LE(cellGo);
+            ple.minWidth = pingW; ple.preferredWidth = pingW; ple.flexibleWidth = 0;
+            var pinghlg = cellGo.AddComponent<HorizontalLayoutGroup>();
+            pinghlg.spacing = gapW;
+            pinghlg.childControlWidth = true;
+            pinghlg.childControlHeight = true;
+            pinghlg.childForceExpandWidth = false;
+            pinghlg.childForceExpandHeight = true;
+            pinghlg.childAlignment = TextAnchor.MiddleRight;
+
+            // The meter keeps its own absolute bar geometry INSIDE this slot — a layout group sizes its
+            // children, not its grandchildren, so PlayerPanel.CreateBars is reused untouched.
+            var meterGo = new GameObject("Meter");
+            meterGo.transform.SetParent(cellGo.transform, false);
+            meterGo.AddComponent<RectTransform>();
+            var mle = LE(meterGo);
+            mle.minWidth = meterW; mle.preferredWidth = meterW; mle.flexibleWidth = 0;
+
+            var bars = PlayerPanel.CreateBars(meterGo.transform, LobbyTheme.ScaledRowHeight);
+            var pingText = UiToolkit.CreateText(cellGo, "Ms", Vector2.zero,
+                new Vector2(msW, RowHeight), "",
+                LobbyTheme.ScaledSubFontSize, TextAnchor.MiddleRight, new Vector2(1f, 0.5f));
+            pingText.color = LobbyTheme.SubText;
+            var msle = LE(pingText.gameObject);
+            msle.minWidth = msW; msle.preferredWidth = msW; msle.flexibleWidth = 0;
 
             return new RosterRow
             {
-                Go = go, ReadyLabel = readyLabel, NameLabel = nameLabel,
-                WarnBtn = warnBtn, RenameBtn = renameBtn, ParityDiffs = ""
+                Go = go, Tint = tint, Crown = crown, NameLabel = nameLabel, StatusChip = statusChip,
+                WarnBtn = warnBtn, Bars = bars, PingText = pingText,
+                ParityDiffs = "", PingShown = int.MinValue
             };
         }
     }

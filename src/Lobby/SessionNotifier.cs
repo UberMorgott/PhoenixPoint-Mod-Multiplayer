@@ -48,6 +48,13 @@ namespace Multiplayer.Network
 
         private static void OnClientConnected(ulong peerId)
         {
+            // QUIET IN THE LOBBY, LOUD ONCE THE CAMPAIGN IS RUNNING. Before the session starts players
+            // drift in and out freely and the roster row + the chat line already say so — a toast per
+            // arrival is pure noise on a screen the player is already looking at. Once the campaign is
+            // running an arrival matters, so the toast comes back. Same flag the lobby panel hides
+            // itself on (SaveTransferCoordinator.SessionStarted): no second notion of "started".
+            if (_attached?.SaveTransfer?.SessionStarted != true) return;
+
             // The join CHAT line is already posted by SessionManager.HandleConnectionRequest (with the
             // resolved name, once the JOIN handshake binds it). Here we add only the transient toast.
             // The name is not bound yet at transport-connect time, so the toast is name-agnostic.

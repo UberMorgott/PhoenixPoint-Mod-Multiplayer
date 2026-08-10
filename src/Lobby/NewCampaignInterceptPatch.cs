@@ -44,6 +44,77 @@ namespace Multiplayer.Harmony
     [HarmonyPatch]
     public static class NewCampaignInterceptPatch
     {
+        // ── The five seconds before a world exists ──────────────────────────────────────────────
+        // THE HOST'S SETTINGS CANNOT BE CAPTURED AND REPLAYED. GeoscapeGameParams only materialises
+        // INSIDE the native confirm body, at which point creation is already underway — there is no pause
+        // between "host confirmed" and "world created" to hang a countdown in. But the prefix can REFUSE,
+        // and it already does on two paths (client-in-session, transfer in flight); a refused confirm
+        // leaves nothing created and no residue, and the settings screen stays open with the host's own
+        // choices still on it. So the countdown IS the refusal: arm, return false, and when the clock
+        // reaches zero re-invoke this very method on the state instance we kept, with _committed set —
+        // the prefix then falls through to the behaviour that was always here and everything downstream
+        // is untouched. Exactly the shape DeployCountdown.Gate/HostTick uses for the drop.
+        //
+        // The bootstrap arm (and with it BroadcastLoadBoundaryBegin, which curtains every client) is on
+        // the far side of that refusal, so a cancelled countdown cannot leave a single peer behind a
+        // curtain for a campaign nobody is creating.
+
+        /// <summary>The native settings state whose confirm this held, kept ONLY so the countdown can
+        /// re-issue it. Overwritten by each arm and read by <see cref="CommitNewCampaign"/> alone, which
+        /// nothing but the countdown's fire reaches (RailCheck L403).</summary>
+        private static UIStateNewGeoscapeGameSettings _pendingConfirm;
+
+        /// <summary>Set for the ONE re-issued confirm the countdown releases; the prefix consumes it on
+        /// the way past. Nothing else sets it, so no route reaches world creation without a countdown
+        /// having fired.</summary>
+        private static bool _committed;
+
+        /// <summary>PURE (RailCheck L403). Does the co-op arm path HOLD this confirm for the countdown
+        /// instead of letting the native creation run? Only two terms, and no clock in either:
+        ///   • not a co-op arm path → false, the other cases (vanilla, client block, transfer in flight)
+        ///     already decided and this changes none of them;
+        ///   • the countdown already ran and released this confirm → false, exactly once;
+        ///   • otherwise → HOLD, which is a refusal that creates nothing.</summary>
+        public static bool HoldsForCountdown(bool coopArmAllowed, bool committed) =>
+            coopArmAllowed && !committed;
+
+        /// <summary>
+        /// The countdown reached zero: re-issue the confirm it refused. Called from
+        /// <c>MultiplayerUI.Update</c> and nowhere else — the fire is the only door to campaign creation.
+        ///
+        /// The latch is cleared in a FINALLY: a native confirm that throws (or a state that has since
+        /// died) must leave the host able to press confirm again, not stuck behind a latch that says a
+        /// countdown already ran.
+        /// </summary>
+        public static void CommitNewCampaign()
+        {
+            var state = _pendingConfirm;
+            if (state == null)
+            {
+                Debug.LogWarning("[Multiplayer] new-campaign countdown fired with no held confirm — nothing " +
+                                 "created. The host can press CONFIRM again on the new-game screen.");
+                return;
+            }
+            try
+            {
+                _committed = true;
+                Debug.Log("[Multiplayer] new-campaign countdown reached zero — re-issuing the host's native " +
+                          "CONFIRM with the settings still on screen; the prefix now falls through to the " +
+                          "bootstrap arm and the native creation it always ran.");
+                AccessTools.Method(typeof(UIStateNewGeoscapeGameSettings), "GameSettings_OnConfirm")
+                           ?.Invoke(state, null);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multiplayer] re-issuing the native new-game confirm FAILED — no campaign was " +
+                               "created and the latch is released, so the host can press CONFIRM again: " + e);
+            }
+            finally
+            {
+                _committed = false;
+            }
+        }
+
         // ── Prefix: the native new-game CONFIRM — the ONE convergence point ─────────────────────
         // Mirrors the case structure of LoadGameConvergenceGatePatch (same SessionLifecycle predicates):
         //   A) host + active lobby + !started → ARM the bootstrap, let the native creation run;
@@ -54,7 +125,7 @@ namespace Multiplayer.Harmony
         //   No engine / no active session → vanilla single-player new game, untouched.
         [HarmonyPatch(typeof(UIStateNewGeoscapeGameSettings), "GameSettings_OnConfirm")]
         [HarmonyPrefix]
-        public static bool OnConfirm_Prefix()
+        public static bool OnConfirm_Prefix(UIStateNewGeoscapeGameSettings __instance)
         {
             try
             {
@@ -95,8 +166,22 @@ namespace Multiplayer.Harmony
                     SessionLifecycle.NewCampaignArmGuard(isHost, active, sessionStarted, coord.TransferActive)
                     // Case B — mid-session second fresh campaign = F2 host reload (existing rule).
                     || SessionLifecycle.HostLoadGuard(isHost, active, sessionStarted, clients, coord.TransferActive);
+                // THE COUNTDOWN, and it is a REFUSAL (see the block at the top of this class). Both arm
+                // cases go through it: the lobby bootstrap and the mid-session second campaign are both
+                // "a world is about to be created for everybody", which is the thing the other players
+                // were promised five seconds to stop.
+                if (HoldsForCountdown(armAllowed, _committed))
+                {
+                    _pendingConfirm = __instance;
+                    // A refused ARM (something is already counting down) still refuses the confirm — see
+                    // LobbyCountdown.ArmNewCampaign: letting it through is the one way to reach world
+                    // creation with no countdown at all.
+                    LobbyCountdown.ArmNewCampaign(engine);
+                    return false; // nothing created, no residue, the settings screen stays open
+                }
                 if (armAllowed)
                 {
+                    _committed = false;  // one release, one confirm
                     coord.ArmNewCampaignBootstrap();
                     return true; // native confirm runs → FinishLevel(PlayNewGameResult) → campaign creation
                 }
@@ -180,6 +265,12 @@ namespace Multiplayer.Harmony
                 var engine = NetworkEngine.Instance;
                 var coord = engine?.SaveTransfer;
                 if (engine == null || coord == null || !engine.IsHost || !engine.IsActiveSession) return;
+                // The screen this countdown was going to re-enter is being popped: drop the held state
+                // (a dead view state must not be re-invoked) and stop the clock, or every peer watches a
+                // number count down to a confirm that can no longer happen.
+                _pendingConfirm = null;
+                _committed = false;
+                if (LobbyCountdown.Running) LobbyCountdown.Cancel(engine, null);
                 coord.DisarmNewCampaignBootstrap();
                 if (!coord.SessionStarted)
                     MultiplayerUI.Instance?.ShowLobby();

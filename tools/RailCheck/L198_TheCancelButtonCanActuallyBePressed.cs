@@ -90,15 +90,20 @@ namespace RailCheck
             var cancel = typeof(DeployCountdown).GetMethod("Cancel", All);
             var awake = ui?.GetMethod("Awake", All);
             var update = ui?.GetMethod("Update", All);
+            var lobbyType = mod.GetType("Multiplayer.Network.LobbyCountdown");
+            var lobbyRequest = lobbyType?.GetMethod("RequestCancel", All);
+            var lobbyCancel = lobbyType?.GetMethod("Cancel", All);
 
             if (attach == null || ensure == null || skin == null || clicked == null || sync == null ||
-                request == null || cancel == null || awake == null || update == null)
+                request == null || cancel == null || awake == null || update == null ||
+                lobbyRequest == null || lobbyCancel == null)
             {
                 yield return "L198 premise-changed: one of CountdownPanel.{Attach,EnsureRaycaster,SkinButton," +
-                             "OnCancelClicked,Sync}, DeployCountdown.{RequestCancel,Cancel} or " +
-                             "MultiplayerUI.{Awake,Update} no longer resolves. This law is the only thing " +
-                             "asserting that the veto L177 protects can actually be PRESSED, and a vacuous " +
-                             "pass here reads exactly like the three empty logs that started it.";
+                             "OnCancelClicked,Sync}, DeployCountdown.{RequestCancel,Cancel}, " +
+                             "LobbyCountdown.{RequestCancel,Cancel} or MultiplayerUI.{Awake,Update} no longer " +
+                             "resolves. This law is the only thing asserting that the veto L177 protects can " +
+                             "actually be PRESSED, and a vacuous pass here reads exactly like the three empty " +
+                             "logs that started it.";
                 yield break;
             }
 
@@ -142,7 +147,22 @@ namespace RailCheck
                              "was a method that can return without a word, so 'the click did nothing' and 'the " +
                              "click never arrived' produced the same evidence — none.";
 
-            foreach (var m in new[] { clicked, request, cancel })
+            // ONE BUTTON, TWO COUNTDOWNS (2026-08-10). The lobby's own five-second start countdown reuses
+            // this exact plate and this exact button, so the dispatch in OnCancelClicked is now part of
+            // "the press reaches a handler": wired to only one of them, the other countdown draws a CANCEL
+            // that is a picture of a button again — which is this law's whole subject. The lobby veto also
+            // carries more weight than the deployment one (it clears the canceller's own READY, without
+            // which the gate re-arms the countdown on the next frame), so a swallowed press there does not
+            // merely fail to stop the clock, it lets the session start.
+            if (!Program.Callees(clicked, mod).Any(c => c.MetadataToken == lobbyRequest.MetadataToken &&
+                                                        c.Module == lobbyRequest.Module))
+                yield return "L198 click-is-silent: CountdownPanel.OnCancelClicked never reaches " +
+                             "LobbyCountdown.RequestCancel. The same panel draws the LOBBY start countdown " +
+                             "(pre-session, its own 0x49/0x4A ids because the sync rail is not live yet), and a " +
+                             "cancel button wired only to the deployment veto is inert on every lobby " +
+                             "countdown there will ever be — the dead click of 2026-08-08 in a new place.";
+
+            foreach (var m in new[] { clicked, request, cancel, lobbyRequest, lobbyCancel })
                 if (!Logs(m))
                     yield return "L198 click-is-silent: " + m.DeclaringType.Name + "." + m.Name + " contains no " +
                                  "logging call. Every step of the veto — the press, the send, and the host's " +

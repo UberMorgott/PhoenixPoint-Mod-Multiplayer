@@ -54,7 +54,9 @@ namespace RailCheck
     /// discovery succeeded, whether the host's endpoint is reachable, or whether the Steam invite path
     /// resolves a lobby — all runtime, all needing the game. It also cannot check that the two CALLERS pass
     /// the origin they should (<c>MultiplayerUI</c> is a MonoBehaviour; the two call sites are the Steam
-    /// invite callback in <c>WireSteamInvite</c> and the paste box in <c>OnLobbyJoinPrompt</c>). What makes
+    /// invite callback in <c>WireSteamInvite</c> and the gate's join screen, <c>OnGateJoin</c> — where the
+    /// paste box lives since the lobby's own <c>OnLobbyJoinPrompt</c> was deleted with its JOIN button).
+    /// What makes
     /// that survivable is that <c>origin</c> is a REQUIRED parameter with no default: a new entry point
     /// cannot inherit the wrong technology by omission, it has to state one and fails to compile otherwise.
     ///

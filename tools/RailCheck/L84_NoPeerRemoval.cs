@@ -180,6 +180,12 @@ namespace RailCheck
             lobby.BeginHost();
 
             // A dead peer must not hold the lobby: paused + not ready, and the gate still opens.
+            // hostReady is TRUE here because the host is now one of the players the gate counts (2026-08-10,
+            // the PLAY button became a universal READY toggle and a countdown starts the session by itself).
+            // That is a term about the HOST'S OWN choice, which is not what this arm is about: the claim is
+            // that a peer NOBODY CAN READY FOR — a paused one, a parity-blocked one — cannot hold the lobby
+            // shut. Leaving hostReady false would close the gate for an unrelated reason and the arm would
+            // read green while proving nothing about the peers.
             lobby.UpdateLobby(connectedClientCount: 49, saveChosen: true,
                 allLivePeersReady: LobbyController.AllLivePeersReady(new[]
                 {
@@ -187,7 +193,7 @@ namespace RailCheck
                     new PeerListEntry { Ready = true,  PlayerGuid = joined },
                     new PeerListEntry { Ready = false, Paused = true, PlayerGuid = Guid.NewGuid() },
                     new PeerListEntry { Ready = false, ParityDiffs = "mod X missing", PlayerGuid = Guid.NewGuid() },
-                }));
+                }), hostReady: true);
             if (!lobby.CanStart)
                 yield return "L84 lobby-counts-a-dead-peer: a roster whose only un-ready rows are a PAUSED peer " +
                              "and a parity-blocked one still closes the start gate. Neither can ever be cleared " +

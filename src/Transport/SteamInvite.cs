@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Multiplayer.Network;   // SteamConnect (pure decisions)
 using Multiplayer.Util;      // InviteCode (pure codec)
 using Steamworks;
@@ -31,8 +32,26 @@ namespace Multiplayer.Transport
         /// <summary>Never-silent stage diagnostics: (message, isError). isError → UI message box; both cases also log.</summary>
         public static Action<string, bool> Report;
 
+        /// <summary>
+        /// One friend who is currently in a co-op Steam lobby of this game. BCL fields ONLY — no
+        /// Facepunch type crosses this boundary, which is the whole reason this class is internal (see
+        /// the class summary): the UI gets a name to draw and a lobby id to hand straight back to
+        /// <see cref="JoinFriendLobby"/>, and never has to name a Steamworks type to do it.
+        /// </summary>
+        internal struct HostingFriend
+        {
+            public string Name;
+            public ulong LobbyId;
+        }
+
         private static bool _handlersRegistered;
         private static Lobby? _hostLobby;   // set on the HOST once its invite lobby exists
+        // …and the lobby we entered as a CLIENT (accepted invite, friends-list row, "+connect_lobby").
+        // JoinLobby used to drop this handle on the floor, which is why the invite button was host-only:
+        // OpenInviteOverlay had nothing to point at. Cleared by LeaveSteamLobby, which EVERY session
+        // teardown runs (NetworkEngine.RunSteamLobbyCleanup), so a handle from a dead session is never
+        // reused to invite someone into a lobby that no longer exists.
+        private static Lobby? _joinedLobby;
 
         public static bool HasLobby => _hostLobby.HasValue;
 
@@ -86,7 +105,7 @@ namespace Multiplayer.Transport
             try
             {
                 if (!SteamClient.IsValid) { Stage("Steam not running — cannot create invite lobby", true); return; }
-                LeaveHostLobby();
+                LeaveSteamLobby();
                 Stage("creating Steam lobby…");
                 // The seat count is NetworkEngine's, not a second opinion — see NetworkEngine.MaxPlayers.
                 var made = await SteamMatchmaking.CreateLobbyAsync(NetworkEngine.MaxPlayers);
@@ -105,7 +124,7 @@ namespace Multiplayer.Transport
                 lobby.SetJoinable(true);
                 lobby.SetData(SteamConnect.HostKey, SteamClient.SteamId.Value.ToString());
                 // Canonical rich presence: non-empty "connect" lights the friends-list "Join Game"
-                // button (cleared explicitly in LeaveHostLobby — Steam does NOT auto-clear it while
+                // button (cleared explicitly in LeaveSteamLobby — Steam does NOT auto-clear it while
                 // the game keeps running); "status" is the human-readable View Game Info line.
                 SteamFriends.SetRichPresence("connect", SteamConnect.ConnectString(lobby.Id.Value));
                 SteamFriends.SetRichPresence("status", "Hosting co-op campaign");
@@ -131,27 +150,99 @@ namespace Multiplayer.Transport
             catch (Exception ex) { Stage("SetJoinable failed: " + ex.Message, true); }
         }
 
-        /// <summary>HOST invite button: open Steam's invite dialog for our lobby. Returns false (with a stage message) when no lobby exists yet.</summary>
+        /// <summary>
+        /// Invite button: open Steam's invite dialog for WHICHEVER lobby this session holds — the one we
+        /// published as host, or the one we joined as a client. Steam permits an explicit overlay invite
+        /// from any lobby MEMBER; friends-only governs who may BROWSE a lobby, not who may be invited into
+        /// it, so a joiner can pull their own friends into the host's session. Returns false (with a stage
+        /// message) when we are in no lobby yet.
+        /// </summary>
         public static bool OpenInviteOverlay()
         {
-            if (!_hostLobby.HasValue) { Stage("Steam invite lobby not ready yet — try again in a moment", true); return false; }
+            var lobby = _hostLobby ?? _joinedLobby;
+            if (!lobby.HasValue) { Stage("Steam invite lobby not ready yet — try again in a moment", true); return false; }
             try
             {
-                SteamFriends.OpenGameInviteOverlay(_hostLobby.Value.Id);
+                SteamFriends.OpenGameInviteOverlay(lobby.Value.Id);
                 Stage("invite overlay opened");
                 return true;
             }
             catch (Exception ex) { Stage("invite overlay failed: " + ex.Message, true); return false; }
         }
 
-        /// <summary>Leave + forget the host lobby and clear rich presence (session leave / re-host).</summary>
-        public static void LeaveHostLobby()
+        /// <summary>
+        /// Leave + forget EVERY Steam lobby this session holds — the one published as host AND the one
+        /// entered as a client — and clear rich presence. THE teardown chokepoint: every session end runs
+        /// it through NetworkEngine.RunSteamLobbyCleanup, which is what stops a stale handle from a
+        /// previous session reaching <see cref="OpenInviteOverlay"/>. Also run by HostPublish before it
+        /// creates a new lobby (idempotent; each half null-guards).
+        /// </summary>
+        public static void LeaveSteamLobby()
         {
-            if (!_hostLobby.HasValue) return;
-            try { _hostLobby.Value.Leave(); } catch { }
+            if (_hostLobby.HasValue) { try { _hostLobby.Value.Leave(); } catch { } _hostLobby = null; }
+            if (_joinedLobby.HasValue) { try { _joinedLobby.Value.Leave(); } catch { } _joinedLobby = null; }
+            // Unconditional: rich presence never auto-clears while the game keeps running (canonical Valve
+            // lifecycle), and leaving a "Join Game" pointing at a dead session is exactly the bug.
             try { SteamFriends.ClearRichPresence(); } catch { }
-            _hostLobby = null;
         }
+
+        /// <summary>
+        /// Steam friends who are in a co-op lobby of THIS game right now — one row each for the join
+        /// screen. Empty (never null) when Steam is off, so the caller needs no Steam knowledge at all.
+        ///
+        /// TWO SIGNALS, most specific first. Our OWN rich-presence "connect" value is written by exactly
+        /// one place (<see cref="HostPublish"/>) and cleared by exactly one place
+        /// (<see cref="LeaveSteamLobby"/>), so parsing it back through the same pure grammar the launch
+        /// line uses (SteamConnect.ParseConnectString) means "this friend is HOSTING a session of this
+        /// mod" and nothing else. Steam's own view of which lobby the friend sits in is the fallback: it
+        /// also covers a friend who JOINED someone else's session, and that is still a useful row —
+        /// <see cref="JoinLobby"/> reads the advertised HostKey off the lobby, so the row resolves to the
+        /// real HOST either way rather than to the friend.
+        ///
+        /// VERIFIED AGAINST THE SHIPPED ASSEMBLY (Facepunch.Steamworks.Win64, Version=1.0.0.0), not from
+        /// memory: SteamFriends.GetFriends() returns IEnumerable&lt;Steamworks.Friend&gt;; Friend.Name is
+        /// a string, Friend.Id is a SteamId FIELD, Friend.IsPlayingThisGame is a bool property;
+        /// Friend.GameInfo is Nullable&lt;Steamworks.Friend.FriendGameInfo&gt; (a public NESTED type) and
+        /// FriendGameInfo.Lobby is Nullable&lt;Steamworks.Data.Lobby&gt; whose Id.Value is the SteamID64
+        /// of the lobby. Every one of those members exists and is public in this build.
+        /// </summary>
+        public static List<HostingFriend> HostingFriends()
+        {
+            var list = new List<HostingFriend>();
+            try
+            {
+                if (!SteamClient.IsValid) return list;
+                var me = SteamClient.SteamId.Value;
+                foreach (var f in SteamFriends.GetFriends())
+                {
+                    if (f.Id.Value == me || !f.IsPlayingThisGame) continue;
+
+                    var lobbyId = SteamConnect.ParseConnectString(f.GetRichPresence("connect")) ?? 0UL;
+                    if (lobbyId == 0)
+                    {
+                        var info = f.GameInfo;
+                        if (info.HasValue && info.Value.Lobby.HasValue)
+                            lobbyId = info.Value.Lobby.Value.Id.Value;
+                    }
+                    if (lobbyId == 0) continue;   // in the game, but not in any lobby we could join
+
+                    list.Add(new HostingFriend { Name = f.Name, LobbyId = lobbyId });
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log, do NOT raise the error box. This runs to PAINT a list, and the list already states
+                // its own emptiness on screen; a modal error over the join screen (which has the menu
+                // chrome hidden behind it) would be a worse answer than the empty state.
+                Stage("friends scan failed: " + ex.Message);
+            }
+            return list;
+        }
+
+        /// <summary>A friends-list row click: enter that Steam lobby and route into the EXISTING client
+        /// join flow. Literally the accepted-invite path (<see cref="JoinLobby"/>), so this feature adds
+        /// no networking of its own.</summary>
+        public static void JoinFriendLobby(ulong lobbyId) => JoinLobby(lobbyId);
 
         // ─── CLIENT ────────────────────────────────────────────────────────
 
@@ -258,6 +349,13 @@ namespace Multiplayer.Transport
                 var handler = OnJoinResolved;
                 if (handler != null) handler(joinStr);
                 else Stage("no join handler wired (mod menu not ready)", true);
+
+                // KEEP THE HANDLE — and keep it AFTER the handler, not before. OnLobbyJoin tears the
+                // PREVIOUS session down first (Disconnect + Shutdown), and Shutdown runs
+                // RunSteamLobbyCleanup → LeaveSteamLobby, which would immediately drop the lobby we just
+                // entered if it had already been stored. Stored here it belongs to the session that is
+                // now starting, and that session's own teardown clears it.
+                _joinedLobby = lobby;
             }
             catch (Exception ex) { Stage("lobby join exception: " + ex.Message, true); }
         }

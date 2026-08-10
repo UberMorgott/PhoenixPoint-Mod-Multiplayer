@@ -39,7 +39,18 @@ namespace RailCheck
     /// (c) are the pair that has to hold TOGETHER, and each alone is a bug: a phantom must not BLOCK the
     /// fold, and it must not OPEN the gate by standing in for the player the host may not start without.
     /// (d) is the name in the message. (e) is the seam — the count half must read the same predicate, or
-    /// the two clauses drift apart again, which is the defect itself.
+    /// the two clauses drift apart again, which is the defect itself. (f) is the THIRD clause the gate
+    /// grew on 2026-08-10.
+    ///
+    /// THE GATE GAINED A CLAUSE AND LOST ITS BUTTON (2026-08-10). The PLAY button is gone; the footer
+    /// carries a READY toggle every player has, the HOST included, and <c>LobbyCountdown</c> arms a
+    /// five-second clock the instant <c>CanStart</c> turns true. Two consequences this law has to hold on
+    /// to. First, the host's own ready is now a TERM of <c>PeersReady</c> (<c>SessionManager.HostReady</c>,
+    /// which has always ridden the roster and which nothing ever read), so a third clause has joined the
+    /// two that must agree about who is at the table — arm (f). Second, and this is why the law matters
+    /// MORE than it did: there is no longer a human declining to press a lit button, so a gate that opens
+    /// wrongly does not offer to start a session, it STARTS one. The phantom of L180 satisfying "the host
+    /// is not alone" used to cost a wasted click; now it would cost a launch.
     ///
     /// Falsify (each verified to go RED, then restored): drop the <c>PlayerGuid</c> test from IsLivePeer →
     /// <c>unjoined-row-is-counted-live</c> and <c>phantom-blocks-the-gate</c>; make IsLivePeer true for
@@ -127,6 +138,39 @@ namespace RailCheck
                              "reads IsLivePeer. It then counts rows the readiness fold skips, which is the defect " +
                              "verbatim: a phantom excluded from \"everyone has readied\" while still standing in " +
                              "for the player the host is not allowed to start without.";
+
+            // ─── (f) THE HOST IS ONE OF THE PLAYERS THE GATE COUNTS ───
+            // EXECUTED against the real FSM, because the countdown reads exactly this and nothing else.
+            var open = new LobbyController();
+            open.BeginHost();
+            open.UpdateLobby(connectedClientCount: 1, saveChosen: true, allLivePeersReady: true,
+                             hostReady: false);
+            if (open.CanStart || open.PeersReady)
+                yield return "L181 host-starts-without-readying: every live peer has readied, a save is chosen " +
+                             "and the gate is OPEN while the host itself has not readied. Since the PLAY button " +
+                             "was replaced by a universal READY toggle there is nobody left to decline to press " +
+                             "it — an open gate ARMS THE COUNTDOWN — so the host's own ready is the only thing " +
+                             "standing between a lobby it is still setting up and a session it did not ask to " +
+                             "start.";
+            if (!open.ClientsReady)
+                yield return "L181 new-campaign-lost-its-gate: ClientsReady is false for a table whose live peers " +
+                             "have all readied, purely because the HOST has not. ClientsReady exists to keep the " +
+                             "NEW CAMPAIGN button on exactly the rule it had before the host gained a toggle — " +
+                             "and the host cannot ready without a chosen save, which a fresh campaign never has, " +
+                             "so folding the host's term in here would make that button unpressable forever.";
+            open.UpdateLobby(connectedClientCount: 1, saveChosen: true, allLivePeersReady: true,
+                             hostReady: true);
+            if (!open.CanStart)
+                yield return "L181 POSITIVE CONTROL: the gate is SHUT for a full, ready, save-chosen table with a " +
+                             "ready host. Arm (f) then proves nothing — it would read green against a gate that " +
+                             "never opens for anybody, i.e. a lobby that can no longer start at all.";
+            open.UpdateLobby(connectedClientCount: 0, saveChosen: true, allLivePeersReady: true,
+                             hostReady: true);
+            if (open.CanStart)
+                yield return "L181 host-alone-starts: a host with ZERO live peers, ready and with a save chosen, " +
+                             "opens the gate — which now means it silently counts itself down into a co-op " +
+                             "session with nobody in it. That is Bug B, and the automatic start is exactly the " +
+                             "condition under which it stops being a click somebody would notice.";
         }
     }
 }

@@ -1,41 +1,79 @@
 using System;
+using System.Collections.Generic;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 
 namespace Multiplayer.Util
 {
     /// <summary>
-    /// Resolves the host's advertisable LAN IPv4 by connecting a UDP socket to a public address
-    /// and reading its LocalEndPoint — this returns the actual outbound-interface address and
-    /// avoids the VPN/virtual/loopback adapters that Dns.GetHostAddresses enumerates blindly.
-    /// No packet is actually sent: UDP "connect" only fixes the socket's default peer, which is
-    /// enough for the OS to bind a source address.
+    /// EVERY IPv4 THIS MACHINE ANSWERS ON, each paired with the interface that carries it.
+    ///
+    /// This used to be a single <c>TryResolveLocalIPv4</c> that opened a UDP socket to 8.8.8.8 and read
+    /// back the source address the OS picked. That answers exactly one question — "which adapter would a
+    /// packet to the internet leave by" — and it is the WRONG question for an invite card: the whole
+    /// point of Radmin / ZeroTier / Hamachi is that the peer is reachable on an adapter that is NOT the
+    /// default route, and that adapter's address was the one the old resolver could never return.
+    ///
+    /// So enumerate instead, and keep the NAME: "Ethernet" and "ZeroTier One" are the two lines a player
+    /// has to tell apart, and only the interface knows which is which. Kept: interfaces that are
+    /// <see cref="OperationalStatus.Up"/>, their IPv4 unicast addresses, minus loopback (127/8) and APIPA
+    /// (169.254/16) — an address nobody outside this box can dial is worse than no line at all.
     /// </summary>
     public static class LanIpResolver
     {
-        public static bool TryResolveLocalIPv4(out IPAddress ip)
+        /// <summary>One dialable local address and the adapter it belongs to.</summary>
+        public struct LocalAddress
         {
-            ip = null;
+            public string Interface;
+            public IPAddress Ip;
+        }
+
+        // CACHED, WITH A TTL — the lobby asks every frame and GetAllNetworkInterfaces is a syscall sweep,
+        // but a cable plugged in (or a VPN brought up) after the lobby opened must not stay invisible for
+        // the rest of the session. Ten seconds is the cheapest trigger that satisfies both: no event to
+        // subscribe to and unsubscribe from, no polling thread, and the worst case is a line appearing ten
+        // seconds late on a screen the player is reading anyway.
+        // ponytail: TTL, not System.Net.NetworkInformation.NetworkChange. Swap in the event if the sweep
+        // ever shows up in a profile — it is one subscription, but its Mono behaviour would need proving.
+        private const double CacheSeconds = 10;
+        private static List<LocalAddress> _cache;
+        private static DateTime _cachedAt;
+
+        /// <summary>Every up, non-loopback, non-APIPA IPv4 with its interface name. Never null; the list
+        /// instance is stable between re-enumerations, so callers can use a reference compare to decide
+        /// whether anything can possibly have changed.</summary>
+        public static List<LocalAddress> LocalIPv4Addresses()
+        {
+            if (_cache != null && (DateTime.UtcNow - _cachedAt).TotalSeconds < CacheSeconds)
+                return _cache;
+
+            var found = new List<LocalAddress>();
             try
             {
-                using (var socket = new Socket(AddressFamily.InterNetwork,
-                    SocketType.Dgram, ProtocolType.Udp))
+                foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
                 {
-                    socket.Connect("8.8.8.8", 65530);
-                    if (socket.LocalEndPoint is IPEndPoint ep &&
-                        ep.AddressFamily == AddressFamily.InterNetwork &&
-                        !IPAddress.IsLoopback(ep.Address))
+                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                    foreach (var ua in ni.GetIPProperties().UnicastAddresses)
                     {
-                        ip = ep.Address;
-                        return true;
+                        var a = ua.Address;
+                        if (a == null || a.AddressFamily != AddressFamily.InterNetwork) continue;
+                        var b = a.GetAddressBytes();
+                        if (b[0] == 127) continue;                 // loopback — reachable by nobody else
+                        if (b[0] == 169 && b[1] == 254) continue;  // APIPA — a failed DHCP, not an address
+                        found.Add(new LocalAddress { Interface = ni.Name, Ip = a });
                     }
                 }
             }
             catch
             {
-                // No route / sandboxed network → caller falls back to a placeholder rail value.
+                // Sandboxed / permission-denied enumeration → whatever was collected before the throw.
+                // The caller simply shows fewer lines; it must never take the lobby down with it.
             }
-            return false;
+
+            _cache = found;
+            _cachedAt = DateTime.UtcNow;
+            return _cache;
         }
     }
 }

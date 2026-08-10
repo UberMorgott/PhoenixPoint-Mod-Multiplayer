@@ -3,7 +3,8 @@ using UnityEngine;
 namespace Multiplayer.Network
 {
     /// <summary>
-    /// F3 — the host leaving drops every client to the Main Menu. Wired ONCE per engine init
+    /// F3 — the host leaving ends every client's session and puts each one back in its OWN fresh lobby
+    /// (via the one-shot <see cref="ConsumeLobbyReopen"/> flag). Wired ONCE per engine init
     /// (<see cref="AttachTo"/>) to the two triggers that converge on ONE handler:
     ///   (a) GRACEFUL — the host sends <c>PacketType.HostDisconnected</c>; routed to
     ///       <c>SessionManager.HandleHostDisconnected</c> → <c>OnHostDisconnected</c>.
@@ -19,6 +20,22 @@ namespace Multiplayer.Network
         private static NetworkEngine _attached;
         private static readonly HostLeaveLatch _latch = new HostLeaveLatch();
 
+        // THE SESSION DIED UNDER US, SO GIVE THE PLAYER A LOBBY BACK — not a bare main menu.
+        // Set ONLY on the HandleHostLeft path (host quit / crashed / went silent) and consumed exactly
+        // once by MultiplayerUI.OnMenuReady, which is the first moment the menu the lobby draws over
+        // actually exists again. Deliberately NOT set by a voluntary client leave, the host closing its
+        // own lobby, quitting the game, or the campaign-end degrade (ReturnToMainMenuForCampaignEnd) —
+        // each of those already puts the player exactly where they asked to be.
+        private static bool _reopenLobby;
+
+        /// <summary>Read-and-clear the one-shot "put this client back in its own lobby" flag.</summary>
+        public static bool ConsumeLobbyReopen()
+        {
+            var reopen = _reopenLobby;
+            _reopenLobby = false;
+            return reopen;
+        }
+
         /// <summary>Subscribe to a freshly-initialized engine; re-arm the idempotency latch.</summary>
         public static void AttachTo(NetworkEngine engine)
         {
@@ -27,6 +44,10 @@ namespace Multiplayer.Network
 
             Detach();
             _latch.Reset(); // fresh session: allow the menu-return to fire once again
+            // …and DROP any unconsumed reopen. The menu rebuild it was waiting for never came (the
+            // client was already at the menu, or started a new session first), and a flag that outlives
+            // its own session would spring a lobby open on some unrelated later return to the menu.
+            _reopenLobby = false;
             if (engine.Session != null)
                 engine.Session.OnHostDisconnected += OnHostDisconnectedGraceful;
             engine.OnClientDisconnectedNamed += OnPeerDroppedMaybeHost;
@@ -111,7 +132,12 @@ namespace Multiplayer.Network
         {
             if (!_latch.TryHandle()) return; // already handled this session
             var notice = reason ?? SessionLifecycle.HostEndedSession;
-            Debug.LogWarning("[Multiplayer] F3: host left the session — returning client to main menu. " + notice);
+            Debug.LogWarning("[Multiplayer] F3: host left the session — returning client to its own lobby. " + notice);
+            // Arm BEFORE Begin: FinishLevelAndGoToLobby is asynchronous but the flag is read much later
+            // (next OnMenuReady), and arming first means an early/synchronous menu rebuild cannot beat us.
+            // Rides the same one-shot latch above, so the graceful packet + the transport drop + the
+            // heartbeat timeout of ONE host-leave arm it once.
+            _reopenLobby = true;
             SessionEnd.Begin(notice);
         }
     }

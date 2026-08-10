@@ -68,6 +68,30 @@ namespace Multiplayer.Network
         public string ChosenSaveName { get; private set; }
         public string ChosenSaveMeta { get; private set; }
 
+        /// <summary>
+        /// THE HOST'S UNIFIED INVITE CODE, readable on every peer. The host publishes it here
+        /// (<see cref="PublishHostInviteCode"/>) and it rides the PEER_LIST broadcast; a client mirrors
+        /// whatever arrived. Before this, a client's invite field read "(host to share)" and a player
+        /// who was not the host had nothing to forward to a friend.
+        /// </summary>
+        public string HostInviteCode { get; private set; } = "";
+
+        /// <summary>
+        /// Host-only: record the code the lobby is currently advertising and, on a CHANGE, mark the
+        /// roster dirty so the next flush carries it. Called from the host's own lobby panel, which
+        /// already computes this string every frame for its own display — so the poll costs one string
+        /// compare and the broadcast happens only when the value actually moves (it fills in live as
+        /// UPnP/STUN discovery and Steam become ready).
+        /// </summary>
+        public void PublishHostInviteCode(string code)
+        {
+            if (!_engine.IsHost) return;
+            code = code ?? "";
+            if (HostInviteCode == code) return;
+            HostInviteCode = code;
+            BroadcastPeerList();
+        }
+
         // Last roster the CLIENT received from the host (preserves IsHost + every peer's nickname/
         // ready exactly as the host broadcast it). On the host the live BuildPeerList() is authoritative.
         private List<PeerListEntry> _clientRoster = new List<PeerListEntry>();
@@ -1094,14 +1118,42 @@ namespace Multiplayer.Network
             }
         }
 
+        /// <summary>
+        /// THE HOST HAS A READY TOGGLE TOO, and this is the one place it moves. <see cref="HostReady"/> has
+        /// always existed and has always ridden the roster (<c>BuildPeerList</c>); until the PLAY button was
+        /// replaced by a universal READY toggle nothing ever set it, because the host WAS the start.
+        ///
+        /// A HOST MAY NOT READY WITHOUT A CAMPAIGN. Host-authoritative and refused HERE rather than only in
+        /// the greyed button, for the same reason <see cref="SetClientReady"/> re-checks parity: the button
+        /// is a courtesy, the gate is the rule. Readying with no save chosen would leave the countdown
+        /// arming against <c>CanStart</c>'s save clause forever — a lobby that looks ready and never starts.
+        /// </summary>
+        public void SetHostReady(bool ready)
+        {
+            if (!_engine.IsHost) return;
+            if (ready && string.IsNullOrEmpty(ChosenSaveName))
+            {
+                Debug.LogWarning("[Multiplayer] Ignoring host READY: no save is chosen yet. The countdown " +
+                                 "starts the session, and there is nothing to start it into.");
+                return;
+            }
+            if (HostReady == ready) return;
+            HostReady = ready;
+            BroadcastPeerList();
+        }
+
         // Host-only: clear every connected client's Ready flag and re-broadcast the authoritative
         // roster. Called when the host swaps the chosen save (clients readied for a specific session).
+        // THE HOST'S OWN READY GOES WITH THEM: it is now a term of the start gate (LobbyController), and a
+        // host that readied for the save it just swapped away has not agreed to this one either — leaving
+        // it set would let the countdown arm on a campaign nobody at the table said yes to.
         public void ResetAllClientsReady()
         {
             if (!_engine.IsHost) return;
             _readyClients.Clear();
             foreach (var c in _clients.Values)
                 c.IsReady = false;
+            HostReady = false;
             BroadcastPeerList();
         }
 
@@ -1197,7 +1249,7 @@ namespace Multiplayer.Network
             if (!_peerListDirty || !_engine.IsHost) return;
             _peerListDirty = false;
             var roster = BuildPeerList();
-            var payload = MessageSerializer.SerializePeerList(roster);
+            var payload = MessageSerializer.SerializePeerList(roster, HostInviteCode);
             _engine.BroadcastToAll(new NetworkMessage(PacketType.PlayerListUpdate, payload));
 
             // NEVER-SILENT FAN-OUT. PEER_LIST is the one message a joiner cannot do without — it is what
@@ -1242,10 +1294,13 @@ namespace Multiplayer.Network
         public void HandlePeerList(NetworkMessage msg)
         {
             if (_engine.IsHost) return;
-            var peers = MessageSerializer.DeserializePeerList(msg.Payload);
+            var peers = MessageSerializer.DeserializePeerList(msg.Payload, out var hostInviteCode);
 
             // Cache the raw roster (incl. host self-entry + IsHost flags) for the lobby UI.
             _clientRoster = peers;
+            // …and the session-level fact that rode with it: the host's invite key, which this client's
+            // lobby renders read-only so its player can forward it to a friend.
+            HostInviteCode = hostInviteCode;
 
             // Learn THIS peer's own host-assigned slot by matching the local persistent identity.
             foreach (var p in peers)
@@ -1430,10 +1485,20 @@ namespace Multiplayer.Network
         /// counts the roster and never touches a seat (L84, and L91's "no host decision reads other peers'
         /// membership" — a notice is not a decision, and it must not become one).
         /// </summary>
+        /// <remarks>
+        /// QUIET IN THE LOBBY, LOUD ONCE THE CAMPAIGN IS RUNNING. <c>isNotice</c> is the "paint this on
+        /// screen" bit and nothing else, so gating it here — and NOT the chat line — keeps the log
+        /// complete in both states while the pre-start lobby stays silent: players drifting in and out
+        /// before anyone has started is not news, and the roster row next to the chat line already says
+        /// it. Decided ONCE, host-side, because the flag rides the wire: a client still downloading the
+        /// save has its own SessionStarted false and would otherwise disagree with every other screen
+        /// about the same event. (The mid-session parity notice is inside an already-started branch, so
+        /// it is untouched by this.)
+        /// </remarks>
         public void SystemNotice(string text)
         {
             if (!_engine.IsHost || string.IsNullOrEmpty(text)) return;
-            BroadcastChat(0, null, text, true, isNotice: true);
+            BroadcastChat(0, null, text, true, isNotice: _engine.SaveTransfer?.SessionStarted == true);
         }
 
         /// <summary>

@@ -67,7 +67,7 @@ namespace Multiplayer.UI
         private RectTransform _rootRect;
         private Text _title;
         private Button _cancel;
-        private int _shown = -1;
+        private string _shownCaption;
         private bool _loggedFailure;
 
         /// <summary>Build the (hidden) panel under the mod's overlay canvas. One call, from
@@ -142,11 +142,24 @@ namespace Multiplayer.UI
         /// press that changes nothing still leaves a line saying it happened.</summary>
         private static void OnCancelClicked()
         {
-            Debug.Log("[MP][deploy] CANCEL pressed on this peer at " +
-                      (string.IsNullOrEmpty(DeployCountdown.State.SiteRef) ? "S#?" : DeployCountdown.State.SiteRef) +
-                      " with " + DeployCountdown.DisplaySecondsLeft() + " s left — one peer's veto stops the drop " +
-                      "for everyone (no vote, nobody else has to agree).");
-            DeployCountdown.RequestCancel();
+            // ONE BUTTON, TWO COUNTDOWNS, and the deployment one wins because it is the only one that can
+            // be running inside a live session — the lobby countdown exists solely before the session
+            // starts, so in practice they are disjoint and this is a tie-break that never fires.
+            if (DeployCountdown.DisplaySecondsLeft() > 0)
+            {
+                Debug.Log("[MP][deploy] CANCEL pressed on this peer at " +
+                          (string.IsNullOrEmpty(DeployCountdown.State.SiteRef) ? "S#?" : DeployCountdown.State.SiteRef) +
+                          " with " + DeployCountdown.DisplaySecondsLeft() + " s left — one peer's veto stops the drop " +
+                          "for everyone (no vote, nobody else has to agree).");
+                DeployCountdown.RequestCancel();
+                return;
+            }
+            Debug.Log("[MP][lobby] CANCEL pressed on this peer with " + LobbyCountdown.DisplaySecondsLeft() +
+                      " s left on the " + LobbyCountdown.Subject + " countdown — one peer's veto stops the " +
+                      "start for everyone. On the SAVE route it also clears THAT peer's own READY, without " +
+                      "which the gate would still be open and the countdown would re-arm on the very next " +
+                      "frame; the NEW CAMPAIGN route has no such gate and leaves every READY alone.");
+            LobbyCountdown.RequestCancel();
         }
 
         /// <summary>
@@ -225,20 +238,34 @@ namespace Multiplayer.UI
             var engine = NetworkEngine.Instance;
             // The peer-LOCAL count, not the replicated field: the rail carries only the arm and the clear now,
             // because a value that changed once a second re-entered this very screen once a second.
+            //
+            // TWO COUNTDOWNS, ONE PLATE. The deployment drop (in-session, mirrored over the rail) and the
+            // LOBBY start (pre-session, its own 0x49/0x4A ids, because the rail is not live yet). They can
+            // never overlap — one exists only before the session starts and the other only after — so this
+            // is a fallthrough, not an arbitration, and the caption says WHICH so a five-second number is
+            // never ambiguous about what it is about to do.
             int left = DeployCountdown.DisplaySecondsLeft();
+            string what = "MISSION";
+            // The lobby clock counts down to one of TWO things (start-from-save, or the host's new
+            // campaign), so the subject comes off the arm that is running rather than being a literal.
+            if (left <= 0) { left = LobbyCountdown.DisplaySecondsLeft(); what = LobbyCountdown.Subject; }
             bool show = engine != null && engine.IsActiveSession && left > 0;
 
             if (!show)
             {
                 if (_root.activeSelf) _root.SetActive(false);
-                _shown = -1;
+                _shownCaption = null;
                 return;
             }
             if (!_root.activeSelf) _root.SetActive(true);
-            if (left == _shown) return;                      // per-frame work is one int compare
-            _shown = left;
 
-            _title.text = "MISSION STARTS IN " + left + (left == 1 ? " SECOND" : " SECONDS");
+            // Keyed on the whole caption, not on the number alone: the two countdowns share this widget, so
+            // "5" from one and "5" from the other must not be mistaken for the same repaint.
+            var caption = what + " STARTS IN " + left + (left == 1 ? " SECOND" : " SECONDS");
+            if (caption == _shownCaption) return;            // per-frame work is one string compare
+            _shownCaption = caption;
+
+            _title.text = caption;
             _title.color = LobbyTheme.BodyText;
         }
 

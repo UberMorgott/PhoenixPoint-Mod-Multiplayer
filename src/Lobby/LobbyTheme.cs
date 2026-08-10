@@ -41,9 +41,12 @@ namespace Multiplayer.UI
         public const int ClonedButtonFontCapBase = 22;   // cap on cloned native menu-button labels
 
         // Structured roster row (A) + sectioned rail (C) base sizes.
-        public const int RosterNameWidthBase = 150;     // fixed name-column width so all rows align
-        public const int RosterStatusWidthBase = 96;    // fixed status-column width (right side, before pencil)
-        public const int IconButtonSizeBase = 34;       // square mini-button (rename pencil)
+        // MIN width of the roster's name cell, not its width: the cell FLEXES (LobbyPanel.CreateRow), and
+        // it was a fixed 150 that ran every nickname longer than "Player" under the status column.
+        public const int RosterNameWidthBase = 100;
+        public const int RosterStatusWidthBase = 80;    // word status chip ("READY" / "SEAT HELD")
+        public const int IconButtonSizeBase = 34;       // square mini-button
+        public const int SelfNameFontSizeBase = 24;     // the local player's nickname on the self card
         public const int SectionHeaderFontSizeBase = 17; // rail section header ("SHARE"/"SAVE"/"JOIN")
         public const int SeparatorThicknessBase = 2;     // thin section-divider line height
 
@@ -62,6 +65,7 @@ namespace Multiplayer.UI
         public static int ScaledRosterNameWidth => Scale(RosterNameWidthBase);
         public static int ScaledRosterStatusWidth => Scale(RosterStatusWidthBase);
         public static int ScaledIconButtonSize => Scale(IconButtonSizeBase);
+        public static int ScaledSelfNameFontSize => Scale(SelfNameFontSizeBase);
         public static int ScaledSectionHeaderFontSize => Scale(SectionHeaderFontSizeBase);
         public static int ScaledSeparatorThickness => Mathf.Max(1, Scale(SeparatorThicknessBase));
 
@@ -104,8 +108,69 @@ namespace Multiplayer.UI
         // Thin divider line between rail sections.
         public static Color Separator => _separator;
 
+        /// <summary>
+        /// THE HOST ROW'S WASH. The roster panel behind the row is painted <see cref="CardBackground"/>,
+        /// so tinting the host row with CardBackground was zero contrast — an invisible plate, leaving the
+        /// crown glyph as silently the only host cue. A LIGHTENED CardBackground, not <see cref="Accent"/>:
+        /// Accent is captured live from the game's WarningUIColor and can arrive RED (the trap
+        /// LoadOverlayController.cs:254 documents), and "this row is the host's" is not a warning.
+        /// Lightening keeps the wash inside the panel's own palette whatever the capture found.
+        /// </summary>
+        public static Color HostRowTint
+        {
+            get
+            {
+                var c = CardBackground;
+                return new Color(c.r + (1f - c.r) * 0.16f,
+                                 c.g + (1f - c.g) * 0.16f,
+                                 c.b + (1f - c.b) * 0.16f, 1f);
+            }
+        }
+
         /// <summary>The captured native menu font (Purista Semibold), or Arial fallback.</summary>
         public static Font Font => NativeWidgetFactory.MenuFont ?? UiToolkit.DefaultFont;
+
+        // ─── Glyph coverage (the captured font's is UNKNOWN) ────────────────
+        // Every label renders in a Font captured at runtime off a native menu button (Purista Semibold).
+        // Nothing says which code points it covers, and a missing glyph renders BLANK with no fallback —
+        // the crown, the "≠" badge and the no-sample em-dash would each just vanish. Font.HasCharacter
+        // answers it for all three (they are BMP), so ASK, and keep an ASCII label for a no.
+        //
+        // Resolved LAZILY and cached against the FONT INSTANCE, never at build time: LobbyTheme.Font
+        // falls back to Arial until NativeWidgetFactory captures the menu font, and Arial covers all
+        // three — caching that answer would test the wrong font and re-introduce the blank. Re-testing
+        // when the instance changes costs one reference compare per read.
+        private static Font _glyphFont;
+        private static string _crownGlyph, _parityLabel, _emDash;
+
+        private static void EnsureGlyphs()
+        {
+            var f = Font;
+            if (_crownGlyph != null && ReferenceEquals(f, _glyphFont)) return;
+            _glyphFont = f;
+            _crownGlyph = Covers(f, '♔') ? "♔" : "HOST";
+            _parityLabel = Covers(f, '≠') ? "MODS ≠" : "MODS !";
+            _emDash = Covers(f, '—') ? "—" : "-";
+        }
+
+        private static bool Covers(Font f, char c)
+        {
+            try { return f != null && f.HasCharacter(c); }
+            catch (Exception e)
+            {
+                Debug.LogError("[Multiplayer] LobbyTheme glyph probe failed: " + e.Message);
+                return false;
+            }
+        }
+
+        /// <summary>Host marker for a roster row — the crown, or "HOST" if the font has no crown.</summary>
+        public static string HostCrown { get { EnsureGlyphs(); return _crownGlyph; } }
+
+        /// <summary>Parity-badge label — "MODS ≠", or an ASCII stand-in if the font has no ≠.</summary>
+        public static string ParityBadgeLabel { get { EnsureGlyphs(); return _parityLabel; } }
+
+        /// <summary>The NO-SAMPLE marker (law L145) — an em-dash, or a hyphen if the font has no em-dash.</summary>
+        public static string EmDash { get { EnsureGlyphs(); return _emDash; } }
 
         // ─── Native panel sprite (sliced frame), captured lazily ────────────
         private static Sprite _panelSprite;

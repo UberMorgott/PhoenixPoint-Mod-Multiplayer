@@ -14,8 +14,11 @@ namespace Multiplayer.Network
         /// <summary>Fallback display name when a peer's real name is unknown (id-only event).</summary>
         public const string UnknownPlayer = "a player";
 
-        /// <summary>The session-fatal line shown to a client when the host ends the session (F3).</summary>
-        public const string HostEndedSession = "Host ended the session";
+        /// <summary>The session-fatal line shown to a client when the host ends the session (F3). Says
+        /// both halves out loud — WHO went (the host, not some peer) and WHAT that cost (the session,
+        /// not just a connection) — because the client is about to be moved off whatever screen it was
+        /// on and back into its own lobby, and a line that only named one half read as a network hiccup.</summary>
+        public const string HostEndedSession = "The host left — the session has ended.";
 
         // ─── The three leave/return notices ─────────────────────────────────
         //
@@ -42,6 +45,14 @@ namespace Multiplayer.Network
         /// without it a session that healed itself still reads, on every other screen, as one player down.</summary>
         public static string FormatReconnectedNotice(string playerName) =>
             $"— {Named(playerName)} is back —";
+
+        /// <summary>The lobby countdown was vetoed. Same shape as the three above because it is the same
+        /// kind of fact — something happened to somebody and the rest of the table needs to know who —
+        /// but it rides <c>SessionManager.SystemChat</c>, NOT <c>SystemNotice</c>: it happens in the lobby
+        /// with the chat panel open in front of every player, so a native toast on top of it would be
+        /// shouting at people who are already looking. Pure, so RailCheck executes it.</summary>
+        public static string FormatCountdownCancelledNotice(string playerName) =>
+            $"— {Named(playerName)} cancelled the countdown —";
 
         private static string Named(string playerName) =>
             string.IsNullOrEmpty(playerName) ? UnknownPlayer : playerName;

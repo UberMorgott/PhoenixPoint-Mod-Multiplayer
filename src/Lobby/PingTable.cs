@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Network
 {
@@ -121,6 +122,31 @@ namespace Multiplayer.Network
             => _sampledAt.TryGetValue(peerId, out var at) && nowMs - at <= StaleAfterMs
                 ? _srtt[peerId]
                 : -1;
+
+        /// <summary>
+        /// WHOSE LINK A ROSTER ROW IS — resolved in ONE place for every surface that draws one.
+        ///
+        /// Every id in the table is a TRANSPORT id, and the host's row does not carry one a client can
+        /// use: <c>BuildPeerList</c> stamps it with the host's OWN LocalSteamId, which is that machine's
+        /// handle for itself (0 on DirectIP) and not the handle this client's transport knows the host by.
+        /// A client therefore looks its host reading up under <c>HostPeerId</c> — the id it actually
+        /// measured against — and everything else matches by construction, because the host both keys the
+        /// table and writes the roster with the same ids.
+        ///
+        /// It lives here rather than in a panel because it was a copy inside <c>PlayerPanel.Paint</c>
+        /// until the lobby roster grew a ping column of its own, and a remap rule written twice is a rule
+        /// that disagrees with itself the first time a transport changes what it calls the host — silently,
+        /// as an em-dash on one screen and a number on the other. -1 = NO FRESH SAMPLE (law L145): every
+        /// caller renders that as an admitted gap and nothing waits for it.
+        /// </summary>
+        public static int PingMsFor(SessionManager session, NetworkEngine engine, PeerListEntry entry)
+        {
+            if (session == null || entry == null) return -1;
+            var id = entry.IsHost && engine != null && !engine.IsHost && session.HostPeerId.HasValue
+                ? session.HostPeerId.Value
+                : entry.SteamId;
+            return session.Ping.GetPingMs(id);
+        }
 
         // ─── Wire ────────────────────────────────────────────────────────────
         // Only the HOST has a link to every peer, so only the host can measure everyone. Its table rides

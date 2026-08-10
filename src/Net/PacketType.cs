@@ -68,6 +68,23 @@ namespace Multiplayer.Network.MessageLayer
                                    // 00:24:06.037 vs both clients 00:24:19.04). No payload — the signal IS the event,
                                    // and the curtain drop is unconditional + idempotent with the first-chunk drop.
                                    // Pairs with 0x47: that one takes the same curtain back down. Law L71.
+        LobbyCountdown = 0x49,     // host->all: the LOBBY start countdown ARMED or CLEARED. Payload
+                                   // [secondsLeft:u8][route:u8] — non-zero ARMS, 0 CLEARS. The route is
+                                   // LobbyCountdown.Route (1 = start from the chosen SAVE, 2 = the host's
+                                   // NEW CAMPAIGN confirm, which the intercept refuses and re-issues when
+                                   // this reaches zero); it rides the wire so a client's overlay names the
+                                   // right thing. A one-byte arm reads as the save route. Exactly two writes per
+                                   // countdown, never one per second: each peer counts its own display down
+                                   // from the arm off local realtime (LobbyCountdown.DisplaySecondsLeft), the
+                                   // same shape DeployCountdown already uses and for the same reason. It
+                                   // needs a TOP-LEVEL id rather than the 0x67 sync rail because the rail is
+                                   // not live before the session starts — the lobby is exactly the window
+                                   // where no rail exists. Host-authoritative: only the host arms and clears.
+        LobbyCountdownCancel = 0x4A, // client->host: veto the lobby countdown. No payload — keyed by sender,
+                                   // which the host DOES read here (unlike the deployment veto): the cancel
+                                   // clears the CANCELLER'S OWN ready, or every peer would still be ready the
+                                   // instant the countdown died and it would re-arm on the very next frame.
+                                   // Pair of 0x44 ClientUnready in shape and of 0x47 in direction-of-effect.
 
         // ActionSync 0x60-0x6F
         // 0x60 (ActionRequest) + 0x61 (ActionApply) + 0x62 (ActionReject) RETIRED at the envelope cutover — the

@@ -101,7 +101,7 @@ namespace Multiplayer.Network
         public bool IsIntentionalDisconnect => _intentionalDisconnect;
 
         // ─── Steam invite-lobby lifecycle hooks ────────────────────────────
-        // Wired by MultiplayerUI at startup to SteamInvite.LeaveHostLobby / SetLobbyJoinable; null in
+        // Wired by MultiplayerUI at startup to SteamInvite.LeaveSteamLobby / SetLobbyJoinable; null in
         // unit tests. Delegate fields (not direct calls) so THIS class never references Steamworks
         // types — Shutdown/TearDown must stay JIT-safe without the Facepunch assembly (test runners,
         // non-Steam installs). Invoking HERE makes EVERY teardown path (leave button, smart-join
@@ -697,6 +697,17 @@ namespace Multiplayer.Network
                 case PacketType.ClientUnready:
                 case PacketType.AllClientsReady:
                     Session.HandleReadyState(msg);
+                    break;
+
+                // The LOBBY start countdown. Its own top-level ids because the 0x67 sync rail is not live
+                // before the session starts — see LobbyCountdown. 0x49 is host→all (arm/clear), 0x4A is a
+                // client's veto, which the host applies and which also clears that client's own READY.
+                case PacketType.LobbyCountdown:
+                    LobbyCountdown.HandleCountdown(this, msg);
+                    break;
+
+                case PacketType.LobbyCountdownCancel:
+                    LobbyCountdown.HandleCancel(this, msg);
                     break;
 
                 // ─── Save transfer + barrier (Phase B — SaveTransferCoordinator). ─────

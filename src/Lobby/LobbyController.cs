@@ -25,8 +25,16 @@ namespace Multiplayer.Network
     /// Reset); it never mutates network state directly.
     ///
     /// Bug B is killed here by design: <see cref="CanStart"/> is true ONLY while in HostLobby,
-    /// unlocked, with at least one connected client, and a save chosen. Host-alone can never start.
+    /// unlocked, with at least one connected client, a save chosen, every live peer ready AND THE HOST
+    /// ITSELF READY. Host-alone can never start.
     /// On <see cref="CommitStart"/> the lobby LOCKS so a late join can never reopen the gate mid-start.
+    ///
+    /// NOBODY PRESSES START ANY MORE (2026-08-10). The PLAY button is gone; the footer carries a READY
+    /// toggle every player has, the host included, and <c>LobbyCountdown</c> arms a five-second clock the
+    /// moment <see cref="CanStart"/> turns true. That makes this gate the ONLY thing standing between a
+    /// lobby and a launch — there is no longer a human declining to press a lit button — which is why the
+    /// host's own readiness had to become a term of it rather than an implicit "well, the host pressed
+    /// PLAY, so the host was ready".
     ///
     /// READINESS LIVES IN THE LOBBY, AND ONLY IN THE LOBBY (owner ruling, 2026-08-07). This REVERSES
     /// <c>afc111a</c> (2026-08-05), which removed exactly this gate under "start on the host's own
@@ -59,6 +67,7 @@ namespace Multiplayer.Network
         private int _connectedClientCount;
         private bool _saveChosen;
         private bool _allLivePeersReady;
+        private bool _hostReady;
 
         /// <summary>
         /// THE ONE DEFINITION OF A PEER THAT IS ACTUALLY AT THE TABLE, so both halves of the gate ask the
@@ -129,15 +138,33 @@ namespace Multiplayer.Network
         }
 
         /// <summary>
-        /// The readiness half of the gate, on its own because the NEW CAMPAIGN button needs it WITHOUT
-        /// the chosen-save half (a fresh campaign picks no save). Same lobby state, same lock, same
-        /// host-is-not-alone rule.
+        /// THE CLIENTS' half of the readiness gate, on its own because the NEW CAMPAIGN button needs it
+        /// WITHOUT the chosen-save half (a fresh campaign picks no save) AND WITHOUT the host's own ready
+        /// (the host may not ready until a save is chosen, so folding it in here would make NEW CAMPAIGN
+        /// unpressable forever — the fresh-campaign route is deliberately untouched by the ready-toggle
+        /// work). Same lobby state, same lock, same host-is-not-alone rule.
         /// </summary>
-        public bool PeersReady =>
+        public bool ClientsReady =>
             State == LobbyState.HostLobby
             && !IsLocked
             && _connectedClientCount >= 1
             && _allLivePeersReady;
+
+        /// <summary>
+        /// EVERYONE AT THE TABLE, THE HOST INCLUDED. The PLAY button is gone: the footer's primary control
+        /// is a READY toggle every player has, and when this turns true a five-second
+        /// <c>LobbyCountdown</c> arms itself and starts the session. So the host is no longer "the starter"
+        /// standing outside the readiness rule — it is one of the players the rule counts, and
+        /// <c>SessionManager.HostReady</c> (which has always existed and always rode the roster) is finally
+        /// something the gate reads.
+        ///
+        /// The host-is-not-alone clause (<c>_connectedClientCount &gt;= 1</c>, inherited from
+        /// <see cref="ClientsReady"/>) is what keeps a solo host ticking READY from launching a co-op
+        /// session with nobody in it. It is the oldest guard here and the automatic start does not weaken
+        /// it — it makes it load-bearing in a new way, because there is no longer a human deciding not to
+        /// press the button.
+        /// </summary>
+        public bool PeersReady => ClientsReady && _hostReady;
 
         /// <summary>The start gate: <see cref="PeersReady"/> plus a chosen save.</summary>
         public bool CanStart => PeersReady && _saveChosen;
@@ -170,12 +197,14 @@ namespace Multiplayer.Network
         /// Push the latest lobby facts. Ignored once locked (post-start) so a mid-start race can
         /// never reopen the gate.
         /// </summary>
-        public void UpdateLobby(int connectedClientCount, bool saveChosen, bool allLivePeersReady)
+        public void UpdateLobby(int connectedClientCount, bool saveChosen, bool allLivePeersReady,
+                                bool hostReady)
         {
             if (IsLocked) return;
             _connectedClientCount = connectedClientCount;
             _saveChosen = saveChosen;
             _allLivePeersReady = allLivePeersReady;
+            _hostReady = hostReady;
         }
 
         /// <summary>
@@ -221,6 +250,7 @@ namespace Multiplayer.Network
             _connectedClientCount = 0;
             _saveChosen = false;
             _allLivePeersReady = false;
+            _hostReady = false;
         }
 
     }

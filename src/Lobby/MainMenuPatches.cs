@@ -118,14 +118,15 @@ namespace Multiplayer.Harmony
     }
 
     /// <summary>
-    /// While the co-op lobby overlay is open, Escape (the "OptionsMenu" input action) must NOT leave
-    /// the lobby and must NOT open the main-menu Options screen over it — the ONLY way out of the
-    /// lobby is the explicit on-screen LEAVE button (MultiplayerUI.OnLobbyLeave). Escape is
-    /// event-driven, dispatched to UIStateMainMenu.OnInputEvent(InputEvent), so we prefix that
-    /// handler: when the lobby is open and an "OptionsMenu" press arrives, we simply SWALLOW it
-    /// (return false → original skipped, Options not opened, nothing torn down). Outside the lobby
-    /// the original runs unchanged. (Accidental Escape used to close the host listener / break the
-    /// session — that teardown is removed here.)
+    /// While ANY mod page is open, Escape (the "OptionsMenu" input action) must NOT open the main-menu
+    /// Options screen over it and must NOT tear the menu down underneath it. Escape is event-driven,
+    /// dispatched to UIStateMainMenu.OnInputEvent(InputEvent), so we prefix that handler. What the press
+    /// MEANS depends on which page is up, and both answers live in <see cref="ModScreenInput.Consume"/>:
+    ///   • the create/join GATE — Escape is BACK ONE SCREEN (join → gate → main menu), which is the only
+    ///     way it can never leave the player half-way out of a page;
+    ///   • the LOBBY — swallowed outright, unchanged: the ONLY way out is the on-screen LEAVE button
+    ///     (MultiplayerUI.OnLobbyLeave), because an accidental Escape used to close the host listener.
+    /// Outside every mod page the original runs unchanged.
     /// </summary>
     [HarmonyPatch]
     public static class LobbyEscapeSuppressPatch
@@ -145,29 +146,42 @@ namespace Multiplayer.Harmony
         [HarmonyPrefix]
         public static bool Prefix(InputEvent ev)
         {
-            if (MultiplayerUI.Instance?.IsLobbyOpen == true
-                && ev.Type == InputEventType.Pressed
-                && ev.Name == "OptionsMenu")
-            {
-                // Swallow Escape inside the lobby: do NOT open Options, do NOT leave. Leaving is
-                // ONLY via the LEAVE button.
-                return false; // skip original
-            }
-            return true;
+            return !ModScreenInput.Consume(ev, "OptionsMenu");
         }
     }
 
     /// <summary>
-    /// While the co-op lobby overlay is open, the right-click / back gesture (the "Cancel" input
-    /// action) must NOT leave the lobby either. In the home-screen UI framework "Cancel" is captured
-    /// in HomeScreenViewState.OnInputEventInternal (sets _cancelEventPending), which the state's
-    /// update loop then turns into SwitchToPreviousState()/OnCancel() — i.e. a back-navigation that
-    /// can tear down the menu underneath the lobby. We prefix that base handler: when the lobby is
-    /// open and a "Cancel" press arrives, we SWALLOW it (return false → the whole base body is
-    /// skipped, _cancelEventPending is never set, so no back-navigation fires). The patch lives on
-    /// the BASE state so it covers whichever home state hosts the lobby overlay, but the
-    /// IsLobbyOpen gate makes it completely inert in every other menu/state — so normal right-click
-    /// back-navigation is untouched outside the co-op lobby. Leaving is ONLY via the LEAVE button.
+    /// ONE rule for "a back-ish key arrived while a mod page owns the menu", shared by the Escape and
+    /// Cancel patches so the two can never drift into different answers. Returns true when the press was
+    /// consumed (the caller must skip the original handler).
+    /// </summary>
+    internal static class ModScreenInput
+    {
+        public static bool Consume(InputEvent ev, string actionName)
+        {
+            var ui = MultiplayerUI.Instance;
+            if (ui == null || ev.Type != InputEventType.Pressed || ev.Name != actionName) return false;
+            // Gate / join screen: go back ONE screen, ending at the main menu. Checked FIRST because it
+            // is the only branch with a side effect, and it must not run for a press we would not have
+            // swallowed anyway — hence the action-name guard above it.
+            if (ui.BackOneScreen()) return true;
+            // Lobby: swallow, exactly as before. LEAVE is its only exit.
+            return ui.IsModScreenOpen;
+        }
+    }
+
+    /// <summary>
+    /// While ANY mod page is open, the right-click / back gesture (the "Cancel" input action) must not
+    /// reach the native back-navigation. In the home-screen UI framework "Cancel" is captured in
+    /// HomeScreenViewState.OnInputEventInternal (sets _cancelEventPending), which the state's update loop
+    /// then turns into SwitchToPreviousState()/OnCancel() — i.e. a back-navigation that can tear down the
+    /// menu underneath our page. We prefix that base handler and route the press through the SAME
+    /// <see cref="ModScreenInput.Consume"/> rule Escape uses (return false → the whole base body is
+    /// skipped, _cancelEventPending is never set, so no back-navigation fires). The patch lives on the
+    /// BASE state so it covers whichever home state hosts our overlay, but the IsModScreenOpen gate makes
+    /// it completely inert in every other menu/state — so normal right-click back-navigation is untouched.
+    /// On the gate the gesture goes back one screen; in the lobby it is swallowed and leaving is ONLY via
+    /// the LEAVE button.
     /// </summary>
     [HarmonyPatch]
     public static class LobbyCancelSuppressPatch
@@ -187,15 +201,10 @@ namespace Multiplayer.Harmony
         [HarmonyPrefix]
         public static bool Prefix(InputEvent ev)
         {
-            if (MultiplayerUI.Instance?.IsLobbyOpen == true
-                && ev.Type == InputEventType.Pressed
-                && ev.Name == "Cancel")
-            {
-                // Swallow right-click/back inside the lobby: skip the base body so the cancel is
-                // never queued and no back-navigation/teardown runs.
-                return false; // skip original
-            }
-            return true;
+            // Same rule as Escape (ModScreenInput): back-one-screen on the gate, swallowed in the lobby,
+            // skipping the base body either way so the cancel is never queued and no back-navigation or
+            // teardown runs. Inert in every other menu state, so normal right-click back is untouched.
+            return !ModScreenInput.Consume(ev, "Cancel");
         }
     }
 

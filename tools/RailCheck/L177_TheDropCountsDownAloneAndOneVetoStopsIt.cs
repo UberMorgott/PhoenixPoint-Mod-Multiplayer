@@ -133,8 +133,14 @@ namespace RailCheck
                              "everything else: once true it stays true, so the countdown completes with every " +
                              "other peer asleep.";
 
+            // "LobbyCountdown" added 2026-08-10 with the lobby's own five-second start countdown. It is the
+            // same shape by design and shares this file's overlay widget, but it is the OPPOSITE kind of
+            // thing on the one axis this arm guards: it waits on a readiness gate (legitimately — it runs
+            // BEFORE the game is entered, where there is no play to block) and its cancel un-readies its
+            // own sender. Reading it from here would import a readiness term into the in-game drop, which
+            // is precisely the mandate violation this arm exists to make impossible.
             var peerish = new[] { "SessionManager", "PingTable", "PeerListEntry", "LobbyController",
-                                  "PlayerPanel", "CountdownPanel" };
+                                  "PlayerPanel", "CountdownPanel", "LobbyCountdown" };
             foreach (var m in countdown.GetMethods(All).Concat<MethodBase>(countdown.GetConstructors(All)))
                 foreach (var c in Program.Callees(m, mod))
                     if (c.DeclaringType != null && peerish.Contains(c.DeclaringType.Name))

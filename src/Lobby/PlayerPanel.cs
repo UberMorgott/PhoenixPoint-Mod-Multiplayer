@@ -68,7 +68,7 @@ namespace Multiplayer.UI
         // ─── Bar meter thresholds ───────────────────────────────────────────
         // Four bars, cellular-style. The gradient is the meaning: green is a link co-op plays on, red is
         // one it survives. Boundaries are the recon's (rtt-recon.md): <60 / <120 / <250 / else.
-        private static int BarsFor(int ms) => ms < 60 ? 4 : ms < 120 ? 3 : ms < 250 ? 2 : 1;
+        internal static int BarsFor(int ms) => ms < 60 ? 4 : ms < 120 ? 3 : ms < 250 ? 2 : 1;
 
         /// <summary>Indexed by (bars - 1). Unfilled bars use <see cref="LobbyTheme.MutedText"/> dimmed.</summary>
         private static readonly Color[] BarColors =
@@ -209,24 +209,16 @@ namespace Multiplayer.UI
             row.Name.text = string.IsNullOrEmpty(entry.Nickname) ? "Player" : entry.Nickname;
             row.Name.color = entry.Paused ? LobbyTheme.MutedText : LobbyTheme.BodyText;
 
-            // WHOSE LINK IS THIS. Every id in the table is a TRANSPORT id, and the host's row does not
-            // carry one a client can use: BuildPeerList stamps it with the host's OWN LocalSteamId, which
-            // is that machine's handle for itself (0 on DirectIP) and not the handle this client's
-            // transport knows the host by. A client therefore looks its host reading up under HostPeerId —
-            // the id it actually measured against — and everything else matches by construction, because
-            // the host both keys the table and writes the roster with the same ids.
-            ulong id = entry.IsHost && !engine.IsHost && session.HostPeerId.HasValue
-                ? session.HostPeerId.Value
-                : entry.SteamId;
-            int ms = session.Ping.GetPingMs(id);
+            // WHOSE LINK IS THIS — PingTable.PingMsFor, which is where the host-id remap this method used
+            // to spell out inline now lives, because the lobby roster draws the same meter and the rule
+            // may exist exactly once.
+            int ms = PingTable.PingMsFor(session, engine, entry);
 
             bool hover = ms >= 0 && RectTransformUtility.RectangleContainsScreenPoint(row.PingCell, mouse, null);
-            int bars = ms < 0 ? 0 : BarsFor(ms);
-            for (int b = 0; b < row.Bars.Length; b++)
-            {
-                row.Bars[b].enabled = bars > 0 && !hover;
-                row.Bars[b].color = b < bars ? BarColors[bars - 1] : Dim(LobbyTheme.MutedText);
-            }
+            PaintBars(row.Bars, ms);
+            // The number REPLACES the meter here (this panel overhangs a live battle map and has no room
+            // for both) — the lobby row shows the two side by side instead.
+            if (hover) foreach (var bar in row.Bars) bar.enabled = false;
             // NO SAMPLE IS SAID OUT LOUD (law L145). An em-dash, permanently — never a stale number, never
             // a spinner, and nothing anywhere waits for the sample that did not arrive.
             row.Number.enabled = ms < 0 || hover;
@@ -251,6 +243,50 @@ namespace Multiplayer.UI
                 row.Status.color = new Color(0.85f, 0.30f, 0.30f, 1f);
             }
         }
+
+        /// <summary>THE METER, for both screens that draw one. <paramref name="ms"/> below zero is NO
+        /// SAMPLE and blanks every bar — the caller says so in words (an em-dash), never with a lit bar.
+        /// Shared with the lobby roster so the two meters cannot disagree about what a colour means; the
+        /// thresholds law L159 pins live in <see cref="BarsFor"/>, which both go through.</summary>
+        internal static void PaintBars(Image[] bars, int ms)
+        {
+            if (bars == null) return;
+            int lit = ms < 0 ? 0 : BarsFor(ms);
+            for (int b = 0; b < bars.Length; b++)
+            {
+                bars[b].enabled = lit > 0;
+                bars[b].color = b < lit ? BarColors[lit - 1] : Dim(LobbyTheme.MutedText);
+            }
+        }
+
+        /// <summary>The four stacked bars themselves, bottom-left of <paramref name="cell"/> and vertically
+        /// centred in a <paramref name="rowH"/>-tall row. The one thing here that is DRAWN rather than
+        /// reused, because the game ships no discrete signal-strength widget (its only bar is the
+        /// continuous loading bar NativeWidgetFactory clones, which reads as progress, not as strength).
+        /// Four flat Images — no sprite is generated anywhere in this mod.</summary>
+        internal static Image[] CreateBars(Transform cell, int rowH)
+        {
+            int barW = Mathf.Max(2, LobbyTheme.Scale(3));
+            int gap = Mathf.Max(1, LobbyTheme.Scale(1));
+            int full = Mathf.Max(4, LobbyTheme.Scale(12));
+            var bars = new Image[BarCount];
+            for (int b = 0; b < BarCount; b++)
+            {
+                var bgo = new GameObject("Bar" + b);
+                bgo.transform.SetParent(cell, false);
+                var brt = bgo.AddComponent<RectTransform>();
+                brt.anchorMin = brt.anchorMax = brt.pivot = new Vector2(0f, 0f);
+                brt.sizeDelta = new Vector2(barW, full * (b + 1) / (float)BarCount);
+                brt.anchoredPosition = new Vector2(b * (barW + gap), (rowH - full) / 2f);
+                bars[b] = bgo.AddComponent<Image>();
+                bars[b].raycastTarget = false;
+            }
+            return bars;
+        }
+
+        /// <summary>Total width the four bars occupy, so a caller can size the cell that holds them.</summary>
+        internal static int BarsWidth => BarCount * Mathf.Max(2, LobbyTheme.Scale(3)) +
+                                         (BarCount - 1) * Mathf.Max(1, LobbyTheme.Scale(1));
 
         private static Color Fade(Color c, float a) => new Color(c.r, c.g, c.b, a);
         private static Color Dim(Color c) => Fade(c, 0.25f);
@@ -353,24 +389,7 @@ namespace Multiplayer.UI
             cell.sizeDelta = new Vector2(PingW, RowH);
             cell.anchoredPosition = new Vector2(NameW + Pad, 0f);
 
-            // Four stacked bars — the one thing here that is DRAWN rather than reused, because the game
-            // ships no discrete signal-strength widget (its only bar is the continuous loading bar
-            // NativeWidgetFactory clones, which reads as progress, not as strength). Four flat Images.
-            int barW = Mathf.Max(2, LobbyTheme.Scale(3));
-            int gap = Mathf.Max(1, LobbyTheme.Scale(1));
-            int full = Mathf.Max(4, LobbyTheme.Scale(12));
-            var bars = new Image[BarCount];
-            for (int b = 0; b < BarCount; b++)
-            {
-                var bgo = new GameObject("Bar" + b);
-                bgo.transform.SetParent(cellGo.transform, false);
-                var brt = bgo.AddComponent<RectTransform>();
-                brt.anchorMin = brt.anchorMax = brt.pivot = new Vector2(0f, 0f);
-                brt.sizeDelta = new Vector2(barW, full * (b + 1) / (float)BarCount);
-                brt.anchoredPosition = new Vector2(b * (barW + gap), (RowH - full) / 2f);
-                bars[b] = bgo.AddComponent<Image>();
-                bars[b].raycastTarget = false;
-            }
+            var bars = CreateBars(cellGo.transform, RowH);
 
             var number = UiToolkit.CreateText(cellGo, "Number", Vector2.zero, new Vector2(PingW, RowH), "",
                 NumberFont, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
