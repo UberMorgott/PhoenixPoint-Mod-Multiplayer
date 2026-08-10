@@ -299,6 +299,39 @@ namespace Multiplayer.Network.Sync
                 string.Equals(x.Membership.PlayerGuid, player, StringComparison.OrdinalIgnoreCase))
                 .Select(x => x.Membership).FirstOrDefault();
 
+        /// <summary>
+        /// ONE CHARGE PER OCCURRENCE+CHOICE, ACROSS EVERY RETRY. The durable answer's native lambda takes
+        /// the cost out of the SHARED wallet and then calls CompleteEvent; the two are not one transaction
+        /// and deliberately cannot be (DurableInboxEngine.cs:966-969 — native CompleteEvent is not undoable).
+        /// A throw inside CompleteEvent therefore leaves the payment made, the record still Triggered, and
+        /// the pending decision rolled back (:1018-1027) — so the re-entry guard at the top of the lambda
+        /// passes on the retry and the shared wallet is charged a SECOND time, silently, out of everybody's
+        /// resources. The claim is what makes the pair recover as a unit: the take happens on the first
+        /// attempt only, and every later attempt completes the event without paying again.
+        ///
+        /// A refund on failure would have been the other shape and is WRONG here: Wallet.Take CLAMPS to what
+        /// the wallet actually holds (Wallet.cs:55) and returns nothing about it, so giving the full pack
+        /// back can mint resources the faction never had.
+        ///
+        /// Cleared at the session boundary (DurableInboxSession.ActiveStore's setter), because trigger ids
+        /// restart with a new store and a stale key would suppress a legitimate charge in the next campaign.
+        /// </summary>
+        private static readonly HashSet<string> WalletChargeClaims = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>True on the FIRST call for a key — i.e. "this attempt owns the charge". False on every
+        /// retry of the same occurrence+choice. Idempotent under repeated retries by construction.</summary>
+        internal static bool ClaimWalletCharge(string chargeKey)
+        {
+            if (string.IsNullOrEmpty(chargeKey)) return true;   // no key to dedupe on: behave as before
+            lock (WalletChargeClaims) return WalletChargeClaims.Add(chargeKey);
+        }
+
+        /// <summary>Session boundary — see <see cref="WalletChargeClaims"/>.</summary>
+        internal static void ClearWalletChargeClaims()
+        {
+            lock (WalletChargeClaims) WalletChargeClaims.Clear();
+        }
+
         private static bool TryDurableOrdinaryAnswer(OccurrenceId occurrence, MembershipId winner, string eventId,
             int index, int choiceCount, GeoscapeEventRecord record, GeoscapeEvent ev, GeoEventChoice choice,
             GeoFaction faction, out bool accepted)
@@ -332,7 +365,11 @@ namespace Multiplayer.Network.Sync
                 {
                     if (record.State != GeoscapeEventRecordState.Triggered)
                         throw new InvalidOperationException("native event diverged before it was answered");
-                    if (choice != null && choice.Requirments != null)
+                    // The charge and the completion below recover as ONE unit across retries — see
+                    // ClaimWalletCharge. Keyed by occurrence AND choice, so a different choice for the same
+                    // window still pays for itself.
+                    if (choice != null && choice.Requirments != null &&
+                        ClaimWalletCharge(occurrence.EventId + "|" + occurrence.TriggerId + "|" + choiceValue))
                         faction.Wallet.Take(choice.Requirments.Resources, OperationReason.Gift);
                     ev.CompleteEvent(choice != null && choice.Outcome == null ? null : choice, faction);
                 }, locked =>

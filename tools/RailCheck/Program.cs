@@ -373,6 +373,7 @@ namespace RailCheck
             Add(laws, () => L406_AConfirmPutsThePreparationWindowFirstForEveryPeer.Check());
             Add(laws, () => L407_PostMissionResupplyIsFirstAndAsksOnAnEdge.Check());
             Add(laws, () => L408_AFailedPrepareLeavesTheLocalCampaignsIdentity.Check());
+            Add(laws, () => L409_ASharedAnswerChargesTheWalletOnce.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
 

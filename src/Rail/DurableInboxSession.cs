@@ -17,7 +17,11 @@ namespace Multiplayer.Network.Sync
                 bool changed; DurableInboxStore old;
                 lock (Gate) { old = _activeStore; changed = !ReferenceEquals(old, value); _activeStore = value; }
                 if (changed) { MissionSync.ClearScheduledSourceRevalidationDeltas();
-                    WindowQueueSync.ClearDurableRuntimeCarriers(); old?.Carriers.AbandonStore(); }
+                    WindowQueueSync.ClearDurableRuntimeCarriers();
+                    // Occurrence trigger ids restart with a new store, so a wallet-charge claim left over
+                    // from the previous session would suppress a legitimate charge in this one.
+                    EventSync.ClearWalletChargeClaims();
+                    old?.Carriers.AbandonStore(); }
             }
         }
 
