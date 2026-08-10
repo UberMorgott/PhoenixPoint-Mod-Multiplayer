@@ -481,7 +481,8 @@ namespace Multiplayer.Network.Sync
             {
                 bool changed; DurableInboxStore old;
                 lock (Gate) { old = _activeStore; changed = !ReferenceEquals(old, value); _activeStore = value; }
-                if (changed) { WindowQueueSync.ClearDurableRuntimeCarriers(); old?.Carriers.AbandonStore(); }
+                if (changed) { MissionSync.ClearScheduledSourceRevalidationDeltas();
+                    WindowQueueSync.ClearDurableRuntimeCarriers(); old?.Carriers.AbandonStore(); }
             }
         }
         internal static DurableInboxRestore PendingRestore { get { lock (Gate) return _pendingRestore; } }
@@ -549,6 +550,7 @@ namespace Multiplayer.Network.Sync
             result = values.Where(x => !(x is DurableInboxSaveRoot)).ToArray();
             }
             WindowQueueSync.ClearDurableRuntimeCarriers(); old?.Carriers.AbandonStore();
+            MissionSync.ClearScheduledSourceRevalidationDeltas();
             return result;
         }
 
@@ -576,6 +578,7 @@ namespace Multiplayer.Network.Sync
             WindowQueueSync.ClearDurableRuntimeCarriers();
             old?.Carriers.AbandonStore();
             DurableEffectSaveCatalog.ClearPinnedBlobs();
+            DurableSourceRevalidationEngine.RetryTerminalTeardown(installed);
             var pendingDecision = installed.Canonical.Decisions.FirstOrDefault(x => x.Phase != SharedChoicePhase.ChoiceLocked);
             if (pendingDecision != null)
             {

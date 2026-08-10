@@ -1552,6 +1552,7 @@ namespace Multiplayer.Network.Sync
             if (removed != null)
                 foreach (var k in removed)
                 {
+                    if (k.StartsWith("V#", StringComparison.Ordinal)) DepartureGenerationRail.Remove(k);
                     _prevRoots.Remove(k);
                     _prevRootTypes.Remove(k);
                     if (!StructuralEnabled(k))
@@ -1724,6 +1725,17 @@ namespace Multiplayer.Network.Sync
                     ms.Position = countPos;
                     w.Write((ushort)n);
                     ms.Position = end;
+
+                    // Optional backward-compatible vehicle tail. Older clients stop after n entries;
+                    // current clients install these exact host generations only after the whole batch.
+                    if (i >= changed.Count) // only the final chunk: every order leaf in this walk is settled
+                    {
+                        var departures = DepartureGenerationRail.Snapshot();
+                        w.Write(DepartureGenerationRail.TailMarker);
+                        w.Write((ushort)departures.Length);
+                        foreach (var departure in departures)
+                        { w.Write(departure.Key); w.Write(departure.Value); }
+                    }
 
                     try
                     {

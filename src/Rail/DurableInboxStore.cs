@@ -84,6 +84,7 @@ namespace Multiplayer.Network.Sync
         // Monitor locks are re-entrant.  Native game callbacks can therefore loop back into a second
         // store command on the same thread unless the transaction owns an explicit write barrier.
         private bool _nativeTransitionActive;
+        private bool _sourceTransitionActive;
         private readonly DurableInboxCanonicalState _snapshotCanonical;
         private readonly HashSet<OccurrenceId> _unservable;
         private readonly Dictionary<OccurrenceId, object> _effectGates = new Dictionary<OccurrenceId, object>();
@@ -236,6 +237,169 @@ namespace Multiplayer.Network.Sync
                         checked(expected.CommittedRevision + 1), expected.Members);
                 return Commit(expected, next);
             });
+        }
+
+        /// <summary>Commits the campaign consequence of one deployment-source departure.  A partial
+        /// departure is a material preparation revision for every entitlement (therefore a Deferred copy
+        /// becomes eligible again by the Task 11 rule); loss of the last/unique source is one exact
+        /// Invalidated tombstone boundary.  Carrier teardown is deliberately outside this method and may
+        /// run only after this record has committed.</summary>
+        internal bool CommitSourceRevalidationBatch(IEnumerable<SourceRevalidationPlan> sourcePlans,
+            out SourceRevalidationBatchDelta delta, out string refusal)
+        {
+            lock (_gate)
+            {
+                if (_sourceTransitionActive)
+                { delta = null; refusal = "a source revalidation batch is already active"; return false; }
+                _sourceTransitionActive = true;
+                try { return CommitSourceRevalidationBatchLocked(sourcePlans, out delta, out refusal); }
+                finally { _sourceTransitionActive = false; }
+            }
+        }
+
+        private bool CommitSourceRevalidationBatchLocked(IEnumerable<SourceRevalidationPlan> sourcePlans,
+            out SourceRevalidationBatchDelta delta, out string refusal)
+        {
+            delta = null; refusal = null;
+            lock (_gate)
+            {
+                var plans = (sourcePlans ?? Enumerable.Empty<SourceRevalidationPlan>()).ToArray();
+                if (plans.Length == 0 || plans.Length > 1024 || plans.Select(x => x.Occurrence).Distinct().Count() != plans.Length)
+                { refusal = "invalid source revalidation batch"; return false; }
+                ulong revision;
+                try { revision = checked(_ledger.CommittedRevision + 1); }
+                catch (OverflowException) { refusal = "ledger revision exhausted"; return false; }
+                var prepared = new List<Tuple<SourceRevalidationPlan, ulong, ulong>>(plans.Length);
+                foreach (var plan in plans)
+                {
+                    if ((!string.Equals(plan.Occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal) &&
+                         !DurableWindowRegistry.IsMissionOfferOccurrence(plan.Occurrence)))
+                    { refusal = "source revalidation does not name a mission occurrence"; return false; }
+                    var copies = _ledger.AllEntries.Where(x => x.Occurrence.Equals(plan.Occurrence)).ToArray();
+                    if (copies.Length == 0 || copies.Any(x => x.Lifecycle == InboxLifecycle.Removed) ||
+                        copies.Any(x => x.PreparationRevision != copies[0].PreparationRevision))
+                    { refusal = "mission occurrence is absent, terminal, or internally split"; return false; }
+                    ulong nextPreparation = copies[0].PreparationRevision;
+                    if (!plan.Terminal) try { nextPreparation = checked(nextPreparation + 1); }
+                    catch (OverflowException) { refusal = "preparation revision exhausted"; return false; }
+                    if (plan.Terminal && copies.Any(x => x.LifecycleRevision == ulong.MaxValue))
+                    { refusal = "lifecycle revision exhausted"; return false; }
+                    ulong watermark = Math.Max(copies[0].PreparationAuthorityRevision, copies[0].TombstoneRevision);
+                    if (copies.Any(x => Math.Max(x.PreparationAuthorityRevision, x.TombstoneRevision) != watermark))
+                    { refusal = "source authority watermark is internally split"; return false; }
+                    prepared.Add(Tuple.Create(plan, nextPreparation, watermark));
+                }
+                HostLedger candidate = _ledger;
+                foreach (var pair in prepared)
+                {
+                    var plan = pair.Item1;
+                    candidate = plan.Terminal
+                        ? candidate.ReplaceOccurrence(plan.Occurrence, x => new InboxEntry(x.Occurrence, x.Membership,
+                            InboxLifecycle.Removed, x.Choice, Math.Max(x.LifecycleRevision + 1, revision), revision,
+                            x.HostOrderKey, terminalReason: TerminalReason.SourceInvalidated, predecessor: x.Predecessor,
+                            preparationRevision: x.PreparationRevision, preparationAuthorityRevision: revision))
+                        : candidate.ReplaceOccurrence(plan.Occurrence, x => x.WithPreparationRevision(pair.Item2, revision));
+                }
+                candidate = candidate.WithAuthority(revision, _ledger.Members);
+                SourceRevalidationBatchDelta preparedDelta;
+                try
+                {
+                    var departedSources = prepared.Select(x => x.Item1.DepartedSource).Distinct(StringComparer.Ordinal).ToArray();
+                    if (departedSources.Length != 1) throw new InvalidOperationException("batch spans multiple departed sources");
+                    var watermarks = prepared.Select(x => x.Item1.DepartureWatermark).Distinct().ToArray();
+                    if (watermarks.Length != 1 || watermarks[0] == 0) throw new InvalidOperationException("batch spans invalid departure watermarks");
+                    preparedDelta = new SourceRevalidationBatchDelta(revision, departedSources[0], watermarks[0], prepared.Select(x =>
+                        new SourceRevalidationItem(x.Item1.Occurrence, x.Item1.Terminal, x.Item2, x.Item3)));
+                    DurableInboxCodec.EncodeSourceRevalidation(preparedDelta); // bounded wire preflight before authority
+                }
+                catch (Exception ex)
+                { refusal = "source delta materialization failed: " + ex.Message; return false; }
+                if (!CommitWithCanonical(_ledger, candidate, null))
+                { refusal = "source revalidation journal commit failed"; return false; }
+                delta = preparedDelta;
+                return true;
+            }
+        }
+
+        internal bool InstallSourceRevalidationBatch(SourceRevalidationBatchDelta delta, out string refusal)
+        {
+            refusal = null;
+            if (delta == null) { refusal = "source delta is null"; return false; }
+            lock (_gate)
+            {
+                var readiness = SourceRevalidationReadiness(delta);
+                if (readiness != SourceDeltaReadiness.Ready)
+                { refusal = "source delta is " + readiness.ToString().ToLowerInvariant(); return false; }
+                ulong localRevision;
+                try { localRevision = checked(_ledger.CommittedRevision + 1); }
+                catch (OverflowException) { refusal = "ledger revision exhausted"; return false; }
+                HostLedger candidate = _ledger;
+                foreach (var item in delta.Items)
+                {
+                    var copies = candidate.AllEntries.Where(x => x.Occurrence.Equals(item.Occurrence)).ToArray();
+                    if (copies.Length == 0 || copies.Any(x => x.Lifecycle == InboxLifecycle.Removed) ||
+                        copies.Any(x => x.PreparationRevision != copies[0].PreparationRevision))
+                    { refusal = "source delta names absent, terminal, or split occurrence"; return false; }
+                    if (!item.Terminal)
+                    {
+                        ulong expectedPreparation;
+                        try { expectedPreparation = checked(copies[0].PreparationRevision + 1); }
+                        catch (OverflowException) { refusal = "preparation revision exhausted"; return false; }
+                        if (item.PreparationRevision != expectedPreparation)
+                        { refusal = "source delta skipped preparation revision"; return false; }
+                    }
+                    if (item.Terminal && copies.Any(x => x.LifecycleRevision == ulong.MaxValue))
+                    { refusal = "lifecycle revision exhausted"; return false; }
+                    candidate = item.Terminal
+                        ? candidate.ReplaceOccurrence(item.Occurrence, x => new InboxEntry(x.Occurrence, x.Membership,
+                            InboxLifecycle.Removed, x.Choice, x.LifecycleRevision + 1,
+                            delta.AuthorityRevision, x.HostOrderKey, terminalReason: TerminalReason.SourceInvalidated,
+                            predecessor: x.Predecessor, preparationRevision: x.PreparationRevision,
+                            preparationAuthorityRevision: delta.AuthorityRevision))
+                        : candidate.ReplaceOccurrence(item.Occurrence,
+                            x => x.WithPreparationRevision(item.PreparationRevision, delta.AuthorityRevision));
+                }
+                candidate = candidate.WithAuthority(localRevision, candidate.Members);
+                if (!CommitWithCanonical(_ledger, candidate, null))
+                { refusal = "source delta journal commit failed"; return false; }
+                return true;
+            }
+        }
+
+        internal bool IsSourceRevalidationBatchInstalled(SourceRevalidationBatchDelta delta)
+            => SourceRevalidationReadiness(delta) == SourceDeltaReadiness.Installed;
+
+        internal SourceDeltaReadiness SourceRevalidationReadiness(SourceRevalidationBatchDelta delta)
+        {
+            if (delta == null) return SourceDeltaReadiness.Conflict;
+            lock (_gate)
+            {
+                bool allInstalled = true, anyFuture = false;
+                foreach (var item in delta.Items)
+                {
+                    var copies = _ledger.AllEntries.Where(x => x.Occurrence.Equals(item.Occurrence)).ToArray();
+                    if (copies.Length == 0) return SourceDeltaReadiness.Conflict;
+                    bool installed;
+                    if (item.Terminal)
+                    {
+                        installed = copies.All(x => x.Lifecycle == InboxLifecycle.Removed &&
+                            x.TerminalReason == TerminalReason.SourceInvalidated &&
+                            x.TombstoneRevision == delta.AuthorityRevision);
+                    }
+                    else installed = copies.All(x => x.PreparationRevision == item.PreparationRevision &&
+                        x.PreparationAuthorityRevision == delta.AuthorityRevision);
+                    if (installed) continue;
+                    allInstalled = false;
+                    if (copies.Any(x => x.Lifecycle == InboxLifecycle.Removed)) return SourceDeltaReadiness.Conflict;
+                    ulong watermark = Math.Max(copies[0].PreparationAuthorityRevision, copies[0].TombstoneRevision);
+                    if (copies.Any(x => Math.Max(x.PreparationAuthorityRevision, x.TombstoneRevision) != watermark))
+                        return SourceDeltaReadiness.Conflict;
+                    if (watermark < item.ExpectedAuthorityRevision) anyFuture = true;
+                    else if (watermark > item.ExpectedAuthorityRevision) return SourceDeltaReadiness.Conflict;
+                }
+                return allInstalled ? SourceDeltaReadiness.Installed :
+                    anyFuture ? SourceDeltaReadiness.Future : SourceDeltaReadiness.Ready;
+            }
         }
 
         internal bool CommitPreparationNative(OccurrenceId occurrence, ulong expectedPreparationRevision,

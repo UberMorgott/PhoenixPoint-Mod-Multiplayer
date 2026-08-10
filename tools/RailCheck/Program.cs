@@ -369,6 +369,7 @@ namespace RailCheck
             Add(laws, () => L384_ACancelledOfferStaysLocal.Check());
             Add(laws, () => L385_AStartCreatesOneSharedPreparation.Check());
             Add(laws, () => L386_ACollaborativePreparationEditRepaintsEveryCopy.Check());
+            Add(laws, () => L388_ADeparturePrunesBeforeItInvalidates.Check());
             Add(laws, () => L390_AStartNeedsNoPeerReadiness.Check());
             Add(laws, () => L378_WindowsPresentOnlyOnTheGeoscape.Check());
             Add(laws, () => L393_EveryRoutedWindowFamilyHasAVerdict.Check());

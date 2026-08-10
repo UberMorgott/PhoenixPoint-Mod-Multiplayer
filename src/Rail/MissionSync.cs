@@ -84,11 +84,91 @@ namespace Multiplayer.Network.Sync
                 SurfaceIds.GeoWindowIntent, SyncKind.StateDelta, DurableInboxCodec.EncodePreparationEdit(delta))));
         }
 
+        internal static void BroadcastSourceRevalidation(SourceRevalidationBatchDelta delta)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, SyncProtocol.EncodeEnvelope(
+                SurfaceIds.GeoWindowIntent, SyncKind.StateDelta, DurableInboxCodec.EncodeSourceRevalidation(delta))));
+        }
+
         internal static bool ApplyPreparationEditDelta(DurableInboxStore store, PreparationEditDelta delta,
             Action<PreparationEditDelta> repaint)
         {
             if (store == null || delta == null || repaint == null || !store.InstallPreparationEdit(delta)) return false;
             repaint(delta); return true;
+        }
+        private static readonly object SourceDeltaGate = new object();
+        private const int MaxScheduledSourceDeltas = 1024;
+        private static readonly List<SourceRevalidationBatchDelta> ScheduledSourceDeltas =
+            new List<SourceRevalidationBatchDelta>();
+        internal static void ScheduleSourceRevalidationDelta(SourceRevalidationBatchDelta delta)
+        {
+            if (delta == null) return;
+            lock (SourceDeltaGate)
+            {
+                if (ScheduledSourceDeltas.Count >= MaxScheduledSourceDeltas)
+                { Debug.LogWarning("[MP][inbox] source-revalidation buffer full; bounded delta refused"); return; }
+                ScheduledSourceDeltas.Add(delta);
+            }
+        }
+        internal static bool HasScheduledSourceDelta(string source)
+        { lock (SourceDeltaGate) return ScheduledSourceDeltas.Any(x =>
+            string.Equals(x.DepartedSource, source, StringComparison.Ordinal)); }
+        internal static void ClearScheduledSourceRevalidationDeltas()
+        { lock (SourceDeltaGate) ScheduledSourceDeltas.Clear();
+          lock (DepartureGate) DepartureCaptures.Clear();
+          DepartureGenerationRail.Clear();
+          GenericApplier.ClearDepartureWatermarks(); }
+        internal static int ApplyScheduledSourceRevalidationDeltas()
+        {
+            int applied = 0; bool progressed;
+            do
+            {
+                progressed = false; SourceRevalidationBatchDelta[] pending;
+                lock (SourceDeltaGate) pending = ScheduledSourceDeltas.ToArray();
+                var store = DurableInboxSaveBridge.ActiveStore;
+                if (store == null) return applied;
+                foreach (var delta in pending)
+                {
+                    if (!GenericApplier.HasSettledDeparture(delta.DepartedSource, delta.DepartureWatermark))
+                        continue;
+                    var readiness = store.SourceRevalidationReadiness(delta); string why = null;
+                    if (readiness == SourceDeltaReadiness.Future) continue;
+                    bool duplicate = readiness == SourceDeltaReadiness.Installed;
+                    bool success = duplicate || readiness == SourceDeltaReadiness.Ready &&
+                        store.InstallSourceRevalidationBatch(delta, out why);
+                    if (!success && readiness == SourceDeltaReadiness.Ready)
+                    { Debug.LogWarning("[MP][inbox] scheduled source-revalidation delta refused: " + why); continue; }
+                    lock (SourceDeltaGate) ScheduledSourceDeltas.Remove(delta);
+                    progressed = true;
+                    if (!success)
+                    { Debug.LogWarning("[MP][inbox] conflicting source-revalidation delta dropped"); continue; }
+                    DurableSourceRevalidationEngine.RetryTerminalTeardown(store,
+                        delta.Items.Where(x => x.Terminal).Select(x => x.Occurrence));
+                    if (!duplicate)
+                    {
+                        RepaintSourceRevalidation(delta);
+                        applied++;
+                    }
+                }
+            } while (progressed);
+            return applied;
+        }
+        internal static Action SourceRevalidationRepaintProbe;
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        internal static void RepaintSourceRevalidation(SourceRevalidationBatchDelta delta)
+        {
+            try
+            {
+                var geo = GenericApplier.StartedGeoLevel();
+                if (geo != null) foreach (var item in delta.Items)
+                    UiEventMap.FirePreparationEdit(new HashSet<object>(), geo, item.Occurrence,
+                        item.PreparationRevision);
+                else OpenUiRepaint.MarkDirty();
+            }
+            catch (System.Security.SecurityException) { OpenUiRepaint.MarkDirty(); }
+            SourceRevalidationRepaintProbe?.Invoke();
         }
 
         internal static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
@@ -112,6 +192,17 @@ namespace Multiplayer.Network.Sync
                 });
                 return true;
             }
+            if (payload[1] == 3)
+            {
+                SourceRevalidationBatchDelta sourceDelta; string why;
+                if (!DurableInboxCodec.TryDecodeSourceRevalidation(payload, out sourceDelta, out why))
+                { Debug.LogWarning("[MP][inbox] malformed source-revalidation StateDelta refused: " + why); return true; }
+                if (engine == null || engine.IsHost || engine.Session == null ||
+                    !IsAuthoritativeTransitionSender(engine.Session.HostPeerId, senderPeerId)) return true;
+                ScheduleSourceRevalidationDelta(sourceDelta);
+                ApplyScheduledSourceRevalidationDeltas(); // handles delta-after-rail; rail flush handles delta-before-rail
+                return true;
+            }
             DeploymentTransitionDelta delta; string decodeRefusal;
             if (!DurableInboxCodec.TryDecodeDeploymentTransition(payload, out delta, out decodeRefusal)) return false;
             if (engine == null || engine.IsHost || engine.Session == null ||
@@ -128,6 +219,124 @@ namespace Multiplayer.Network.Sync
         }
         internal static bool IsAuthoritativeTransitionSender(ulong? hostPeerId, ulong senderPeerId) =>
             hostPeerId.HasValue && hostPeerId.Value == senderPeerId;
+
+        /// <summary>Common source-departure adapter.  The host reaches it after native StartTravel has
+        /// cleared CurrentSite; a client reaches it after the whole CurrentSite/Travelling/DestinationSites
+        /// rail batch.  Both therefore derive from the same settled native graph and enter the same durable
+        /// reducer.  No mission Cancel callback is reachable from this path.</summary>
+        internal sealed class DepartureBinding
+        {
+            internal DepartureBinding(OccurrenceId occurrence, GeoMission mission, DeploymentSourceSnapshot before,
+                bool uniquelyBound) { Occurrence = occurrence; Mission = mission; Before = before; UniquelyBound = uniquelyBound; }
+            internal OccurrenceId Occurrence { get; } internal GeoMission Mission { get; }
+            internal DeploymentSourceSnapshot Before { get; } internal bool UniquelyBound { get; }
+        }
+        internal sealed class DepartureCapture
+        {
+            internal DepartureCapture(string vehicleIdentity, GeoVehicle vehicle, GeoSite site,
+                IEnumerable<DepartureBinding> bindings)
+            { VehicleIdentity = vehicleIdentity; Vehicle = vehicle; Site = site; Bindings = bindings.ToArray(); }
+            internal string VehicleIdentity { get; } internal GeoVehicle Vehicle { get; } internal GeoSite Site { get; }
+            internal IReadOnlyList<DepartureBinding> Bindings { get; }
+        }
+        private static readonly object DepartureGate = new object();
+        private static readonly Dictionary<GeoVehicle, Stack<DepartureCapture>> DepartureCaptures =
+            new Dictionary<GeoVehicle, Stack<DepartureCapture>>();
+
+        internal static void CaptureVehicleDeparture(GeoVehicle vehicle)
+        {
+            var store = DurableInboxSaveBridge.ActiveStore;
+            var geo = GenericApplier.StartedGeoLevel();
+            var network = NetworkEngine.Instance;
+            if (geo == null || vehicle == null || vehicle.CurrentSite == null ||
+                network == null || !network.IsActiveSession || !network.IsHost) return;
+            string vehicleIdentity = IdentityResolver.RootRef(vehicle);
+            if (string.IsNullOrEmpty(vehicleIdentity)) return;
+            var site = vehicle.CurrentSite; var mission = site.ActiveMission;
+            string stable = DurableWindowRegistry.StableMissionSubject(mission);
+            var bindings = Array.Empty<DepartureBinding>();
+            if (store != null && mission != null && !string.IsNullOrEmpty(stable))
+            {
+                bool missionUnique = UniqueSourceBinding(mission.MissionDef != null &&
+                    mission.MissionDef.DeployOnlyFromActiveVehicle, null, vehicleIdentity);
+                var before = DeploymentSources(mission, geo.PhoenixFaction, missionUnique ? vehicle : null);
+                if (before.ContainsSource(vehicleIdentity)) bindings = store.Ledger.AllEntries
+                .Where(x => x.Lifecycle != InboxLifecycle.Removed &&
+                    (string.Equals(x.Occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal) ||
+                     DurableWindowRegistry.IsMissionOfferOccurrence(x.Occurrence)) &&
+                    x.Occurrence.SubjectIds.Contains(stable, StringComparer.Ordinal) &&
+                    x.Occurrence.SubjectIds.Contains(IdentityResolver.RootRef(site), StringComparer.Ordinal))
+                .Select(x => x.Occurrence).Distinct()
+                .Select(x => new DepartureBinding(x, mission, before,
+                    UniqueSourceBinding(mission.MissionDef != null && mission.MissionDef.DeployOnlyFromActiveVehicle,
+                        x, vehicleIdentity))).ToArray();
+            }
+            var capture = new DepartureCapture(vehicleIdentity, vehicle, site, bindings);
+            lock (DepartureGate)
+            {
+                Stack<DepartureCapture> stack;
+                if (!DepartureCaptures.TryGetValue(vehicle, out stack))
+                    DepartureCaptures.Add(vehicle, stack = new Stack<DepartureCapture>());
+                stack.Push(capture);
+            }
+        }
+
+        internal static bool UniqueSourceBinding(bool deployOnlyFromActiveVehicle, OccurrenceId? occurrence,
+            string vehicleIdentity) => deployOnlyFromActiveVehicle &&
+            (!occurrence.HasValue || occurrence.Value.SubjectIds.Contains(vehicleIdentity, StringComparer.Ordinal));
+
+        internal static void CommitCapturedVehicleDeparture(GeoVehicle vehicle)
+        {
+            var capture = TakeDepartureCapture(vehicle);
+            if (capture == null) return;
+            ulong departureWatermark;
+            if (!DepartureGenerationRail.TryAdvance(capture.VehicleIdentity, out departureWatermark)) return;
+            DiffEngine.FlushNow(); // the exact generation rides the ordinary vehicle rail snapshot
+            if (capture.Bindings.Count == 0) return; // ordinary departure still advanced the shared generation
+            var store = DurableInboxSaveBridge.ActiveStore; var geo = GenericApplier.StartedGeoLevel();
+            if (store == null || geo == null) return;
+            var plans = capture.Bindings.Select(binding => new SourceRevalidationPlan(binding.Occurrence,
+                capture.VehicleIdentity, binding.Before,
+                ReferenceEquals(capture.Site.ActiveMission, binding.Mission)
+                    ? DeploymentSources(binding.Mission, geo.PhoenixFaction, null)
+                    : new DeploymentSourceSnapshot(new Dictionary<string, IEnumerable<string>>()),
+                binding.UniquelyBound, departureWatermark)).ToArray();
+            SourceRevalidationBatchDelta delta; string refusal;
+            if (new DurableSourceRevalidationEngine(store, (o, m) => OpenUiRepaint.MarkDirty())
+                .TryRevalidateBatch(plans, out delta, out refusal))
+            { BroadcastSourceRevalidation(delta); OpenUiRepaint.MarkDirty(); }
+            else if (!string.IsNullOrEmpty(refusal))
+                Debug.LogWarning("[MP][inbox] source departure batch refused: " + refusal);
+        }
+
+        internal static void AbandonCapturedVehicleDeparture(GeoVehicle vehicle) => TakeDepartureCapture(vehicle);
+
+        private static DepartureCapture TakeDepartureCapture(GeoVehicle vehicle)
+        {
+            DepartureCapture capture = null;
+            lock (DepartureGate)
+            {
+                Stack<DepartureCapture> stack;
+                if (vehicle != null && DepartureCaptures.TryGetValue(vehicle, out stack) && stack.Count != 0)
+                { capture = stack.Pop(); if (stack.Count == 0) DepartureCaptures.Remove(vehicle); }
+            }
+            return capture;
+        }
+
+        private static DeploymentSourceSnapshot DeploymentSources(GeoMission mission, GeoFaction faction,
+            IGeoCharacterContainer priority)
+        {
+            var result = new Dictionary<string, IEnumerable<string>>(StringComparer.Ordinal);
+            if (mission == null || faction == null) return new DeploymentSourceSnapshot(result);
+            foreach (var source in mission.GetDeploymentSources(faction, priority) ?? new List<IGeoCharacterContainer>())
+            {
+                string identity = IdentityResolver.RootRef(source);
+                if (string.IsNullOrEmpty(identity)) continue;
+                result[identity] = (source.GetAllCharacters() ?? Enumerable.Empty<GeoCharacter>())
+                    .Select(IdentityResolver.RootRef).Where(x => !string.IsNullOrEmpty(x));
+            }
+            return new DeploymentSourceSnapshot(result);
+        }
 
         private static void WriteOccurrence(BinaryWriter w, OccurrenceId o)
         { WriteBounded(w,o.EventId); WriteBounded(w,o.TriggerId); if(o.SubjectIds.Count>1024)throw new InvalidDataException();

@@ -243,6 +243,7 @@ namespace Multiplayer.Network.Sync
                             ApplyEntry(engine, geo, kindId, path, fieldIdx, subKey, value, touched);
                         }
                     }
+                    ApplyDepartureGenerationTail(r);
                     // The anchor is a DTO, so the leaf applies above only filled it in — this is where it becomes
                     // the clock. Post-batch, and outside SyncApplyScope because ProcessInstanceData fires nothing.
                     TimeAnchor.ApplyIfTouched(geo, touched);
@@ -251,6 +252,8 @@ namespace Multiplayer.Network.Sync
                     // would seed the wrong route. Outside SyncApplyScope on purpose — this only STARTS a
                     // coroutine, whose arrival callback must meet VehicleArrivalGate with no apply exemption.
                     FlushOrderReseed();
+                    MarkDepartureWatermarksSettled();
+                    FlushDepartureRevalidation();
                 }
                 catch (Exception ex)
                 {
@@ -707,6 +710,7 @@ namespace Multiplayer.Network.Sync
         /// re-asserts) but it IS a client-side authoritative write, and ClientSimGate does not cover it.</summary>
         private static void ApplyVehicleDestroy(string rootKey, PhoenixPoint.Geoscape.Entities.GeoVehicle vehicle)
         {
+            RemoveDepartureGeneration(rootKey);
             vehicle.OnExitPlay();                                  // GeoVehicle.cs:602
             UnityEngine.Object.Destroy(vehicle.gameObject);        // :603
             OpenUiRepaint.MarkDirty();
@@ -1071,6 +1075,9 @@ namespace Multiplayer.Network.Sync
         //      list which is a SUFFIX of what we last seeded is skipped; only a genuinely different route
         //      re-issues Navigate.
         private static readonly HashSet<GeoVehicle> _reseed = new HashSet<GeoVehicle>();
+        private const int MaxDepartureWatermarks = DepartureGenerationRail.MaxVehicles;
+        private static readonly Dictionary<string, ulong> _departureWatermarks =
+            new Dictionary<string, ulong>(StringComparer.Ordinal);
         private static readonly Dictionary<string, GeoSite[]> _seededRoute = new Dictionary<string, GeoSite[]>(StringComparer.Ordinal);
 
         /// <summary>The ORDER leaves — a mirrored INPUT to a native derivation, as opposed to its derived
@@ -1181,6 +1188,51 @@ namespace Multiplayer.Network.Sync
             if (rootKey != null && IdentityResolver.Resolve(geo, rootKey, _pathCache) is GeoSite owner)
                 _siteRepaint.Add(owner);
         }
+
+        /// <summary>Task 12 client seam intentionally owns no authority. Source lifecycle changes arrive
+        /// only as authenticated GeoWindowIntent StateDelta schema 3 after the ordinary vehicle rail.
+        /// Kept as a named negative seam for L388 and future batch ordering instrumentation.</summary>
+        internal static void FlushDepartureRevalidation()
+        {
+            MissionSync.ApplyScheduledSourceRevalidationDeltas();
+        }
+
+        private static void MarkDepartureWatermarksSettled()
+        {
+            // Exact generations are installed from the optional GeoRail tail before this post-batch rung.
+        }
+
+        internal static void InstallDepartureGeneration(string source, ulong generation)
+        {
+            if (string.IsNullOrEmpty(source) || generation == 0) return;
+            ulong existing;
+            if (_departureWatermarks.TryGetValue(source, out existing))
+            { if (generation > existing) _departureWatermarks[source] = generation; return; }
+            if (_departureWatermarks.Count >= MaxDepartureWatermarks) return; // never evict a pending token
+            _departureWatermarks.Add(source, generation);
+        }
+
+        internal static void RemoveDepartureGeneration(string source)
+        {
+            if (string.IsNullOrEmpty(source) || MissionSync.HasScheduledSourceDelta(source)) return;
+            _departureWatermarks.Remove(source);
+        }
+
+        private static void ApplyDepartureGenerationTail(BinaryReader reader)
+        {
+            if (reader.BaseStream.Position == reader.BaseStream.Length) return; // older host
+            if (reader.ReadByte() != DepartureGenerationRail.TailMarker) throw new InvalidDataException("unknown GeoRail tail");
+            int count = reader.ReadUInt16();
+            if (count < 0 || count > MaxDepartureWatermarks) throw new InvalidDataException("departure generation tail over bound");
+            for (int i = 0; i < count; i++) InstallDepartureGeneration(reader.ReadString(), reader.ReadUInt64());
+            if (reader.BaseStream.Position != reader.BaseStream.Length) throw new InvalidDataException("trailing GeoRail bytes");
+        }
+
+        internal static bool HasSettledDeparture(string source, ulong watermark)
+        { ulong settled; return watermark != 0 && source != null && _departureWatermarks.TryGetValue(source, out settled) && settled >= watermark; }
+
+        internal static void ClearDepartureWatermarks()
+        { _departureWatermarks.Clear(); }
 
         /// <summary>
         /// A DERIVED PRESENTATION'S "DONE" DOES NOT ALWAYS LAND ON THE ENTITY THAT IS PRESENTING, and that

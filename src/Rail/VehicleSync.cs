@@ -208,7 +208,16 @@ namespace Multiplayer.Network.Sync
         [HarmonyPatch(typeof(GeoVehicle), nameof(GeoVehicle.StartTravel), new[] { typeof(List<GeoSite>) })]
         internal static class TravelCapturePatch
         {
-            private static bool Prefix(GeoVehicle __instance, List<GeoSite> path) => CaptureTravel(__instance, path);
+            private static bool Prefix(GeoVehicle __instance, List<GeoSite> path)
+            {
+                MissionSync.CaptureVehicleDeparture(__instance); // immutable BEFORE, host-only
+                return CaptureTravel(__instance, path);
+            }
+            private static Exception Finalizer(GeoVehicle __instance, Exception __exception)
+            {
+                if (__exception != null) MissionSync.AbandonCapturedVehicleDeparture(__instance);
+                return __exception;
+            }
         }
 
 
@@ -604,6 +613,41 @@ namespace Multiplayer.Network.Sync
     [HarmonyPatch(typeof(GeoVehicle), nameof(GeoVehicle.StartTravel), new[] { typeof(List<GeoSite>) })]
     internal static class TravelRepaintPatch
     {
-        private static void Postfix() => OpenUiRepaint.MarkDirty();
+        private static void Postfix(GeoVehicle __instance)
+        {
+            MissionSync.CommitCapturedVehicleDeparture(__instance); // AFTER native StartTravel write
+            OpenUiRepaint.MarkDirty();
+        }
+    }
+
+    /// <summary>Host-issued generation carried as an optional tail of the existing GeoRail delta. It is
+    /// advanced by every successful native StartTravel, whether or not a DWI occurrence currently binds
+    /// the vehicle; the DWI delta names this exact value and can therefore never align by coincidence.</summary>
+    internal static class DepartureGenerationRail
+    {
+        internal const byte TailMarker = 0xD7;
+        internal const int MaxVehicles = 256; // <= ~8 KiB tail; 45 KiB rail chunk remains under u16 envelope
+        private static readonly object Gate = new object();
+        private static readonly Dictionary<string, ulong> Generations =
+            new Dictionary<string, ulong>(StringComparer.Ordinal);
+
+        internal static bool TryAdvance(string vehicleIdentity, out ulong generation)
+        {
+            generation = 0; if (string.IsNullOrEmpty(vehicleIdentity)) return false;
+            lock (Gate)
+            {
+                ulong previous;
+                if (!Generations.TryGetValue(vehicleIdentity, out previous) && Generations.Count >= MaxVehicles)
+                    return false;
+                try { generation = checked(previous + 1); } catch (OverflowException) { return false; }
+                Generations[vehicleIdentity] = generation; return true;
+            }
+        }
+
+        internal static KeyValuePair<string, ulong>[] Snapshot()
+        { lock (Gate) return Generations.OrderBy(x => x.Key, StringComparer.Ordinal).ToArray(); }
+        internal static void Remove(string vehicleIdentity)
+        { if (vehicleIdentity == null) return; lock (Gate) Generations.Remove(vehicleIdentity); }
+        internal static void Clear() { lock (Gate) Generations.Clear(); }
     }
 }

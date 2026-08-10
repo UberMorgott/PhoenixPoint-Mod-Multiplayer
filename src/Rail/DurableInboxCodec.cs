@@ -19,6 +19,7 @@ namespace Multiplayer.Network.Sync
         private const byte DeploymentTransitionSchema = 1;
         private const uint DeploymentTransitionTail = 0x44915AC3;
         private const uint PreparationEditTail = 0x45A15AC3;
+        private const uint SourceRevalidationTail = 0x46A15AC3;
         private const int MaxStringBytes = 4096;
         private const int MaxCollection = 1024;
         private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
@@ -235,6 +236,49 @@ namespace Multiplayer.Network.Sync
                     delta = new PreparationEditDelta(occurrence, prep, ledger, touched); return true;
                 }
             }} catch (Exception ex) when (ex is ArgumentException || ex is InvalidDataException || ex is EndOfStreamException || ex is IOException || ex is OverflowException)
+            { refusal = ex.Message; return false; }
+        }
+
+        internal static byte[] EncodeSourceRevalidation(SourceRevalidationBatchDelta delta)
+        {
+            if (delta == null) throw new ArgumentNullException(nameof(delta));
+            byte[] body; using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms, StrictUtf8))
+            {
+                w.Write(delta.AuthorityRevision); WriteString(w, delta.DepartedSource); w.Write(delta.DepartureWatermark);
+                WriteCount(w, delta.Items.Count);
+                foreach (var item in delta.Items)
+                { WriteOccurrence(w, item.Occurrence); w.Write(item.Terminal); w.Write(item.PreparationRevision);
+                  w.Write(item.ExpectedAuthorityRevision); }
+                body = ms.ToArray();
+            }
+            if (body.Length > ushort.MaxValue) throw new ArgumentOutOfRangeException(nameof(delta));
+            using (var ms = new MemoryStream()) using (var w = new BinaryWriter(ms, StrictUtf8))
+            { w.Write(DeploymentTransitionOp); w.Write((byte)3); w.Write((ushort)body.Length); w.Write(body);
+              w.Write(Crc32.Compute(body)); w.Write(SourceRevalidationTail); return ms.ToArray(); }
+        }
+
+        internal static bool TryDecodeSourceRevalidation(byte[] payload, out SourceRevalidationBatchDelta delta,
+            out string refusal)
+        {
+            delta = null; refusal = null;
+            try { using (var ms = new MemoryStream(payload ?? Array.Empty<byte>(), false)) using (var r = new BinaryReader(ms, StrictUtf8))
+            {
+                if (r.ReadByte() != DeploymentTransitionOp || r.ReadByte() != 3) throw new InvalidDataException("invalid source delta header");
+                int length = r.ReadUInt16(); if (length <= 0 || ms.Length - ms.Position != length + 8)
+                    throw new InvalidDataException("invalid source delta length");
+                var body = r.ReadBytes(length); if (body.Length != length || r.ReadUInt32() != Crc32.Compute(body) ||
+                    r.ReadUInt32() != SourceRevalidationTail || ms.Position != ms.Length) throw new InvalidDataException("invalid source delta frame");
+                using (var bs = new MemoryStream(body, false)) using (var br = new BinaryReader(bs, StrictUtf8))
+                {
+                    ulong revision = br.ReadUInt64(); string departedSource = ReadString(br); ulong watermark = br.ReadUInt64();
+                    int count = ReadCount(br); var items = new SourceRevalidationItem[count];
+                    for (int i = 0; i < count; i++) items[i] = new SourceRevalidationItem(ReadOccurrence(br),
+                        br.ReadBoolean(), br.ReadUInt64(), br.ReadUInt64());
+                    if (revision == 0 || bs.Position != bs.Length) throw new InvalidDataException("invalid source delta body");
+                    delta = new SourceRevalidationBatchDelta(revision, departedSource, watermark, items); return true;
+                }
+            }} catch (Exception ex) when (ex is ArgumentException || ex is InvalidDataException ||
+                ex is EndOfStreamException || ex is IOException || ex is OverflowException)
             { refusal = ex.Message; return false; }
         }
 

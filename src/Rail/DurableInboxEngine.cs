@@ -86,7 +86,8 @@ namespace Multiplayer.Network.Sync
         MissionCompleted,
         Launched,
         MembershipEnded,
-        LevelTeardown
+        LevelTeardown,
+        SourceInvalidated
     }
 
     internal enum DurableCarrierClass : byte
@@ -612,6 +613,145 @@ namespace Multiplayer.Network.Sync
         }
 
     }
+
+    /// <summary>The authoritative live deployment containers at one revalidation boundary.  Occupants are
+    /// retained with their source so removal of an aircraft cannot leave its soldiers addressable through
+    /// a queued/suspended/deferred preparation copy.</summary>
+    internal sealed class DeploymentSourceSnapshot
+    {
+        private readonly IReadOnlyDictionary<string, IReadOnlyList<string>> _sources;
+        internal DeploymentSourceSnapshot(IDictionary<string, IEnumerable<string>> sources)
+        {
+            if (sources == null) throw new ArgumentNullException(nameof(sources));
+            var copy = new SortedDictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+            foreach (var pair in sources)
+            {
+                var key = InboxIdentity.Required(pair.Key, nameof(sources));
+                var occupants = (pair.Value ?? Enumerable.Empty<string>())
+                    .Select(x => InboxIdentity.Required(x, nameof(sources))).Distinct(StringComparer.Ordinal)
+                    .OrderBy(x => x, StringComparer.Ordinal).ToArray();
+                copy.Add(key, occupants);
+            }
+            _sources = copy;
+        }
+        internal int SourceCount => _sources.Count;
+        internal int OccupantCount => _sources.Values.Sum(x => x.Count);
+        internal bool ContainsSource(string source) => source != null && _sources.ContainsKey(source);
+        internal IReadOnlyDictionary<string, IReadOnlyList<string>> Sources => _sources;
+    }
+
+    /// <summary>One reducer adapter for the host's post-StartTravel edge and the client's post-rail edge.
+    /// It never invents mission cancellation: partial loss versions all copies and repaints each open
+    /// entitlement; terminal loss commits one Invalidated tombstone and only then enters Task 7 teardown.</summary>
+    internal sealed class DurableSourceRevalidationEngine
+    {
+        private sealed class NoCarrier : IDurableWindowCarrierAdapter
+        {
+            public InboxWindowCheckpoint Capture(OccurrenceId occurrence) => null;
+            public bool Present(OccurrenceId occurrence) => false;
+            public bool Restore(OccurrenceId occurrence, InboxWindowCheckpoint checkpoint) => false;
+            public void Abandon(OccurrenceId occurrence) { }
+            public void FinalizeRestore(OccurrenceId occurrence) { }
+        }
+        private static readonly IDurableWindowCarrierAdapter NullCarrier = new NoCarrier();
+        private readonly DurableInboxStore _store;
+        private readonly Action<OccurrenceId, MembershipId> _repaintOpen;
+        internal DurableSourceRevalidationEngine(DurableInboxStore store,
+            Action<OccurrenceId, MembershipId> repaintOpen)
+        { _store = store ?? throw new ArgumentNullException(nameof(store));
+          _repaintOpen = repaintOpen ?? throw new ArgumentNullException(nameof(repaintOpen)); }
+
+        internal bool TryRevalidate(OccurrenceId occurrence, string departedSource,
+            DeploymentSourceSnapshot before, DeploymentSourceSnapshot after, bool uniquelyBound,
+            out ulong terminalRevision, out string refusal)
+        {
+            SourceRevalidationBatchDelta delta;
+            var plan = new SourceRevalidationPlan(occurrence, departedSource, before, after, uniquelyBound);
+            bool committed = TryRevalidateBatch(new[] { plan }, out delta, out refusal);
+            terminalRevision = committed && delta.Items[0].Terminal ? delta.AuthorityRevision : 0;
+            return committed;
+        }
+
+        internal bool TryRevalidateBatch(IEnumerable<SourceRevalidationPlan> sourcePlans,
+            out SourceRevalidationBatchDelta delta, out string refusal)
+        {
+            delta = null; refusal = null;
+            var plans = (sourcePlans ?? Enumerable.Empty<SourceRevalidationPlan>()).ToArray();
+            if (plans.Length == 0 || plans.Length > 1024 || plans.Select(x => x.Occurrence).Distinct().Count() != plans.Length)
+            { refusal = "source revalidation batch is empty, duplicate, or over bound"; return false; }
+            foreach (var plan in plans)
+            {
+                if (plan.Before == null || plan.After == null || string.IsNullOrEmpty(plan.DepartedSource) ||
+                    !plan.Before.ContainsSource(plan.DepartedSource)) return false;
+                if (plan.After.ContainsSource(plan.DepartedSource))
+                { refusal = "departed source is still present after the host write"; return false; }
+                if (plan.After.Sources.Keys.Any(x => !plan.Before.ContainsSource(x)))
+                { refusal = "source revalidation cannot add an unrelated deployment source"; return false; }
+            }
+            if (!_store.CommitSourceRevalidationBatch(plans, out delta, out refusal)) return false;
+            foreach (var item in delta.Items.Where(x => !x.Terminal))
+                foreach (var open in _store.Ledger.AllEntries.Where(x => x.Occurrence.Equals(item.Occurrence) &&
+                    x.Lifecycle == InboxLifecycle.Open).ToArray()) _repaintOpen(item.Occurrence, open.Membership);
+            RetryTerminalTeardown(_store, delta.Items.Where(x => x.Terminal).Select(x => x.Occurrence));
+            return true; // authority remains committed even when a carrier needs a later retry
+        }
+
+        internal static int RetryTerminalTeardown(DurableInboxStore store, IEnumerable<OccurrenceId> occurrences = null)
+        {
+            if (store == null) return 0;
+            var filter = occurrences == null ? null : new HashSet<OccurrenceId>(occurrences);
+            int completed = 0;
+            foreach (var group in store.Ledger.AllEntries.Where(x => x.Lifecycle == InboxLifecycle.Removed &&
+                x.TerminalReason == TerminalReason.SourceInvalidated && (filter == null || filter.Contains(x.Occurrence)))
+                .GroupBy(x => x.Occurrence).ToArray())
+            {
+                var first = group.First(); string why;
+                if (new DurableInboxEngine(store, first.Membership, NullCarrier).RemoveAllCarriers(
+                    group.Key, TerminalReason.SourceInvalidated, first.TombstoneRevision, out why)) completed++;
+            }
+            return completed;
+        }
+    }
+
+    internal sealed class SourceRevalidationPlan
+    {
+        internal SourceRevalidationPlan(OccurrenceId occurrence, string departedSource,
+            DeploymentSourceSnapshot before, DeploymentSourceSnapshot after, bool uniquelyBound,
+            ulong departureWatermark = 1)
+        { Occurrence = occurrence; DepartedSource = departedSource; Before = before; After = after;
+          UniquelyBound = uniquelyBound; DepartureWatermark = departureWatermark; }
+        internal OccurrenceId Occurrence { get; } internal string DepartedSource { get; }
+        internal DeploymentSourceSnapshot Before { get; } internal DeploymentSourceSnapshot After { get; }
+        internal bool UniquelyBound { get; }
+        internal ulong DepartureWatermark { get; }
+        internal bool Terminal => UniquelyBound || After.SourceCount == 0 || After.OccupantCount == 0;
+    }
+
+    internal sealed class SourceRevalidationItem
+    {
+        internal SourceRevalidationItem(OccurrenceId occurrence, bool terminal, ulong preparationRevision,
+            ulong expectedAuthorityRevision)
+        { Occurrence = occurrence; Terminal = terminal; PreparationRevision = preparationRevision;
+          ExpectedAuthorityRevision = expectedAuthorityRevision; }
+        internal OccurrenceId Occurrence { get; } internal bool Terminal { get; }
+        internal ulong PreparationRevision { get; }
+        internal ulong ExpectedAuthorityRevision { get; }
+    }
+
+    internal sealed class SourceRevalidationBatchDelta
+    {
+        internal SourceRevalidationBatchDelta(ulong authorityRevision, string departedSource, ulong departureWatermark,
+            IEnumerable<SourceRevalidationItem> items)
+        { AuthorityRevision = authorityRevision; DepartedSource = InboxIdentity.Required(departedSource, nameof(departedSource));
+          DepartureWatermark = departureWatermark;
+          Items = (items ?? throw new ArgumentNullException(nameof(items))).ToArray();
+          if (authorityRevision == 0 || departureWatermark == 0 || Items.Count == 0 || Items.Count > 1024 ||
+              Items.Select(x => x.Occurrence).Distinct().Count() != Items.Count) throw new ArgumentException("invalid source delta"); }
+        internal ulong AuthorityRevision { get; } internal string DepartedSource { get; }
+        internal ulong DepartureWatermark { get; }
+        internal IReadOnlyList<SourceRevalidationItem> Items { get; }
+    }
+    internal enum SourceDeltaReadiness : byte { Ready, Future, Installed, Conflict }
 
     internal sealed class DeploymentTransitionDelta
     {
