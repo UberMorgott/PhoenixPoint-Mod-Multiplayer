@@ -436,6 +436,20 @@ in `L163` and `L164`.
   net for a host that never sends. NOT A QUORUM: a host machine event, never a human action. **L407**,
   and `L164` arm (b) widened one hop so it follows the shared `TryQueueReplenish`.
 
+## Known gap next to L85 — the `last == 1` restart boundary (recorded 2026-08-10, NOT fixed)
+
+- `SurfaceSeq.IsStreamRestart` (`src/Rail/SurfaceSeq.cs:52`) recognises a restart only for `last > 1`.
+  If a surface's PREVIOUS battle emitted exactly ONE message (cursor left at 1), the next battle's seq 1
+  reads as the duplicate the guard exists to drop: the first message of the new stream is swallowed with
+  no log — the same silence L85 was written for, in the one boundary case L85 does not cover (its
+  incident drives the restart from cursor 12; the law has no arm at this edge).
+- LEFT ALONE ON PURPOSE, not overlooked. From the receiver's side `seq 1 against last 1` is literally the
+  same wire fact whether it is a re-delivery of the old battle's only message or the first of the new
+  one. Widening the comparison to `last >= 1` buys the rare case by double-applying EVERY ordinary first
+  message a resend repeats — a worse trade, and unfalsifiable either way.
+- The real fix is a per-battle EPOCH id in the envelope (bumped by `SurfaceSeq.Reset`, compared ahead of
+  the seq). That is a wire change plus a law of its own. Do that; do not widen the comparison.
+
 ## Attention
 
 - rows in table: 150. numbers issued: 155 (L85–L90 never issued; old L26 retired). Registrations: 130 — see "Rows vs registrations".

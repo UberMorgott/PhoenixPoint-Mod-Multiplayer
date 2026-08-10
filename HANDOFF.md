@@ -286,3 +286,37 @@ is the code this session deleted on purpose.
 - `docs/laws.md` — the prose clarification at `:372` corrected: L377/L379/L381/L383/L394 added to the
   deleted list, the "no L402 was created" line withdrawn, and L391's description un-tied from the
   campaign save that no longer carries it.
+
+---
+
+## 9. Audit fixes, 2026-08-10 (transport / save-transfer / structural rail)
+
+- **An oversized structural CREATE is now fragmented, and a failed send never retires a root.**
+  A create blob over the u16 envelope made `SyncProtocol.EncodeEnvelope` throw; `SendStructural`
+  swallowed it and the caller still did `_prevRoots.Add(key)` — and a create is only ever derived
+  from a root's ABSENCE from that set, so the entity was never sent to anyone again. Now
+  `DiffEngine.FragmentStructuralBlob` splits it with the entry rail's own frame
+  (`RailMeta.EncodeFragment` → `GenericApplier.Reassemble`), flagged on the op byte with
+  `DiffEngine.FragmentedBlobFlag` (0x80) — a FLAG, not a first-byte sniff, because a native graph
+  blob may legitimately open with `FragmentMarker`. `SendStructural` returns bool; a false retries
+  next walk (create: not added; destroy: re-added to `_prevRoots`). A buffered fragment still marks
+  its seq, or the next one reads as a gap and asks for a resync. Asserted by four new **L40** arms.
+- **A failed save-prepare restores this peer's own campaign identity.**
+  `ApplyPrepareLoadGameState` now RETURNS its undo (`LatestLoad`/`_currentGameId`/`_currentDifficulty`/
+  `_enabledDlc`/`IsIronmanMode`), and `PrepareEntryFromBlobCrt` runs it plus the
+  `_currentGeoscapeSection.ContentObjects` restore from a `finally`. Without it a throw in the
+  level-params read left the live SaveManager on the REMOTE save's identity while the player kept
+  playing their own game — the next save was written under the wrong campaign id. New law **L408**.
+  Note for future readers: an iterator's `finally` body is LIFTED into `<>m__FinallyN` on the state
+  machine, so an IL law must read that family, not only `MoveNext` (L408 does).
+- **StunTransport dispatches received packets OUTSIDE `_lock`** (`Update`, copy-drain exactly like
+  the peer-event drain above it). Holding the lock across arbitrary handler work stalled
+  `ReceiveLoop`'s enqueue and every `Send`/`Broadcast`, and a stalled reader drops UDP.
+- **`DeserializeSaveChunk` / `DeserializePeerList` bound their wire-declared length/count** against
+  the bytes actually present, the same FA-0012 guard `DeserializeJoin` already had.
+- **Nicknames are capped at 32 chars** in `ClientInfo.PlayerName`'s setter (JOIN, RENAME and the
+  client-side PEER_LIST apply all route through it) plus `HostNickname` and the JOIN boundary.
+  Truncate, never reject. One long name used to inflate the roster datagram past the STUN
+  fragmentation bound, where it is dropped silently for the WHOLE lobby.
+- **NOT fixed, deliberately:** `SurfaceSeq.IsStreamRestart` at `last == 1` — see the new "Known gap
+  next to L85" section in `docs/laws.md`. It needs an epoch id, not a widened comparison.
