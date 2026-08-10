@@ -81,6 +81,33 @@ namespace Multiplayer.UI
         private GameObject _chooseSaveCell;     // footer: CHOOSE SAVE…
         private GameObject _newCampaignCell;    // footer: NEW CAMPAIGN…
 
+        // INVITE VIA STEAM, GREYED WHEN THERE IS NO STEAM TO INVITE THROUGH — the same three-field shape
+        // as READY and NEW CAMPAIGN above, for the same reason: a cloned native button repaints its
+        // greyed visual ONLY through its PhoenixGeneralButton controller's SetInteractable, never off
+        // Button.interactable alone. Writing interactable by itself leaves IsEnabled true, so the
+        // controller's own Update → UpdateColorElements repaints the label at the first pointer-enter and
+        // wipes any colour we wrote — a hover would have un-greyed the button and, because this applies
+        // on change only, the grey would never have come back.
+        // _inviteBtnLabel is the FALLBACK path's visual only (no clone → no controller → nothing else
+        // shows the state; the from-code button's label colour is CreateButton's BodyText, not a prefab's,
+        // so it needs no capture). -1 = not yet applied.
+        private Button _inviteBtn;
+        private Text _inviteBtnLabel;
+        private object _inviteBtnCtrl;
+        private System.Reflection.MethodInfo _inviteBtnSetInteractable;
+        private int _inviteInteractableCache = -1;
+
+        // COPY ACKNOWLEDGEMENT — the clicked value cell, what it really said, and when it goes back.
+        // ONE cell at a time: two acks would need two timers and could leave one cell green forever.
+        // The clock is Time.realtimeSinceStartup, the same one LobbyCountdown counts its display down
+        // from — unscaled, so an ack does not freeze with the game.
+        private const float CopiedAckSeconds = 1.5f;   // seconds, not pixels: nothing to Scale()
+        private const string CopiedLabel = "COPIED";   // shorter than any real value, so it cannot overrun
+        private Text _copiedCell;
+        private string _copiedText;
+        private Color _copiedColor;
+        private float _copiedUntil;
+
         // Chat zone. Version diff drives a cheap re-render; we track the subscribed session so we
         // re-bind (and drop the old handler) when the session instance is re-created on Join.
         // Capacity 500 = effectively whole-session history for a lobby chat (matches the host's
@@ -490,6 +517,27 @@ namespace Multiplayer.UI
                 SessionButtonSize, () => _owner.InvitePlayers());
             _inviteBtnCell = CellRoot(inviteBtn, inviteRow.transform);
 
+            // Handles for the greying (Refresh drives it). Same one-time controller resolution the READY
+            // and NEW CAMPAIGN buttons do — resolved from the CELL, not from the returned Button, since
+            // on the clone path the Button is nested inside the clone root and the controller sits at or
+            // above it. With a controller, SetInteractable owns the whole visual; without one (the
+            // from-code fallback) the label is all there is to grey.
+            _inviteBtn = inviteBtn;
+            _inviteBtnLabel = _inviteBtnCell != null ? _inviteBtnCell.GetComponentInChildren<Text>(true) : null;
+            if (inviteBtn != null)
+            {
+                var invPgb = HarmonyLib.AccessTools.TypeByName(
+                    "PhoenixPoint.Common.View.ViewControllers.PhoenixGeneralButton");
+                if (invPgb != null)
+                {
+                    _inviteBtnCtrl = inviteBtn.GetComponentInParent(invPgb)
+                        ?? inviteBtn.GetComponentInChildren(invPgb);
+                    if (_inviteBtnCtrl != null)
+                        _inviteBtnSetInteractable =
+                            HarmonyLib.AccessTools.Method(invPgb, "SetInteractable", new[] { typeof(bool) });
+                }
+            }
+
             // THE INVITE CODE, right-aligned in the slack the button leaves: the host's PUBLIC ENDPOINT,
             // 10 symbols, and never a Steam id — the button to its left IS the Steam channel, and a Steam
             // id in the code would be useless to the non-Steam player a code gets shared with
@@ -499,7 +547,11 @@ namespace Multiplayer.UI
             // It is the cell allowed to give up width — hence the flex, and hence the clip
             // (MakeCopyableValue's RectMask2D). A truncated code is still a correct COPY, because the
             // click copies the live value, not the drawn glyphs.
-            _inviteCodeValue = MakeCopyableValue(inviteRow, "InviteValue", () => _owner.GetSessionInviteCode());
+            // The COPY getter, not the display one: it returns "" while the cell is showing a placeholder
+            // ("discovering…" and friends), which is what keeps the click silent instead of putting a
+            // status line on the clipboard and saying COPIED over it. Refresh still DRAWS the full string.
+            _inviteCodeValue = MakeCopyableValue(inviteRow, "InviteValue",
+                                                 () => _owner.GetCopyableSessionInviteCode());
             _inviteCodeValue.alignment = TextAnchor.MiddleRight;
             var codeW = LobbyTheme.Scale(150);
             var codeLe = LE(_inviteCodeValue.transform.parent.gameObject);
@@ -602,21 +654,110 @@ namespace Multiplayer.UI
             if (cell != null && cell.activeSelf != on) cell.SetActive(on);
         }
 
-        // Click-to-copy value text: a button whose label is the live value; click copies it. The
+        /// <summary>
+        /// Grey / un-grey INVITE VIA STEAM. ON CHANGE ONLY (-1 = never applied), the same transition
+        /// guard the READY and NEW CAMPAIGN repaints use — SetInteractable runs an animator, so firing it
+        /// every frame is not free.
+        ///
+        /// THE CONTROLLER OWNS THE VISUAL when there is one. SetInteractable is the complete native
+        /// "appear now" path: it sets BaseButton.interactable, flips IsEnabled, runs the animator and
+        /// calls UpdateColorElements. Writing Button.interactable alone leaves IsEnabled TRUE, and then
+        /// the controller's own Update repaints the label on the first pointer-enter — a hover would
+        /// un-grey the button, and with an apply-on-change gate the grey never returns. We still write
+        /// interactable as well, because that is what actually refuses the click.
+        ///
+        /// THE LABEL BRANCH IS THE FALLBACK PATH ONLY. With no native template captured, AddCardButton
+        /// builds the button from code: its Button is added at runtime with no targetGraphic, so its
+        /// ColorTint transition has nothing to tint and interactable is invisible. There the label mute
+        /// is the whole visual. The two branches are exclusive — nothing here can fight the controller.
+        /// </summary>
+        private void SetInviteButtonEnabled(bool on)
+        {
+            var now = on ? 1 : 0;
+            if (now == _inviteInteractableCache) return;
+            _inviteInteractableCache = now;
+
+            if (_inviteBtn != null) _inviteBtn.interactable = on;
+
+            if (_inviteBtnCtrl != null && _inviteBtnSetInteractable != null)
+            {
+                try { _inviteBtnSetInteractable.Invoke(_inviteBtnCtrl, new object[] { on }); }
+                catch (System.Exception e)
+                {
+                    UnityEngine.Debug.LogError("[Multiplayer] Invite button repaint failed: " + e.Message);
+                }
+            }
+            else if (_inviteBtnLabel != null)
+            {
+                _inviteBtnLabel.color = on ? LobbyTheme.BodyText : LobbyTheme.MutedText;
+            }
+        }
+
+        /// <summary>
+        /// SAY THAT A COPY HAPPENED, ON THE CELL THE PLAYER CLICKED: it shows the WORD "COPIED" in the
+        /// roster's existing green for <see cref="CopiedAckSeconds"/>, then goes back to its own value
+        /// and its own colour. A word, not a hue — a cell that merely changed colour asks the player to
+        /// know what that colour means, and green here says nothing by itself.
+        ///
+        /// ONE ACK AT A TIME, which is the whole of the overlap case: clicking a second cell while the
+        /// first is still green ENDS the first immediately (RestoreCopiedCell before the new capture), so
+        /// no cell can be left stuck reading COPIED. Clicking the SAME cell again only pushes the
+        /// deadline out — re-capturing would save "COPIED"/green AS the cell's real value and the ack
+        /// would never come off.
+        ///
+        /// The capture is per-cell state rather than per-kind: whatever the cell was showing and however
+        /// it was coloured is what comes back, so this knows nothing about invite codes or endpoints.
+        /// </summary>
+        private void NoteCopied(Text cell)
+        {
+            if (cell == null) return;
+            if (!ReferenceEquals(cell, _copiedCell))
+            {
+                RestoreCopiedCell();          // whatever was green a moment ago is done NOW
+                _copiedCell = cell;
+                _copiedText = cell.text;      // captured BEFORE the swap, never after
+                _copiedColor = cell.color;
+                cell.text = CopiedLabel;
+                cell.color = LobbyTheme.ReadyText;
+            }
+            _copiedUntil = Time.realtimeSinceStartup + CopiedAckSeconds;
+        }
+
+        /// <summary>Put the acknowledged cell back the way it was. No liveness question arises: the panel
+        /// is built once (MultiplayerUI.Build), Hide only deactivates it, and address rows are POOLED —
+        /// so no copyable cell is ever destroyed while an ack is live. The null test is the ordinary
+        /// "nothing is acknowledging" case, not a guard against a dangling reference.</summary>
+        private void RestoreCopiedCell()
+        {
+            if (_copiedCell == null) return;
+            _copiedCell.text = _copiedText;
+            _copiedCell.color = _copiedColor;
+            _copiedCell = null;
+        }
+
+        // Click-to-copy value text: a button whose label is the live value; click copies it and the cell
+        // says COPIED back (see NoteCopied). The
         // button rect is owned by the parent layout group (caller sets the LayoutElement min/preferred).
         private Text MakeCopyableValue(GameObject parent, string name, System.Func<string> getValue)
         {
             // Vector2.zero size, not a hand-picked one: the button rect comes from the parent layout
             // group and the label is stretched to the button below, so any number here would be a dead
             // literal that reads like a width someone chose.
+            // The ack is wired HERE, in the one factory every copyable cell is built by, so a copy target
+            // added later inherits it without its author knowing it exists. `label` is assigned a few
+            // lines down and the closure captures the VARIABLE, not its (still null) value — the click
+            // cannot run before the build finishes. Only a real copy acknowledges: CopyToClipboard
+            // returns false for an empty value and the cell then says nothing.
+            Text label = null;
             var btn = UiToolkit.CreateButton(parent, name, "", Vector2.zero, Vector2.zero,
-                new Vector2(0f, 1f), () => _owner.CopyToClipboard(getValue()));
+                new Vector2(0f, 1f),
+                () => { if (_owner.CopyToClipboard(getValue())) NoteCopied(label); });
             // The value is the one cell in its row that flexes, so it is the one that can be handed less
             // width than its text needs — and its label is a CreateText, i.e. horizontalOverflow =
             // Overflow, which would draw the tail of a long invite code straight over the button beside
             // it. RectMask2D clips it to its own rect, the same fix the roster's nickname cell carries.
             btn.gameObject.AddComponent<RectMask2D>();
-            var label = btn.GetComponentInChildren<Text>();
+            label = btn.GetComponentInChildren<Text>();
             if (label != null)
             {
                 // STRETCH the label to the button rect. CreateButton anchors it at the centre with a
@@ -1268,6 +1409,13 @@ namespace Multiplayer.UI
 
         public void Hide()
         {
+            // END ANY LIVE COPY ACK HERE. Refresh is only called while the lobby is VISIBLE
+            // (MultiplayerUI.Update gates it on IsVisible), so an ack armed a frame before this would
+            // otherwise stay armed for the whole hidden period and expire on the next Show — restoring a
+            // capture from minutes ago onto a cell whose value has moved on. Hiding is the end of the
+            // interaction, so it is the end of the acknowledgement.
+            RestoreCopiedCell();
+
             // Turn the SINGLE visibility lever OFF: deactivate the lobby canvas GO (hides the whole
             // subtree). _root stays active inside it, ready for the next Show().
             if (_lobbyCanvas != null) _lobbyCanvas.gameObject.SetActive(false);
@@ -1302,6 +1450,13 @@ namespace Multiplayer.UI
 
         public void Refresh()
         {
+            // THE COPY ACK EXPIRES FIRST, above the two Hide() returns below, so the 1.5 s is measured
+            // even on the frame the lobby is closing. It is NOT the whole story on its own: Refresh only
+            // runs while the lobby is visible (MultiplayerUI.Update gates the call on IsVisible), so an
+            // ack that outlives the screen is ended by Hide() instead — see the RestoreCopiedCell there.
+            // Between the two, no ack can survive into a later Show and restore a stale capture.
+            if (_copiedCell != null && Time.realtimeSinceStartup >= _copiedUntil) RestoreCopiedCell();
+
             // Key the work-guard on the SAME single lever as IsVisible: do nothing unless the lobby
             // canvas GO is actually on screen.
             if (!IsVisible) return;
@@ -1348,11 +1503,19 @@ namespace Multiplayer.UI
             {
                 var code = _owner.GetSessionInviteCode();
                 if (engine.IsHost) engine.Session?.PublishHostInviteCode(code);
-                _inviteCodeValue.text = code;
+                // THIS is the ack's other half for this cell, and the reason there is no second writer:
+                // the per-frame stamp simply STANDS ASIDE while the cell is acknowledging a copy, then
+                // resumes on the frame the ack expires above. A "COPIED" written anywhere else would be
+                // erased by this line within one frame. Publishing never pauses — only the drawing does,
+                // so a client's mirrored code keeps arriving while the host's cell reads COPIED.
+                if (!ReferenceEquals(_inviteCodeValue, _copiedCell)) _inviteCodeValue.text = code;
             }
 
-            // THE STEAM INVITE BUTTON IS FOR EVERYONE, NOT JUST THE HOST (see BuildSessionCard).
+            // THE STEAM INVITE BUTTON IS FOR EVERYONE, NOT JUST THE HOST (see BuildSessionCard) — but it
+            // is GREYED, not hidden, when there is no Steam to invite through. A button that vanishes
+            // reads as a broken layout; a greyed one reads as "this needs Steam", which is the truth.
             SetCellActive(_inviteBtnCell, true);
+            SetInviteButtonEnabled(SteamProbe.IsAlive());
             // HOST-ONLY: the address lines are the host machine's own addresses.
             RefreshAddresses(engine);
 
@@ -1523,7 +1686,14 @@ namespace Multiplayer.UI
             var ln = _addressLines[index];
             ln.Endpoint = endpoint;
             if (ln.Key.text != key) ln.Key.text = key;
-            if (ln.Value.text != endpoint) ln.Value.text = endpoint;
+            // THE SAME STAND-ASIDE THE INVITE-CODE WRITER USES, and it needs the second half as well.
+            // This repaint fires when the address list changes under a live ack (LanIpResolver's 10 s TTL
+            // hands back a new list instance, or the UPnP mapping lands mid-ack): writing here would wipe
+            // COPIED early, and then the restore would put the PRE-CLICK endpoint back over the new one —
+            // where the != guard below would keep it, wrong, until the list changed again. So while this
+            // cell is acknowledging, re-aim the ACK's capture at the new endpoint instead of drawing it.
+            if (ReferenceEquals(ln.Value, _copiedCell)) _copiedText = endpoint;
+            else if (ln.Value.text != endpoint) ln.Value.text = endpoint;
             SetCellActive(ln.Cell, true);
         }
 

@@ -49,7 +49,8 @@ namespace RailCheck
     /// used — the Steam invite path still reads it — so nothing about the code FORMAT or the wire changed
     /// here. Only the plan did.
     ///
-    /// WHAT THIS LAW CANNOT SEE, said plainly so a green L155 is not read as "join works". It executes a
+    /// WHAT THIS LAW CANNOT SEE, said plainly so a green L155 is not read as "join works". Its arms (a)
+    /// through (e) execute a
     /// PURE decision function over fabricated targets. It does not connect, does not know whether STUN
     /// discovery succeeded, whether the host's endpoint is reachable, or whether the Steam invite path
     /// resolves a lobby — all runtime, all needing the game. It also cannot check that the two CALLERS pass
@@ -59,6 +60,8 @@ namespace RailCheck
     /// What makes
     /// that survivable is that <c>origin</c> is a REQUIRED parameter with no default: a new entry point
     /// cannot inherit the wrong technology by omission, it has to state one and fails to compile otherwise.
+    /// Arm (f) closes one corner of that caller-side gap — by IL, not by behaviour — for the one entry
+    /// point whose affordance the player sees before any plan exists: the INVITE VIA STEAM button.
     ///
     /// THE ARMS, all EXECUTED against the real <c>JoinPlan.Build</c>:
     ///   (a) <c>pasted-code-tries-steam</c> — a unified code carrying BOTH a steam id and an endpoint, with
@@ -83,6 +86,17 @@ namespace RailCheck
     ///       ONLY plan a code-joiner ever gets. Guarded: the arm first asserts <c>JoinTarget.Stun</c> still
     ///       classifies as <c>StunCode</c>, because re-routing that classification would leave the
     ///       assertions passing against a branch nobody meant to test.
+    ///   (f) <c>steam-affordance-ungated</c> — the OTHER half of entry point #1, and the only arm that
+    ///       reads IL instead of executing Build: <c>LobbyPanel.Refresh</c> → <c>SteamProbe.IsAlive</c> →
+    ///       <c>SteamInvite.IsSteamAlive</c>, both hops, so INVITE VIA STEAM is greyed by the SAME
+    ///       predicate that tells Build whether a Steam leg may exist. (Two hops because the UI may not
+    ///       touch SteamInvite directly — its <c>Lobby?</c> statics make the type unloadable where
+    ///       Facepunch is absent, so SteamProbe holds the catch.) Every other arm asks whether the plan
+    ///       names the right technology; this one asks whether the button that starts that technology is
+    ///       offered when it cannot work. RUNS FIRST, sharing no guard with the arms below. Guarded
+    ///       twice itself — every member must resolve, and the IL walk must reach <c>RefreshControls</c>,
+    ///       the call that CLOSES Refresh, so a reader that died early reports itself instead of
+    ///       accusing the gate.
     ///   (d) POSITIVE CONTROL. A vacuous sweep is the likeliest silent regression here and it is cheap:
     ///       delete the SteamP2P line entirely and (a) and (c)'s direct/stun cases stay green forever. So
     ///       the law asserts that <c>Build</c> DOES emit SteamP2P where it must — arm (b)'s first attempt
@@ -94,7 +108,8 @@ namespace RailCheck
     /// Falsify: drop the <c>origin == JoinOrigin.SteamInvite</c> clause from JoinPlan's Unified branch → (a);
     /// remove the Steam attempt outright → (b) and (d); make a legacy kind consult the origin → (c);
     /// give <c>Build</c> a defaulted origin or a compatibility overload → (d); delete the DirectIP line from
-    /// the StunCode arm, or put it after the StunUDP one → (e).
+    /// the StunCode arm, or put it after the StunUDP one → (e); hard-code the lobby's Steam gate to true,
+    /// or swap it for a second predicate of its own → (f).
     /// </summary>
     internal static class L155_EachEntryPointKeepsItsTransport
     {
@@ -105,6 +120,14 @@ namespace RailCheck
 
         internal static IEnumerable<string> Check()
         {
+            // ARM (f) RUNS FIRST, BEFORE ANY OTHER GUARD. Both guards below (Build's signature, and
+            // JoinTarget.Stun's kind) end this method with `yield break`, so from behind them arm (f)
+            // would vanish silently whenever an unrelated premise moved — the report would name Build or
+            // StunCode and say nothing at all about the Steam affordance, which is the failure mode the
+            // whole "an unguarded arm passes while checking nothing" rule exists to stop. It shares no
+            // premise with them, so it has no business sharing their exit.
+            foreach (var v in SteamAffordanceGated()) yield return v;
+
             var builds = typeof(JoinPlan).GetMethods(BindingFlags.Public | BindingFlags.Static |
                                                      BindingFlags.DeclaredOnly)
                                          .Where(m => m.Name == "Build").ToList();
@@ -200,6 +223,125 @@ namespace RailCheck
 
             // ── arm (d), the POSITIVE CONTROL.
             foreach (var v in PositiveControl(unified)) yield return v;
+        }
+
+        /// <summary>
+        /// ARM (f) — THE INVITE BUTTON IS GATED ON THE SAME SIGNAL AS THE INVITE'S TRANSPORT.
+        ///
+        /// Entry point #1 in this law's list is "the lobby's INVITE VIA STEAM button → Steam P2P", and
+        /// every other arm checks the second half of that pair (does the PLAN name Steam) while nothing
+        /// checked the first (may the player press it at all). The failure that leaves is silent and
+        /// entirely visual: with Steam not running the button still draws fully live, so the player
+        /// presses the one control the card offers for getting a friend in, and gets a message box
+        /// instead of an overlay — while the join leg for that same technology was correctly refused all
+        /// along, because JoinPlan.Build is handed steamAlive and arm (b) proves it obeys it. ONE notion
+        /// of "Steam is alive" for the button that starts an invite and the leg that finishes one.
+        ///
+        /// IL, NOT BEHAVIOUR, and that is a real limit worth stating: this asserts that the per-frame
+        /// pass REACHES the liveness predicate, not that the boolean is applied the right way round. A
+        /// gate wired backwards would pass here and be obvious in one glance at the lobby. What it does
+        /// stop is the regression that is NOT obvious — the gate quietly becoming a constant (hard-coded
+        /// true, or a second predicate invented beside it), which looks fine in every screenshot taken on
+        /// a machine that has Steam running, i.e. every developer's.
+        ///
+        /// GUARDED: every member must resolve, AND the walk over Refresh must reach RefreshControls, the
+        /// call that closes that method. "Has any callee at all" was too weak to be the guard it claimed
+        /// to be — see the comment on that check.
+        /// </summary>
+        private static IEnumerable<string> SteamAffordanceGated()
+        {
+            const BindingFlags All = BindingFlags.Public | BindingFlags.NonPublic |
+                                     BindingFlags.Instance | BindingFlags.Static;
+
+            var mod = typeof(JoinPlan).Assembly;
+            var panel = mod.GetType("Multiplayer.UI.LobbyPanel");
+            var refresh = panel?.GetMethod("Refresh", All);
+            var probe = mod.GetType("Multiplayer.Transport.SteamProbe");
+            var probeIsAlive = probe?.GetMethod("IsAlive", All);
+            var isSteamAlive = typeof(SteamInvite).GetMethod("IsSteamAlive", All);
+            // A callee the lobby's per-frame pass reaches LATE — the anti-vacuity landmark, see below.
+            var refreshControls = panel?.GetMethod("RefreshControls", All);
+
+            if (panel == null || refresh == null || probe == null || probeIsAlive == null ||
+                isSteamAlive == null || refreshControls == null)
+            {
+                yield return "L155 premise-changed: LobbyPanel.{Refresh,RefreshControls}, " +
+                             "SteamProbe.IsAlive or SteamInvite.IsSteamAlive no longer resolves, so " +
+                             "nothing checks that the lobby's Steam entry point is offered only when " +
+                             "there is a Steam to invite through. Re-point this arm at whatever the " +
+                             "lobby's per-frame pass and the Steam-liveness predicate are called now — " +
+                             "do not delete it.";
+                yield break;
+            }
+
+            // ANTI-VACUITY, AND IT HAS TO BE A LATE LANDMARK RATHER THAN "ANY CALLEE AT ALL". The IL
+            // reader abandons a method on the first opcode it cannot decode (Program.CallSites yields
+            // break, it does not throw), so a walk that died two instructions in still reports plenty of
+            // callees while missing everything after them — the reachability answer would then be a FALSE
+            // RED blaming the gate for a broken scanner. RefreshControls is called at the very END of
+            // Refresh, so seeing it proves the walk reached the bottom of the method.
+            if (!Program.Callees(refresh, mod).Any(c => c.MetadataToken == refreshControls.MetadataToken &&
+                                                        c.Module == refreshControls.Module))
+            {
+                yield return "L155 premise-changed: the IL walk over LobbyPanel.Refresh never reached " +
+                             "RefreshControls, the call that closes that method — so the scan stopped " +
+                             "early (an opcode it cannot decode) and every reachability answer below " +
+                             "would accuse the gate of something the reader simply did not see. Fix the " +
+                             "reader, or pick a new landmark at the end of Refresh.";
+                yield break;
+            }
+
+            // TWO HOPS, because the probe is deliberately a separate type: LobbyPanel cannot call
+            // SteamInvite directly (its Lobby? statics make the type unloadable where Facepunch is
+            // absent, which is why SteamProbe exists at all), so the chain to pin is
+            // Refresh → SteamProbe.IsAlive → SteamInvite.IsSteamAlive. Checking only the first hop would
+            // let SteamProbe.IsAlive become `return true`; only the second would let the lobby stop
+            // asking. The walk is scoped to the owning type at each hop.
+            if (!Reaches(refresh, probeIsAlive, mod, panel))
+                yield return "L155 steam-affordance-ungated: LobbyPanel.Refresh no longer reaches " +
+                             "SteamProbe.IsAlive, so INVITE VIA STEAM is drawn the same whether or " +
+                             "not Steam is running. It is the one control on the session card for getting " +
+                             "a friend in, so a player with Steam down presses a button that looks live " +
+                             "and gets a message box — while the JOIN leg of that same technology is " +
+                             "refused correctly, because Build is handed the same signal (arm (b)). The " +
+                             "gate must stay the SAME predicate, not a hard-coded true and not a second " +
+                             "opinion written beside it: two notions of 'Steam is alive' drift, and the " +
+                             "one that drifts is always the one nobody can see failing.";
+
+            if (!Reaches(probeIsAlive, isSteamAlive, mod, probe))
+                yield return "L155 steam-affordance-ungated: SteamProbe.IsAlive no longer reaches " +
+                             "SteamInvite.IsSteamAlive, so the probe every UI surface trusts has stopped " +
+                             "asking Steam anything. Its whole job is to be the ONE guarded answer to " +
+                             "'is Steam running' — a constant here greys nothing (or greys everything) " +
+                             "while the lobby, the join screen and JoinPlan all keep believing they share " +
+                             "a signal with each other.";
+        }
+
+        /// <summary>Does <paramref name="from"/> reach <paramref name="target"/>, walking only through
+        /// methods declared on <paramref name="within"/> (or its compiler-generated nested closures — a
+        /// per-frame gate can live behind a small private helper, and a click behind a lambda)? Breadth
+        /// first over Program.Callees, the same IL reader L403 uses on this very type.</summary>
+        private static bool Reaches(MethodBase from, MethodBase target, Assembly mod, Type within)
+        {
+            var seen = new HashSet<int>();
+            var queue = new Queue<MethodBase>();
+            queue.Enqueue(from);
+
+            while (queue.Count > 0)
+            {
+                var m = queue.Dequeue();
+                if (!seen.Add(m.MetadataToken)) continue;
+
+                foreach (var callee in Program.Callees(m, mod))
+                {
+                    if (callee.MetadataToken == target.MetadataToken && callee.Module == target.Module)
+                        return true;
+                    var owner = callee.DeclaringType;
+                    if (owner != null && (owner == within || owner.DeclaringType == within))
+                        queue.Enqueue(callee);
+                }
+            }
+            return false;
         }
 
         /// <summary>ARM (d). Every assertion above is of the form "this transport is absent" or "this exact
