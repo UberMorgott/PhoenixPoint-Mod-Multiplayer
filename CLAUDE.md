@@ -1,5 +1,16 @@
 # CLAUDE.md
 
+## Shell
+- Run every command through **PowerShell**, never the Bash tool — PowerShell syntax (`$env:VAR`, backtick escape) and Windows paths.
+- Same for subagents: brief them to use PowerShell.
+
+## Deploy target
+- Deploy only into the Steam game folder: `D:\Steam\steamapps\common\Phoenix Point` (confirmed by appid `839770` in `D:\Steam\steamapps\libraryfolders.vdf`; only Steam library on this machine).
+- `& .\deploy.ps1 -GameDir 'D:\Steam\steamapps\common\Phoenix Point'` — `-GameDir` wins over `$env:PhoenixPointDir` and the script's hardcoded probe list.
+- Never publish to the Steam Workshop, never upload — local file install only, unless explicitly asked.
+- `$extraModRoots` in `deploy.ps1` also mirrors to `D:\PP-Instance2` / `D:\PP-Instance3` (co-op test instances) — game folder is the target that matters.
+- Docs elsewhere say `E:\Dev Games\PP-Instance2`; that path does not exist here — the dev instance is `D:\PP-Instance2`.
+
 ## Verify
 - `deploy.ps1` — builds `Multiplayer.dll` into `Mods/Multiplayer`; needs a Phoenix Point install.
 - `dotnet run -c Debug --project tools/RailCheck` — law harness; needs a Phoenix Point install (reflects over real game assemblies).
