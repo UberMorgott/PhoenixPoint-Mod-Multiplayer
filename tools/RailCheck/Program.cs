@@ -378,6 +378,9 @@ namespace RailCheck
             Add(laws, () => L411_ADeclinedOfferCanBeReoffered.Check());
             Add(laws, () => L412_AResearchCompletionIsSeededBeforeTheBatchThatCarriesIt.Check());
             Add(laws, () => L413_ATabPauseFollowsTheDispatcherNotTheAudience.Check());
+            Add(laws, () => L414_NoWireStringAllocatesOnTheSendersWord.Check());
+            Add(laws, () => L415_ATransferThatFailsAsyncGivesTheTerminalFlagsBack.Check());
+            Add(laws, () => L416_AConnectThatLandsAfterTheTeardownIsDropped.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
 
