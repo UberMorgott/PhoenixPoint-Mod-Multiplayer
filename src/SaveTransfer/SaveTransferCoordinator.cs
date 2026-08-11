@@ -165,6 +165,10 @@ namespace Multiplayer.Network
         private bool _reachedPlaying;
         private bool _revealed;
         private bool _revealAllSent;
+        // The pending undo for the terminal-flag clear both transfer launches do (see ClearTerminalFlags).
+        // Non-null exactly while a launch's outcome is still unknown; invoked on ANY failure arm, nulled once
+        // the transfer is really under way.
+        private Action _undoTransferFlags;
         // Batch 2 (entry-via-save): the host is holding its loading screen for a tactical-ENTRY transfer.
         // Set at LAUNCH (OpenTacticalEntryBarrier), cleared at reveal (PerformDeferredLift). Unlike F2/lobby
         // the host stays in its already-live tactical level (no self-enter), so _begun is NOT reset to false
@@ -562,16 +566,12 @@ namespace Multiplayer.Network
             // LaunchTransfer can still fail (no game / no timing): restore the flags on that path, or a
             // mid-game host is stranded with SessionStarted==false while still IN the live co-op level
             // (curtain patches inert, host-load guards closed).
-            bool wasBegun = _begun, wasLoadComplete = _loadCompleteSent, wasRevealAll = _revealAllSent;
-            _begun = false;
-            _loadCompleteSent = false;
-            _revealAllSent = false;
+            _undoTransferFlags = ClearTerminalFlags();
             bool launched = LaunchTransfer(chosen);
             if (!launched)
             {
-                _begun = wasBegun;
-                _loadCompleteSent = wasLoadComplete;
-                _revealAllSent = wasRevealAll;
+                _undoTransferFlags?.Invoke();
+                _undoTransferFlags = null;
                 return false;
             }
             // rca-4: arm the post-reload full re-seed for THIS reload (the transfer is now in flight); it
@@ -580,6 +580,28 @@ namespace Multiplayer.Network
             // not carry perfectly would otherwise stay stale on clients until then.
             _reseedGate.Arm();
             return true;
+        }
+
+        // Snapshot + clear the three terminal flags, returning the Action that puts them back (the undo-delegate
+        // shape the SaveManager-identity swap already uses in this file). BOTH launch sites used to restore only
+        // when LaunchTransfer returned false SYNCHRONOUSLY — but it returns true the moment the coroutine starts,
+        // and HostSerializeAndSendCrt can still fail asynchronously on an empty blob. That path restored nothing,
+        // so a mid-session host was left with SessionStarted==false while standing in a live co-op level:
+        // HostLoadGuard and ShouldInterceptInSessionHostLoad both AND on it, so the next F2/CONTINUE was either
+        // refused or ran as a VANILLA SOLO load while the clients kept playing, and ArmSelfLoadBarrier never
+        // re-armed. Holding the undo in a field lets every failure arm — sync or async — take it back.
+        private Action ClearTerminalFlags()
+        {
+            bool wasBegun = _begun, wasLoadComplete = _loadCompleteSent, wasRevealAll = _revealAllSent;
+            _begun = false;
+            _loadCompleteSent = false;
+            _revealAllSent = false;
+            return () =>
+            {
+                _begun = wasBegun;
+                _loadCompleteSent = wasLoadComplete;
+                _revealAllSent = wasRevealAll;
+            };
         }
 
         // Shared launch tail for both the lobby start and the mid-session load: warn on the best-effort
@@ -631,10 +653,19 @@ namespace Multiplayer.Network
                 // The boundary was ANNOUNCED before this coroutine started (lobby PLAY press / new-campaign
                 // arm), so every peer — this host included, since CurtainHoldArmed reads the announcement —
                 // is already behind a curtain waiting for bytes that will never exist. Take it back down.
+                // THE ASYNC FAILURE ARM the launch sites could not reach: LaunchTransfer already returned true,
+                // so their synchronous restore is long gone. Undo the terminal-flag clear here or the host stays
+                // stranded with SessionStarted==false inside the live level (see ClearTerminalFlags).
+                _undoTransferFlags?.Invoke();
+                _undoTransferFlags = null;
                 BroadcastLoadBoundaryAbort("the save produced no bytes");
                 Debug.LogError("[Multiplayer] Save serialization produced no bytes; aborting transfer.");
                 yield break;
             }
+
+            // The blob exists: the transfer is really under way, so the launch-time undo must never fire again
+            // (a later legitimate reset of these flags is not this transfer's to take back).
+            _undoTransferFlags = null;
 
             var ext = System.IO.Path.GetExtension(metaData.Path);
             if (string.IsNullOrEmpty(ext)) ext = SerializationComponent.DefaultExtension;
@@ -1350,18 +1381,14 @@ namespace Multiplayer.Network
                     // false (no-op). OpenBarrier itself resets the per-run state per fresh barrier. Same
                     // restore-on-failure too: a failed launch must not strand a mid-session host with
                     // SessionStarted==false inside a live co-op level.
-                    bool wasBegun = _begun, wasLoadComplete = _loadCompleteSent, wasRevealAll = _revealAllSent;
-                    _begun = false;
-                    _loadCompleteSent = false;
-                    _revealAllSent = false;
+                    _undoTransferFlags = ClearTerminalFlags();
                     // hostHoldsThisWorld: THIS is the boundary where the blob is an autosave of the world the
                     // host is standing in (taken by the CallSafe above, seconds ago) — so the host must not
                     // load it back. Law L174; flip this one argument to false to restore the re-entry.
                     if (!LaunchTransfer(meta, hostHoldsThisWorld: true))
                     {
-                        _begun = wasBegun;
-                        _loadCompleteSent = wasLoadComplete;
-                        _revealAllSent = wasRevealAll;
+                        _undoTransferFlags?.Invoke();
+                        _undoTransferFlags = null;
                         failure = "the transfer launch was refused (see the prior log line)";
                     }
                     else if (reseedAfterReveal) _reseedGate.Arm();
