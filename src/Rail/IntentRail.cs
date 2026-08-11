@@ -207,7 +207,16 @@ namespace Multiplayer.Network.Sync
             {
                 // Native validation throws double as the reject path (families with a scoped subtree to
                 // re-emit catch closer in, where they still know the entity id).
-                Reject(surfaceId, senderPeerId, "(throw) " + ex.Message);
+                //
+                // UNWRAP FOR THE WIRE. Host op handlers reach the game through MethodInfo.Invoke, which
+                // buries every native throw under TargetInvocationException — the peer used to be told
+                // "Exception has been thrown by the target of an invocation." and the actual refusal
+                // ("Нет подходящей цели", "not enough resources") never crossed. The reject text is the
+                // ONLY word the acting player gets, so it carries the inner message; the full outer
+                // exception still goes to the host log, where the stack trace is what has value.
+                var cause = (ex as System.Reflection.TargetInvocationException)?.InnerException ?? ex;
+                Debug.LogError("[MP][intent] HOST " + Tag(surfaceId) + " handler threw: " + ex);
+                Reject(surfaceId, senderPeerId, "(throw) " + cause.Message);
             }
             return true;
         }
