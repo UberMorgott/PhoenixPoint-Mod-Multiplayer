@@ -98,6 +98,17 @@ namespace Multiplayer.Network.Sync
     [HarmonyPatch(typeof(UIModuleCharacterProgression), "CommitStatChanges")]
     internal static class StatCommitApplyGate
     {
+        /// <summary>FIRST, ahead of <c>PersonnelSync.CommitStatsClientBlockPatch</c> on this same method.
+        /// Both prefixes return bool, so whichever returns false first skips the other — and only the other
+        /// one has a SIDE EFFECT on its true path (<c>UiNativeRepaint.AlignStageBaseline</c>, which drops the
+        /// visit's undo floor and reseeds <c>_startingFactionPoints</c>). Undeclared, the block patch could
+        /// run first during session teardown, align the baseline, and only THEN be blocked here by
+        /// <c>SessionEnd.InProgress</c> — a commit that never happened, paid for with the floor native's
+        /// refund split reads (<c>ChangeCharacterStat</c>:915-931), so a later decrement pays the soldier
+        /// instead of the shared purse, on every peer, with nothing red. That window is real:
+        /// <c>SessionEnd.Begin</c> → <c>QuiesceOpenUi</c> drives <c>UIStateEditSoldier.ExitState</c>:232,
+        /// which is a caller of this very method. This gate is PURE, so deciding first can never be wrong.</summary>
+        [HarmonyPriority(Priority.First)]
         private static bool Prefix()
         {
             if (SessionEnd.InProgress) return false;         // see EquipStorageGate for why this is first
@@ -123,6 +134,13 @@ namespace Multiplayer.Network.Sync
     [HarmonyPatch(typeof(GeoCharacter), nameof(GeoCharacter.SetItems))]
     internal static class SetItemsApplyGate
     {
+        /// <summary>FIRST, ahead of <c>EquipSync.SetItemsCapturePatch</c>. Both return bool, so the first
+        /// false skips the other, and the outcome is the same either way — inside an apply the capture
+        /// returns true and defers here anyway. What differs is SIDE EFFECTS: run second, this gate lets the
+        /// capture's <c>SelfCheckGestureCommit</c> and <c>BlockStaleHostRevert</c> fire underneath a mirror
+        /// apply, where by construction there is no gesture to self-check and no stale screen to guard. This
+        /// gate is pure and its verdict does not depend on anything the capture does, so it answers first.</summary>
+        [HarmonyPriority(Priority.First)]
         private static bool Prefix()
         {
             if (!SyncApplyScope.Active) return true;          // native: gestures, host replays, solo

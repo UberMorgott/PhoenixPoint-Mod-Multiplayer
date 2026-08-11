@@ -129,6 +129,10 @@ namespace Multiplayer.Network.Sync
         [HarmonyPatch(typeof(GeoCharacter), nameof(GeoCharacter.SetItems))]
         internal static class SetItemsCapturePatch
         {
+            /// <summary>SECOND, behind <c>SetItemsApplyGate</c> (<c>Priority.First</c>) — see the reason
+            /// there. Every side effect on this seam lives here, so it runs only once the pure gate has
+            /// agreed this flush is a real gesture and not a mirror apply.</summary>
+            [HarmonyPriority(Priority.Normal)]
             private static bool Prefix(GeoCharacter __instance, IEnumerable<GeoItem> armour,
                                        IEnumerable<GeoItem> equipment, IEnumerable<GeoItem> inventory, bool freeReload)
             {

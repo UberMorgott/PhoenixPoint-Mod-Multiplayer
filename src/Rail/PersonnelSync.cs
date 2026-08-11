@@ -240,6 +240,10 @@ namespace Multiplayer.Network.Sync
         [HarmonyPatch(typeof(UIModuleCharacterProgression), nameof(UIModuleCharacterProgression.CommitStatChanges))]
         internal static class CommitStatsClientBlockPatch
         {
+            /// <summary>SECOND, behind <c>StatCommitApplyGate</c> (<c>Priority.First</c>) — see the reason
+            /// there. This is the half with the side effect, so it acts only after the pure gate has agreed
+            /// the commit is legitimate.</summary>
+            [HarmonyPriority(Priority.Normal)]
             private static bool Prefix(UIModuleCharacterProgression __instance)
             {
                 if (!IntentRail.ShouldRunNative()) return false; // client: blocked
