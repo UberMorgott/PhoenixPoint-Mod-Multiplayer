@@ -655,10 +655,10 @@ namespace Multiplayer.Network.Sync
             string siteRef = null;
             try
             {
-                siteRef = r.ReadString();
+                siteRef = WireString.ReadKey(r);
                 int n = r.ReadUInt16();
                 var refs = new List<string>(n);
-                for (int i = 0; i < n; i++) refs.Add(r.ReadString());
+                for (int i = 0; i < n; i++) refs.Add(WireString.ReadKey(r));
 
                 var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, siteRef, "no geoscape"); return; }
@@ -733,8 +733,8 @@ namespace Multiplayer.Network.Sync
             string siteRef = null;
             try
             {
-                siteRef = r.ReadString();
-                string defGuid = r.ReadString();
+                siteRef = WireString.ReadKey(r);
+                string defGuid = WireString.ReadKey(r);
                 int zoneIdx = r.ReadInt16();
 
                 var geo = GenericApplier.GeoLevel();

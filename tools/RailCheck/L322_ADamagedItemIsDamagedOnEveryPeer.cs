@@ -57,7 +57,7 @@ namespace RailCheck
     /// return <c>hasParentSlot</c> → (a) own-damage-unshipped; stop calling it from the postfix →
     /// (b) routing-decision-unreached; drop <c>ItemGuidOf</c> from <c>OnDamageApplied</c> →
     /// (c) item-rides-as-its-slot; drop the <c>ResolveItem</c> branch from <c>ApplyDamage</c> →
-    /// (c) item-record-lands-on-the-slot; drop the third <c>ReadString</c> → (c) address-half-read;
+    /// (c) item-record-lands-on-the-slot; drop the third string read → (c) address-half-read;
     /// drop the item block from the resnapshot → (d).
     /// </summary>
     internal static class L322_ADamagedItemIsDamagedOnEveryPeer
@@ -151,7 +151,10 @@ namespace RailCheck
                              "law can say nothing about the address that precedes it.";
             else
             {
-                if (seq.Take(codec).Count(c => c.Name == "ReadString") < 2)
+                // "A string read" is no longer only BinaryReader.ReadString: L414's bound moved every wire
+                // decode onto MessageSerializer.ReadBoundedString, reached here through WireString's named
+                // ceilings. Count both, or this arm reads a bounded reader as a missing field.
+                if (seq.Take(codec).Count(IsStringRead) < 2)
                     yield return "L322 address-half-read: ApplyDamage reads fewer than two strings before the " +
                                  "DamageResult. The record carries (key, slot name, item def guid); reading one " +
                                  "string fewer than the host wrote does not lose the item — it MISALIGNS every " +
@@ -221,6 +224,12 @@ namespace RailCheck
                              ".ApplyDamage, routed or not) passed the corner table, so arm (a) cannot tell the " +
                              "shipped rule from one that relays each limb hit twice.";
         }
+
+        /// <summary>One string consumed off the wire, however it is spelled — the bare reader, the bounded
+        /// helper L414 requires, or one of <c>WireString</c>'s named ceilings over it.</summary>
+        private static bool IsStringRead(MethodBase c)
+            => c != null && (c.Name == "ReadString" || c.Name == "ReadBoundedString" ||
+                             c.DeclaringType != null && c.DeclaringType.Name == "WireString");
 
         /// <summary>The routing table of <c>TacticalItem.ApplyDamage</c>:301-313, as the capture must read it.
         /// Only the fall-through — no parent slot, or an <c>AttachedItem</c> one — moves THIS item's hit

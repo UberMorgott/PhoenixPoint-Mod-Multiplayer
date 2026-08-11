@@ -182,12 +182,12 @@ namespace Multiplayer.Tactical
                                                "this build cannot decode (known 0x" + KnownBits.ToString("X4") + ") — " +
                                                "the payload after it is misaligned and must not be guessed at");
             var d = new DamageResult();
-            if ((mask & BitDamageTypeDef) != 0) d.DamageTypeDef = Def<DamageTypeBaseEffectDef>(r.ReadString(), "DamageTypeDef", notes);
+            if ((mask & BitDamageTypeDef) != 0) d.DamageTypeDef = Def<DamageTypeBaseEffectDef>(WireString.ReadKey(r), "DamageTypeDef", notes);
             if ((mask & BitRelatedDamageTypeDefs) != 0)
             {
                 int n = r.ReadInt32();
                 d.RelatedDamageTypeDefs = new List<DamageTypeBaseEffectDef>(n);
-                for (int i = 0; i < n; i++) d.RelatedDamageTypeDefs.Add(Def<DamageTypeBaseEffectDef>(r.ReadString(), "RelatedDamageTypeDef", notes));
+                for (int i = 0; i < n; i++) d.RelatedDamageTypeDefs.Add(Def<DamageTypeBaseEffectDef>(WireString.ReadKey(r), "RelatedDamageTypeDef", notes));
             }
             if ((mask & BitApplyStatuses) != 0)
             {
@@ -195,10 +195,10 @@ namespace Multiplayer.Tactical
                 d.ApplyStatuses = new List<StatusApplication>(n);
                 for (int i = 0; i < n; i++)
                 {
-                    var def = Def<StatusDef>(r.ReadString(), "StatusDef", notes);
+                    var def = Def<StatusDef>(WireString.ReadKey(r), "StatusDef", notes);
                     float value = r.ReadSingle();
                     int srcKey = r.ReadInt32();
-                    string targetSlot = r.ReadString();
+                    string targetSlot = WireString.ReadKey(r);
                     int cooldownTurns = r.ReadInt32();
                     string ignore;
                     d.ApplyStatuses.Add(new StatusApplication
@@ -218,7 +218,7 @@ namespace Multiplayer.Tactical
                 for (int i = 0; i < n; i++)
                 {
                     var type = (StatModificationType)r.ReadInt32();
-                    string name = r.ReadString();
+                    string name = WireString.ReadKey(r);
                     float value = r.ReadSingle();
                     float applied = r.ReadSingle();
                     d.StatModifications.Add(new StatModification(type, name, value, null, applied));
@@ -228,7 +228,7 @@ namespace Multiplayer.Tactical
             {
                 int n = r.ReadInt32();
                 d.ActorEffects = new List<EffectDef>(n);
-                for (int i = 0; i < n; i++) d.ActorEffects.Add(Def<EffectDef>(r.ReadString(), "ActorEffect", notes));
+                for (int i = 0; i < n; i++) d.ActorEffects.Add(Def<EffectDef>(WireString.ReadKey(r), "ActorEffect", notes));
             }
             if ((mask & BitHealthDamage) != 0) d.HealthDamage = r.ReadSingle();
             if ((mask & BitArmorDamage) != 0) d.ArmorDamage = r.ReadSingle();
@@ -865,8 +865,8 @@ namespace Multiplayer.Tactical
         {
             var tlc = Tlc();
             int key = r.ReadInt32();
-            string slot = r.ReadString();
-            string itemGuid = r.ReadString();
+            string slot = WireString.ReadKey(r);
+            string itemGuid = WireString.ReadKey(r);
             var notes = new List<string>();
             var result = DamageResultCodec.Read(r, tlc, notes);
             float recvHp = r.ReadSingle(), recvArmor = r.ReadSingle();
@@ -982,7 +982,7 @@ namespace Multiplayer.Tactical
                     if (actor == null) lost++;
                     for (int s = 0; s < slots; s++)
                     {
-                        string name = r.ReadString();
+                        string name = WireString.ReadKey(r);
                         float sh = r.ReadSingle(), sa = r.ReadSingle();
                         if (actor == null) continue;
                         var recv = TacticalActorKey.ResolveReceiver(actor, name, out why);
@@ -995,7 +995,7 @@ namespace Multiplayer.Tactical
                     int itemCount = r.ReadInt32();
                     for (int k = 0; k < itemCount; k++)
                     {
-                        string iSlot = r.ReadString(), iGuid = r.ReadString();
+                        string iSlot = WireString.ReadKey(r), iGuid = WireString.ReadKey(r);
                         float ih = r.ReadSingle(), ia = r.ReadSingle();
                         if (actor == null) continue;
                         var item = ResolveItem(actor, iSlot, iGuid, out why);

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -1152,7 +1152,7 @@ namespace Multiplayer.Tactical
         private static void HandleSelectEquipment(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
             int key = r.ReadInt32();
-            string guid = r.ReadString();
+            string guid = WireString.ReadKey(r);
             string why;
             var actor = TacticalActorKey.ResolveActor(Tlc(), key, out why);
             var faction = actor == null ? null : actor.TacticalFaction;
@@ -1434,7 +1434,7 @@ namespace Multiplayer.Tactical
         {
             int n = r.ReadInt32();
             var traits = new List<string>(n < 0 ? 0 : n);
-            for (int i = 0; i < n; i++) traits.Add(r.ReadString());
+            for (int i = 0; i < n; i++) traits.Add(WireString.ReadKey(r));
             return traits;
         }
 
@@ -1452,7 +1452,7 @@ namespace Multiplayer.Tactical
         {
             int n = r.ReadInt32();
             var d = new Dictionary<string, int>(n < 0 ? 0 : n, StringComparer.Ordinal);
-            for (int i = 0; i < n; i++) { string g = r.ReadString(); d[g] = r.ReadInt32(); }
+            for (int i = 0; i < n; i++) { string g = WireString.ReadKey(r); d[g] = r.ReadInt32(); }
             return d;
         }
 
@@ -1992,7 +1992,7 @@ namespace Multiplayer.Tactical
         {
             long bodyStart = r.BaseStream.Position;
             int key = r.ReadInt32();
-            string guid = r.ReadString();
+            string guid = WireString.ReadKey(r);
             var tlc = Tlc();
             // A throw here funnels into IntentRail's reject path. A key that does not resolve is NOT a throw —
             // it is a named refusal, so the losing peer is told which actor the host could not find.
@@ -2311,7 +2311,7 @@ namespace Multiplayer.Tactical
                     {
                         NoteCatchUpBurst();
                         int actorKey = r.ReadInt32();
-                        string abilityGuid = r.ReadString();
+                        string abilityGuid = WireString.ReadKey(r);
                         var unresolved = new List<string>();
                         var target = ReadCommandTarget(r, unresolved);
                         bool fumbled = r.ReadBoolean();
@@ -2321,9 +2321,9 @@ namespace Multiplayer.Tactical
                                                         new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
                                                         r.ReadSingle(), r.ReadSingle(), r.ReadBoolean(),
                                                         TacticalStatusSet.Read(r), ReadTraits(r),
-                                                        r.ReadBoolean() ? r.ReadString() : null,
+                                                        r.ReadBoolean() ? WireString.ReadKey(r) : null,
                                                         ReadUses(r), TftvChampIdentity.Read(r), ReadVision(r));
-                    else if (op == OpSelectEquipment) ApplySelectEquipment(r.ReadInt32(), r.ReadString());
+                    else if (op == OpSelectEquipment) ApplySelectEquipment(r.ReadInt32(), WireString.ReadKey(r));
                     else
                     {
                         Debug.LogError("[Multiplayer][tac] unknown host→all command op " + op + " (seq=" + seq +
@@ -3323,7 +3323,7 @@ namespace Multiplayer.Tactical
             int n = r.ReadInt32();
             var rows = new List<VisionRow>(n < 0 ? 0 : n);
             for (int i = 0; i < n; i++)
-                rows.Add(new VisionRow { FactionGuid = r.ReadString(),
+                rows.Add(new VisionRow { FactionGuid = WireString.ReadKey(r),
                                          Located = r.ReadByte(), Revealed = r.ReadByte() });
             return rows;
         }

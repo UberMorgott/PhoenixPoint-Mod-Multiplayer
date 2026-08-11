@@ -230,15 +230,15 @@ namespace Multiplayer.Network.Sync
                     Kind = (StateKind)r.ReadByte(),
                     ModalType = r.ReadInt32(),
                     Shape = (DataShape)r.ReadByte(),
-                    Ref = r.ReadString(),
+                    Ref = WireString.ReadKey(r),
                 };
                 var keys = new string[r.ReadUInt16()];
-                for (int i = 0; i < keys.Length; i++) keys[i] = r.ReadString();
+                for (int i = 0; i < keys.Length; i++) keys[i] = WireString.ReadKey(r);
                 p.Keys = keys;
                 p.Num = r.ReadInt32();
                 p.Priority = r.ReadInt32();
-                p.DurableTrigger = r.ReadString();
-                p.DurableSubject = r.ReadString();
+                p.DurableTrigger = WireString.ReadKey(r);
+                p.DurableSubject = WireString.ReadKey(r);
                 return p;
             }
         }

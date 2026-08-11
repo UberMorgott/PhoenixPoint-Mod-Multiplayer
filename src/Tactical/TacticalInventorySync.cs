@@ -20,6 +20,7 @@ using PhoenixPoint.Tactical.Entities.Equipments;
 using PhoenixPoint.Tactical.Levels;
 using PhoenixPoint.Tactical.View.ViewStates;
 using UnityEngine;
+using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Tactical
 {
@@ -320,11 +321,11 @@ namespace Multiplayer.Tactical
                 var s = new Slot { ActorKey = r.ReadInt32(), Kind = r.ReadByte() };
                 if (s.Kind == KindGround)
                 {
-                    s.SetGuid = r.ReadString();
+                    s.SetGuid = WireString.ReadKey(r);
                     s.Pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 }
                 int items = r.ReadInt32();
-                for (int j = 0; j < items; j++) { s.ItemDefs.Add(r.ReadString()); s.ItemCharges.Add(r.ReadInt32()); }
+                for (int j = 0; j < items; j++) { s.ItemDefs.Add(WireString.ReadKey(r)); s.ItemCharges.Add(r.ReadInt32()); }
                 slots.Add(s);
             }
             return slots;

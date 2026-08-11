@@ -210,7 +210,7 @@ namespace Multiplayer.Tactical
                     if (op == OpFallback)
                     {
                         if (!engine.IsHost) return true;
-                        string reason = r.ReadString();
+                        string reason = WireString.ReadText(r);
                         Debug.LogWarning("[Multiplayer][tac-native] peer " + senderPeerId + " cannot build this " +
                                          "battle locally (" + reason + ") — arming the save-transfer fallback.");
                         FallbackArmed = true;
@@ -227,7 +227,7 @@ namespace Multiplayer.Tactical
                     int siteId = r.ReadInt32();
                     int seed = r.ReadInt32();
                     bool inMist = r.ReadByte() != 0;
-                    string plotGuid = r.ReadString();
+                    string plotGuid = WireString.ReadKey(r);
                     int len = r.ReadInt32();
                     if (len <= 0 || len > ms.Length) { RequestFallback("params length " + len + " out of bounds"); return true; }
                     byte[] paramBytes = r.ReadBytes(len);

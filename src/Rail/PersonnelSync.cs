@@ -847,7 +847,7 @@ namespace Multiplayer.Network.Sync
                 SpecializationDef promoteSpec = null;
                 if (op == OpTftvRedeploy || op == OpTftvPromote)
                 {
-                    string siteRef = r.ReadString();
+                    string siteRef = WireString.ReadKey(r);
                     var target = IdentityResolver.Resolve(geo, siteRef, null) is GeoSite site
                         ? geo.PhoenixFaction.Bases.FirstOrDefault(b => ReferenceEquals(b.Site, site))
                         : null;
@@ -857,7 +857,7 @@ namespace Multiplayer.Network.Sync
                     {
                         // The spec guid is wire input: only a real SpecializationDef may reach TFTV's
                         // method (it stamps the new operative's main class).
-                        if (!(ResolveDef(r.ReadString()) is SpecializationDef spec))
+                        if (!(ResolveDef(WireString.ReadKey(r)) is SpecializationDef spec))
                         { Reject(senderPeerId, charId, "unknown spec (promote)"); return; }
                         promoteSpec = spec;
                         // TFTV's own method guards ONLY the dismissed marker (TrainingFacilityRework.cs:872)
@@ -932,11 +932,11 @@ namespace Multiplayer.Network.Sync
                         break;
                     case OpBuyAbility:
                         ok = ApplyBuyAbility(senderPeerId, character, (AbilityTrackSource)r.ReadInt32(),
-                                             r.ReadInt32(), r.ReadInt32(), r.ReadString());
+                                             r.ReadInt32(), r.ReadInt32(), WireString.ReadKey(r));
                         break;
                     case OpReassign:
                         {
-                            string destinationRef = r.ReadString();
+                            string destinationRef = WireString.ReadKey(r);
                             bool hasPreparation = DurablePreparationEditContext.TryReadTrailing(r, out preparation);
                             if (!hasPreparation && DeploymentWindowClose.RequiresPreparationContextForSender(engine, senderPeerId))
                             { Reject(senderPeerId, charId, "open deployment preparation requires revision context"); return; }
@@ -981,7 +981,7 @@ namespace Multiplayer.Network.Sync
                         ok = ApplyCustomize(senderPeerId, geo, character, r);
                         break;
                     default: // OpSecondSpec (the op set is table-gated upstream)
-                        ok = ApplySecondSpec(senderPeerId, character, r.ReadString());
+                        ok = ApplySecondSpec(senderPeerId, character, WireString.ReadKey(r));
                         break;
                 }
                 if (ok)
@@ -1016,8 +1016,8 @@ namespace Multiplayer.Network.Sync
             string siteRef = null;
             try
             {
-                siteRef = r.ReadString();
-                string vehicleRef = r.ReadString();
+                siteRef = WireString.ReadKey(r);
+                string vehicleRef = WireString.ReadKey(r);
                 var geo = GenericApplier.GeoLevel();
                 if (geo == null) { RejectHire(senderPeerId, null, "no geoscape"); return; }
                 var phoenix = geo.PhoenixFaction;
@@ -1095,10 +1095,10 @@ namespace Multiplayer.Network.Sync
             string name = null;
             try
             {
-                name = r.ReadString();
-                string templateGuid = r.ReadString();
+                name = WireString.ReadText(r);
+                string templateGuid = WireString.ReadKey(r);
                 int level = r.ReadInt32();
-                string siteRef = r.ReadString();
+                string siteRef = WireString.ReadKey(r);
                 var geo = GenericApplier.GeoLevel();
                 if (geo == null) { RejectNaked(senderPeerId, name, "no geoscape"); return; }
                 var phoenix = geo.PhoenixFaction;

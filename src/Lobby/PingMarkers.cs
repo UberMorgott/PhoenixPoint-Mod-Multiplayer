@@ -442,7 +442,7 @@ namespace Multiplayer.UI
                 kind = r.ReadByte();
                 if (kind == KindObject)
                 {
-                    if (scene == SceneGeo) entityRef = r.ReadString();
+                    if (scene == SceneGeo) entityRef = WireString.ReadKey(r);
                     else actorKey = r.ReadInt32();
                 }
                 else pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());

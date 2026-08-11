@@ -13,6 +13,7 @@ using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.Entities.Statuses;
 using PhoenixPoint.Tactical.Levels;
 using UnityEngine;
+using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Tactical
 {
@@ -203,10 +204,10 @@ namespace Multiplayer.Tactical
             var keys = new List<string>(n < 0 ? 0 : n);
             for (int i = 0; i < n; i++)
             {
-                string name = r.ReadString();
+                string name = WireString.ReadKey(r);
                 int refKey = r.ReadInt32();
-                string source = r.ReadString();
-                string target = r.ReadString();
+                string source = WireString.ReadKey(r);
+                string target = WireString.ReadKey(r);
                 keys.Add(Key(name, refKey, source, target));
             }
             return keys;

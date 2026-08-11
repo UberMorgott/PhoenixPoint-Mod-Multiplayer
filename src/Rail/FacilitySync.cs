@@ -212,7 +212,7 @@ namespace Multiplayer.Network.Sync
 
             if (op == OpBuild)
             {
-                string defGuid = r.ReadString();
+                string defGuid = WireString.ReadKey(r);
                 var pos = new Vector2Int(r.ReadInt32(), r.ReadInt32());
                 var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as PhoenixFacilityDef;
                 if (def == null)
@@ -235,7 +235,7 @@ namespace Multiplayer.Network.Sync
                 // 0xAC value rail as GeoSite.SiteName (RailMeta alias, 21edc3b). No cost, no validation
                 // beyond non-empty: the game's own BaseNameValidator (UIModuleBaseLayout.cs:686-689)
                 // accepts every character, so the only refusable input is nothing at all.
-                string newName = r.ReadString();
+                string newName = WireString.ReadText(r);
                 if (string.IsNullOrWhiteSpace(newName))
                 { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "empty base name", "S#" + siteId); return; }
                 px.RenameBase(newName);

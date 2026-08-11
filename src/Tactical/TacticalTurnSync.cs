@@ -365,7 +365,7 @@ namespace Multiplayer.Tactical
                                          "left, and the host will wait on a reveal barrier it can never open.");
                         return true; // stale re-delivery (law 7)
                     }
-                    if (op == OpTurn) ApplyTurn(r.ReadString(), r.ReadInt32());
+                    if (op == OpTurn) ApplyTurn(WireString.ReadKey(r), r.ReadInt32());
                     else if (op == OpEnd) ApplyEnd((TacFactionState)r.ReadByte());
                     else if (op == OpLeave) ApplyLeave();
                     else if (op == OpRestart) ApplyRestart();
@@ -593,7 +593,7 @@ namespace Multiplayer.Tactical
 
         private static void HandleEndTurn(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
-            string wanted = r.ReadString();
+            string wanted = WireString.ReadKey(r);
             var cur = Tlc()?.CurrentFaction;
             string why = Validate(wanted, Guid(cur), cur != null && cur.IsControlledByPlayer,
                                   cur != null && cur.IsPlayingTurn);

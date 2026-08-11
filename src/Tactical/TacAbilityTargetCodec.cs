@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -243,10 +243,10 @@ namespace Multiplayer.Tactical
         {
             int key = r.ReadInt32();
             byte kind = r.ReadByte();
-            string guid = r.ReadString();
+            string guid = WireString.ReadKey(r);
             int charge = r.ReadInt32();
             int ordinal = r.ReadInt32();
-            string slot = r.ReadString();
+            string slot = WireString.ReadKey(r);
             string why;
             var owner = TacticalActorKey.Resolve(tlc, key, out why);
             if (owner == null)
@@ -386,7 +386,7 @@ namespace Multiplayer.Tactical
             if ((mask & BitDamageReceiver) != 0)
             {
                 int key = r.ReadInt32();
-                string slot = r.ReadString();
+                string slot = WireString.ReadKey(r);
                 var owner = ResolveActor(key, "DamageReceiver", tlc, unresolved);
                 string why;
                 var recv = TacticalActorKey.ResolveReceiver(owner, slot, out why);

@@ -10,6 +10,7 @@ using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.Interception.Equipments;
 using PhoenixPoint.Geoscape.Levels;
 using UnityEngine;
+using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Network.Sync
 {
@@ -450,7 +451,7 @@ namespace Multiplayer.Network.Sync
         {
             int n = r.ReadUInt16();
             var list = new List<string>(n);
-            for (int i = 0; i < n; i++) list.Add(r.ReadString());
+            for (int i = 0; i < n; i++) list.Add(WireString.ReadKey(r));
             return list;
         }
 
@@ -461,8 +462,8 @@ namespace Multiplayer.Network.Sync
             string vehicleRef = null;
             try
             {
-                vehicleRef = r.ReadString();
-                string siteRef = r.ReadString();
+                vehicleRef = WireString.ReadKey(r);
+                string siteRef = WireString.ReadKey(r);
                 var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, vehicleRef, "no geoscape"); return; }
 
@@ -513,7 +514,7 @@ namespace Multiplayer.Network.Sync
             string vehicleRef = null;
             try
             {
-                vehicleRef = r.ReadString();
+                vehicleRef = WireString.ReadKey(r);
                 var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, vehicleRef, "no geoscape"); return; }
 
@@ -543,7 +544,7 @@ namespace Multiplayer.Network.Sync
             string vehicleRef = null;
             try
             {
-                vehicleRef = r.ReadString();
+                vehicleRef = WireString.ReadKey(r);
                 var wantWeapons = ReadSlots(r);
                 var wantModules = ReadSlots(r);
                 var geo = GenericApplier.GeoLevel();

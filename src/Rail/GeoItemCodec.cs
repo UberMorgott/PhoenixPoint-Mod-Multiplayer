@@ -8,6 +8,7 @@ using PhoenixPoint.Common.Entities;
 using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Geoscape.Entities;
 using UnityEngine;
+using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Network.Sync
 {
@@ -133,7 +134,7 @@ namespace Multiplayer.Network.Sync
 
         internal static ItemRec ReadRec(BinaryReader r) => new ItemRec
         {
-            Guid = r.ReadString(),
+            Guid = WireString.ReadKey(r),
             Count = r.ReadInt32(),
             Charges = r.ReadInt32(),
             Malfunction = r.ReadInt32(),

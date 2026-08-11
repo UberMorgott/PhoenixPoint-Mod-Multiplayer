@@ -417,7 +417,7 @@ namespace Multiplayer.Network.Sync
             }
             int k = r.ReadUInt16();
             for (int i = 0; i < k; i++)
-                wire.Rows.Add(new Row { Kind = r.ReadByte(), A = r.ReadString(), B = r.ReadString(), Value = r.ReadInt32() });
+                wire.Rows.Add(new Row { Kind = r.ReadByte(), A = WireString.ReadKey(r), B = WireString.ReadKey(r), Value = r.ReadInt32() });
             return wire;
         }
 

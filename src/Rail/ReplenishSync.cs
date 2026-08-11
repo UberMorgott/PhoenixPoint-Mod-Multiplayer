@@ -614,7 +614,7 @@ namespace Multiplayer.Network.Sync
         {
             character = null; def = null;
             int charId = r.ReadInt32();
-            string guid = r.ReadString();
+            string guid = WireString.ReadKey(r);
 
             var geo = GenericApplier.GeoLevel();
             if (geo == null)

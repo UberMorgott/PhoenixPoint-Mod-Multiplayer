@@ -12,6 +12,7 @@ using Base.Serialization;
 using Base.Serialization.General;
 using PhoenixPoint.Geoscape.Levels;
 using UnityEngine;
+using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Network.Sync
 {
@@ -1187,7 +1188,9 @@ namespace Multiplayer.Network.Sync
                 case LeafKind.UInt64: return Coerce(r.ReadUInt64(), declared);
                 case LeafKind.Single: return Coerce(r.ReadSingle(), declared);
                 case LeafKind.Double: return Coerce(r.ReadDouble(), declared);
-                case LeafKind.String: return r.ReadString();
+                // Prose, not Key: this arm carries ANY string member of ANY railed type, which includes a
+                // def description, not just an id. A Key ceiling here would refuse legitimate state.
+                case LeafKind.String: return WireString.ReadProse(r);
                 case LeafKind.Enum: return Enum.ToObject(declared, r.ReadInt64());
                 case LeafKind.TimeSpanTicks:
                 {
@@ -1199,12 +1202,12 @@ namespace Multiplayer.Network.Sync
                 case LeafKind.DateTimeTicks: return new DateTime(r.ReadInt64());
                 // The 2-arg public ctor IS the rebuild (decompile Base.UI/LocalizedTextBind.cs:24-28) — a
                 // FRESH instance, never a write into the one the host (or a def) holds.
-                case LeafKind.TextBind: return new Base.UI.LocalizedTextBind(r.ReadString(), r.ReadBoolean());
+                case LeafKind.TextBind: return new Base.UI.LocalizedTextBind(WireString.ReadKey(r), r.ReadBoolean());
                 case LeafKind.Vector3: return new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 case LeafKind.Quaternion: return new Quaternion(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 case LeafKind.DefRef:
                 {
-                    var guid = r.ReadString();
+                    var guid = WireString.ReadKey(r);
                     var def = GameUtl.GameComponent<DefRepository>()?.GetDef(guid);
                     // WarnOnce, not raw: a systematic miss (mod parity gap) repeats per entry per tick.
                     // Unresolved ≠ null: the host wrote a REAL ref (a genuine null is LeafKind.Null), so
@@ -1215,7 +1218,7 @@ namespace Multiplayer.Network.Sync
                 }
                 case LeafKind.EntityRef:
                 {
-                    var key = r.ReadString();
+                    var key = WireString.ReadKey(r);
                     var e = IdentityResolver.Resolve(geo, key, null);
                     if (e == null) { WarnOnce("DecodeLeaf: unresolved entity ref " + key); return Unresolved; }
                     return e;
@@ -1576,7 +1579,7 @@ namespace Multiplayer.Network.Sync
                 using (var ms = new MemoryStream(payload))
                 using (var r = new BinaryReader(ms)) // default = UTF8, matching EncodeActorCreate's writer
                 {
-                    var typeName = r.ReadString();
+                    var typeName = WireString.ReadKey(r);
                     int n = ms.Position < ms.Length ? r.ReadByte() : -1;
                     if (n != 1)
                     {
@@ -1611,7 +1614,7 @@ namespace Multiplayer.Network.Sync
             {
                 using (var ms = new MemoryStream(payload))
                 using (var r = new BinaryReader(ms)) // default = UTF8, matching EncodeDescendCreate's writer
-                    return r.ReadString();
+                    return WireString.ReadKey(r);
             }
             catch { return null; }
         }
@@ -1647,7 +1650,7 @@ namespace Multiplayer.Network.Sync
                 using (var ms = new MemoryStream(payload))
                 using (var r = new BinaryReader(ms)) // default = UTF8, matching EncodeDescendCreate's writer
                 {
-                    r.ReadString(); // type name — already resolved by the caller
+                    WireString.ReadKey(r); // type name — already resolved by the caller
                     int n = ms.Position < ms.Length ? r.ReadByte() : -1;
                     if (n != ci.Params.Length)
                     {
@@ -1776,7 +1779,7 @@ namespace Multiplayer.Network.Sync
             {
                 if (r.ReadByte() != OrderVectorMarker) throw new IOException("bad order-vector marker");
                 var keys = new string[r.ReadUInt16()];
-                for (int i = 0; i < keys.Length; i++) keys[i] = r.ReadString();
+                for (int i = 0; i < keys.Length; i++) keys[i] = WireString.ReadKey(r);
                 return keys;
             }
         }
@@ -1815,7 +1818,7 @@ namespace Multiplayer.Network.Sync
             {
                 if (r.ReadByte() != DictCensusMarker) throw new IOException("bad census marker");
                 var keys = new string[r.ReadUInt16()];
-                for (int i = 0; i < keys.Length; i++) keys[i] = r.ReadString();
+                for (int i = 0; i < keys.Length; i++) keys[i] = WireString.ReadKey(r);
                 return keys;
             }
         }
@@ -2509,7 +2512,7 @@ namespace Multiplayer.Network.Sync
                         else dict.Clear();
                         for (int j = 0; j < dn; j++)
                         {
-                            var key = DecodeDictKey(r.ReadString(), f.KeyType);
+                            var key = DecodeDictKey(WireString.ReadKey(r), f.KeyType);
                             var dv = DecodeValue(r, ser, f.DictValType, geo, locals, fixups, depth + 1, chain);
                             if (dict != null && !ReferenceEquals(dv, Unresolved)) dict[key] = dv;
                         }

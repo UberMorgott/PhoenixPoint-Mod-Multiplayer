@@ -311,11 +311,11 @@ namespace Multiplayer.Network.Sync
                 seq = r.ReadUInt32();
                 return new Raise
                 {
-                    EventId = r.ReadString(),
-                    SiteRef = r.ReadString(),
-                    VehicleRef = r.ReadString(),
-                    Title = r.ReadString(),
-                    Narrative = r.ReadString(),
+                    EventId = WireString.ReadKey(r),
+                    SiteRef = WireString.ReadKey(r),
+                    VehicleRef = WireString.ReadKey(r),
+                    Title = WireString.ReadText(r),
+                    Narrative = WireString.ReadProse(r),
                     Priority = r.ReadInt32(),
                 };
             }
@@ -618,7 +618,7 @@ namespace Multiplayer.Network.Sync
                             return true;
                         }
                         r.BaseStream.Position = 0;
-                        string eventId = r.ReadString();
+                        string eventId = WireString.ReadKey(r);
                         var wire = MissionOutcomeMirror.DecodeRaw(r);
                         _rewards[eventId] = wire;
                         Debug.Log("[MP][events] reward for '" + eventId + "' received (rows=" + wire.Rows.Count +
@@ -1687,7 +1687,7 @@ namespace Multiplayer.Network.Sync
                     OccurrenceId occurrence;
                     if (TryGetDurableOccurrence(source, out occurrence) || TryFindDurableOccurrence(eventId, out occurrence))
                     { r.ReadByte(); EventSync.ReadOccurrence(r); _durableRewards[occurrence] = MissionOutcomeMirror.DecodeRaw(r); }
-                    else { r.ReadString(); _rewards[eventId] = MissionOutcomeMirror.DecodeRaw(r); }
+                    else { WireString.ReadKey(r); _rewards[eventId] = MissionOutcomeMirror.DecodeRaw(r); }
                 }
                 Debug.Log("[MP][events] HOST reward for '" + eventId + "' broadcast");
             }

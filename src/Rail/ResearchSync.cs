@@ -9,6 +9,7 @@ using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View.ViewModules;
 using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
+using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Network.Sync
 {
@@ -168,8 +169,8 @@ namespace Multiplayer.Network.Sync
 
         private static void HandleIntentOp(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
-            string factionGuid = r.ReadString();
-            string researchId = r.ReadString();
+            string factionGuid = WireString.ReadKey(r);
+            string researchId = WireString.ReadKey(r);
             int pos = r.ReadInt32();
             string reemit = "F#" + factionGuid + ".Research"; // reject reconverge: the faction's research subtree
 

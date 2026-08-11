@@ -335,7 +335,7 @@ namespace Multiplayer.Network.Sync
                     int count = r.ReadInt32();
                     for (int i = 0; i < count; i++)
                     {
-                        string key = r.ReadString();
+                        string key = WireString.ReadKey(r);
                         rows.Add(new KeyValuePair<string, float>(key, r.ReadSingle()));
                     }
                 }
@@ -582,8 +582,8 @@ namespace Multiplayer.Network.Sync
         /// <see cref="VehiclePickPatch"/> — no purchase path reads how many aircraft are parked.</summary>
         private static void HandleBuy(ulong peer, uint nonce, BinaryReader r)
         {
-            string eventId = r.ReadString();
-            string key = r.ReadString();
+            string eventId = WireString.ReadKey(r);
+            string key = WireString.ReadKey(r);
 
             var geo = GenericApplier.GeoLevel();
             var market = geo?.Marketplace;

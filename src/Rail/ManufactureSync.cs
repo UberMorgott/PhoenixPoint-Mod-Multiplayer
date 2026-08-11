@@ -291,7 +291,7 @@ namespace Multiplayer.Network.Sync
                     var entries = new List<KeyValuePair<string, float>>(n);
                     for (int i = 0; i < n; i++)
                     {
-                        string guid = r.ReadString();
+                        string guid = WireString.ReadKey(r);
                         float pts = r.ReadSingle();
                         entries.Add(new KeyValuePair<string, float>(guid, pts));
                     }
@@ -308,7 +308,7 @@ namespace Multiplayer.Network.Sync
         /// table entries — see <see cref="RegisterIntents"/>).</summary>
         private static void HandleDefIndexIntent(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
-            string defGuid = r.ReadString();
+            string defGuid = WireString.ReadKey(r);
             int index = r.ReadInt32();
 
             var manufacture = PhoenixManufacture();
@@ -810,7 +810,7 @@ namespace Multiplayer.Network.Sync
         /// rides the rail — IntentRail's dispatch FlushNow ships it this frame.</summary>
         private static void HandleCartMutateIntent(NetworkEngine engine, ulong peer, uint nonce, byte op, BinaryReader r)
         {
-            string defGuid = r.ReadString();
+            string defGuid = WireString.ReadKey(r);
             bool veh = r.ReadInt32() != 0;
             if (string.IsNullOrEmpty(defGuid)) return;
             var store = veh ? Cart.Vehicles : Cart.Items;

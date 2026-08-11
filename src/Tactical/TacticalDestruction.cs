@@ -9,6 +9,7 @@ using Multiplayer.Network.Sync;
 using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.Levels.Destruction;
 using UnityEngine;
+using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Tactical
 {
@@ -374,11 +375,11 @@ namespace Multiplayer.Tactical
         /// fall abilities it raises — runs here exactly as it did there.</summary>
         internal static void ApplyEnvDamage(BinaryReader r)
         {
-            string guid = r.ReadString();
+            string guid = WireString.ReadKey(r);
             var aim = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
             var notes = new List<string>();
             var result = DamageResultCodec.Read(r, TacticalDamageSync.Tlc(), notes);
-            string posTag = r.ReadString();
+            string posTag = WireString.ReadKey(r);
 
             string why;
             var destructable = Resolve(guid, posTag, out why);

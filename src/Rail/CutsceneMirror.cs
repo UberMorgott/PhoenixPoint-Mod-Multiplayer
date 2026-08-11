@@ -172,7 +172,7 @@ namespace Multiplayer.Network.Sync
                 using (var r = new BinaryReader(ms, Encoding.UTF8))
                 {
                     seq = r.ReadUInt32();
-                    guid = r.ReadString();
+                    guid = WireString.ReadKey(r);
                     priority = r.ReadInt32();
                 }
                 if (!Seq.ShouldApply(SurfaceIds.GeoCutsceneRaise, seq)) return true;

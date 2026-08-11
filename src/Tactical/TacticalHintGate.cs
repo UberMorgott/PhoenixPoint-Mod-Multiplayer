@@ -253,7 +253,7 @@ namespace Multiplayer.Tactical
                 string name;
                 using (var ms = new MemoryStream(payload))
                 using (var r = new BinaryReader(ms, Encoding.UTF8))
-                    name = r.ReadString();
+                    name = WireString.ReadKey(r);
 
                 // THE RELAY IS UNCONDITIONAL, AND IT COMES FIRST. It used to sit behind the display choke,
                 // which made the host's own eyes silence the third peer: the host sights the boss first

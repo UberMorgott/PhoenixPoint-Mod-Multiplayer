@@ -549,7 +549,7 @@ namespace Multiplayer.Network.Sync
         /// is noise control: a no-op write still logs and still re-raises.</summary>
         private static void HandleSetVariable(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
-            string name = r.ReadString();
+            string name = WireString.ReadKey(r);
             int value = r.ReadInt32();
 
             var es = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.EventSystem;

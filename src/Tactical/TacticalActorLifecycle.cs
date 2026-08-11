@@ -16,6 +16,7 @@ using PhoenixPoint.Tactical.Levels;
 using PhoenixPoint.Tactical.Levels.ActorDeployment;
 using PhoenixPoint.Tactical.Levels.Missions;
 using UnityEngine;
+using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Tactical
 {
@@ -304,13 +305,13 @@ namespace Multiplayer.Tactical
         internal static void ApplySpawn(BinaryReader r)
         {
             int key = r.ReadInt32();
-            string setGuid = r.ReadString();
-            string templateGuid = r.ReadString();
-            string factionGuid = r.ReadString();
+            string setGuid = WireString.ReadKey(r);
+            string templateGuid = WireString.ReadKey(r);
+            string factionGuid = WireString.ReadKey(r);
             var participant = (TacMissionParticipant)r.ReadByte();
             var pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
             var rot = new Quaternion(r.ReadSingle(), r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
-            string zoneName = r.ReadString();
+            string zoneName = WireString.ReadKey(r);
             // Read BEFORE the refusals below, never inside the success branch: the bytes are consumed whether
             // or not this peer can rebuild the actor, exactly as TacticalStatusSet.Read is.
             var champ = TftvChampIdentity.Read(r);
@@ -472,7 +473,7 @@ namespace Multiplayer.Tactical
             var list = new List<KeyValuePair<string, bool>>(n);
             for (int i = 0; i < n; i++)
             {
-                string guid = r.ReadString();
+                string guid = WireString.ReadKey(r);
                 bool destroy = r.ReadByte() != 0;
                 list.Add(new KeyValuePair<string, bool>(guid, destroy));
             }

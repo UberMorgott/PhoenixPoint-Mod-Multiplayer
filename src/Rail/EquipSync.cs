@@ -88,7 +88,7 @@ namespace Multiplayer.Network.Sync
             {
                 [OpSetItems] = (engine, peer, nonce, op, r) => HandleIntent(engine, peer, nonce, r),
                 [OpScrapEquipped] = (engine, peer, nonce, op, r) => HandleScrapEquippedIntent(peer, nonce, r),
-                [OpAugment] = (engine, peer, nonce, op, r) => HandleAugmentIntent(peer, nonce, r.ReadString(), r.ReadInt32()),
+                [OpAugment] = (engine, peer, nonce, op, r) => HandleAugmentIntent(peer, nonce, WireString.ReadKey(r), r.ReadInt32()),
             };
             IntentRail.Register(SurfaceIds.GeoEquipIntent, "equip", ops);
         }
@@ -676,7 +676,7 @@ namespace Multiplayer.Network.Sync
                 if (n < 0 || n > MaxSlotsPerList) throw new InvalidDataException("slot count " + n + " out of range");
                 var list = new List<SlotRef>(n);
                 for (int k = 0; k < n; k++)
-                    list.Add(new SlotRef { Guid = r.ReadString(), Count = r.ReadInt32(), Charges = r.ReadInt32() });
+                    list.Add(new SlotRef { Guid = WireString.ReadKey(r), Count = r.ReadInt32(), Charges = r.ReadInt32() });
                 lists[i] = list;
             }
             return lists;
@@ -890,7 +890,7 @@ namespace Multiplayer.Network.Sync
             {
                 charId = r.ReadInt32();
                 byte listIdx = r.ReadByte();
-                string guid = r.ReadString();
+                string guid = WireString.ReadKey(r);
                 int count = r.ReadInt32();
                 int charges = r.ReadInt32();
                 int amount = r.ReadInt32();

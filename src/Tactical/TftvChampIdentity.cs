@@ -10,6 +10,7 @@ using PhoenixPoint.Common.View.ViewControllers;
 using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.View;
 using UnityEngine;
+using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Tactical
 {
@@ -137,10 +138,10 @@ namespace Multiplayer.Tactical
 
         internal static Identity Read(BinaryReader r)
         {
-            string name = r.ReadString();
+            string name = WireString.ReadText(r);
             int n = r.ReadInt32();
             var tags = new List<string>(n < 0 ? 0 : n);
-            for (int i = 0; i < n; i++) tags.Add(r.ReadString());
+            for (int i = 0; i < n; i++) tags.Add(WireString.ReadKey(r));
             return string.IsNullOrEmpty(name) && tags.Count == 0 ? null : new Identity { Name = name, Tags = tags };
         }
 

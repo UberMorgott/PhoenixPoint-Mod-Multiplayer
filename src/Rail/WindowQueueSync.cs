@@ -13,6 +13,7 @@ using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
+using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Network.Sync
 {
@@ -600,7 +601,7 @@ namespace Multiplayer.Network.Sync
 
         private static void HandleAdvance(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
-            string wantIdentity = r.ReadString();
+            string wantIdentity = WireString.ReadKey(r);
             byte result = r.ReadByte();
 
             var view = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>()?.View;
@@ -704,8 +705,8 @@ namespace Multiplayer.Network.Sync
         /// and the game's own list is the only definition of where this asset may go.</summary>
         private static void HandleDeploy(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
-            string wantIdentity = r.ReadString();
-            string siteRef = r.ReadString();
+            string wantIdentity = WireString.ReadKey(r);
+            string siteRef = WireString.ReadKey(r);
 
             var geo = GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>();
             var query = SwitchQueryField?.GetValue(geo?.View) as GeoscapeViewSwitchQuery;
