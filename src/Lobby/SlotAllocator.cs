@@ -56,9 +56,5 @@ namespace Multiplayer.Network
             _slots.Remove(identity);
             _inUse.Remove(slot);
         }
-
-        public byte SlotFor(Guid identity) => _slots[identity];
-
-        public bool TryGetSlot(Guid identity, out byte slot) => _slots.TryGetValue(identity, out slot);
     }
 }

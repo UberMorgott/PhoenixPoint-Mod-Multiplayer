@@ -1332,25 +1332,6 @@ namespace Multiplayer.UI
                 root.gameObject.AddComponent<RectMask2D>();
         }
 
-        // Stretch a cloned native scroller GO (an ancestor of its returned content RectTransform, child
-        // of <paramref name="host"/>) to fill the group-sized host: relative 0..1 anchors, zero
-        // offsets → rubber, no pixel math. No LayoutElement on it (the host is not a layout group).
-        private static void StretchScrollerToHost(RectTransform content, Transform host)
-        {
-            if (content == null || host == null) return;
-            Transform t = content.transform;
-            while (t.parent != null && !ReferenceEquals(t.parent, host))   // L113: identity stop test
-                t = t.parent;
-            var rt = t as RectTransform;
-            if (rt == null) return;
-            rt.anchorMin = Vector2.zero;
-            rt.anchorMax = Vector2.one;
-            rt.pivot = new Vector2(0.5f, 0.5f);
-            rt.offsetMin = Vector2.zero;
-            rt.offsetMax = Vector2.zero;
-            rt.localScale = Vector3.one;
-        }
-
         // Configure a ScrollRect content (or fallback list) RectTransform to stack rows top-down and
         // self-size by content: pivot top, VerticalLayoutGroup + ContentSizeFitter(PreferredSize). Its
         // parent is the viewport / scroll host (NOT a layout group) so the fitter is conflict-free (§E-1).

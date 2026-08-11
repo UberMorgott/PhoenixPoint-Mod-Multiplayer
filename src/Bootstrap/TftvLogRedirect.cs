@@ -100,35 +100,5 @@ namespace Multiplayer.Util
                 return false;
             }
         }
-
-        /// <summary>
-        /// Find the lowest free instance index (2..MaxInstances) for the secondary log by probing
-        /// the candidate redirected paths with the same exclusive-open lock test. Returns the first
-        /// index whose target file is openable; defaults to 2 if none is free (degrade gracefully —
-        /// worst case two secondaries share one fallback file, never the primary).
-        /// </summary>
-        public static int ResolveSecondaryIndex(string originalPath)
-        {
-            for (var i = 2; i <= MaxInstances; i++)
-            {
-                var candidate = ResolveRedirectedPath(originalPath, isSecondary: true, instanceIndex: i);
-                if (string.IsNullOrEmpty(candidate))
-                    return i;
-                try
-                {
-                    using (new FileStream(candidate, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None))
-                        return i; // this suffix is free for us.
-                }
-                catch (IOException)
-                {
-                    // held by yet another instance — advance.
-                }
-                catch (UnauthorizedAccessException)
-                {
-                    return i;
-                }
-            }
-            return 2;
-        }
     }
 }

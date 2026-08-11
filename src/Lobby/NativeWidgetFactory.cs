@@ -218,14 +218,6 @@ namespace Multiplayer.UI
             return btn;
         }
 
-        /// <summary>Set the label on a cloned menu button (its first child Text).</summary>
-        public static void SetMenuButtonLabel(Button btn, string label)
-        {
-            if (btn == null) return;
-            var t = btn.GetComponentInChildren<Text>(true);
-            if (t != null) t.text = label;
-        }
-
         // ═══════════════════════════════════════════════════════════════════
         //  Native panel background sprite
         // ═══════════════════════════════════════════════════════════════════

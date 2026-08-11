@@ -75,7 +75,6 @@ namespace Multiplayer.UI
         // ─── Palette (FALLBACK = TFTV HAVEN RECRUITS hexes; overwritten by capture) ──
         // Navy + amber. Captured natives replace PanelFill / PanelBorder / BodyText / Accent etc.
         // where a live source is found; the rest stay these grounded TFTV values.
-        private static Color _headerBg = Hex(0x16, 0x22, 0x2a, 1.00f);     // header/title bar fill
         private static Color _headerBorder = Hex(0x22, 0x2e, 0x40, 1.00f); // header border
         private static Color _accent = Hex(0xff, 0xb3, 0x39, 1.00f);       // amber highlight
         private static Color _cardBg = Hex(0x1e, 0x20, 0x26, 1.00f);       // row/card body
@@ -95,7 +94,6 @@ namespace Multiplayer.UI
         private static readonly Color _valueText = new Color(1f, 0.42f, 0.36f, 1f);
 
         // ─── Public palette accessors (ensure capture first) ────────────────
-        public static Color HeaderBackground { get { EnsureCaptured(); return _headerBg; } }
         public static Color HeaderBorder { get { EnsureCaptured(); return _headerBorder; } }
         public static Color Accent { get { EnsureCaptured(); return _accent; } }
         public static Color CardBackground { get { EnsureCaptured(); return _cardBg; } }

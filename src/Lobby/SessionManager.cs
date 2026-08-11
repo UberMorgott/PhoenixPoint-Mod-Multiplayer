@@ -1699,7 +1699,6 @@ namespace Multiplayer.Network
         // NOT on the PEER_LIST wire: it rides the tactical band's own tally (SurfaceIds.TacTurn op 4).
         public bool TacReady { get; set; }
         public string ParityDiffs { get; set; } = ""; // FIX-4 soft-gate: exact diff text ("" = parity OK)
-        public int LatencyMs { get; set; }
         public byte SlotIndex { get; set; }           // host-assigned stable slot (echoed in PEER_LIST)
         public DateTime ConnectedAt { get; set; }
     }

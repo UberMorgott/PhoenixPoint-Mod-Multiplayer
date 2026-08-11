@@ -316,9 +316,6 @@ namespace Multiplayer.Network.Sync
         internal SharedChoiceDecision WithAppliedStep(string key) =>
             new SharedChoiceDecision(Occurrence, EffectToken, Choice, Result, Rewards, Winner, Phase,
                 EffectSteps.Select(x => x.Key == key ? x.Applied() : x), SharedRevision, RewardPayload);
-        internal SharedChoiceDecision WithRewards(IEnumerable<CanonicalRewardItemId> rewards) =>
-            new SharedChoiceDecision(Occurrence, EffectToken, Choice, Result, rewards, Winner, Phase,
-                EffectSteps, SharedRevision, RewardPayload);
         internal SharedChoiceDecision WithRewardPayload(byte[] payload) =>
             new SharedChoiceDecision(Occurrence, EffectToken, Choice, Result, Rewards, Winner, Phase,
                 EffectSteps, SharedRevision, payload);

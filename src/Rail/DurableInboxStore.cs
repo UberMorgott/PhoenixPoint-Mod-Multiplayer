@@ -443,22 +443,6 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        internal bool ReplacePendingDecisionRewards(OccurrenceId occurrence,
-            IEnumerable<CanonicalRewardItemId> rewards, byte[] rewardPayload = null)
-        {
-            lock (_gate)
-            {
-                var pending = _canonical.Decisions.SingleOrDefault(x => x.Occurrence.Equals(occurrence));
-                if (pending == null || pending.Phase == SharedChoicePhase.ChoiceLocked ||
-                    _ledger.CommittedRevision == ulong.MaxValue) return false;
-                var nextDecision = pending.WithRewards(rewards);
-                if (rewardPayload != null) nextDecision = nextDecision.WithRewardPayload(rewardPayload);
-                var nextCanonical = _canonical.WithDecision(nextDecision);
-                var next = new HostLedger(_ledger.AllEntries, _ledger.CommittedRevision + 1, _ledger.Members);
-                return CommitWithCanonical(_ledger, next, nextCanonical);
-            }
-        }
-
         internal T WithEffectGate<T>(OccurrenceId occurrence, Func<T> action)
         {
             object gate;

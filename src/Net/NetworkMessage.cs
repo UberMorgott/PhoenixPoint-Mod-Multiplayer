@@ -102,18 +102,5 @@ namespace Multiplayer.Network.MessageLayer
                 ? Encoding.UTF8.GetString(payload)
                 : "";
 
-        public static byte[] BuildBoolPayload(bool value)
-            => new[] { (byte)(value ? 1 : 0) };
-
-        public static bool ParseBoolPayload(byte[] payload)
-            => payload != null && payload.Length > 0 && payload[0] != 0;
-
-        public static byte[] BuildIntPayload(int value)
-            => BitConverter.GetBytes(value);
-
-        public static int ParseIntPayload(byte[] payload)
-            => payload != null && payload.Length >= 4
-                ? BitConverter.ToInt32(payload, 0)
-                : 0;
     }
 }

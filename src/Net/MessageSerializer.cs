@@ -570,16 +570,6 @@ namespace Multiplayer.Network.MessageLayer
             }
         }
 
-        public static long DeserializeSessionBegin(byte[] data)
-        {
-            using (var ms = new MemoryStream(data))
-            using (var br = new BinaryReader(ms))
-            {
-                return br.ReadInt64();
-            }
-        }
-
-
         // ─── RevealAll (second barrier: synchronized geoscape reveal) ────────────────
         // Mirrors SessionBegin exactly: a single long serverTicks (DateTime.UtcNow.Ticks at send),
         // written via BinaryWriter.Write(long) and read back via BinaryReader.ReadInt64().
@@ -590,15 +580,6 @@ namespace Multiplayer.Network.MessageLayer
             {
                 bw.Write(serverTicks);
                 return ms.ToArray();
-            }
-        }
-
-        public static long DeserializeRevealAll(byte[] data)
-        {
-            using (var ms = new MemoryStream(data))
-            using (var br = new BinaryReader(ms))
-            {
-                return br.ReadInt64();
             }
         }
 
