@@ -386,6 +386,7 @@ namespace RailCheck
             Add(laws, () => L419_OneDoorToTheLiveGeoscapeLevel.Check());
             Add(laws, () => L420_NothingDecodesTheWireOnTheSendersWord.Check());
             Add(laws, () => L421_WorkThatOutlivedItsBoundaryDoesNotLand.Check());
+            Add(laws, () => L422_AMultiPatchedTargetDeclaresItsOrder.Check());
             Add(laws, () => L423_TheHoldDefersNoWorkOutsideItsApplyScope.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
