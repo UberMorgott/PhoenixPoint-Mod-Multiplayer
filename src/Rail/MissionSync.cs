@@ -521,12 +521,6 @@ namespace Multiplayer.Network.Sync
             IntentRail.Reject(SurfaceIds.GeoMissionIntent, peer, DurableStartRefusalText(why), true,
                 string.IsNullOrEmpty(siteRef) ? null : siteRef);
 
-        private static GeoLevelController GeoLevel()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
-        }
-
         // NOTIFY: a refused LAUNCH is the one geoscape gesture with no vanilla surface to fall back on. The
         // player picked a squad, pressed Launch and the deployment simply does not happen; the usual cause is
         // co-op arbitration (another peer already took this site / the mission stopped being runnable under
@@ -666,7 +660,7 @@ namespace Multiplayer.Network.Sync
                 var refs = new List<string>(n);
                 for (int i = 0; i < n; i++) refs.Add(r.ReadString());
 
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, siteRef, "no geoscape"); return; }
 
                 var site = IdentityResolver.Resolve(geo, siteRef, null) as GeoSite;
@@ -743,7 +737,7 @@ namespace Multiplayer.Network.Sync
                 string defGuid = r.ReadString();
                 int zoneIdx = r.ReadInt16();
 
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, siteRef, "prepare-haven: no geoscape"); return; }
 
                 var site = IdentityResolver.Resolve(geo, siteRef, null) as GeoSite;

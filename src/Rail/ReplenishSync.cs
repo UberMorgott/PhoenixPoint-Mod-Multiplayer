@@ -122,9 +122,6 @@ namespace Multiplayer.Network.Sync
                 });
         }
 
-        private static GeoLevelController GeoLevel() =>
-            GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>();
-
         // ─── S1 + S3 capture: ONE prefix on the game's only queue entry point ───
 
         /// <summary>Every window in the game is queued through here, so this is where the rank applies —
@@ -310,7 +307,7 @@ namespace Multiplayer.Network.Sync
         {
             try
             {
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (!(geo?.ViewerFaction is GeoPhoenixFaction px))
                 {
                     Debug.Log("[MP][replenish] VERDICT DEFERRED (" + because + "): this peer's geoscape is not " +
@@ -339,7 +336,7 @@ namespace Multiplayer.Network.Sync
         /// the ceiling all ask exactly the same question. Returns true when the screen was queued.</summary>
         private static bool TryQueueReplenish(string because)
         {
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             var view = geo?.View;
             if (view == null) return false;
             if (!(geo.ViewerFaction is GeoPhoenixFaction phoenix)) return false;
@@ -421,7 +418,7 @@ namespace Multiplayer.Network.Sync
                         mission.GetMissionOutcomeState() == PhoenixPoint.Tactical.Levels.TacFactionState.Playing)
                         return;
 
-                    var geo = GeoLevel();
+                    var geo = GenericApplier.GeoLevel();
                     var view = geo?.View;
                     if (view == null) return;
 
@@ -471,7 +468,7 @@ namespace Multiplayer.Network.Sync
         /// <summary>Is the game's resupply screen already in this peer's window queue? One question, one
         /// place — the gate, the verdict line and the re-ask all have to be asking the same thing.</summary>
         private static bool ReplenishQueued() =>
-            SwitchQueryOf(GeoLevel()?.View)?.TryGetStateSwitchRequestForState<UIStateReplenish>(out _) == true;
+            SwitchQueryOf(GenericApplier.GeoLevel()?.View)?.TryGetStateSwitchRequestForState<UIStateReplenish>(out _) == true;
 
         private static GeoscapeViewSwitchQuery SwitchQueryOf(GeoscapeView view) =>
             view == null || SwitchQueryField == null
@@ -619,7 +616,7 @@ namespace Multiplayer.Network.Sync
             int charId = r.ReadInt32();
             string guid = r.ReadString();
 
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             if (geo == null)
             { Reject(peer, charId, what + ": no geoscape"); return false; }
             if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter c))

@@ -150,12 +150,6 @@ namespace Multiplayer.Network.Sync
             IntentRail.Register(SurfaceIds.GeoPersonnelIntent, "personnel", ops);
         }
 
-        private static GeoLevelController GeoLevel()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
-        }
-
         // ─── Harmony seams (law 4a, intent-capture only — this file owns no other patch) ──
 
         /// <summary>
@@ -541,7 +535,7 @@ namespace Multiplayer.Network.Sync
                 // GeoPhoenixFaction.cs:673-741) hit this same funnel with a CLIENT-allocated id —
                 // shipping it would let a stale id counter resolve an unrelated EXISTING host unit
                 // and ApplyReassign would silently move the wrong soldier on every peer.
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null || FindCharacterContainer(geo, character) == null)
                 {
                     Debug.LogWarning("[MP][personnel] CLIENT membership add DROPPED — U#" + (int)character.Id +
@@ -787,7 +781,7 @@ namespace Multiplayer.Network.Sync
                     var siteRef = targetBase == null ? null : IdentityResolver.RootRef(targetBase.Site);
                     if (character == null || siteRef == null || mainClass == null)
                     { OpenUiRepaint.MarkDirty(); return false; }
-                    var geo = GeoLevel();
+                    var geo = GenericApplier.GeoLevel();
                     if (geo == null || FindCharacterContainer(geo, character) == null)
                     {
                         Debug.LogWarning("[MP][personnel] CLIENT TFTV promote DROPPED — U#" + (int)character.Id +
@@ -835,7 +829,7 @@ namespace Multiplayer.Network.Sync
             try
             {
                 charId = r.ReadInt32();
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, charId, "no geoscape"); return; }
                 if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character))
                 { Reject(senderPeerId, charId, "unresolved character"); return; }
@@ -916,7 +910,7 @@ namespace Multiplayer.Network.Sync
             {
                 charId = r.ReadInt32();
 
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, charId, "no geoscape"); return; }
                 if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character))
                 { Reject(senderPeerId, charId, "unresolved character"); return; }
@@ -1024,7 +1018,7 @@ namespace Multiplayer.Network.Sync
             {
                 siteRef = r.ReadString();
                 string vehicleRef = r.ReadString();
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null) { RejectHire(senderPeerId, null, "no geoscape"); return; }
                 var phoenix = geo.PhoenixFaction;
                 if (!(IdentityResolver.Resolve(geo, siteRef, null) is GeoSite site) ||
@@ -1060,7 +1054,7 @@ namespace Multiplayer.Network.Sync
             try
             {
                 charId = r.ReadInt32();
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, charId, "no geoscape"); return; }
                 if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character))
                 { Reject(senderPeerId, charId, "unresolved character (already dismissed?)"); return; }
@@ -1105,7 +1099,7 @@ namespace Multiplayer.Network.Sync
                 string templateGuid = r.ReadString();
                 int level = r.ReadInt32();
                 string siteRef = r.ReadString();
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null) { RejectNaked(senderPeerId, name, "no geoscape"); return; }
                 var phoenix = geo.PhoenixFaction;
                 GeoUnitDescriptor recruit = null;

@@ -115,12 +115,6 @@ namespace Multiplayer.Network.Sync
             _sent.Clear();
         }
 
-        private static GeoLevelController GeoLevel()
-        {
-            var level = Base.Core.GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
-        }
-
         // ─── EVERY PEER: the ONE capture seam (law 4a), block-first ─────────
 
         /// <summary>THE seam. <c>GeoCharacter.SetItems</c> (GeoCharacter.cs:831, no overloads) is the model
@@ -227,7 +221,7 @@ namespace Multiplayer.Network.Sync
         /// as an expected client state. Nothing here reaches the rail: the staged set is presentation.</summary>
         private static bool IsAugmentStaging()
         {
-            var vs = GeoLevel()?.View?.CurrentViewState;
+            var vs = GenericApplier.GeoLevel()?.View?.CurrentViewState;
             return vs is UIStateBionics || vs is UIStateMutate;
         }
 
@@ -354,7 +348,7 @@ namespace Multiplayer.Network.Sync
             // Solo: the two UIInventoryList patches this falsifies are deliberately inert, so the game's own
             // double-Remove is live and the check would shout at a player we are not protecting.
             if (engine == null || !engine.IsActiveSession) return;
-            var view = GeoLevel()?.View;
+            var view = GenericApplier.GeoLevel()?.View;
             if (!(view?.CurrentViewState is UIStateEditSoldier)) return; // vehicle screen uses other lists
             var equip = view.GeoscapeModules?.SoldierEquipModule;
             if (equip == null) return;
@@ -409,7 +403,7 @@ namespace Multiplayer.Network.Sync
                 if (IntentRail.ShouldRunNative()) return true;
                 var def = geoItem?.ItemDef;
                 // Non-viewer faction (unreachable from UI) → block the local write, no intent.
-                if (def == null || !ReferenceEquals(__instance, GeoLevel()?.PhoenixFaction)) return false;
+                if (def == null || !ReferenceEquals(__instance, GenericApplier.GeoLevel()?.PhoenixFaction)) return false;
                 if (FindEquippedInstance(__instance, geoItem, out int charId, out byte listIdx))
                     SendScrapEquippedIntent(charId, listIdx, geoItem, amount);
                 else
@@ -700,7 +694,7 @@ namespace Multiplayer.Network.Sync
                 DurablePreparationEditContext preparation;
                 bool hasPreparation = DurablePreparationEditContext.TryReadTrailing(r, out preparation);
 
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, charId, "no geoscape"); return; }
                 if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character))
                 { Reject(senderPeerId, charId, "unresolved character"); return; }
@@ -901,7 +895,7 @@ namespace Multiplayer.Network.Sync
                 int charges = r.ReadInt32();
                 int amount = r.ReadInt32();
 
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, charId, "scrap: no geoscape"); return; }
                 if (listIdx > 2) { Reject(senderPeerId, charId, "scrap: bad list " + listIdx); return; }
                 if (!(IdentityResolver.Resolve(geo, "U#" + charId, null) is GeoCharacter character))
@@ -998,7 +992,7 @@ namespace Multiplayer.Network.Sync
         /// the client screen only offers slots built from host-mirrored state; add them if drift ever shows.</summary>
         internal static bool HandleAugmentIntent(ulong senderPeerId, uint nonce, string defGuid, int charId)
         {
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             if (geo == null) { Reject(senderPeerId, charId, "augment: no geoscape"); return false; }
             var def = GeoItemCodec.ResolveDef(defGuid);
             if (def == null) { Reject(senderPeerId, charId, "augment: unknown def " + defGuid); return false; }
@@ -1194,7 +1188,7 @@ namespace Multiplayer.Network.Sync
         /// <summary>Everything an equip gesture could have touched: the character subtree + faction storage.</summary>
         private static string[] ReemitPrefixes(int charId)
         {
-            var phoenix = GeoLevel()?.PhoenixFaction;
+            var phoenix = GenericApplier.GeoLevel()?.PhoenixFaction;
             return new[]
             {
                 charId >= 0 ? "U#" + charId : null,

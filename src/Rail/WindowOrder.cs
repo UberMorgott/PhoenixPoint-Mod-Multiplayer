@@ -138,11 +138,6 @@ namespace Multiplayer.Network.Sync
         /// still say so, but once, not every frame the player spends in the research tree.</summary>
         private static readonly HashSet<string> _heldOnScreen = new HashSet<string>(StringComparer.Ordinal);
 
-        private static PhoenixPoint.Geoscape.Levels.GeoLevelController GeoLevel() =>
-            Base.Core.GameUtl.CurrentLevel() == null
-                ? null
-                : Base.Core.GameUtl.CurrentLevel().GetComponent<PhoenixPoint.Geoscape.Levels.GeoLevelController>();
-
         /// <summary>Called from the ONE queue entry point, on the request the game is actually about to
         /// insert (after any rank rebuild — a rebuilt request is a different instance, and stamping the one
         /// that never reaches the list would key nothing). Never throws into game code.</summary>
@@ -454,7 +449,7 @@ namespace Multiplayer.Network.Sync
                 // reordering, and reordering on a LOCAL condition (which screen this peer has open) is the
                 // one thing this class exists to avoid. Promote it to the head only if a session shows an
                 // answer window queued behind a held one; the measured defect was the head itself.
-                var current = GeoLevel()?.View?.CurrentViewState;
+                var current = GenericApplier.GeoLevel()?.View?.CurrentViewState;
                 var head = pending[0].State;
                 if (HoldsHead(pending[0], current == null ? null : current.GetType()))
                 {

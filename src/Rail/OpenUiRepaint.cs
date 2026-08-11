@@ -123,7 +123,7 @@ namespace Multiplayer.Network.Sync
             // state that re-Inits the module (UIStateNothingSelected.EnterState:104) brought the strip back —
             // the reported "enter Research and come back and it appears". GeoscapeModulesData holds the
             // module by reference whether it is active or not, so the handle can never go quiet on us.
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             var view = geo?.View;
             var mods = view?.GeoscapeModules;
             if (mods == null) return; // no geoscape view at all (tactical / main menu) — nothing to repaint
@@ -292,12 +292,6 @@ namespace Multiplayer.Network.Sync
             seen.Clear();
             foreach (var s in now) seen.Add(s);
             return started;
-        }
-
-        private static GeoLevelController GeoLevel()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
         }
 
         /// <summary>Close of a remote mirror-apply batch (client) or a host-side post-intent reseed.
@@ -515,7 +509,7 @@ namespace Multiplayer.Network.Sync
                 var field = selected.GetComponent<UnityEngine.UI.InputField>();
                 if (field != null && field.isFocused) return true;
             }
-            var mods = GeoLevel()?.View?.GeoscapeModules;
+            var mods = GenericApplier.GeoLevel()?.View?.GeoscapeModules;
             if (mods == null) return false;
             // ponytail: EquipSync's gesture flag is deliberately NOT consulted here — it is consumed by the
             // very next SetItems flush (same frame on an open equip screen), so it can never be "in flight"
@@ -544,7 +538,7 @@ namespace Multiplayer.Network.Sync
             // cases, 2026-08-08/09). Dropped here, once per flush, through the game's own pending list.
             try { DeploymentWindowClose.DropUnservableQueued(); }
             catch (Exception ex) { Debug.LogError("[MP][deploy] queued-window sweep threw: " + ex); }
-            var view = GeoLevel()?.View;
+            var view = GenericApplier.GeoLevel()?.View;
             var current = view?.CurrentViewState;
             if (current == null) return;
             // A reseed (table entry OR fallback re-enter, both below) recomputes the screen's own

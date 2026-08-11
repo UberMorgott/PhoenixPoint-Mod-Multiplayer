@@ -65,9 +65,6 @@ namespace Multiplayer.Network.Sync
         /// offer table, so a stale screen cannot buy at a stale rate.</summary>
         internal const byte OpTrade = 2;
 
-        private static GeoLevelController GeoLevel() =>
-            GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>();
-
         /// <summary>CLIENT: block and address. HOST/solo: run the game's own exchange.</summary>
         [HarmonyPatch(typeof(GeoHaven), nameof(GeoHaven.TradeResource))]
         internal static class TradeCapturePatch
@@ -109,7 +106,7 @@ namespace Multiplayer.Network.Sync
             var wants = (ResourceType)r.ReadByte();
             int amount = r.ReadInt32();
 
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             var site = geo?.Map?.AllSites?.FirstOrDefault(s => s != null && s.SiteId == siteId);
             var haven = site == null ? null : site.GetComponent<GeoHaven>();
             var faction = geo?.PhoenixFaction;

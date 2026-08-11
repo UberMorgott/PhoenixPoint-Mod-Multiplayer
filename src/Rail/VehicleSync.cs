@@ -81,12 +81,6 @@ namespace Multiplayer.Network.Sync
         /// <summary>Full session teardown: drop the re-flush memo (see <see cref="AlreadySent"/>).</summary>
         internal static void Reset() => _sent.Clear();
 
-        private static GeoLevelController GeoLevel()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
-        }
-
         /// <summary>The DiffEngine root-key scope a rejected op re-emits (IntentRail.Reject narrows the
         /// re-emit with it). Never blank for a resolvable gesture: an unscoped reject falls back to the
         /// whole covered graph, which converges but costs a full walk.</summary>
@@ -237,7 +231,7 @@ namespace Multiplayer.Network.Sync
                 // A client's own sim/AI route — a raid, a faction controller, the mid-flight resume. A
                 // projector must not run it (the route is host-computed and arrives as mirrored motion)
                 // and must not ORDER it either: nobody asked for it. Blocked, logged once, never sent.
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null || !ReferenceEquals(vehicle.Owner, geo.PhoenixFaction))
                 {
                     if (_logged.Add("route:" + vehicleRef))
@@ -287,7 +281,7 @@ namespace Multiplayer.Network.Sync
             string vehicleRef = IdentityResolver.RootRef(vehicle);
             try
             {
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null || !ReferenceEquals(vehicle.Owner, geo.PhoenixFaction))
                 {
                     if (_logged.Add("equip:" + vehicleRef))
@@ -361,7 +355,7 @@ namespace Multiplayer.Network.Sync
             string vehicleRef = IdentityResolver.RootRef(vehicle);
             try
             {
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null || !ReferenceEquals(vehicle.Owner, geo.PhoenixFaction))
                 {
                     if (_logged.Add("explore:" + vehicleRef))
@@ -469,7 +463,7 @@ namespace Multiplayer.Network.Sync
             {
                 vehicleRef = r.ReadString();
                 string siteRef = r.ReadString();
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, vehicleRef, "no geoscape"); return; }
 
                 var vehicle = IdentityResolver.Resolve(geo, vehicleRef, null) as GeoVehicle;
@@ -520,7 +514,7 @@ namespace Multiplayer.Network.Sync
             try
             {
                 vehicleRef = r.ReadString();
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, vehicleRef, "no geoscape"); return; }
 
                 var vehicle = IdentityResolver.Resolve(geo, vehicleRef, null) as GeoVehicle;
@@ -552,7 +546,7 @@ namespace Multiplayer.Network.Sync
                 vehicleRef = r.ReadString();
                 var wantWeapons = ReadSlots(r);
                 var wantModules = ReadSlots(r);
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null) { Reject(senderPeerId, vehicleRef, "no geoscape"); return; }
 
                 var vehicle = IdentityResolver.Resolve(geo, vehicleRef, null) as GeoVehicle;

@@ -104,12 +104,6 @@ namespace Multiplayer.Network.Sync
             if (engine.IsHost) HostTick(); else ClientTick();
         }
 
-        private static GeoLevelController GeoLevel()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
-        }
-
         private static void HostTick()
         {
             var ready = _ready;
@@ -131,7 +125,7 @@ namespace Multiplayer.Network.Sync
             if (Time.realtimeSinceStartup < _nextTickAt) return;
             _nextTickAt = Time.realtimeSinceStartup + RecomputeIntervalSeconds;
 
-            var comp = GeoLevel()?.MistRenderComponent;
+            var comp = GenericApplier.GeoLevel()?.MistRenderComponent;
             if (comp == null || MistDataField == null || HoursPassedField == null) return;
 
             int hours = (int)HoursPassedField.GetValue(comp);
@@ -166,7 +160,7 @@ namespace Multiplayer.Network.Sync
         {
             var data = State.MistData;
             if (data == null || data == _lastApplied) return;
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             var comp = geo == null ? null : geo.MistRenderComponent;
             if (comp == null) return;
             _lastApplied = data;

@@ -66,12 +66,6 @@ namespace Multiplayer.Network.Sync
 
         private static float _nextProbeAt;
 
-        private static GeoLevelController GeoLevel()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
-        }
-
         /// <summary>HOST: ship the clock reading. Costs one static bool read when the flag is off, which is
         /// the whole point of gating here rather than at the log line.</summary>
         internal static void HostTick(NetworkEngine engine)
@@ -82,7 +76,7 @@ namespace Multiplayer.Network.Sync
             _nextProbeAt = Time.realtimeSinceStartup + ProbeIntervalSeconds;
             try
             {
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null || geo.Timing == null) return;
                 byte[] inner;
                 using (var ms = new MemoryStream())
@@ -119,7 +113,7 @@ namespace Multiplayer.Network.Sync
                     hostScale = r.ReadDouble();
                     hostLatchAge = r.ReadDouble();
                 }
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 if (geo == null || geo.Timing == null) return true;   // in a battle / mid-load: nothing to compare
                 Debug.Log(PhaseLine(hostNow, geo.Timing.Now.TimeSpan.TotalSeconds, hostScale,
                                     TimeAnchor.ClientAnchorAgeSeconds, hostLatchAge));

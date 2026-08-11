@@ -181,13 +181,7 @@ namespace Multiplayer.Network.Sync
             Cart.Vehicles.Clear();
         }
 
-        private static GeoLevelController GeoLevel()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
-        }
-
-        private static ItemManufacturing PhoenixManufacture() => GeoLevel()?.PhoenixFaction?.Manufacture;
+        private static ItemManufacturing PhoenixManufacture() => GenericApplier.GeoLevel()?.PhoenixFaction?.Manufacture;
 
         // ─── HOST: hook management + ≤2 Hz queue snapshot poll ─────────────
 
@@ -337,7 +331,7 @@ namespace Multiplayer.Network.Sync
                     // The storage LOOKUP sits inside the guard too — it is diag-only work, not just a log.
                     if (MpDiag.On)
                     {
-                        var st = GeoLevel()?.PhoenixFaction?.ItemStorage;
+                        var st = GenericApplier.GeoLevel()?.PhoenixFaction?.ItemStorage;
                         int made = (st != null && item.RelatedItemDef != null && st.Items.TryGetValue(item.RelatedItemDef, out var gi))
                             ? gi.CommonItemData.Count : -1;
                         Debug.Log("[Multiplayer][mfgdiag] HOST made def=" + defGuid + " nonce=" + nonce + " -> hostStorageCount=" + made);
@@ -351,11 +345,11 @@ namespace Multiplayer.Network.Sync
                 // no-op, :1219, and the handler must not report ok on it). ScrapItem refunds+subtracts in
                 // place but does NOT remove the emptied GeoItem (UIModuleManufacturing.ScrapAllItems does) — so we do.
                 var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as ItemDef;
-                var storage = GeoLevel()?.PhoenixFaction?.ItemStorage;
+                var storage = GenericApplier.GeoLevel()?.PhoenixFaction?.ItemStorage;
                 if (index >= 1 && def != null && storage != null && storage.Items.TryGetValue(def, out var gi) &&
                     gi.CommonItemData.Count >= index)
                 {
-                    GeoLevel().PhoenixFaction.ScrapItem(gi, index);
+                    GenericApplier.GeoLevel().PhoenixFaction.ScrapItem(gi, index);
                     if (gi.CommonItemData.IsEmpty()) storage.RemoveItem(gi);
                     ok = true;
                 }
@@ -366,11 +360,11 @@ namespace Multiplayer.Network.Sync
             else if (op == OpScrapVehicle)
             {
                 var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as GeoVehicleEquipmentDef;
-                var air = GeoLevel()?.PhoenixFaction?.AircraftItemStorage;
+                var air = GenericApplier.GeoLevel()?.PhoenixFaction?.AircraftItemStorage;
                 if (def != null && air != null && air.HasItem(def))
                 {
                     var veh = air.PopItem(def);   // removes from storage
-                    if (veh != null) { GeoLevel().PhoenixFaction.ScrapVehicleEquipment(veh); ok = true; }
+                    if (veh != null) { GenericApplier.GeoLevel().PhoenixFaction.ScrapVehicleEquipment(veh); ok = true; }
                 }
                 else IntentRail.Reject(SurfaceIds.GeoManufactureIntent, senderPeerId, "scrapVehicle missing " + defGuid);
                 if (MpDiag.On) Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x1 ok=" + ok);
@@ -385,7 +379,7 @@ namespace Multiplayer.Network.Sync
                 // loadout gesture. We do NOT try to reproduce which UI slot the click targeted:
                 // that is view state, and guessing identity placement is exactly what law 3 forbids.
                 var def = GameUtl.GameComponent<DefRepository>()?.GetDef(defGuid) as ItemDef;
-                var faction = GeoLevel()?.PhoenixFaction;
+                var faction = GenericApplier.GeoLevel()?.PhoenixFaction;
                 if (def != null && faction?.Wallet != null && faction.ItemStorage != null &&
                     manufacture.ManufacturableItems.Any(i => ReferenceEquals(i.RelatedItemDef, def)) &&   // L113: def identity
                     faction.Wallet.HasResources(def.ManufacturePrice))
@@ -486,7 +480,7 @@ namespace Multiplayer.Network.Sync
         {
             try
             {
-                var view = GeoLevel()?.View;
+                var view = GenericApplier.GeoLevel()?.View;
                 if (view == null || !(view.CurrentViewState is UIStateManufacturing)) return;
                 var module = view.GeoscapeModules?.ManufacturingModule;
                 if (module == null) return;
@@ -511,7 +505,7 @@ namespace Multiplayer.Network.Sync
         /// partial-magazine note in the body.</summary>
         private static void ResyncScrapSnapshot(UIModuleManufacturing module)
         {
-            var faction = GeoLevel()?.PhoenixFaction;
+            var faction = GenericApplier.GeoLevel()?.PhoenixFaction;
             if (faction?.ItemStorage == null || faction.AircraftItemStorage == null) return;
 
             // THE POOL FIRST, and everything below measured against it. The native snapshot block ends with
@@ -747,7 +741,7 @@ namespace Multiplayer.Network.Sync
             /// the native loop.</summary>
             private static void PruneCartsToLiveStorage(UIModuleManufacturing module)
             {
-                var faction = GeoLevel()?.PhoenixFaction;
+                var faction = GenericApplier.GeoLevel()?.PhoenixFaction;
                 if (faction == null) return;
                 var cart = ScrapItemsField(module);
                 foreach (var def in cart.Items.Keys.ToList())
@@ -802,7 +796,7 @@ namespace Multiplayer.Network.Sync
 
         private static int CartLiveCount(string defGuid, bool veh)
         {
-            var faction = GeoLevel()?.PhoenixFaction;
+            var faction = GenericApplier.GeoLevel()?.PhoenixFaction;
             var repo = GameUtl.GameComponent<DefRepository>();
             if (faction == null || repo == null) return 0;
             if (veh)
@@ -841,7 +835,7 @@ namespace Multiplayer.Network.Sync
         /// (FlushNow + MarkDirty ride the IntentRail dispatch).</summary>
         private static void HandleCartScrapIntent(NetworkEngine engine, ulong peer, uint nonce, byte op, BinaryReader r)
         {
-            var faction = GeoLevel()?.PhoenixFaction;
+            var faction = GenericApplier.GeoLevel()?.PhoenixFaction;
             if (faction == null) return;
             if (Cart.Items.Count == 0 && Cart.Vehicles.Count == 0) return;
             var repo = GameUtl.GameComponent<DefRepository>();

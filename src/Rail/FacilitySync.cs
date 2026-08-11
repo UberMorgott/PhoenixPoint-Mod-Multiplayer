@@ -68,12 +68,6 @@ namespace Multiplayer.Network.Sync
             IntentRail.Register(SurfaceIds.GeoBaseIntent, "base", ops);
         }
 
-        private static GeoLevelController GeoLevel()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
-        }
-
         // ─── CLIENT: capture seams (law 4a; gate = IntentRail.ShouldRunNative, the shared law) ─────
 
         /// <summary>Build gesture (see class doc for why this level and not the model funnel).
@@ -210,7 +204,7 @@ namespace Multiplayer.Network.Sync
         private static void HandleIntent(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
             int siteId = r.ReadInt32();
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             var site = geo?.Map?.AllSites?.FirstOrDefault(s => s != null && s.SiteId == siteId);
             var px = site == null ? null : site.GetComponent<GeoPhoenixBase>();
             if (px == null || px.Layout == null)

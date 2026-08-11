@@ -234,7 +234,7 @@ namespace Multiplayer.UI
         /// (cursor off the globe, over GUI, no level).</summary>
         private static byte[] Capture()
         {
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             if (geo != null)
             {
                 var view = geo.View;
@@ -454,7 +454,7 @@ namespace Multiplayer.UI
 
         private static void ShowGeo(byte kind, Vector3 local, string entityRef, bool mine)
         {
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             var refs = geo?.SceneReferences;
             var root = GlobeRoot(geo);
             // The game's own haven-defence ring. GeoSiteVisualsDefs is a def, not a scene object, so unlike
@@ -997,7 +997,7 @@ namespace Multiplayer.UI
 
             if (p.Geo)
             {
-                var director = GeoLevel()?.View?.CameraDirector;
+                var director = GenericApplier.GeoLevel()?.View?.CameraDirector;
                 if (director == null)
                 {
                     Debug.LogWarning("[Multiplayer] ping arrow clicked but NOT followed — the geoscape view " +
@@ -1041,7 +1041,7 @@ namespace Multiplayer.UI
         {
             if (p.Follow != null) return p.Follow.position;
             if (!p.Geo) return Tlc() == null ? (Vector3?)null : p.Local;
-            var root = GlobeRoot(GeoLevel());
+            var root = GlobeRoot(GenericApplier.GeoLevel());
             return root == null ? (Vector3?)null : root.TransformPoint(p.Local);
         }
 
@@ -1051,7 +1051,7 @@ namespace Multiplayer.UI
         private static bool Faces(Live p, Camera cam, Vector3 world)
         {
             if (!p.Geo) return true;
-            var root = GlobeRoot(GeoLevel());
+            var root = GlobeRoot(GenericApplier.GeoLevel());
             if (root == null) return true;
             var centre = root.position;
             return Vector3.Dot(world - centre, cam.transform.position - centre) > 0f;
@@ -1102,12 +1102,6 @@ namespace Multiplayer.UI
         }
 
         // ─── level accessors (same shape as TacticalDamageSync.Tlc) ──────────
-
-        private static GeoLevelController GeoLevel()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
-        }
 
         private static TacticalLevelController Tlc()
         {

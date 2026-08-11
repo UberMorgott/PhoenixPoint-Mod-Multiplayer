@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -458,7 +458,7 @@ namespace Multiplayer.Network.Sync
             // Stamp WHICH level the "clients share the save" promise was made about. Instance id, not a
             // reference: a dying GeoLevelController must not be kept alive by the rail, and an id never
             // trips Unity's fake-null equality (law L113).
-            var boundaryLevel = GeoLevel();
+            var boundaryLevel = GenericApplier.GeoLevel();
             _boundaryLevelId = boundaryLevel == null ? 0 : boundaryLevel.GetInstanceID();
             _forceFull = false;
             _forcePrefixes.Clear();
@@ -524,12 +524,6 @@ namespace Multiplayer.Network.Sync
             path.Length >= p.Length && string.CompareOrdinal(path, 0, p, 0, p.Length) == 0 &&
             (path.Length == p.Length || path[p.Length] == '.');
 
-        private static GeoLevelController GeoLevel()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
-        }
-
         // ─── Law-7 drift backstop: per-root subtree CRC ─────────────────────
         // THE only host↔client reconciliation in the rail. Everything else compares host-NOW against
         // host-BEFORE (DiffAndEmit), so state the host DELETES is invisible by construction: a vanished
@@ -593,7 +587,7 @@ namespace Multiplayer.Network.Sync
         internal static void HandleCrcReport(ulong peerId, string rootKey, uint clientCrc, uint clientSeq)
         {
             if (string.IsNullOrEmpty(rootKey)) return;
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             if (geo == null) return;
             string tag = peerId + "|" + rootKey;
             var mine = IdentityResolver.Resolve(geo, rootKey, null);
@@ -805,7 +799,7 @@ namespace Multiplayer.Network.Sync
             // in this cycle's snapshot, so it survives in _forcePrefixes/_forceFull and gets its own cycle
             // on the very next frame (FlushNow already zeroed _nextTickAt).
             if (_cycleRoots == null && now < _nextTickAt) return;
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             if (geo == null) { AbandonCycle(); _nextTickAt = now + TickInterval; return; }
             ArmChangeDrivenFlush(geo.Timing);
 

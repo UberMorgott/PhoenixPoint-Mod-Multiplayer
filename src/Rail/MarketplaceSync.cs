@@ -139,10 +139,7 @@ namespace Multiplayer.Network.Sync
                 reconverge: () => HostBroadcastOffers("reject reconverge"));
         }
 
-        private static GeoLevelController GeoLevel() =>
-            GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>();
-
-        private static GeoMarketplace Market() => GeoLevel()?.Marketplace;
+        private static GeoMarketplace Market() => GenericApplier.GeoLevel()?.Marketplace;
 
         // ─── The game's own private funnels, borrowed rather than re-implemented ───
 
@@ -354,7 +351,7 @@ namespace Multiplayer.Network.Sync
         /// still lands) when this peer has no geoscape to put a shop in.</summary>
         private static bool ApplyOffers(List<KeyValuePair<string, float>> rows)
         {
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             var market = geo?.Marketplace;
             if (market?.MarketplaceChoices == null)
             {
@@ -448,7 +445,7 @@ namespace Multiplayer.Network.Sync
         {
             try
             {
-                var view = GeoLevel()?.View;
+                var view = GenericApplier.GeoLevel()?.View;
                 if (!(view?.CurrentViewState is UIStateMarketplaceGeoscapeEvent)) return;
                 var module = view.GeoscapeModules?.TheMarketplaceModule;
                 var ev = module == null ? null : ModuleGeoEvent?.GetValue(module) as GeoscapeEvent;
@@ -487,7 +484,7 @@ namespace Multiplayer.Network.Sync
             {
                 if (IntentRail.ShouldRunNative()) return true;
 
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 var module = geo?.View?.GeoscapeModules?.TheMarketplaceModule;
                 var ev = module == null ? null : ModuleGeoEvent?.GetValue(module) as GeoscapeEvent;
                 // The address is read off the CLICKED ROW ITSELF — never off its position in a list the
@@ -588,7 +585,7 @@ namespace Multiplayer.Network.Sync
             string eventId = r.ReadString();
             string key = r.ReadString();
 
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             var market = geo?.Marketplace;
             var choices = market?.MarketplaceChoices;
             if (geo == null || choices == null)

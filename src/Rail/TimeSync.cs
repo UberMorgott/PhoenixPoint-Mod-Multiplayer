@@ -173,18 +173,12 @@ namespace Multiplayer.Network.Sync
             IntentRail.Register(SurfaceIds.GeoTimeIntent, "time", ops);
         }
 
-        private static GeoLevelController GeoLevel()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
-        }
-
         /// <summary>Only the geoscape LEVEL clock is shared state; the interception module drives a
         /// private mini-game clock and stays native. No geoscape (mid-load) → native too: the reload
         /// boundary + save transfer own that window. Callers check <see cref="BindOk"/> first.</summary>
         private static bool IsLevelClock(UIModuleTimeControl module)
         {
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             return geo != null && ReferenceEquals(FTiming.GetValue(module), geo.Timing);
         }
 
@@ -318,7 +312,7 @@ namespace Multiplayer.Network.Sync
                 if (!IsLevelClock(__instance)) return true;  // interception clock / mid-load: local by design
                 try
                 {
-                    var geo = GeoLevel();
+                    var geo = GenericApplier.GeoLevel();
                     if (geo != null && geo.Timing.Paused != pause)
                         Send(OpPause, pause ? (byte)1 : (byte)0, pause ? "pause" : "resume");
                 }
@@ -374,7 +368,7 @@ namespace Multiplayer.Network.Sync
             {
                 try
                 {
-                    var geo = GeoLevel();
+                    var geo = GenericApplier.GeoLevel();
                     // Native is provably INERT here: its only side branch needs (!paused && timing.Paused)
                     // = a change (GeoscapeView.cs:1259), and the else-write is swallowed by the
                     // change-gated Paused setter (Timing.cs:112). So nothing to capture and nothing to
@@ -407,7 +401,7 @@ namespace Multiplayer.Network.Sync
         {
             byte val = r.ReadByte();
 
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             if (geo == null)
             { IntentRail.Reject(SurfaceIds.GeoTimeIntent, senderPeerId, "no geoscape op=" + op); return; }
 
@@ -458,7 +452,7 @@ namespace Multiplayer.Network.Sync
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return;
             if (Time.realtimeSinceStartup < _nextEnforceAt) return;
             _nextEnforceAt = Time.realtimeSinceStartup + 1f;
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             if (geo != null) TimeAnchor.EnforceDrift(geo);
         }
     }

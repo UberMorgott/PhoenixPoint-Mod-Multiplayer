@@ -64,7 +64,7 @@ namespace Multiplayer.Network.Sync
             string siteRef = IdentityResolver.RootRef(site) ?? "";
             if (IntentRail.ShouldRunNative())
             {
-                var es = GeoLevel()?.EventSystem;
+                var es = GenericApplier.GeoLevel()?.EventSystem;
                 var rec = es?.GetEventRecord(eventId);
                 string refusal = EventSync.ReofferRefusal(rec == null ? (GeoscapeEventRecordState?)null : rec.State);
                 EventPopup.BriefProbe(eventId, "reoffer-enabled", refusal == null
@@ -133,8 +133,6 @@ namespace Multiplayer.Network.Sync
                    "record (GeoSite.HasActiveEncounter is false)";
         }
 
-        private static GeoLevelController GeoLevel() =>
-            GameUtl.CurrentLevel() == null ? null : GameUtl.CurrentLevel().GetComponent<GeoLevelController>();
     }
 
     /// <summary>Door one: the site's own encounter row. Client relays; host/solo run native.</summary>

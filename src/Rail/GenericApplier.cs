@@ -112,7 +112,15 @@ namespace Multiplayer.Network.Sync
         /// whose squad is still the host's pre-battle save until a batch lands.</summary>
         internal static uint LastSeq => _lastSeq;
 
-        private static GeoLevelController GeoLevel()
+        /// <summary>The live <c>GeoLevelController</c>, or null off the geoscape / mid-load. THE one copy:
+        /// twenty-two identical private ones used to exist and three of them had drifted to
+        /// <c>CurrentLevel()?.GetComponent&lt;…&gt;()</c>, which is NOT the same question. <c>level == null</c>
+        /// runs Unity's <c>op_Equality</c> and answers "the native half is gone" for a destroyed Level; <c>?.</c>
+        /// is a plain reference test, sees the managed husk as alive and calls <c>GetComponent</c> on a dead
+        /// object. That is the exact hazard RailCheck's <c>L113_UnityIdentityEquality</c> exists for, so the
+        /// comparison lives in one place where it cannot drift again. Internal, like the
+        /// <see cref="StartedGeoLevel"/> next to it.</summary>
+        internal static GeoLevelController GeoLevel()
         {
             var level = GameUtl.CurrentLevel();
             return level == null ? null : level.GetComponent<GeoLevelController>();

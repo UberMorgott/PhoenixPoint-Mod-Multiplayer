@@ -144,12 +144,6 @@ namespace Multiplayer.Network.Sync
             IntentRail.Register(SurfaceIds.GeoResearchIntent, "research", ops);
         }
 
-        private static GeoLevelController GeoLevel()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<GeoLevelController>();
-        }
-
         // ─── CLIENT: intent capture (fed by the Harmony prefixes below) ────
 
         /// <summary>
@@ -238,7 +232,7 @@ namespace Multiplayer.Network.Sync
         private static ResearchElement LocateLive(string factionGuid, string researchId, out Research research)
         {
             research = null;
-            var geo = GeoLevel();
+            var geo = GenericApplier.GeoLevel();
             if (geo == null) { Debug.LogWarning("[Multiplayer][rail] ResearchSync: no geoscape level — dropping apply"); return null; }
             var faction = geo.Factions.FirstOrDefault(f => f.Def != null && f.Def.Guid == factionGuid);
             research = faction?.Research;
@@ -355,7 +349,7 @@ namespace Multiplayer.Network.Sync
         public static void ClientTick(NetworkEngine engine)
         {
             if (engine == null || !engine.IsActiveSession || engine.IsHost || _deferredCompleted.Count == 0) return;
-            PumpDeferredCompletions(GeoLevel());
+            PumpDeferredCompletions(GenericApplier.GeoLevel());
         }
 
         /// <summary>Law 11 repaint entry for the generic rail (UiEventMap): research values changed.</summary>
@@ -379,7 +373,7 @@ namespace Multiplayer.Network.Sync
         {
             try
             {
-                var geo = GeoLevel();
+                var geo = GenericApplier.GeoLevel();
                 var view = geo == null ? null : geo.View;
                 if (view == null || !(view.CurrentViewState is UIStateResearch)) return false;
                 var module = view.GeoscapeModules == null ? null : view.GeoscapeModules.ResearchModule;

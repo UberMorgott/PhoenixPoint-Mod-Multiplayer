@@ -1637,7 +1637,7 @@ namespace Multiplayer.Network.Sync
 
         private static GeoLevelController GeoLevel()
         {
-            try { return Base.Core.GameUtl.CurrentLevel()?.GetComponent<GeoLevelController>(); }
+            try { return GenericApplier.GeoLevel(); }
             catch { return null; }
         }
 
