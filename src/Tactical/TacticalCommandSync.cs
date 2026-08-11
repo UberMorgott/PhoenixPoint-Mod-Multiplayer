@@ -2915,9 +2915,19 @@ namespace Multiplayer.Tactical
             var target = ReadCommandTarget(r, unresolved);
             if (unresolved.Count > 0)
             {
+                // A REFUSAL MUST ALSO RELEASE, exactly as the Validate arm at :3005 does. Since L230 the
+                // click's native activation is suppressed WITH its state switch and _awaitingEcho is armed,
+                // and only a mirror or a settle clears that wait — a reject on its own clears neither. This
+                // arm ships none, so the refused soldier stayed un-orderable for the whole EchoCeiling, a
+                // second click was thrown away, and TickEchoWaits then logged "the host never mirrored it
+                // back" — untrue, the host had answered with a reason 12 s earlier.
+                // NOTIFY: a mod-protocol refusal leaving a dead gesture, which is the case IntentRail's own
+                // doc (:237-239) reserves the popup for — vanilla greys nothing here, it never saw the click.
                 IntentRail.Reject(SurfaceIds.TacCommandIntent, senderPeerId,
                                   "command for actor " + key + ": the host cannot name the target — " +
-                                  string.Join("; ", unresolved.ToArray()));
+                                  string.Join("; ", unresolved.ToArray()), true);
+                var unnamed = TacticalActorKey.ResolveActor(tlc, key, out _);
+                if (unnamed != null && !unnamed.HasExecutingAbility()) HostSettle(unnamed, forced: true);
                 return;
             }
 
@@ -3060,6 +3070,17 @@ namespace Multiplayer.Tactical
                     IntentRail.Reject(SurfaceIds.TacCommandIntent, d.Peer,
                                       "command for actor " + d.Key + ": that soldier is still executing this same " +
                                       "peer's previous order after " + DeferCeilingSeconds + "s");
+                    // Same debt as the unresolved arm in HandleActivate, and it must be paid UNCONDITIONALLY
+                    // here. The Validate arm at :3005 skips a busy actor because its running order's own
+                    // end-of-action settle is the corrector — but reaching this line means that settle is
+                    // precisely what did not come in DeferCeilingSeconds, which is what the line above says
+                    // out loud. Without one the client's _awaitingEcho sits to its own ceiling and then
+                    // blames a host that answered. NO notify here, unlike the arm in HandleActivate: this
+                    // method is not on L123's arm-(g) allowlist and adding it is a law decision, not a
+                    // drive-by. The settle is what unfreezes the player; the reason still crosses and is
+                    // still logged on his own client.
+                    var stuck = TacticalActorKey.ResolveActor(Tlc(), d.Key, out _);
+                    if (stuck != null) HostSettle(stuck, forced: true);
                     continue;
                 }
                 _deferred.RemoveAt(i);
