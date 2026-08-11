@@ -11,8 +11,33 @@ namespace Multiplayer.Network.MessageLayer
         /// length is read raw off the wire and fed to <c>BinaryReader.ReadBytes(len)</c>, which allocates
         /// <c>new byte[len]</c> eagerly — a crafted JOIN could declare ~2e9 and force a multi-GB alloc on the
         /// host. A real manifest (DLC + mods + settings) is a few KB; 64 KB rejects only hostile/corrupt
-        /// lengths while clearing even a large legitimate modlist.</summary>
+        /// lengths while clearing even a large legitimate modlist. The same hazard rides on every string:
+        /// <c>BinaryReader.ReadString</c> pre-sizes a StringBuilder from the wire-declared length before the
+        /// payload exists, so every read here goes through <see cref="ReadBoundedString"/> instead.</summary>
         public const int MaxManifestBytes = 64 * 1024;
+
+        private static readonly UTF8Encoding StrictUtf8 = new UTF8Encoding(false, true);
+
+        // FA-0012, the ReadString half: BinaryReader.ReadString pre-sizes a StringBuilder from the wire-declared
+        // byte length before reading the payload, so a 20-byte JOIN declaring 2^28 forces a ~512 MB allocation on
+        // the host — pre-auth, and long before the roster's nickname cap ever sees the string. Read the 7-bit
+        // prefix ourselves and reject a length the stream cannot back, exactly as the ReadBytes guards below do.
+        private static string ReadBoundedString(BinaryReader br)
+        {
+            int len = 0, shift = 0;
+            while (true)
+            {
+                if (shift > 28) throw new InvalidDataException("string: malformed length prefix");
+                var b = br.ReadByte();
+                len |= (b & 0x7F) << shift;
+                shift += 7;
+                if ((b & 0x80) == 0) break;
+            }
+            var s = br.BaseStream;
+            if (len < 0 || len > s.Length - s.Position)
+                throw new InvalidDataException("string: implausible length " + len);
+            return len == 0 ? string.Empty : StrictUtf8.GetString(br.ReadBytes(len));
+        }
 
         // ─── Lobby / Identity Messages ─────────────────────────────────────
 
@@ -49,7 +74,7 @@ namespace Multiplayer.Network.MessageLayer
             {
                 var msg = new JoinMessage();
                 msg.PlayerGuid = new Guid(br.ReadBytes(16));
-                msg.Nickname = br.ReadString();
+                msg.Nickname = ReadBoundedString(br);
                 // FIX-4: trailing parity manifest (backward-compatible). Only read the present-flag when
                 // the stream still has a byte, so a legacy 2-field JOIN parses with Manifest == null.
                 if (ms.Position < ms.Length && br.ReadBoolean())
@@ -117,24 +142,24 @@ namespace Multiplayer.Network.MessageLayer
 
                 var dlcCount = br.ReadInt32();
                 GuardCount(dlcCount);
-                for (var i = 0; i < dlcCount; i++) m.Dlc.Add(br.ReadString());
+                for (var i = 0; i < dlcCount; i++) m.Dlc.Add(ReadBoundedString(br));
 
                 var modCount = br.ReadInt32();
                 GuardCount(modCount);
                 for (var i = 0; i < modCount; i++)
-                    m.Mods.Add(new Parity.ModRef { Id = br.ReadString(), Version = br.ReadString() });
+                    m.Mods.Add(new Parity.ModRef { Id = ReadBoundedString(br), Version = ReadBoundedString(br) });
 
                 var setCount = br.ReadInt32();
                 GuardCount(setCount);
                 for (var i = 0; i < setCount; i++)
                 {
-                    var s = new Parity.ModSettings { ModId = br.ReadString(), Hash = br.ReadUInt32() };
+                    var s = new Parity.ModSettings { ModId = ReadBoundedString(br), Hash = br.ReadUInt32() };
                     var entryCount = br.ReadInt32();
                     GuardCount(entryCount);
-                    for (var j = 0; j < entryCount; j++) s.Entries.Add(br.ReadString());
+                    for (var j = 0; j < entryCount; j++) s.Entries.Add(ReadBoundedString(br));
                     m.Settings.Add(s);
                 }
-                if (ms.Position < ms.Length) m.GameVersion = br.ReadString(); // see the writer's note
+                if (ms.Position < ms.Length) m.GameVersion = ReadBoundedString(br); // see the writer's note
                 return m;
             }
         }
@@ -204,7 +229,7 @@ namespace Multiplayer.Network.MessageLayer
                     {
                         SteamId = br.ReadUInt64(),
                         PlayerGuid = new Guid(br.ReadBytes(16)),
-                        Nickname = br.ReadString(),
+                        Nickname = ReadBoundedString(br),
                         Permissions = br.ReadInt32(),
                         Ready = br.ReadByte() != 0,
                         IsHost = br.ReadByte() != 0,
@@ -214,7 +239,7 @@ namespace Multiplayer.Network.MessageLayer
                 // Trailing parity block (see SerializePeerList) — absent on a legacy sender.
                 if (ms.Position < ms.Length && br.ReadBoolean())
                     for (var i = 0; i < n; i++)
-                        peers[i].ParityDiffs = br.ReadString();
+                        peers[i].ParityDiffs = ReadBoundedString(br);
                 // Trailing status block (see the writer). Absent on a sender that predates the player panel;
                 // its rows then read as connected + not-ready, which is what an unknown flag should look like.
                 if (ms.Position < ms.Length && br.ReadBoolean())
@@ -227,7 +252,7 @@ namespace Multiplayer.Network.MessageLayer
                 // Trailing host-invite-code block (see the writer). Absent on a sender that predates it,
                 // which reads as "no code yet" — exactly what an unknown value should look like.
                 if (ms.Position < ms.Length && br.ReadBoolean())
-                    inviteCode = br.ReadString();
+                    inviteCode = ReadBoundedString(br);
                 return peers;
             }
         }
@@ -270,7 +295,7 @@ namespace Multiplayer.Network.MessageLayer
             using (var br = new BinaryReader(ms))
             {
                 var steamId = br.ReadUInt64();
-                var name = br.ReadString();
+                var name = ReadBoundedString(br);
                 return (steamId, name);
             }
         }
@@ -305,8 +330,8 @@ namespace Multiplayer.Network.MessageLayer
             using (var br = new BinaryReader(ms))
             {
                 var senderSteamId = br.ReadUInt64();
-                var senderNick = br.ReadString();
-                var text = br.ReadString();
+                var senderNick = ReadBoundedString(br);
+                var text = ReadBoundedString(br);
                 var kind = br.ReadByte();
                 var seq = ms.Position < ms.Length ? br.ReadUInt32() : 0u; // unstamped sender → 0 → never dedup'd
                 return new ChatMessageData
@@ -338,8 +363,8 @@ namespace Multiplayer.Network.MessageLayer
             using (var ms = new MemoryStream(data))
             using (var br = new BinaryReader(ms))
             {
-                var name = br.ReadString();
-                var meta = br.ReadString();
+                var name = ReadBoundedString(br);
+                var meta = ReadBoundedString(br);
                 return (name, meta);
             }
         }
@@ -410,7 +435,7 @@ namespace Multiplayer.Network.MessageLayer
             {
                 var id = new Guid(br.ReadBytes(16));
                 var total = br.ReadInt64();
-                var ext = br.ReadString();
+                var ext = ReadBoundedString(br);
                 var crc = br.ReadUInt32();
                 // Backward-compatible read: the onDemandJoin flag is a trailing append. Only read it when
                 // the stream still has a byte, so a legacy 4-field SaveDone parses with onDemandJoin=false.
@@ -587,7 +612,7 @@ namespace Multiplayer.Network.MessageLayer
             using (var ms = new MemoryStream(data))
             using (var br = new BinaryReader(ms))
             {
-                return br.ReadString();
+                return ReadBoundedString(br);
             }
         }
 
