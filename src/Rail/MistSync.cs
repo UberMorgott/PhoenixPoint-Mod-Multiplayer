@@ -63,8 +63,16 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>Worker → main-thread handoff. ONE reference store, so the two values can never be
         /// read half-updated by the walk (which only ever runs on the main thread).</summary>
-        private sealed class Shipment { public string Data; public int Hours; }
+        private sealed class Shipment { public string Data; public int Hours; public int Epoch; }
         private static volatile Shipment _ready;
+
+        /// <summary>Which reload boundary the in-flight encode belongs to. <see cref="ResetForReloadBoundary"/>
+        /// can clear <see cref="_ready"/> but cannot reach a ThreadPool item already running, so a worker
+        /// queued BEFORE the boundary would otherwise land after it and re-publish the PRE-boundary array —
+        /// and with <see cref="_lastShippedHours"/> already advanced by a post-boundary worker, the
+        /// <c>hours == _lastShippedHours</c> gate then blocks every further ship until the game hour turns.
+        /// Written and read on the main thread only; a worker merely carries the value it captured.</summary>
+        private static int _epoch;
 
         private static float _nextTickAt;
         private static int _lastShippedHours = -1;   // host: the _hoursPassed we last encoded
@@ -85,6 +93,7 @@ namespace Multiplayer.Network.Sync
             _lastShippedHours = -1;
             _lastApplied = null;
             _nextTickAt = 0f;
+            _epoch++;   // orphan whatever encode is still in flight — see _epoch
         }
 
         internal static void Reset() => ResetForReloadBoundary();
@@ -107,8 +116,16 @@ namespace Multiplayer.Network.Sync
             if (ready != null)
             {
                 _ready = null;
-                State.MistData = ready.Data;
-                State.HoursPassed = ready.Hours;
+                if (ready.Epoch == _epoch)
+                {
+                    State.MistData = ready.Data;
+                    State.HoursPassed = ready.Hours;
+                }
+                else
+                    // A pre-boundary worker landed on top of a valid post-boundary shipment. Dropping it is
+                    // half the fix; the other half is re-arming, or _lastShippedHours would keep the gate
+                    // below shut on the clobbered hour until the campaign clock moved on.
+                    _lastShippedHours = -1;
             }
 
             if (Time.realtimeSinceStartup < _nextTickAt) return;
@@ -126,6 +143,7 @@ namespace Multiplayer.Network.Sync
             var raw = native.ToArray();
             var copyMs = (Time.realtimeSinceStartup - t0) * 1000f;
             _lastShippedHours = hours;
+            int epoch = _epoch;
 
             ThreadPool.QueueUserWorkItem(_ =>
             {
@@ -135,6 +153,7 @@ namespace Multiplayer.Network.Sync
                     {
                         Data = Convert.ToBase64String(MistRendererSystem.Compress(raw)),
                         Hours = hours,
+                        Epoch = epoch,
                     };
                 }
                 catch (Exception ex) { Debug.LogError("[Multiplayer][rail] MistSync encode failed: " + ex); }
