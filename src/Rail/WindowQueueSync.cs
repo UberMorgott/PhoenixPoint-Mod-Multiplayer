@@ -1186,8 +1186,14 @@ namespace Multiplayer.Network.Sync
         internal static string ResolvedSubjectName(object holder)
         {
             var mission = SubjectMission(holder);
-            if (mission == null || !HasResolved(mission)) return null;
-            return mission.MissionDef == null ? "?" : mission.MissionDef.name;
+            if (mission != null && HasResolved(mission))
+                return mission.MissionDef == null ? "?" : mission.MissionDef.name;
+
+            var evt = SubjectEvent(holder);
+            if (evt != null && evt.IsCompleted)
+                return "event:" + (evt.EventID ?? "?");
+
+            return null;
         }
 
         /// <summary>The game's OWN verdict that a mission is over (<c>UIStateInitial.EnterState</c>:102),
@@ -1208,19 +1214,30 @@ namespace Multiplayer.Network.Sync
         /// for deriving a shape from the runtime type). A context with no mission in it returns null and is
         /// restored exactly as before.
         ///
-        /// MEASURED REACH, not assumed: of the five <c>IGeoscapeRestorableViewState</c> implementors only
-        /// <c>UIStateGeoModal</c> can hold a mission at all (<c>UIStateGeoscapeEvent</c>,
-        /// <c>UIStateBaseGeoscapeEvent</c>, <c>UIStateMarketplaceGeoscapeEvent</c> and
-        /// <c>UIStateAssetDeployment</c> name no <c>GeoMission</c> anywhere in their decompiled source), so
-        /// the post-mission event window — <c>PROG_AN0_WIN</c> and every sibling — CANNOT be reached by this
-        /// filter even though it is raised seconds after the mission it celebrates. That is not luck and it
-        /// is not a carve-out: it falls out of keying on the subject the window actually carries.</summary>
+        /// MEASURED REACH: <c>SubjectMission</c> field-walks for <c>GeoMission</c> and covers
+        /// <c>UIStateGeoModal</c>. <c>SubjectEvent</c> field-walks for <c>GeoscapeEvent</c> and covers
+        /// <c>UIStateGeoscapeEvent</c> / <c>UIStateBaseGeoscapeEvent</c> / siblings — their auto-property
+        /// backing field carries no <c>GeoMission</c> but does carry a <c>GeoscapeEvent</c> whose
+        /// <c>IsCompleted</c> flag is the game's own "already answered" verdict.</summary>
         internal static GeoMission SubjectMission(object context)
         {
             if (context == null) return null;
             for (var t = context.GetType(); t != null && t != typeof(object); t = t.BaseType)
                 foreach (var f in t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
                     if (f.GetValue(context) is GeoMission m) return m;
+            return null;
+        }
+
+        /// <summary>Same field-walk as <see cref="SubjectMission"/> but for a <c>GeoscapeEvent</c>.
+        /// Reaches <c>UIStateGeoscapeEvent</c> and siblings whose auto-property backing field
+        /// (<c>&lt;Event&gt;k__BackingField</c>) carries no <c>GeoMission</c> and was therefore
+        /// invisible to the mission walk.</summary>
+        internal static GeoscapeEvent SubjectEvent(object context)
+        {
+            if (context == null) return null;
+            for (var t = context.GetType(); t != null && t != typeof(object); t = t.BaseType)
+                foreach (var f in t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                    if (f.GetValue(context) is GeoscapeEvent e) return e;
             return null;
         }
     }
