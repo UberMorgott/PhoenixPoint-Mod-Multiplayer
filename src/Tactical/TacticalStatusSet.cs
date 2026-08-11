@@ -200,8 +200,8 @@ namespace Multiplayer.Tactical
         /// every other actor in the same message.</summary>
         internal static List<string> Read(BinaryReader r)
         {
-            int n = r.ReadInt32();
-            var keys = new List<string>(n < 0 ? 0 : n);
+            int n = MessageSerializer.ReadBoundedCount(r, 7); // name 1 + refKey 4 + source 1 + target 1
+            var keys = new List<string>(n);
             for (int i = 0; i < n; i++)
             {
                 string name = WireString.ReadKey(r);

@@ -314,7 +314,7 @@ namespace Multiplayer.Tactical
             payerAp = r.ReadSingle();
             charged = r.ReadByte() != 0;
             partial = r.ReadByte() != 0;
-            int n = r.ReadInt32();
+            int n = MessageSerializer.ReadBoundedCount(r, 9); // actor key 4 + kind 1 + item count 4
             var slots = new List<Slot>(n);
             for (int i = 0; i < n; i++)
             {
@@ -324,7 +324,7 @@ namespace Multiplayer.Tactical
                     s.SetGuid = WireString.ReadKey(r);
                     s.Pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
                 }
-                int items = r.ReadInt32();
+                int items = MessageSerializer.ReadBoundedCount(r, 5); // def guid 1 + charges 4
                 for (int j = 0; j < items; j++) { s.ItemDefs.Add(WireString.ReadKey(r)); s.ItemCharges.Add(r.ReadInt32()); }
                 slots.Add(s);
             }

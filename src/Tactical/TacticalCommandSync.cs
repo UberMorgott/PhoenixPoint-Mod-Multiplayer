@@ -1432,8 +1432,8 @@ namespace Multiplayer.Tactical
 
         internal static List<string> ReadTraits(BinaryReader r)
         {
-            int n = r.ReadInt32();
-            var traits = new List<string>(n < 0 ? 0 : n);
+            int n = MessageSerializer.ReadBoundedCount(r);
+            var traits = new List<string>(n);
             for (int i = 0; i < n; i++) traits.Add(WireString.ReadKey(r));
             return traits;
         }
@@ -1450,8 +1450,8 @@ namespace Multiplayer.Tactical
 
         internal static Dictionary<string, int> ReadUses(BinaryReader r)
         {
-            int n = r.ReadInt32();
-            var d = new Dictionary<string, int>(n < 0 ? 0 : n, StringComparer.Ordinal);
+            int n = MessageSerializer.ReadBoundedCount(r, 5); // def guid 1 + count 4
+            var d = new Dictionary<string, int>(n, StringComparer.Ordinal);
             for (int i = 0; i < n; i++) { string g = WireString.ReadKey(r); d[g] = r.ReadInt32(); }
             return d;
         }
@@ -3325,8 +3325,8 @@ namespace Multiplayer.Tactical
 
         internal static List<VisionRow> ReadVision(BinaryReader r)
         {
-            int n = r.ReadInt32();
-            var rows = new List<VisionRow>(n < 0 ? 0 : n);
+            int n = MessageSerializer.ReadBoundedCount(r, 3); // faction guid 1 + located 1 + revealed 1
+            var rows = new List<VisionRow>(n);
             for (int i = 0; i < n; i++)
                 rows.Add(new VisionRow { FactionGuid = WireString.ReadKey(r),
                                          Located = r.ReadByte(), Revealed = r.ReadByte() });

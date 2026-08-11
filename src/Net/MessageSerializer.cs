@@ -46,6 +46,29 @@ namespace Multiplayer.Network.MessageLayer
             return len == 0 ? string.Empty : StrictUtf8.GetString(br.ReadBytes(len));
         }
 
+        // FA-0012, the COUNT half — the level above ReadBoundedString. A string ceiling does not bound the
+        // array count in front of it: a decoder that reads `int n = r.ReadInt32()` and loops n times spins
+        // allocate-and-throw until the stream is exhausted, and any `new List<T>(n)` in between pre-sizes a
+        // multi-GB backing array on the sender's word alone before the first entry is read.
+        //
+        // The bound is the same one DeserializeParityManifest's GuardCount uses and needs no invented magic
+        // number: every entry consumes at least one byte, so a count larger than the bytes REMAINING in the
+        // stream is impossible by construction. <paramref name="minBytesPerEntry"/> tightens that to the
+        // entry's real floor where the shape gives one honestly — count only the fields every iteration reads
+        // unconditionally, a string as its 1-byte length prefix, and nothing behind an `if`.
+        //
+        // Lives here beside ReadBoundedString and NOT on WireString for two reasons: this is the FA-0012 home
+        // L414 arm (b) points at, and L322 arm (c) counts "a string read" as anything declared on WireString,
+        // so a count helper over there would read as a wire string to a law that counts fields.
+        internal static int ReadBoundedCount(BinaryReader br, int minBytesPerEntry = 1)
+        {
+            var n = br.ReadInt32();
+            var s = br.BaseStream;
+            if (n < 0 || (long)n * minBytesPerEntry > s.Length - s.Position)
+                throw new InvalidDataException("collection: implausible count " + n);
+            return n;
+        }
+
         // ─── Lobby / Identity Messages ─────────────────────────────────────
 
         // JOIN (reuses ConnectionRequest payload): persistent identity on connect.

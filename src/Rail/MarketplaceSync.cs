@@ -332,7 +332,7 @@ namespace Multiplayer.Network.Sync
                 using (var r = new BinaryReader(ms, Encoding.UTF8))
                 {
                     seq = r.ReadUInt32();
-                    int count = r.ReadInt32();
+                    int count = MessageSerializer.ReadBoundedCount(r, 5); // key 1 + price 4
                     for (int i = 0; i < count; i++)
                     {
                         string key = WireString.ReadKey(r);

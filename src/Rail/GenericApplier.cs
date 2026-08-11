@@ -356,7 +356,9 @@ namespace Multiplayer.Network.Sync
                 bool fragmented = (op & DiffEngine.FragmentedBlobFlag) != 0;
                 op &= unchecked((byte)~DiffEngine.FragmentedBlobFlag);
                 string rootKey = MessageSerializer.ReadBoundedString(r);
-                var blob = r.ReadBytes(r.ReadInt32());
+                // The blob length is a byte count, so the "one byte per entry" floor is the exact bound: a
+                // length the stream cannot back would otherwise have ReadBytes allocate new byte[len] first.
+                var blob = r.ReadBytes(MessageSerializer.ReadBoundedCount(r));
                 // A blob too big for the u16 envelope arrives as fragments (DiffEngine.FragmentStructuralBlob),
                 // reassembled by the SAME buffer the entry rail uses. Nothing below knows it was ever split;
                 // an incomplete blob simply is not a packet to apply yet. The seq was already accepted, so a

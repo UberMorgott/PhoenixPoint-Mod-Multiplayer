@@ -139,8 +139,8 @@ namespace Multiplayer.Tactical
         internal static Identity Read(BinaryReader r)
         {
             string name = WireString.ReadText(r);
-            int n = r.ReadInt32();
-            var tags = new List<string>(n < 0 ? 0 : n);
+            int n = MessageSerializer.ReadBoundedCount(r);
+            var tags = new List<string>(n);
             for (int i = 0; i < n; i++) tags.Add(WireString.ReadKey(r));
             return string.IsNullOrEmpty(name) && tags.Count == 0 ? null : new Identity { Name = name, Tags = tags };
         }

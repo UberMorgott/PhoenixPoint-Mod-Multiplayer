@@ -185,13 +185,13 @@ namespace Multiplayer.Tactical
             if ((mask & BitDamageTypeDef) != 0) d.DamageTypeDef = Def<DamageTypeBaseEffectDef>(WireString.ReadKey(r), "DamageTypeDef", notes);
             if ((mask & BitRelatedDamageTypeDefs) != 0)
             {
-                int n = r.ReadInt32();
+                int n = MessageSerializer.ReadBoundedCount(r);
                 d.RelatedDamageTypeDefs = new List<DamageTypeBaseEffectDef>(n);
                 for (int i = 0; i < n; i++) d.RelatedDamageTypeDefs.Add(Def<DamageTypeBaseEffectDef>(WireString.ReadKey(r), "RelatedDamageTypeDef", notes));
             }
             if ((mask & BitApplyStatuses) != 0)
             {
-                int n = r.ReadInt32();
+                int n = MessageSerializer.ReadBoundedCount(r, 14); // key 1 + value 4 + srcKey 4 + slot 1 + cooldown 4
                 d.ApplyStatuses = new List<StatusApplication>(n);
                 for (int i = 0; i < n; i++)
                 {
@@ -213,7 +213,7 @@ namespace Multiplayer.Tactical
             }
             if ((mask & BitStatModifications) != 0)
             {
-                int n = r.ReadInt32();
+                int n = MessageSerializer.ReadBoundedCount(r, 13); // type 4 + name 1 + value 4 + applied 4
                 d.StatModifications = new List<StatModification>(n);
                 for (int i = 0; i < n; i++)
                 {
@@ -226,7 +226,7 @@ namespace Multiplayer.Tactical
             }
             if ((mask & BitActorEffects) != 0)
             {
-                int n = r.ReadInt32();
+                int n = MessageSerializer.ReadBoundedCount(r);
                 d.ActorEffects = new List<EffectDef>(n);
                 for (int i = 0; i < n; i++) d.ActorEffects.Add(Def<EffectDef>(WireString.ReadKey(r), "ActorEffect", notes));
             }
@@ -958,7 +958,8 @@ namespace Multiplayer.Tactical
         private static void ApplyResnap(BinaryReader r)
         {
             var tlc = Tlc();
-            int n = r.ReadInt32();
+            // key 4 + hp/ap/wp 12 + dead 1 + slot count 4 + item count 4; the loot manifest is behind `dead`.
+            int n = MessageSerializer.ReadBoundedCount(r, 25);
             int fixedUp = 0, lost = 0, itemsLost = 0, rewound = 0;
             string firstItemWhy = null;
             // THE RESNAPSHOT CAN BE OLDER THAN WHAT IS ALREADY HERE. ApplySettle has had a staleness guard
@@ -976,7 +977,7 @@ namespace Multiplayer.Tactical
                     // A5: the manifest must be DECLARED before the forced death below, for exactly A4's reason —
                     // DieAbility.DropItems asks its questions inside that same synchronous chain.
                     if (dead) LootMirror.Declare(key, TacticalActorLifecycle.ReadLoot(r));
-                    int slots = r.ReadInt32();
+                    int slots = MessageSerializer.ReadBoundedCount(r, 9); // name 1 + health 4 + armor 4
                     string why;
                     var actor = TacticalActorKey.Resolve(tlc, key, out why);
                     if (actor == null) lost++;
@@ -992,7 +993,7 @@ namespace Multiplayer.Tactical
                     }
                     // The carried items, same discipline: bytes consumed whether or not this peer can resolve
                     // the actor, because every actor behind it in the stream is queued on them.
-                    int itemCount = r.ReadInt32();
+                    int itemCount = MessageSerializer.ReadBoundedCount(r, 10); // slot 1 + guid 1 + health 4 + armor 4
                     for (int k = 0; k < itemCount; k++)
                     {
                         string iSlot = WireString.ReadKey(r), iGuid = WireString.ReadKey(r);

@@ -469,7 +469,7 @@ namespace Multiplayer.Tactical
 
         internal static List<KeyValuePair<string, bool>> ReadLoot(BinaryReader r)
         {
-            int n = r.ReadInt32();
+            int n = MessageSerializer.ReadBoundedCount(r, 2); // def guid 1 + destroy flag 1
             var list = new List<KeyValuePair<string, bool>>(n);
             for (int i = 0; i < n; i++)
             {
