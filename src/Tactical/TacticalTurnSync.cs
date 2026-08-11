@@ -497,6 +497,10 @@ namespace Multiplayer.Tactical
                                "other peer is back on the geoscape.");
                 return;
             }
+            // Direct, NOT through InvokeNativeLeave: L64's leave-apply-hand-rolled arm reads THIS method's IL
+            // for the native handle and does not follow a helper. It also needs no latch rollback — a client
+            // applying the host's leave has broadcast nothing to retract, and its own Continue button still
+            // runs the native exit (the capture prefix is non-blocking), so a throw here strands nobody.
             using (SyncApplyScope.Enter()) GoToGeoscapeMethod.Invoke(tlc.View, null);
             Debug.Log("[Multiplayer][tac] CLIENT host-left-battle APPLIED — running this peer's own " +
                       "GoToGeoscape → FinishLevel → geoscape.");
@@ -668,6 +672,38 @@ namespace Multiplayer.Tactical
         /// which <see cref="Tlc"/> is null and the validator refuses on that instead.</summary>
         internal static bool LeftBattle;
 
+        /// <summary>THE ONE WAY THIS MOD RUNS THE NATIVE EXIT — and the only place the latch can be dropped
+        /// again. <see cref="LeftBattle"/> is set by the PREFIX (<see cref="OnLocalLeaveBattle"/>), which by
+        /// construction cannot see whether the body it fronts actually completed. So when the body throws the
+        /// peer half-left: on the host the announcement is already out (see below), the level never leaves
+        /// Playing, and <see cref="TacLevelEndBarrier"/> — the ONLY thing that clears the latch on a normal
+        /// arrival (TacticalLevelController.OnLevelStateChanged, out of Playing → <see cref="Reset"/>) — never
+        /// runs. The host then sits in a battle it told everyone it left, with <see cref="ValidateLeave"/>'s
+        /// <c>alreadyLeaving</c> arm refusing every remaining peer's retry: nobody can get it out.
+        ///
+        /// THE BROADCAST CANNOT BE TAKEN BACK and this does not pretend otherwise — the peers already ran
+        /// their own FinishLevel and are loading the geoscape; there is no un-leave and inventing one would
+        /// be a second, divergent way to move a peer between levels. What IS recoverable is the LATCH, so
+        /// that is exactly what rolls back: a retry (this peer's own Continue, or a remaining peer's ask)
+        /// gets a host that will honour it instead of a permanently refused one. Loud, because a session
+        /// that reached here is already split.
+        ///
+        /// Rethrows: the caller's existing error path is unchanged (the host dispatch catches at
+        /// IntentRail.HandleInbound and turns it into a reject the asking peer can read).</summary>
+        internal static void InvokeNativeLeave(PhoenixPoint.Tactical.View.TacticalView view)
+        {
+            try { GoToGeoscapeMethod.Invoke(view, null); }
+            catch
+            {
+                LeftBattle = false;
+                Debug.LogError("[Multiplayer][tac] the native GoToGeoscape THREW after this peer had already " +
+                               "latched the leave — dropping the latch so a retry is possible. If this is the " +
+                               "host, the leave announcement is already out and every other peer is on its way " +
+                               "to the geoscape while this one is still in the battle: press Continue again.");
+                throw;
+            }
+        }
+
         /// <summary>May a remaining peer's Continue click end the battle FOR THE HOST? PURE — plain facts off
         /// the HOST's own level only (law 3), so the arbitration is falsifiable headless (RailCheck L64):
         /// "any peer may end any battle" is the same hole the turn arbiter above exists to close.
@@ -722,7 +758,7 @@ namespace Multiplayer.Tactical
             // law 5): GoToGeoscape builds the TacticalGameResult from the HOST's own actors and FinishLevel
             // carries it into GeoMission.Complete. The client contributed the ask, nothing else — its own
             // local Complete is still blocked by ClientMissionResultGate.
-            GoToGeoscapeMethod.Invoke(tlc.View, null);
+            InvokeNativeLeave(tlc.View);
             Debug.Log("[Multiplayer][tac] HOST leave-battle intent from peer=" + senderPeerId + " nonce=" + nonce +
                       " ACCEPTED — running the host's own GoToGeoscape → FinishLevel → geoscape.");
         }
