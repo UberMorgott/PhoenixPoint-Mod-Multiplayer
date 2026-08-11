@@ -178,7 +178,9 @@ namespace Multiplayer.Network.Sync
             return fs;
         }
 
-        private sealed class ReferenceEqualityComparer : IEqualityComparer<object>
+        /// <summary>Identity-keyed set comparer for the reflection walks. One copy for the namespace —
+        /// net472 has no BCL <c>ReferenceEqualityComparer</c> (that type is .NET 5+).</summary>
+        internal sealed class ReferenceEqualityComparer : IEqualityComparer<object>
         {
             public static readonly ReferenceEqualityComparer Instance = new ReferenceEqualityComparer();
             bool IEqualityComparer<object>.Equals(object x, object y) => ReferenceEquals(x, y);

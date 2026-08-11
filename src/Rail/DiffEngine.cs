@@ -113,7 +113,7 @@ namespace Multiplayer.Network.Sync
         // All three are refilled from scratch each tick, so nothing carries over.
         private static Dictionary<string, Entry> _snapshotBack = new Dictionary<string, Entry>(StringComparer.Ordinal);
         private static readonly List<Entry> _ordered = new List<Entry>();
-        private static readonly HashSet<object> _visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        private static readonly HashSet<object> _visited = new HashSet<object>(DefOwnership.ReferenceEqualityComparer.Instance);
         private static readonly Dictionary<Type, byte> _kindIds = new Dictionary<Type, byte>();
         private static readonly List<Type> _kinds = new List<Type>();
         private static readonly HashSet<byte> _sentKinds = new HashSet<byte>();
@@ -399,7 +399,7 @@ namespace Multiplayer.Network.Sync
         // RootCrc's own scratch — see there. Separate from the periodic walk's set on purpose: a CRC may be
         // taken on the host mid-cycle (HandleCrcReport) and must not disturb the cycle in progress.
         private static readonly List<Entry> _crcOrdered = new List<Entry>();
-        private static readonly HashSet<object> _crcVisited = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        private static readonly HashSet<object> _crcVisited = new HashSet<object>(DefOwnership.ReferenceEqualityComparer.Instance);
         private static readonly Dictionary<string, Entry> _crcSnap = new Dictionary<string, Entry>(StringComparer.Ordinal);
         // Subtree paths the rail declares PER-PEER (see IsPeerLocal). Recorded by the walk where it drops the
         // element; excluded from the CRC because both peers legitimately hold different ones, so hashing them
@@ -1844,13 +1844,6 @@ namespace Multiplayer.Network.Sync
                           _entityCounts.Count + " types, " + _walkIncidents.Count + " walk incidents → " + file);
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][rail] coverage report failed: " + ex.Message); }
-        }
-
-        private sealed class ReferenceEqualityComparer : IEqualityComparer<object>
-        {
-            public static readonly ReferenceEqualityComparer Instance = new ReferenceEqualityComparer();
-            bool IEqualityComparer<object>.Equals(object x, object y) => ReferenceEquals(x, y);
-            int IEqualityComparer<object>.GetHashCode(object obj) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(obj);
         }
     }
 }

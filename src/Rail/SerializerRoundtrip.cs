@@ -43,13 +43,10 @@ namespace Multiplayer.Rail
             _reflectionReady = _serializerType != null;
         }
 
+        // Diagnostics only (log line), never on the wire — so the in-assembly Crc32 does the job and
+        // there is no second hand-rolled hash to keep honest.
         private static string BytesHash(byte[] b)
-        {
-            if (b == null) return "null";
-            uint h = 2166136261u;
-            for (int i = 0; i < b.Length; i++) { h ^= b[i]; h *= 16777619u; }
-            return "len=" + b.Length + " fnv=" + h.ToString("X8");
-        }
+            => b == null ? "null" : "len=" + b.Length + " crc=" + Multiplayer.Util.Crc32.Compute(b).ToString("X8");
 
         private static string GraphTypeNames(object[] graph)
         {
