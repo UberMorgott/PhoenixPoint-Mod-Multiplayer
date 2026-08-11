@@ -273,6 +273,18 @@ namespace RailCheck
                 // computed per refusal (ReferenceEquals(refusal, BusyRefusal)), so every OTHER arm of Validate
                 // — the game's own ability gate, AP, WP, target-not-offered — still crosses quietly.
                 "Multiplayer.Tactical.TacticalCommandSync.HandleActivate",
+                // The give-up arm of the SAME hold L146's entry is about, one ceiling later. An order held
+                // behind its own peer's previous one is a co-op-only object: it exists because that peer plays
+                // speculatively and is a whole order ahead of the host's presentation, which single player
+                // cannot produce — there is no second machine. So vanilla has nothing to grey; it never saw
+                // the click. What makes this one worse than the arm it follows is the delay: the verdict lands
+                // up to DeferCeilingSeconds (10 s) after the gesture, on an order that is then DISCARDED, and
+                // the forced settle beside it snaps the soldier back to where the host left him. Without a
+                // line that reads as the host rubber-banding a soldier for no reason ten seconds later — a
+                // silent drop is exactly what this arm's popup exists to prevent. Fires only from HostTick's
+                // ceiling, i.e. only when the running ability is genuinely STUCK; every ordinary busy refusal
+                // still crosses quietly through the Validate arm.
+                "Multiplayer.Tactical.TacticalCommandSync.HostTick",
                 // L187: a loadout change this peer MADE was undone on the host by a stale open-screen flush
                 // (2026-08-07, seven applies in eleven seconds). Co-op-invented in the strongest sense —
                 // single player has no second screen to flush over your change, so vanilla has no control to

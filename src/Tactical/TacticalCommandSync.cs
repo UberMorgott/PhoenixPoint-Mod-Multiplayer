@@ -2152,18 +2152,23 @@ namespace Multiplayer.Tactical
                     Debug.LogError("[Multiplayer][tac] a held order for actor " + d.Key + " from peer=" + d.Peer +
                                    " gave up after " + DeferCeilingSeconds + "s — that soldier never finished the " +
                                    "SAME peer's previous order, so an ability is stuck on the host, not merely slow.");
+                    // NOTIFY, and it is on L123's arm-(g) allowlist for it. The hold this gives up on exists
+                    // ONLY in co-op — it is a peer's order queued behind its OWN previous order still running
+                    // on the host, which single player cannot produce because there is no second machine
+                    // playing ahead of the host's presentation. Vanilla therefore has nothing to grey: it
+                    // never saw the click. And the verdict lands up to DeferCeilingSeconds AFTER it, on an
+                    // order that is now DISCARDED, so the settle below snaps his soldier back with no word on
+                    // screen — the same "reads as a bug rather than a verdict" the L146 and L187 entries were
+                    // written for.
                     IntentRail.Reject(SurfaceIds.TacCommandIntent, d.Peer,
                                       "command for actor " + d.Key + ": that soldier is still executing this same " +
-                                      "peer's previous order after " + DeferCeilingSeconds + "s");
+                                      "peer's previous order after " + DeferCeilingSeconds + "s", true);
                     // Same debt as the unresolved arm in HandleActivate, and it must be paid UNCONDITIONALLY
                     // here. The Validate arm at :3005 skips a busy actor because its running order's own
                     // end-of-action settle is the corrector — but reaching this line means that settle is
                     // precisely what did not come in DeferCeilingSeconds, which is what the line above says
                     // out loud. Without one the client's _awaitingEcho sits to its own ceiling and then
-                    // blames a host that answered. NO notify here, unlike the arm in HandleActivate: this
-                    // method is not on L123's arm-(g) allowlist and adding it is a law decision, not a
-                    // drive-by. The settle is what unfreezes the player; the reason still crosses and is
-                    // still logged on his own client.
+                    // blames a host that answered.
                     var stuck = TacticalActorKey.ResolveActor(Tlc(), d.Key, out _);
                     if (stuck != null) HostSettle(stuck, forced: true);
                     continue;
