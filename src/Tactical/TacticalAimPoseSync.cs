@@ -108,11 +108,7 @@ namespace Multiplayer.Tactical
                                 new Dictionary<byte, IntentRail.OpHandler> { [OpSetAim] = HandleSetAim });
         }
 
-        private static TacticalLevelController Tlc()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<TacticalLevelController>();
-        }
+        private static TacticalLevelController Tlc() => TacticalDamageSync.Tlc();
 
         private static NetworkEngine LiveEngine()
         {

@@ -132,11 +132,7 @@ namespace Multiplayer.Tactical
             SurfaceRouter.ClientBehindTurnEdge = ClientBehindTurnEdge;
         }
 
-        private static TacticalLevelController Tlc()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<TacticalLevelController>();
-        }
+        private static TacticalLevelController Tlc() => TacticalDamageSync.Tlc();
 
         private static string Guid(TacticalFaction f) => f?.TacticalFactionDef?.Guid;
         private static string Name(TacticalFaction f) => f?.TacticalFactionDef?.name ?? "<null>";

@@ -168,11 +168,7 @@ namespace Multiplayer.Tactical
             return engine != null && engine.IsActiveSession;
         }
 
-        private static TacticalLevelController Tlc()
-        {
-            var level = GameUtl.CurrentLevel();
-            return level == null ? null : level.GetComponent<TacticalLevelController>();
-        }
+        private static TacticalLevelController Tlc() => TacticalDamageSync.Tlc();
 
         /// <summary>Is a PLAYER-controlled faction mid-turn on this peer? The narrowing is confined to the
         /// shared player turn: during an AI faction's turn the wait is the presentation of a side nobody
