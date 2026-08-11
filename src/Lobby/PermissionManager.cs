@@ -26,24 +26,6 @@ namespace Multiplayer.Validation
         private static readonly Dictionary<Guid, PlayerAssignment> _assignments =
             new Dictionary<Guid, PlayerAssignment>();
 
-        public static void AssignSoldier(Guid playerGuid, int geoUnitId)
-        {
-            if (!_assignments.TryGetValue(playerGuid, out var assignment))
-            {
-                assignment = new PlayerAssignment { PlayerGuid = playerGuid };
-                _assignments[playerGuid] = assignment;
-            }
-            assignment.OwnedSoldierIds.Add(geoUnitId);
-        }
-
-        public static void UnassignSoldier(Guid playerGuid, int geoUnitId)
-        {
-            if (_assignments.TryGetValue(playerGuid, out var assignment))
-            {
-                assignment.OwnedSoldierIds.Remove(geoUnitId);
-            }
-        }
-
         public static void SetPermission(Guid playerGuid, CampaignPermission permission, bool granted)
         {
             if (!_assignments.TryGetValue(playerGuid, out var assignment))
@@ -68,80 +50,17 @@ namespace Multiplayer.Validation
             assignment.Permissions = permissions;
         }
 
-        /// <summary>
-        /// Clear ALL player assignments + permissions. Test-support: lets a test reset this process-global
-        /// holder to a clean slate so leaked entries can't bleed across tests. Behavior-neutral for the live
-        /// game (single co-op session — the holder is populated fresh from the roster on each session).
-        /// </summary>
-        public static void Reset() => _assignments.Clear();
-
-        // ─── Combat Permissions ───────────────────────────────────────────
-
-        public static bool CanControlSoldier(Guid playerGuid, int geoUnitId)
-        {
-            if (!_assignments.TryGetValue(playerGuid, out var assignment))
-                return false;
-
-            if (HasFlag(assignment.Permissions, CampaignPermission.FullCommander))
-                return true;
-
-            if (!HasFlag(assignment.Permissions, CampaignPermission.ControlSoldiers))
-                return false;
-
-            return assignment.OwnedSoldierIds.Contains(geoUnitId);
-        }
-
-        // ─── Campaign Permissions ─────────────────────────────────────────
-
-        public static bool HasCampaignPermission(Guid playerGuid, CampaignPermission permission)
-        {
-            if (!_assignments.TryGetValue(playerGuid, out var assignment))
-                return false;
-
-            if (HasFlag(assignment.Permissions, CampaignPermission.FullCommander))
-                return true;
-
-            return HasFlag(assignment.Permissions, permission);
-        }
-
         public static int GetPermissions(Guid playerGuid)
         {
             return _assignments.TryGetValue(playerGuid, out var assignment)
                 ? assignment.Permissions
                 : 0;
         }
-
-        // ─── Player Query ─────────────────────────────────────────────────
-
-        public static Guid? GetOwnerOfSoldier(int geoUnitId)
-        {
-            foreach (var kvp in _assignments)
-            {
-                if (kvp.Value.OwnedSoldierIds.Contains(geoUnitId))
-                    return kvp.Key;
-            }
-            return null;
-        }
-
-        public static PlayerAssignment GetAssignment(Guid playerGuid)
-        {
-            return _assignments.TryGetValue(playerGuid, out var assignment)
-                ? assignment
-                : new PlayerAssignment { PlayerGuid = playerGuid };
-        }
-
-        public static IReadOnlyDictionary<Guid, PlayerAssignment> GetAllAssignments()
-            => _assignments;
-
-        private static bool HasFlag(int permissions, CampaignPermission flag)
-            => (permissions & (int)flag) != 0;
     }
 
     public class PlayerAssignment
     {
         public Guid PlayerGuid { get; set; }
-        public string PlayerName { get; set; } = "";
         public int Permissions { get; set; }
-        public HashSet<int> OwnedSoldierIds { get; set; } = new HashSet<int>();
     }
 }
