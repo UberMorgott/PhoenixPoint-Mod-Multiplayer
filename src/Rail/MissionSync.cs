@@ -976,6 +976,10 @@ namespace Multiplayer.Network.Sync
     [HarmonyPatch(typeof(GeoscapeView), nameof(GeoscapeView.ToDeploymentState))]
     internal static class DeploymentNeedsAMission
     {
+        /// <summary>FIRST, ahead of <c>NativeRaiserToken.DeploymentCapture</c>. This is the legitimacy check
+        /// on the whole call, and it is free; the capture allocates and mints a trigger id. The capture is
+        /// void and runs whatever this returns — see the note on its own prefix for why that is correct.</summary>
+        [HarmonyPriority(Priority.First)]
         private static bool Prefix(GeoMission mission)
         {
             if (mission != null) return true;

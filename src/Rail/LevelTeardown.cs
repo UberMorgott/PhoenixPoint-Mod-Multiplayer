@@ -67,6 +67,19 @@ namespace Multiplayer.Network.Sync
     [HarmonyPatch(typeof(PhoenixGame), "FinishLevel")]
     internal static class GeoTeardownResetGate
     {
+        /// <summary>LAST, behind <c>LoadBarrierGate</c> (<c>Priority.First</c>): the curtain must be armed
+        /// before this tears every geoscape sub-screen down, or the teardown is briefly visible. This prefix
+        /// is void, so it also RUNS when the barrier cancels the original, and that is correct — the one case
+        /// the barrier cancels is a client's own refused RESTART, and a restart is tactical→tactical (the
+        /// native Restart button exists in tactical only: <c>UIStateTacticalOptions</c>:45 vs
+        /// <c>UIStateGeoscapeOptions</c>:34). This peer therefore holds no <c>GeoLevelController</c>, the
+        /// <c>view == null</c> arm self-returns after one trace note, and nothing is parked. It must stay
+        /// void: were it bool it could block <c>FinishLevel</c> itself, and a level switch this mod refuses
+        /// is a peer stranded in a level the others have left.</summary>
+        private const string RunsBehindACancelledOriginBecause =
+            "the only cancelled case is a refused client restart, which is tactical-to-tactical, so this " +
+            "peer holds no GeoLevelController and the view == null arm self-returns without parking anything";
+        [HarmonyPriority(Priority.Last)]
         private static void Prefix()
         {
             var engine = NetworkEngine.Instance;

@@ -209,6 +209,14 @@ namespace Multiplayer.Tactical
     [HarmonyPatch(typeof(TacticalAbility), nameof(TacticalAbility.Activate), new[] { typeof(object) })]
     internal static class AbilityDriveOrigin
     {
+        /// <summary>FIRST, ahead of <c>AbilityActivateCapture</c> on this same method. Neither prefix can
+        /// cancel (both void) and neither reads the other's state — <c>TacticalCommandSync.OnAbilityActivated</c>
+        /// never touches the <c>_foreign</c> ledger, so today the order decides nothing. It is declared
+        /// anyway, and declared THIS way round, because the mark is the cheaper invariant to keep true: this
+        /// patch exists so that "whose order is this" is answerable for the whole activation, and a capture
+        /// that ever grows a drive-ledger read would otherwise start answering from an empty set depending on
+        /// nothing more than <c>GetTypesFromAssembly</c> order.</summary>
+        [HarmonyPriority(Priority.First)]
         private static void Prefix(TacticalAbility __instance)
             => TacticalActorDrive.MarkForeign(
                    __instance,

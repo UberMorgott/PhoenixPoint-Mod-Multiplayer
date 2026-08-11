@@ -908,6 +908,11 @@ namespace Multiplayer.Tactical
     [HarmonyPatch(typeof(PhoenixPoint.Tactical.View.TacticalView), "GoToGeoscape")]
     internal static class TacLeaveBattleCapture
     {
+        /// <summary>LAST, behind <c>ReturnCountdown.ReturnHoldPatch</c> (<c>Priority.First</c>). The hold has
+        /// to ARM — write <c>_zeroAt</c> — before this asks <see cref="ReturnCountdown.Holding"/>, or the
+        /// first click announces a leave the strip is about to swallow. Harmony does not do the skipping (see
+        /// the summary above); the priority only guarantees the state is written before it is read.</summary>
+        [HarmonyPriority(Priority.Last)]
         private static void Prefix()
         {
             if (ReturnCountdown.Holding) return;   // swallowed by the strip — announce at the release

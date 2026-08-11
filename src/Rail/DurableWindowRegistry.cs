@@ -50,6 +50,19 @@ namespace Multiplayer.Network.Sync
         {
             private static readonly MethodInfo GetBrief = AccessTools.Method(typeof(GeoscapeView),
                 "GetMissionBriefModal", new[] { typeof(GeoMission) });
+            /// <summary>SECOND, behind <c>MissionReoffer.BriefReofferInput</c> (<c>Priority.First</c>), which
+            /// on a client relays a KeepEncounter re-offer to the host and returns false. This prefix is void
+            /// and runs anyway, latching a brief token into <c>_missionBrief</c> for a brief that will not be
+            /// raised locally — and that is safe because the latch does not outlive the call: the
+            /// <c>Finalizer</c> on this same class clears it, and a finalizer runs even when a prefix
+            /// cancelled the original (measured against the ModSDK's 0Harmony.dll 2.2.0.0). Nothing reads
+            /// <c>CurrentMissionBrief</c> in between, because the only reader is the modal raise the
+            /// cancelled body would have made. It must stay void: a bool here could block the brief for
+            /// everyone, and L411 already requires the relay door to be the one that decides.</summary>
+            private const string RunsBehindACancelledOriginBecause =
+                "the latch it writes is cleared by this class's own Finalizer, which Harmony runs even on a " +
+                "cancelled original, and the only reader of that latch is the modal raise that never happens";
+            [HarmonyPriority(Priority.Normal)]
             private static void Prefix(GeoscapeView __instance, GeoMission mission, GeoVehicle vehicle)
             {
                 _missionBrief = null;
@@ -101,6 +114,20 @@ namespace Multiplayer.Network.Sync
             internal static void EndExplicitReentry(ExplicitReentryToken token)
             { if (ReferenceEquals(_explicitReentry, token)) _explicitReentry = null; }
 
+            /// <summary>SECOND, behind <c>MissionSync.DeploymentNeedsAMission</c> (<c>Priority.First</c>),
+            /// which returns false when <c>mission == null</c>. This prefix RUNS ANYWAY and is meant to:
+            /// <c>ref __state</c> is excluded from Harmony's "can affect the original" test, so it is emitted
+            /// outside the skip guard (measured against the ModSDK's 0Harmony.dll 2.2.0.0), and the Postfix
+            /// that consumes <c>__state</c> runs on a cancelled original too, still holding what was written
+            /// here. Both are harmless with no mission: the Postfix's only action is gated on
+            /// <c>NativeSucceeded</c>, which requires <c>mission != null</c> AND the queue to have grown, and
+            /// a cancelled open queues nothing. <c>StableMissionSubject(null)</c> returns null rather than
+            /// throwing, and the explicit-reentry token is not consumed because its subject cannot match a
+            /// null mission — so the deferred occurrence survives for the open that really happens.</summary>
+            private const string RunsBehindACancelledOriginBecause =
+                "a mission-less open queues nothing, so NativeSucceeded rejects the captured state and the " +
+                "reentry token stays unconsumed for the open that really happens";
+            [HarmonyPriority(Priority.Normal)]
             private static void Prefix(GeoMission mission, ref RaiseState __state)
             {
                 __state = new RaiseState { Before = DurableWindowRegistry.QueueCount() };

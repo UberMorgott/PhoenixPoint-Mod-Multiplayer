@@ -149,6 +149,11 @@ namespace Multiplayer.Network.Sync
     [HarmonyPatch(typeof(GeoscapeView), nameof(GeoscapeView.ShowMissionBriefing))]
     internal static class BriefReofferInput
     {
+        /// <summary>FIRST, ahead of <c>NativeRaiserToken.MissionBriefCapture</c>. This door decides whether
+        /// the brief happens here at all; the capture only records a brief that does. Relaying before the
+        /// capture reflects into the native <c>GetMissionBriefModal</c> also keeps the wire ahead of the work
+        /// that a cancelled call throws away.</summary>
+        [HarmonyPriority(Priority.First)]
         private static bool Prefix(GeoMission mission)
         {
             var custom = mission as GeoCustomMission;

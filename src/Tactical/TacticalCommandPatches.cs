@@ -44,6 +44,9 @@ namespace Multiplayer.Tactical
     [HarmonyPatch(typeof(TacticalAbility), nameof(TacticalAbility.Activate), new[] { typeof(object) })]
     internal static class AbilityActivateCapture
     {
+        /// <summary>SECOND, behind <c>AbilityDriveOrigin</c> (<c>Priority.First</c>) — see the reason there.
+        /// The order is not load-bearing today; it is declared so that it stops being a coin flip.</summary>
+        [HarmonyPriority(Priority.Normal)]
         private static void Prefix(TacticalAbility __instance, object parameter)
             => TacticalCommandSync.OnAbilityActivated(__instance, parameter);
     }

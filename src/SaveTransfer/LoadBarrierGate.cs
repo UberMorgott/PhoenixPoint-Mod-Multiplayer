@@ -100,6 +100,9 @@ namespace Multiplayer.Harmony
         // unconditionally); GeoTeardownResetGate is the only one, and it self-returns when the peer holds no
         // GeoLevelController — which a restart never does, the native Restart button exists in TACTICAL only
         // (UIStateTacticalOptions:45 `restartEnabed: true`, UIStateGeoscapeOptions:34 `restartEnabed: false`).
+        /// <summary>FIRST, ahead of <c>GeoTeardownResetGate</c> on this same method: the load barrier is what
+        /// keeps the curtain down, so it must be armed before the geoscape view state is parked.</summary>
+        [HarmonyPriority(Priority.First)]
         private static bool Prefix(ILevelParams result)
         {
             try
