@@ -562,6 +562,15 @@ namespace Multiplayer.Transport
 
         private void StartUdp(int port)
         {
+            // Defensive: no path calls this twice on one instance today (Host/Connect each run on a
+            // freshly constructed transport), but the failure mode if one ever does is nasty enough to
+            // close here. _running is set BEFORE the field swap and ReceiveLoop re-reads the _udp FIELD
+            // every iteration, so a surviving old thread would resume receiving on the NEW socket — two
+            // threads racing Receive on one UdpClient. Same teardown shape as Shutdown.
+            _running = false;
+            _udp?.Close();
+            _receiveThread?.Join(1000);
+
             _running = true;
             _udp = new UdpClient(port) { EnableBroadcast = true };
             _udp.Client.SendTimeout = 1000;
