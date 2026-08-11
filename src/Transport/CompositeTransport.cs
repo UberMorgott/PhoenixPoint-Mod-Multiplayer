@@ -202,10 +202,15 @@ namespace Multiplayer.Transport
             }
         }
 
-        // CompositeTransport is intentionally Unity-free at compile time (the test project links it
-        // directly without referencing UnityEngine), so we reach UnityEngine.Debug.LogError via
-        // reflection. In-game the call resolves and lands in the Player.log; under tests it is a
-        // harmless no-op. Resolution is cached after first use.
+        // RailCheck EXECUTES this type — L120 and L136 both build a real CompositeTransport over a fake
+        // child and drive its pump — and RailCheck is a plain console host with no Unity player runtime.
+        // A compile-time-bound UnityEngine.Debug.LogError dies there, and dies OUTSIDE any try/catch this
+        // method could hold, because the failure is at JIT/assembly-resolve time and surfaces at the
+        // CALLER: measured 2026-08-11 in a net472 console host, FileNotFoundException on
+        // UnityEngine.CoreModule when the dll is not beside the exe, and SecurityException ("ECall
+        // methods must be packaged into a system module") when it is. Reaching Debug reflectively keeps
+        // that inside the catch below, so the law drives the real transport and the log is simply
+        // skipped. In-game the call resolves and lands in the Player.log. Cached after first use.
         private static System.Reflection.MethodInfo _unityLogError;
         private static bool _unityLogErrorResolved;
         private static void LogError(string message)
@@ -223,7 +228,7 @@ namespace Multiplayer.Transport
                 if (_unityLogError != null)
                     _unityLogError.Invoke(null, new object[] { message });
                 else
-                    Console.WriteLine(message); // fallback (e.g. test host with no UnityEngine loaded)
+                    Console.WriteLine(message); // fallback: a host with no UnityEngine loaded (RailCheck)
             }
             catch { /* logging must never break the host path */ }
         }
