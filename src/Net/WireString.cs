@@ -23,7 +23,27 @@ namespace Multiplayer.Network.MessageLayer
         /// <summary>Machine identifiers: def GUIDs, entity ref keys, slot ids, .NET type names,
         /// localization keys, dictionary keys. The longest such string the game itself produces is a def
         /// name well under 100 chars; 256 clears a modded one several times over and still rejects
-        /// anything that is plainly not an identifier.</summary>
+        /// anything that is plainly not an identifier.
+        ///
+        /// THE ONE SITE THAT NEEDED MEASURING, AND WAS. <c>RailMeta</c>'s create frames write a raw
+        /// <c>t.FullName</c> (<c>EncodeDescendCreate</c>, <c>WriteActorCreateFrame</c>) and read it back
+        /// through this ceiling in three places (<c>DecodeActorCreateDef</c>,
+        /// <c>DescendCreateTypeName</c>, <c>DecodeCreateArgs</c>). A CLOSED GENERIC's <c>FullName</c>
+        /// carries assembly-qualified type arguments and would blow past 256 — so the reachable sets were
+        /// enumerated off the real game assembly rather than assumed:
+        ///
+        ///   [SerializeCustomCreate] types (the Descend frame): n=613, max 114, median 62
+        ///                                                      (MissionContainsKeyStructuresConditionDef)
+        ///   ActorComponent subclasses  (the actor frame):      n=24,  max  75, median 51
+        ///   every concrete type in Assembly-CSharp:            n=10043, max 210 — and the four longest are
+        ///     compiler-generated iterator/closure nests, which are never a create-frame instance type.
+        ///   GENERIC types in either reachable set:             0 — so the closed-generic worry has no
+        ///     subject here, not merely a small one.
+        ///
+        /// Nothing reaches 256, the worst real case leaves ~140 chars of headroom for a modded namespace,
+        /// and encoder and decoder are the same code — a mod that somehow exceeded it would fail loudly on
+        /// its first create frame for everyone, not silently for one player. Left at Key deliberately: Text
+        /// would buy 4 KB of nothing and stop calling a type name an identifier.</summary>
         internal const int Key = 256;
 
         /// <summary>Short human strings: a player-typed base name, a recruit name, a modal title, a
