@@ -133,23 +133,11 @@ namespace Multiplayer.Network.Sync
             return new SharedChoiceDecision(occurrence, token, choice, result, rewards, winner, phase, steps, sharedRevision, payload);
         }
 
+        // The third copy of this is gone: MessageSerializer owns the one implementation (RailCheck L414
+        // resolves it by name off that type, so it cannot move to a neutral home). Same 4 KB ceiling as
+        // before — an event id, a def name or a choice id is tens of bytes, never kilobytes.
         private static string ReadBoundedString(BinaryReader r, int maxBytes = 4096)
-        {
-            int length = 0, shift = 0;
-            for (int i = 0; i < 5; i++)
-            {
-                byte b = r.ReadByte(); length |= (b & 0x7f) << shift;
-                if ((b & 0x80) == 0)
-                {
-                    if (length < 0 || length > maxBytes) throw new InvalidDataException("bounded string length");
-                    byte[] bytes = r.ReadBytes(length);
-                    if (bytes.Length != length) throw new EndOfStreamException();
-                    return new UTF8Encoding(false, true).GetString(bytes);
-                }
-                shift += 7;
-            }
-            throw new InvalidDataException("invalid string length prefix");
-        }
+            => MessageSerializer.ReadBoundedString(r, maxBytes);
 
         /// <summary>The forced re-emit scope for a rejected answer — the "ES" ROOT, not a per-record path.
         /// <c>EncounterRecords</c> classifies <see cref="FieldClass.EntityList"/> (docs/rail-baseline.txt:470),

@@ -2304,6 +2304,15 @@ namespace Multiplayer.Network.Sync
         /// is fixed-width so a slice costs exactly 9 bytes of overhead and the split arithmetic is exact.</summary>
         internal const int FragmentHeaderBytes = 9;
 
+        /// <summary>Ceiling on a REASSEMBLED value — the one number <c>total</c> is checked against before
+        /// <c>GenericApplier.Reassemble</c> does <c>new byte[total]</c> with it. Where it comes from: the
+        /// biggest thing the writers can actually produce on this path is <see cref="MistSync"/>'s mist
+        /// blob, <c>_mistData</c> deflated and base64'd, which its own note puts at ~40 KB early campaign
+        /// to ~900 KB late (MistSync.cs, MistState). 16 MB is ~17× that, so no legitimate value can reach
+        /// it, while a torn or crafted frame declaring 2^31-1 no longer costs 2 GB. Raise it if a real
+        /// value ever grows past it — the symptom would be a dropped fragment, which is loud.</summary>
+        internal const int MaxReassembledBytes = 16 * 1024 * 1024;
+
         internal static byte[] EncodeFragment(byte[] value, int offset, int count)
         {
             var frame = new byte[FragmentHeaderBytes + count];
@@ -2323,7 +2332,12 @@ namespace Multiplayer.Network.Sync
             total = BitConverter.ToInt32(framed, 1);
             offset = BitConverter.ToInt32(framed, 5);
             int n = framed.Length - FragmentHeaderBytes;
-            if (total <= 0 || offset < 0 || offset + n > total) return false; // malformed: treat as a value, fail loudly downstream
+            // offset > total - n, NOT offset + n > total: the old form overflowed. offset=0x7FFFFF00 with
+            // n=0x200 wraps negative, passes the test, and the caller then indexes a 2 GB array it was just
+            // told to allocate. Written this way the arithmetic cannot wrap — n >= 0 and total is capped
+            // first, so total - n stays in range.
+            if (total <= 0 || total > MaxReassembledBytes || offset < 0 || offset > total - n)
+                return false; // malformed: treat as a value, fail loudly downstream
             chunk = new byte[n];
             Buffer.BlockCopy(framed, FragmentHeaderBytes, chunk, 0, n);
             return true;

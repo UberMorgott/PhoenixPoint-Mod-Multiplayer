@@ -22,7 +22,14 @@ namespace Multiplayer.Network.MessageLayer
         // byte length before reading the payload, so a 20-byte JOIN declaring 2^28 forces a ~512 MB allocation on
         // the host — pre-auth, and long before the roster's nickname cap ever sees the string. Read the 7-bit
         // prefix ourselves and reject a length the stream cannot back, exactly as the ReadBytes guards below do.
-        private static string ReadBoundedString(BinaryReader br)
+        //
+        // INTERNAL, and it STAYS ON THIS TYPE. RailCheck L414 arm (b) resolves it by name off
+        // MessageSerializer and proves the serializer still reaches it; moving it to a neutral helper
+        // class would blind that law. So the other readers in this mod — GenericApplier's value rail,
+        // EventSync's decoders — call in here instead of keeping their own copy.
+        // <paramref name="maxBytes"/> is an ADDITIONAL ceiling on top of "the stream can back it", for
+        // callers that know a real value's order of magnitude; the default leaves the stream bound alone.
+        internal static string ReadBoundedString(BinaryReader br, int maxBytes = int.MaxValue)
         {
             int len = 0, shift = 0;
             while (true)
@@ -34,7 +41,7 @@ namespace Multiplayer.Network.MessageLayer
                 if ((b & 0x80) == 0) break;
             }
             var s = br.BaseStream;
-            if (len < 0 || len > s.Length - s.Position)
+            if (len < 0 || len > maxBytes || len > s.Length - s.Position)
                 throw new InvalidDataException("string: implausible length " + len);
             return len == 0 ? string.Empty : StrictUtf8.GetString(br.ReadBytes(len));
         }

@@ -196,7 +196,9 @@ namespace Multiplayer.Network.Sync
                         using (var r = new BinaryReader(ms, Encoding.UTF8))
                         {
                             r.ReadByte(); // MsgCrcReport
-                            DiffEngine.HandleCrcReport(senderPeerId, r.ReadString(), r.ReadUInt32(), r.ReadUInt32());
+                            // Bounded: this one is CLIENT→HOST, so the length prefix is a sender's word.
+                            DiffEngine.HandleCrcReport(senderPeerId, MessageSerializer.ReadBoundedString(r),
+                                                       r.ReadUInt32(), r.ReadUInt32());
                         }
                     return true;
                 }
@@ -241,7 +243,8 @@ namespace Multiplayer.Network.Sync
                 try
                 {
                     int defCount = r.ReadByte();
-                    for (int i = 0; i < defCount; i++) RegisterKind(r.ReadByte(), r.ReadString(), r.ReadUInt16());
+                    for (int i = 0; i < defCount; i++)
+                        RegisterKind(r.ReadByte(), MessageSerializer.ReadBoundedString(r), r.ReadUInt16());
 
                     int n = r.ReadUInt16();
                     _pathCache.Clear(); // batch-local: a new instance under the same key (re-queued research) must re-resolve
@@ -250,9 +253,9 @@ namespace Multiplayer.Network.Sync
                         for (int i = 0; i < n; i++)
                         {
                             byte kindId = r.ReadByte();
-                            string path = r.ReadString();
+                            string path = MessageSerializer.ReadBoundedString(r);
                             ushort fieldIdx = r.ReadUInt16();
-                            string subKey = r.ReadString();
+                            string subKey = MessageSerializer.ReadBoundedString(r);
                             var value = Reassemble(path, fieldIdx, subKey, r.ReadBytes(r.ReadUInt16()));
                             if (value == null) continue; // fragment stashed — the entry applies once it is whole
                             ApplyEntry(engine, geo, kindId, path, fieldIdx, subKey, value, touched);
@@ -352,7 +355,7 @@ namespace Multiplayer.Network.Sync
                 byte op = r.ReadByte();
                 bool fragmented = (op & DiffEngine.FragmentedBlobFlag) != 0;
                 op &= unchecked((byte)~DiffEngine.FragmentedBlobFlag);
-                string rootKey = r.ReadString();
+                string rootKey = MessageSerializer.ReadBoundedString(r);
                 var blob = r.ReadBytes(r.ReadInt32());
                 // A blob too big for the u16 envelope arrives as fragments (DiffEngine.FragmentStructuralBlob),
                 // reassembled by the SAME buffer the entry rail uses. Nothing below knows it was ever split;
@@ -1252,7 +1255,8 @@ namespace Multiplayer.Network.Sync
             if (reader.ReadByte() != DepartureGenerationRail.TailMarker) throw new InvalidDataException("unknown GeoRail tail");
             int count = reader.ReadUInt16();
             if (count < 0 || count > MaxDepartureWatermarks) throw new InvalidDataException("departure generation tail over bound");
-            for (int i = 0; i < count; i++) InstallDepartureGeneration(reader.ReadString(), reader.ReadUInt64());
+            for (int i = 0; i < count; i++)
+                InstallDepartureGeneration(MessageSerializer.ReadBoundedString(reader), reader.ReadUInt64());
             if (reader.BaseStream.Position != reader.BaseStream.Length) throw new InvalidDataException("trailing GeoRail bytes");
         }
 
@@ -2192,7 +2196,7 @@ namespace Multiplayer.Network.Sync
             {
                 using (var ms = new MemoryStream(payload, 1, payload.Length - 1))
                 using (var r = new BinaryReader(ms, Encoding.UTF8))
-                    return r.ReadString();
+                    return MessageSerializer.ReadBoundedString(r); // HOST side: a client names this scope
             }
             catch { return null; }
         }
