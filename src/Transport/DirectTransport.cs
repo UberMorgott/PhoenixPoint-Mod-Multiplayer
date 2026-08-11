@@ -256,6 +256,13 @@ namespace Multiplayer.Transport
         {
             lock (_lock)
             {
+                // Shutdown sets _connectAborted before it takes _lock, so a worker that got here after the
+                // teardown finished sees it and closes its own socket. Checked in-lock, not at the EndConnect
+                // call site: an out-of-lock check only narrows the window that leaks a live connected TcpClient
+                // (and leaves the remote host holding a phantom peer until its heartbeat expires). It also
+                // latched _pendingConnectResult, which nothing clears, so a later Update() surfaced
+                // OnStateChanged/OnPeerConnected on a transport that was already torn down.
+                if (_connectAborted) { try { client?.Close(); } catch { } return; }
                 _pendingConnectResult = true;
                 _pendingConnectSucceeded = succeeded;
                 _pendingClient = client;
@@ -308,6 +315,10 @@ namespace Multiplayer.Transport
         public void Disconnect()
         {
             _running = false;
+            // Same abort Shutdown raises: a Disconnect that is NOT followed by Shutdown otherwise leaves an
+            // in-flight connect running, and QueueConnectResult would latch a live socket onto a torn-down
+            // transport. Connect (:173) clears the flag again, so a later reconnect on this instance is fine.
+            _connectAborted = true;
             // Collect (peerId, label) BEFORE the sockets go down, then raise OnPeerDisconnected
             // OUTSIDE the lock (a handler that calls back into Send/Broadcast must not deadlock).
             // Sockets close via flush-then-close: the writer drains a just-queued ClientLeave notice
@@ -318,6 +329,15 @@ namespace Multiplayer.Transport
             {
                 peers = new List<Peer>(_clients.Values);
                 _clients.Clear();
+                // The other half of the abort above, mirroring Shutdown: the flag only stops a result queued
+                // AFTER it: one already latched here would be surfaced by the next Update — SurfacePendingConnect
+                // is called unconditionally — raising Connected/OnPeerConnected on a transport just disconnected.
+                if (_pendingConnectResult && _pendingClient != null)
+                {
+                    try { _pendingClient.Close(); } catch { }
+                }
+                _pendingConnectResult = false;
+                _pendingClient = null;
             }
             foreach (var peer in peers)
             {
