@@ -66,10 +66,24 @@ namespace Multiplayer.Tactical
             return left < 1 ? 1 : left;
         }
 
-        /// <summary>THE HOLD. Returns false to swallow the native return while the strip counts.</summary>
+        /// <summary>THE HOLD. Returns false to swallow the native return while the strip counts.
+        ///
+        /// ORDER IS DECLARED, NOT HOPED FOR (same reason as <c>PersonnelSync.DismissCapturePatch</c>). The
+        /// mod puts a SECOND prefix on this very method — <c>TacLeaveBattleCapture</c>, which latches
+        /// <c>TacticalTurnSync.LeftBattle</c> and announces the leave to every peer — and a prefix returning
+        /// false cancels the ones that would have run after it. Unordered, whether the leave was announced at
+        /// the CLICK or five seconds later at the RELEASE came down to registration order.
+        ///
+        /// THE HOLD MUST WIN, so the announcement happens at the release: this hold can be ABANDONED
+        /// (<see cref="Tick"/> gives up when the session dies, the level goes away, or the method stops
+        /// resolving) and a leave announced at the click would then have carried every other peer out of a
+        /// battle this one never left — the exact stranding <c>TacLeaveBattleCapture</c> exists to prevent.
+        /// A leave is real when it happens, not when it is scheduled. The release re-invokes through this
+        /// same chain with <see cref="_releasing"/> set, so the capture runs then, exactly once.</summary>
         [HarmonyPatch(typeof(TacticalView), "GoToGeoscape")]
         internal static class ReturnHoldPatch
         {
+            [HarmonyPriority(Priority.First)]
             private static bool Prefix(TacticalView __instance)
             {
                 try
@@ -128,7 +142,10 @@ namespace Multiplayer.Tactical
                           "TacticalView.GoToGeoscape (PhoenixGame.FinishLevel) exactly as the summary screen " +
                           "would have five seconds ago.");
                 _releasing = true;
-                try { GoToGeoscapeMethod.Invoke(view, null); }
+                // Through TacticalTurnSync's invoker, not our own MethodInfo: this call is what fires
+                // TacLeaveBattleCapture (the hold above deliberately runs first, so the capture only ever
+                // fires here), and if the native body throws the leave latch has to come back off.
+                try { TacticalTurnSync.InvokeNativeLeave(view); }
                 finally { _releasing = false; }
             }
             catch (Exception ex)

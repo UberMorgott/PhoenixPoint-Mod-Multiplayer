@@ -882,6 +882,12 @@ namespace Multiplayer.Tactical
     /// <c>TacticalLevel.GetMissionResult()</c>. Nothing about the result crosses the wire in either direction;
     /// its geoscape consequences reach the clients as ordinary value-rail state, exactly as they do when the
     /// host clicks the button itself. That normal case is untouched — the prefix only records and returns.
+    ///
+    /// INVARIANT, DECLARED: <c>ReturnCountdown.ReturnHoldPatch</c> prefixes this same method with
+    /// <c>Priority.First</c> and returns FALSE while its five-second strip runs, which CANCELS this prefix.
+    /// That is deliberate — the leave is announced at the RELEASE, not at the click, because a hold that is
+    /// abandoned would otherwise have carried every other peer out of a battle this peer never left. Any
+    /// third prefix on <c>TacticalView.GoToGeoscape</c> must declare its own priority relative to those two.
     /// </summary>
     [HarmonyPatch(typeof(PhoenixPoint.Tactical.View.TacticalView), "GoToGeoscape")]
     internal static class TacLeaveBattleCapture
