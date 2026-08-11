@@ -211,16 +211,17 @@ namespace Multiplayer.Net
         // A UDP socket bound to one interface, with multicast egress pinned to that same interface.
         private static Socket TryMakeSearchSocket(string localIp)
         {
+            Socket s = null;
             try
             {
                 var addr = IPAddress.Parse(localIp);
-                var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
                 s.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
                 s.Bind(new IPEndPoint(addr, 0));
                 s.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastInterface, addr.GetAddressBytes());
                 return s;
             }
-            catch { return null; }
+            catch { s?.Dispose(); return null; }
         }
 
         // Up, non-loopback IPv4 interface addresses to send M-SEARCH from. ONE enumeration for the mod:

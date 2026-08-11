@@ -5,11 +5,14 @@ name: laws
 # redistributed and so are unavailable in CI. RailCheck runs on a developer machine (see .githooks/pre-commit).
 on: [push, pull_request]
 
+permissions:
+  contents: read
+
 jobs:
   law-integrity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4
       - name: law integrity
         shell: pwsh
         run: ./tools/law-integrity.ps1
