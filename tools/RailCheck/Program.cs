@@ -381,6 +381,12 @@ namespace RailCheck
             Add(laws, () => L414_NoWireStringAllocatesOnTheSendersWord.Check());
             Add(laws, () => L415_ATransferThatFailsAsyncGivesTheTerminalFlagsBack.Check());
             Add(laws, () => L416_AConnectThatLandsAfterTheTeardownIsDropped.Check());
+            Add(laws, () => L417_ARefusedOrderReleasesTheSoldierItLeftWaiting.Check());
+            Add(laws, () => L418_TwoCodecsNeverDisagreeAboutTheSameTypo.Check());
+            Add(laws, () => L419_OneDoorToTheLiveGeoscapeLevel.Check());
+            Add(laws, () => L420_NothingDecodesTheWireOnTheSendersWord.Check());
+            Add(laws, () => L421_WorkThatOutlivedItsBoundaryDoesNotLand.Check());
+            Add(laws, () => L423_TheHoldDefersNoWorkOutsideItsApplyScope.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
 
@@ -10650,34 +10656,46 @@ namespace RailCheck
         }
 
         internal static bool ReadsField(MethodBase m, FieldInfo target)
+            => target != null &&
+               FieldSites(m).Any(s => s.Value.MetadataToken == target.MetadataToken &&
+                                      s.Value.Module == target.Module);
+
+        /// <summary>Every field a method touches, with its IL OFFSET — <see cref="CallSites(MethodBase)"/>'s
+        /// shape for fields. L421 needs both halves of it: HOW MANY times a generation counter is consulted
+        /// (one reference is the capture; the comparison that drops a stale shipment is the second) and
+        /// WHERE, because the consumer block it lives in is defined by running BEFORE the interval gate.
+        /// Load and store alike: `stsfld` is the write half of the same question.</summary>
+        internal static List<KeyValuePair<int, FieldInfo>> FieldSites(MethodBase m)
         {
-            if (m == null || target == null) return false;
+            var sites = new List<KeyValuePair<int, FieldInfo>>();
+            if (m == null) return sites;
             byte[] il = null;
             try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }
-            if (il == null) return false;
+            if (il == null) return sites;
             var typeArgs = m.DeclaringType != null && m.DeclaringType.IsGenericType ? m.DeclaringType.GetGenericArguments() : null;
             var methodArgs = m.IsGenericMethodDefinition ? m.GetGenericArguments() : null;
             int i = 0;
             while (i < il.Length)
             {
+                int at = i;
                 short code = il[i++];
                 if (code == 0xFE)
                 {
-                    if (i >= il.Length) return false;
+                    if (i >= il.Length) break;
                     code = (short)(0xFE00 | il[i++]);
                 }
-                if (!OpCodeByValue.TryGetValue(code, out var op)) return false;
+                if (!OpCodeByValue.TryGetValue(code, out var op)) break;
                 int size = OperandSize(op.OperandType, il, i);
-                if (size < 0 || i + size > il.Length) return false;
+                if (size < 0 || i + size > il.Length) break;
                 if (op.OperandType == OperandType.InlineField)
                 {
                     FieldInfo f = null;
                     try { f = m.Module.ResolveField(BitConverter.ToInt32(il, i), typeArgs, methodArgs); } catch { }
-                    if (f != null && f.MetadataToken == target.MetadataToken && f.Module == target.Module) return true;
+                    if (f != null) sites.Add(new KeyValuePair<int, FieldInfo>(at, f));
                 }
                 i += size;
             }
-            return false;
+            return sites;
         }
 
         /// <summary>Every method our own assembly declares — the universe the caller-set laws quantify over,
@@ -11146,7 +11164,9 @@ namespace RailCheck
             public void LogException(Exception e, UnityEngine.Object c) { }
         }
 
-        private static string RepoRoot()
+        // internal, not private: L418 arm (d) counts the Crockford alphabet literal across src/**/*.cs — a
+        // second copy of this walk-up is the two-tables-disagree shape this file already warns about twice.
+        internal static string RepoRoot()
         {
             var d = new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory);
             while (d != null && !File.Exists(Path.Combine(d.FullName, "Multiplayer.csproj"))) d = d.Parent;
