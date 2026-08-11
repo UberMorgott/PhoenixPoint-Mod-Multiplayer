@@ -372,11 +372,6 @@ namespace Multiplayer.UI
             if (_lobby?.IsVisible == true) _lobby.HideForNativeScreen();
         }
 
-        /// <summary>Stage-3 hand-off: stop driving OUR bar so the native level-load bar + default label take
-        /// over the SAME curtain (a native load is starting) — the SaveTransferCoordinator.SetLoadingLevel
-        /// idiom. Does NOT lift the curtain.</summary>
-        public void TacLoadHandoff() => NativeWidgetFactory.EndDownloadBar();
-
         /// <summary>Abort: stop our bar AND lift the native curtain, because no native level-load will lift it
         /// (watchdog / disconnect / already-in-tactical). Never leaves the client stuck on a curtain.</summary>
         public void TacLoadAbort()
@@ -1053,7 +1048,7 @@ namespace Multiplayer.UI
         //   MessageBoxInputPromptController.cs:50-57 ValidateResult blocks OK on whitespace-only text
         // Also normalizes the field so ALL characters type (BUG A: prefab characterValidation rejected
         // ".") and forces a readable dark text/caret on the light field (BUG B: white-on-white text).
-        private static bool TryUpgradePromptInput(string placeholderHint, string prefill = null)
+        private static bool TryUpgradePromptInput(string placeholderHint)
         {
             var mb = GameUtl.GetMessageBox();
             if (mb == null) return false;
@@ -1077,13 +1072,9 @@ namespace Multiplayer.UI
             field.characterValidation = InputField.CharacterValidation.None;
             field.onValidateInput = null;
 
-            // Prefill (when supplied) seeds the field with a sensible default (e.g. "127.0.0.1:14242")
-            // so the normal Join is IP-only — the user overwrites just the IP and keeps ":port". When no
-            // prefill is given, clear any prefilled value so the placeholder hint shows instead. An empty
-            // submit can never rename/connect to nothing because the native ValidateResult rejects an
-            // empty OK.
-            bool hasPrefill = !string.IsNullOrEmpty(prefill);
-            field.text = hasPrefill ? prefill : string.Empty;
+            // Clear any prefilled value so the placeholder hint shows instead. An empty submit can never
+            // rename/connect to nothing because the native ValidateResult rejects an empty OK.
+            field.text = string.Empty;
 
             // BUG B fix — the typed text was white-on-white (invisible). PP's prompt prefab serializes
             // the input Text white and renders over a light field background in our usage; the dev
@@ -1110,26 +1101,7 @@ namespace Multiplayer.UI
             EventSystem.current?.SetSelectedGameObject(field.gameObject);
             field.ActivateInputField();
 
-            if (hasPrefill)
-            {
-                // Pre-select the IP portion (everything before the LAST ':') so the user's first
-                // keystroke replaces just the IP while the ":port" suffix stays intact. For
-                // "127.0.0.1:14242" the last ':' is at index 9 → selection covers "127.0.0.1". If there
-                // is no ':' (bare host), select the whole text. Selection must be set AFTER
-                // ActivateInputField (the field must be focused/active for the highlight to stick).
-                //   uGUI: selectionAnchorPosition = fixed end, selectionFocusPosition = moving end /
-                //   where the caret renders; a non-empty selection exists when anchor != focus. We do
-                //   NOT set caretPosition here — its setter collapses anchor+focus to one point and
-                //   would clear the highlight.
-                int lastColon = prefill.LastIndexOf(':');
-                int ipLen = lastColon >= 0 ? lastColon : prefill.Length;
-                field.selectionAnchorPosition = 0;
-                field.selectionFocusPosition = ipLen;
-            }
-            else
-            {
-                field.caretPosition = 0;
-            }
+            field.caretPosition = 0;
             return true;
         }
 
@@ -1398,29 +1370,6 @@ namespace Multiplayer.UI
 
         private static bool IsPlaceholderCode(string code)
             => code == CodeWaiting || code == CodeUnavailable || code == CodeDiscovering;
-
-        // Host STUN short code (or a status placeholder while discovering / on failure).
-        // The host's CompositeTransport always includes a hosting StunTransport, so the code
-        // shows whenever discovery succeeds — alongside the DirectIP and Steam rail values.
-        public string GetRailStunCode()
-        {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsHost) return "(host on STUN to share)";
-            var stun = FindHostingChild(TransportType.StunUDP);
-            if (stun == null) return "(host on STUN to share)";
-            if (stun.PublicEndPoint == null)
-            {
-                // Mirror the StunTransport discovery thread's state messages (it retries across a
-                // pool of Google STUN servers and only marks itself unavailable after exhausting all
-                // rounds). "unavailable" = environmentally blocked (symmetric NAT / firewall); the
-                // rail re-reads every frame, so a late success still appears live without reopening.
-                if (stun.LocalEndpoint.Contains("unavailable"))
-                    return CodeUnavailable;
-                return CodeDiscovering;
-            }
-            var code = ConnectCode.Encode(stun.PublicEndPoint);
-            return code ?? CodeUnavailable;
-        }
 
         // THE SESSION'S ONE invite code — the PUBLIC ENDPOINT, and nothing else. The same string on every
         // peer, so ANY player can forward it to a friend, not just the host.
@@ -2061,130 +2010,6 @@ namespace Multiplayer.UI
                     return asm;
             }
             return null;
-        }
-
-        // ═══════════════════════════════════════════════════════════════════
-        //  Pause menu — shown when NETWORK is clicked during gameplay
-        // ═══════════════════════════════════════════════════════════════════
-
-        public void ShowPauseMenu()
-        {
-            var engine = NetworkEngine.Instance;
-            var mb = GameUtl.GetMessageBox();
-            if (mb == null) return;
-
-            if (engine == null || !engine.IsActive)
-            {
-                StartHostAndOpenLobby();
-                return;
-            }
-
-            var info = BuildConnectionInfo(engine);
-            var labels = new Dictionary<MessageBoxButtons, string>();
-
-            labels[MessageBoxButtons.Yes] = "DISCONNECT";
-            labels[MessageBoxButtons.Cancel] = "CLOSE";
-
-            var transport = engine.Transport;
-            if (transport != null)
-            {
-                if (transport.TransportType == TransportType.SteamP2P)
-                    labels[MessageBoxButtons.No] = "COPY STEAM ID";
-                else if (transport.TransportType == TransportType.DirectIP)
-                    labels[MessageBoxButtons.No] = "COPY IP:PORT";
-                else
-                    labels[MessageBoxButtons.No] = "COPY STUN CODE";
-            }
-            else
-            {
-                labels[MessageBoxButtons.No] = "COPY INFO";
-            }
-
-            labels[MessageBoxButtons.Abort] = "INVITE FRIEND";
-
-            mb.ShowSimplePrompt(info, MessageBoxIcon.Information,
-                MessageBoxButtons.Yes | MessageBoxButtons.No | MessageBoxButtons.Abort | MessageBoxButtons.Cancel,
-                labels, OnPauseMenuResult, this);
-        }
-
-        private static string BuildConnectionInfo(NetworkEngine engine)
-        {
-            var transport = engine.Transport;
-            var transportName = transport != null ? transport.TransportType.ToString() : "None";
-            var endpoint = transport?.LocalEndpoint ?? "N/A";
-            var role = engine.IsHost ? "HOST" : "CLIENT";
-            var steamId = engine.LocalSteamId != 0 ? engine.LocalSteamId.ToString() : "N/A";
-
-            var clientsStr = "";
-            if (engine.Session != null)
-            {
-                var count = engine.Session.ClientCount;
-                clientsStr = $"\n  Players: {count + 1} (including you)";
-                if (count > 0)
-                {
-                    clientsStr += "\n  Connected:";
-                    foreach (var c in engine.Session.GetConnectedClients())
-                        clientsStr += $"\n    \u2022 {c}";
-                }
-            }
-
-            var copyable = GetCopyableInfo(engine);
-
-            return $"Network Session\n" +
-                   $"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n" +
-                   $"Transport: {transportName}\n" +
-                   $"Role: {role}\n" +
-                   $"Steam ID: {steamId}\n" +
-                   $"Endpoint: {endpoint}" +
-                   clientsStr +
-                   $"\n\nCopyable: {copyable}";
-        }
-
-        private static string GetCopyableInfo(NetworkEngine engine)
-        {
-            if (engine.Transport == null) return engine.LocalSteamId.ToString();
-
-            switch (engine.Transport.TransportType)
-            {
-                case TransportType.SteamP2P:
-                    return engine.LocalSteamId.ToString();
-                case TransportType.DirectIP:
-                    return engine.Transport.LocalEndpoint
-                        .Replace("DirectIP(host:", "")
-                        .Replace("DirectIP(client:", "")
-                        .Replace(")", "");
-                case TransportType.StunUDP:
-                    return engine.Transport.LocalEndpoint
-                        .Replace("STUN(", "")
-                        .Replace(")", "");
-                default:
-                    return engine.Transport.LocalEndpoint;
-            }
-        }
-
-        private void OnPauseMenuResult(MessageBoxCallbackResult res)
-        {
-            if (res.DialogResult == MessageBoxResult.Yes)
-            {
-                OnDisconnectClicked();
-            }
-            else if (res.DialogResult == MessageBoxResult.No)
-            {
-                var engine = NetworkEngine.Instance;
-                if (engine != null)
-                {
-                    var text = GetCopyableInfo(engine);
-                    CopyToClipboard(text);
-                    var mb = GameUtl.GetMessageBox();
-                    if (mb != null)
-                        mb.ShowSimplePrompt($"Copied to clipboard:\n{text}",
-                            MessageBoxIcon.Information, MessageBoxButtons.OK, null, this);
-                }
-            }
-            else if (res.DialogResult == MessageBoxResult.Abort)
-            {
-                InvitePlayers();
-            }
         }
     }
 }
