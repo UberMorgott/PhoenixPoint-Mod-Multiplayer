@@ -883,16 +883,32 @@ namespace Multiplayer.Tactical
     /// its geoscape consequences reach the clients as ordinary value-rail state, exactly as they do when the
     /// host clicks the button itself. That normal case is untouched — the prefix only records and returns.
     ///
-    /// INVARIANT, DECLARED: <c>ReturnCountdown.ReturnHoldPatch</c> prefixes this same method with
-    /// <c>Priority.First</c> and returns FALSE while its five-second strip runs, which CANCELS this prefix.
-    /// That is deliberate — the leave is announced at the RELEASE, not at the click, because a hold that is
-    /// abandoned would otherwise have carried every other peer out of a battle this peer never left. Any
-    /// third prefix on <c>TacticalView.GoToGeoscape</c> must declare its own priority relative to those two.
+    /// IT ASKS THE HOLD, IT DOES NOT RELY ON BEING SKIPPED (2026-08-11).
+    /// <c>ReturnCountdown.ReturnHoldPatch</c> prefixes this same method at <c>Priority.First</c> and returns
+    /// FALSE while its five-second strip runs, and this capture must not announce behind it: the leave is
+    /// announced when the return HAPPENS, not when it is asked for, because that hold can be abandoned and
+    /// an announcement at the click would have carried every other peer out of a battle this peer never
+    /// left. Harmony WILL NOT do that skipping for us. In HarmonyLib 2.2.0.0 — the ModSDK's own
+    /// 0Harmony.dll — a false prefix cancels only the prefixes that can affect the original (returning
+    /// bool, or taking a ref/out the body reads); a <c>void</c> prefix is emitted outside that guard and
+    /// runs at any priority, which a probe against that exact dll confirmed after a first attempt at this
+    /// shipped as a runtime no-op. Making it <c>bool</c> is not the answer either — L64's
+    /// <c>leave-capture-blocks</c> arm forbids that return type outright, because a capture that CAN block
+    /// this funnel would strand the clicking peer on its own summary screen.
+    ///
+    /// So the condition is read, not inherited: <see cref="ReturnCountdown.Holding"/> is true exactly when
+    /// the hold just swallowed this call. That is also why the priority still matters — the hold has to arm
+    /// before this runs. Any third prefix on <c>TacticalView.GoToGeoscape</c> must declare its own priority
+    /// relative to these two.
     /// </summary>
     [HarmonyPatch(typeof(PhoenixPoint.Tactical.View.TacticalView), "GoToGeoscape")]
     internal static class TacLeaveBattleCapture
     {
-        private static void Prefix() => TacticalTurnSync.OnLocalLeaveBattle();
+        private static void Prefix()
+        {
+            if (ReturnCountdown.Holding) return;   // swallowed by the strip — announce at the release
+            TacticalTurnSync.OnLocalLeaveBattle();
+        }
     }
 
     /// <summary>

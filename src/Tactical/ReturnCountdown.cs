@@ -57,6 +57,12 @@ namespace Multiplayer.Tactical
         /// <summary>Session/level teardown — a live count must not survive into the next battle.</summary>
         internal static void Reset() { _zeroAt = 0f; _view = null; _releasing = false; }
 
+        /// <summary>THE HOLD JUST SWALLOWED THIS CALL — read by <c>TacLeaveBattleCapture</c>, which must not
+        /// announce a leave that has not happened. Exactly mirrors the arms on which
+        /// <see cref="ReturnHoldPatch"/> returns false: every one of them has set the deadline first, and
+        /// <see cref="Tick"/> clears it BEFORE it re-invokes, so the release is not "holding".</summary>
+        internal static bool Holding => _zeroAt > 0f;
+
         /// <summary>What the strip shows on THIS peer. Holds at 1 rather than reaching 0 by itself: zero is
         /// the frame the return actually fires, the same rule <c>LobbyCountdown.DisplaySecondsLeft</c> uses.</summary>
         internal static int DisplaySecondsLeft()
@@ -68,11 +74,19 @@ namespace Multiplayer.Tactical
 
         /// <summary>THE HOLD. Returns false to swallow the native return while the strip counts.
         ///
-        /// ORDER IS DECLARED, NOT HOPED FOR (same reason as <c>PersonnelSync.DismissCapturePatch</c>). The
-        /// mod puts a SECOND prefix on this very method — <c>TacLeaveBattleCapture</c>, which latches
-        /// <c>TacticalTurnSync.LeftBattle</c> and announces the leave to every peer — and a prefix returning
-        /// false cancels the ones that would have run after it. Unordered, whether the leave was announced at
-        /// the CLICK or five seconds later at the RELEASE came down to registration order.
+        /// ORDER IS DECLARED, NOT HOPED FOR. The mod puts a SECOND prefix on this very method —
+        /// <c>TacLeaveBattleCapture</c>, which latches <c>TacticalTurnSync.LeftBattle</c> and announces the
+        /// leave to every peer — and a prefix returning false cancels the ones behind it. Unordered,
+        /// whether the leave went out at the CLICK or five seconds later at the RELEASE came down to
+        /// registration order. <c>Priority.First</c> settles it.
+        ///
+        /// THE PRIORITY IS ONLY HALF OF IT, and Harmony does NOT do the cancelling. In HarmonyLib 2.2.0.0 a
+        /// false prefix skips only the prefixes that can affect the original — ones returning bool or taking
+        /// a ref/out the body reads; a <c>void</c> prefix is emitted unguarded and runs at any priority
+        /// (probed against the ModSDK's own 0Harmony.dll, 2026-08-11, after a first attempt at this shipped
+        /// as a runtime no-op). The capture is <c>void</c> and L64 requires it to stay that way, so it reads
+        /// <see cref="Holding"/> instead. The priority is still load-bearing: this hold must ARM before the
+        /// capture asks.
         ///
         /// THE HOLD MUST WIN, so the announcement happens at the release: this hold can be ABANDONED
         /// (<see cref="Tick"/> gives up when the session dies, the level goes away, or the method stops
