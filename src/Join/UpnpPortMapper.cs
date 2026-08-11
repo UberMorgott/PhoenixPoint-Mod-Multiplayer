@@ -223,22 +223,15 @@ namespace Multiplayer.Net
             catch { return null; }
         }
 
-        // Up, non-loopback IPv4 interface addresses to send M-SEARCH from.
+        // Up, non-loopback IPv4 interface addresses to send M-SEARCH from. ONE enumeration for the mod:
+        // LanIpResolver already sweeps the same interfaces under the same "up, not 127/8, not 169.254/16"
+        // rules, so this only has to dedup + stringify them. Its 10 s TTL is harmless here — discovery
+        // runs once per host session, and the worst case is an adapter brought up in the last ten seconds
+        // missing one M-SEARCH.
         private static List<string> LocalIPv4Candidates()
         {
             var ips = new List<IPAddress>();
-            try
-            {
-                foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
-                {
-                    if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
-                    if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
-                    foreach (var ua in ni.GetIPProperties().UnicastAddresses)
-                        if (ua.Address.AddressFamily == AddressFamily.InterNetwork)
-                            ips.Add(ua.Address);
-                }
-            }
-            catch { }
+            foreach (var a in Multiplayer.Util.LanIpResolver.LocalIPv4Addresses()) ips.Add(a.Ip);
             return FilterCandidateIPv4(ips);
         }
 
@@ -378,8 +371,12 @@ namespace Multiplayer.Net
             catch { return null; }
         }
 
-        // Core is Unity-free at compile time; reach UnityEngine.Debug.Log via reflection so the one
-        // success line lands in Player.log in-game and is a harmless no-op under tests (cached).
+        // Same isolation as CompositeTransport/DirectTransport LogError, and for the same measured
+        // reason: a compile-time-bound UnityEngine.Debug.Log dies in a host with no Unity player runtime
+        // (RailCheck is one), and dies at JIT/assembly-resolve time, i.e. at the CALLER, outside any
+        // try/catch this method holds. Reflection keeps the failure inside the catch below. No law
+        // executes this mapper today — the idiom is kept because the type is deliberately pure BCL and
+        // its discovery runs off the Unity main thread. In-game the line lands in Player.log. Cached.
         private static System.Reflection.MethodInfo _unityLog;
         private static bool _unityLogResolved;
         private static void LogInfo(string message)
