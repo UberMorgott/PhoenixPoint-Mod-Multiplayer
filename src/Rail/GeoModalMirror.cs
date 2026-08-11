@@ -435,14 +435,25 @@ namespace Multiplayer.Network.Sync
                 var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoModalRaise, SyncKind.StateDelta, Encode(seq, p));
                 var msg = new NetworkMessage(PacketType.SyncEnvelope, env);
                 // MISSION BRIEF UNICAST: mission-start confirmation modals (the 10 brief types) go only to
-                // the peer whose vehicle triggered the mission — the same peer EventPopup unicast the event
-                // window to. The site ref links the brief to the dispatcher recorded at event-raise time.
+                // the peer whose vehicle triggered the mission. Primary: EventPopup's dispatcher dictionary,
+                // populated when the event popup fired. Fallback: the site's parked vehicles, for missions
+                // whose brief opens without a preceding event (or whose event didn't record a dispatcher).
                 if (kind == StateKind.Modal && modalData is GeoMission briefMission && briefMission.Site != null &&
                     GeoWindowCoverage.IsMissionStartConfirmation((ModalType)p.ModalType, modalData))
                 {
                     string siteRef = IdentityResolver.RootRef(briefMission.Site);
-                    if (!string.IsNullOrEmpty(siteRef) &&
-                        EventPopup.TryGetMissionDispatcher(siteRef, out var dispatchPeer))
+                    ulong dispatchPeer = 0;
+                    bool found = !string.IsNullOrEmpty(siteRef) &&
+                                 EventPopup.TryGetMissionDispatcher(siteRef, out dispatchPeer);
+                    if (!found)
+                    {
+                        dispatchPeer = 0;
+                        var siteVehicles = briefMission.Site.Vehicles;
+                        if (siteVehicles != null)
+                            foreach (var v in siteVehicles)
+                                if (v != null && AircraftDispatch.TryGetDispatcher(v, out dispatchPeer)) { found = true; break; }
+                    }
+                    if (found)
                     {
                         if (dispatchPeer == AircraftDispatch.HostPeer)
                         {
