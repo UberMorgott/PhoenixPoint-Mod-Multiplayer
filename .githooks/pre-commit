@@ -28,4 +28,17 @@ if [ -z "$managed" ]; then
 fi
 
 echo "RailCheck: using $managed"
-dotnet run -c Debug --project "$root/tools/RailCheck" || exit 1
+
+# The dotnet first on PATH can be the x86 host with no SDK ("No .NET SDKs were found"), which aborts
+# every commit in this tree until the caller prepends the x64 install by hand. Probe for a real SDK and
+# fall back to the known x64 locations; keep plain `dotnet` when it already works (Linux/macOS/CI).
+dotnet_bin="dotnet"
+if [ -z "$(dotnet --list-sdks 2>/dev/null)" ]; then
+    for d in "/c/Program Files/dotnet/dotnet.exe" "/usr/local/share/dotnet/dotnet" ; do
+        [ -x "$d" ] && { dotnet_bin="$d"; break; }
+    done
+    [ "$dotnet_bin" = "dotnet" ] && { echo "pre-commit: no .NET SDK found (the dotnet on PATH has none)"; exit 1; }
+    echo "RailCheck: PATH dotnet has no SDK, using $dotnet_bin"
+fi
+
+"$dotnet_bin" run -c Debug --project "$root/tools/RailCheck" || exit 1
