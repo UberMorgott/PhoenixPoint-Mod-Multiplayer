@@ -1405,6 +1405,11 @@ namespace Multiplayer.Network.Sync
         /// <c>HasRewards()</c>==false (GeoFactionRewardApplyResult.cs:69) makes <c>ShowReward</c>:363
         /// return at once, and the native page renders outcome TEXT only. Consumer:
         /// <see cref="EventCompleteArbiter"/> refusing a resolution needs exactly that pair of writes.</summary>
+        internal static void ClearResolvedInstance(GeoscapeEvent ev)
+        {
+            SetIsCompleted?.Invoke(ev, new object[] { false });
+        }
+
         internal static void MarkResolvedInstance(GeoscapeEvent ev)
         {
             SetIsCompleted?.Invoke(ev, new object[] { true });

@@ -306,6 +306,9 @@ namespace Multiplayer.Network.Sync
             // null for site-less events.
             var ev = EventPopup.LiveInstance(geo.View, eventId)
                      ?? new GeoscapeEvent(data, new GeoscapeEventContext(es.FindEventLocation(eventId), geo.ViewerFaction)) { Record = rec };
+            bool clearedStale = ev.IsCompleted && rec.State == GeoscapeEventRecordState.Triggered;
+            if (clearedStale)
+                EventPopup.ClearResolvedInstance(ev);
             var choice = index < 0 || data.Choices == null || index >= data.Choices.Count ? null : data.Choices[index];
             var faction = geo.ViewerFaction;
 
@@ -357,7 +360,8 @@ namespace Multiplayer.Network.Sync
             // anyway, because a record left Triggered is a window no peer can ever close.
             var reward = ev.CompleteEvent(choice != null && choice.Outcome == null ? null : choice, faction);
             Debug.Log("[MP][events] HOST answered '" + eventId + "' choice=" + index + " → record=" + rec.State +
-                      " selected=" + rec.SelectedChoice + " nonce=" + nonce + " peer=" + senderPeerId);
+                      " selected=" + rec.SelectedChoice + " nonce=" + nonce + " peer=" + senderPeerId +
+                      (clearedStale ? " (cleared stale IsCompleted from prior raise)" : ""));
 
             // Native tail (:604-613), BOTH HALVES. WHICH peer plays the mission is tactical scope (law 5);
             // dropping the mission silently is not an option — that is the swallow class.
@@ -759,6 +763,7 @@ namespace Multiplayer.Network.Sync
             // and a client-side grant of a choice nobody picked.
             string why = ClientRefusal("this funnel is only reachable from a dialog teardown")
                 ?? (rec == null || rec.State == GeoscapeEventRecordState.Triggered
+                              || rec.State == GeoscapeEventRecordState.Reset
                     ? null
                     : "the record is " + rec.State + " (choice " + rec.SelectedChoice + ") — the first answer is frozen");
             if (why == null) return true;
