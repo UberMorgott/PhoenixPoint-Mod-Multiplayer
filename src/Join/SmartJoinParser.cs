@@ -72,7 +72,12 @@ namespace Multiplayer.Util
                 ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
                 return JoinTarget.Direct(ip.ToString(), port);
 
-            var stripped = s.Replace("-", "").Replace(" ", "");
+            // NORMALIZED, not merely stripped — the same aliasing the codecs apply. Branch 3 gates on
+            // stripped.All(IsCrockford), so a hand-rolled strip that kept the letter O turned the whole
+            // ConnectCode branch off for that paste and no amount of tolerance inside Decode could be
+            // reached. Length is untouched (Normalize drops exactly '-' and ' '), so every branch keyed
+            // on it classifies as before.
+            var stripped = Crockford.Normalize(s);
 
             // 2) Invite code: exactly 8 Crockford symbols with a valid check symbol → a Steam account
             // id. Checked BEFORE STUN (11 symbols) — distinct length, so the two never collide. The
@@ -148,7 +153,7 @@ namespace Multiplayer.Util
         private static bool IsCrockford(char c)
         {
             c = char.ToUpperInvariant(c);
-            return "0123456789ABCDEFGHJKMNPQRSTVWXYZ".IndexOf(c) >= 0;
+            return Crockford.Alphabet.IndexOf(c) >= 0;
         }
     }
 }

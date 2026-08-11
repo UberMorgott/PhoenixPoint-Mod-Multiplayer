@@ -20,21 +20,11 @@ namespace Multiplayer.Util
     /// </summary>
     public static class ConnectCode
     {
-        private const string Alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford base32 (32 chars)
+        private const string Alphabet = Crockford.Alphabet;
 
         /// <summary>10 data symbols (48 bits of endpoint, 2 bits of padding) + 1 check symbol.</summary>
         public const int DataSymbols = 10;
         public const int TotalSymbols = DataSymbols + 1;
-
-        // Weighted checksum over the data symbols, mod 32 — byte-for-byte InviteCode.Checksum's scheme, so
-        // there is one notion of "check symbol" in this codebase and not two. Odd weights are invertible
-        // mod 32, so EVERY single-symbol substitution changes it; the weighting catches most transpositions.
-        private static int Checksum(int[] sym)
-        {
-            int sum = 0;
-            for (int i = 0; i < DataSymbols; i++) sum += sym[i] * (2 * i + 1);
-            return sum & 0x1F;
-        }
 
         public static string Encode(IPEndPoint pub)
         {
@@ -62,7 +52,7 @@ namespace Multiplayer.Util
             }
             if (bits > 0)
                 sym[pos++] = (buffer << (5 - bits)) & 0x1F; // pad final partial symbol
-            sym[DataSymbols] = Checksum(sym);
+            sym[DataSymbols] = Crockford.Checksum(sym, DataSymbols);
 
             var sb = new StringBuilder(TotalSymbols);
             for (int i = 0; i < TotalSymbols; i++) sb.Append(Alphabet[sym[i]]);
@@ -76,7 +66,11 @@ namespace Multiplayer.Util
         {
             if (string.IsNullOrWhiteSpace(code)) return null;
 
-            var clean = code.Trim().Replace("-", "").Replace(" ", "").ToUpperInvariant();
+            // The SHARED normalizer, aliases included. This used to trim/strip/upper-case by hand and skip
+            // the Crockford I/L→1, O→0 mapping every other codec applied, so typing the letter O for a zero
+            // was "invalid code" here and a working join through InviteCode — one typo, two verdicts.
+            // Widening only: every string this accepted before normalizes to the same 11 symbols it did.
+            var clean = Crockford.Normalize(code);
             if (clean.Length != TotalSymbols) return null;
 
             var sym = new int[TotalSymbols];
@@ -86,7 +80,7 @@ namespace Multiplayer.Util
                 if (s < 0) return null; // illegal symbol
                 sym[i] = s;
             }
-            if (sym[DataSymbols] != Checksum(sym)) return null; // wrong check symbol → a typo, not an endpoint
+            if (sym[DataSymbols] != Crockford.Checksum(sym, DataSymbols)) return null; // a typo, not an endpoint
 
             int buffer = 0, bits = 0;
             var outBytes = new byte[6];

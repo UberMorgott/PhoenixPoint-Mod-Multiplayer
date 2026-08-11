@@ -19,8 +19,8 @@ namespace Multiplayer.Util
     /// </summary>
     public static class InviteCode
     {
-        private const string Alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford base32 (no I,L,O,U)
-        public const int DataSymbols = 7;   // 7*5 = 35 bits ≥ 32-bit accountId (top 3 bits always 0)
+        private const string Alphabet = Crockford.Alphabet;
+        public const int DataSymbols = 7;  // 7*5 = 35 bits ≥ 32-bit accountId (top 3 bits always 0)
         public const int TotalSymbols = 8;  // + 1 checksum symbol
         public const ulong SteamId64Base = 0x0110000100000000UL;
 
@@ -30,7 +30,7 @@ namespace Multiplayer.Util
             var sym = new int[TotalSymbols];
             for (int i = 0; i < DataSymbols; i++)
                 sym[i] = (int)((accountId >> (5 * (DataSymbols - 1 - i))) & 0x1F);
-            sym[DataSymbols] = Checksum(sym);
+            sym[DataSymbols] = Crockford.Checksum(sym, DataSymbols);
 
             var sb = new StringBuilder(TotalSymbols);
             for (int i = 0; i < TotalSymbols; i++) sb.Append(Alphabet[sym[i]]);
@@ -47,7 +47,7 @@ namespace Multiplayer.Util
         {
             accountId = 0;
             if (string.IsNullOrWhiteSpace(code)) return false;
-            var clean = Normalize(code);
+            var clean = Crockford.Normalize(code);
             if (clean.Length != TotalSymbols) return false;
 
             var sym = new int[TotalSymbols];
@@ -57,7 +57,7 @@ namespace Multiplayer.Util
                 if (idx < 0) return false; // illegal symbol
                 sym[i] = idx;
             }
-            if (sym[DataSymbols] != Checksum(sym)) return false; // wrong check symbol
+            if (sym[DataSymbols] != Crockford.Checksum(sym, DataSymbols)) return false; // wrong check symbol
 
             ulong val = 0;
             for (int i = 0; i < DataSymbols; i++) val = (val << 5) | (uint)sym[i];
@@ -68,30 +68,5 @@ namespace Multiplayer.Util
 
         /// <summary>Reconstruct the full SteamID64 from a decoded account id.</summary>
         public static ulong ToSteamId64(uint accountId) => SteamId64Base | accountId;
-
-        // Weighted checksum over the 7 data symbols, mod 32 (so the check symbol is itself an
-        // in-alphabet Crockford char). Odd weights are all invertible mod 32, so EVERY single-symbol
-        // substitution changes the checksum; the weighting also catches most adjacent transpositions.
-        private static int Checksum(int[] sym)
-        {
-            int sum = 0;
-            for (int i = 0; i < DataSymbols; i++) sum += sym[i] * (2 * i + 1);
-            return sum & 0x1F; // mod 32
-        }
-
-        // Crockford normalization: trim, drop dashes/spaces, upper-case, map I/L→1 and O→0.
-        private static string Normalize(string code)
-        {
-            var sb = new StringBuilder(code.Length);
-            foreach (var ch in code.Trim())
-            {
-                if (ch == '-' || ch == ' ') continue;
-                var c = char.ToUpperInvariant(ch);
-                if (c == 'I' || c == 'L') c = '1';
-                else if (c == 'O') c = '0';
-                sb.Append(c);
-            }
-            return sb.ToString();
-        }
     }
 }

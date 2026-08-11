@@ -22,7 +22,7 @@ namespace Multiplayer.Util
     /// </summary>
     public static class UnifiedCode
     {
-        private const string Alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"; // Crockford base32 (no I,L,O,U)
+        private const string Alphabet = Crockford.Alphabet;
         private const byte FlagSteam = 0x01;
         private const byte FlagEndpoint = 0x02;
 
@@ -57,7 +57,7 @@ namespace Multiplayer.Util
             }
 
             var symbols = Base32Encode(data.ToArray());
-            var raw = symbols + Alphabet[Checksum(symbols)];
+            var raw = symbols + Alphabet[Crockford.Checksum(symbols)];
             return Group(raw);
         }
 
@@ -72,12 +72,12 @@ namespace Multiplayer.Util
             steamAccountId = 0; hasSteam = false; endpoint = null; hasEndpoint = false;
             if (string.IsNullOrWhiteSpace(code)) return false;
 
-            var clean = Normalize(code);
+            var clean = Crockford.Normalize(code);
             if (clean.Length != 9 && clean.Length != 13 && clean.Length != 19) return false;
             foreach (var ch in clean) if (Alphabet.IndexOf(ch) < 0) return false; // illegal symbol
 
             var dataSymbols = clean.Substring(0, clean.Length - 1);
-            if (Alphabet[Checksum(dataSymbols)] != clean[clean.Length - 1]) return false; // bad check
+            if (Alphabet[Crockford.Checksum(dataSymbols)] != clean[clean.Length - 1]) return false; // bad check
 
             var bytes = Base32Decode(dataSymbols);
             if (bytes.Length < 1) return false;
@@ -146,31 +146,6 @@ namespace Multiplayer.Util
                 }
             }
             return outBytes.ToArray();
-        }
-
-        // Weighted checksum over the data symbols (indices), mod 32 — same scheme as InviteCode:
-        // odd weights are invertible mod 32, so every single-symbol substitution changes the check.
-        private static int Checksum(string symbols)
-        {
-            int sum = 0;
-            for (int i = 0; i < symbols.Length; i++)
-                sum += Alphabet.IndexOf(symbols[i]) * (2 * i + 1);
-            return sum & 0x1F;
-        }
-
-        // Crockford normalization: trim, drop dashes/spaces, upper-case, map I/L→1 and O→0.
-        private static string Normalize(string code)
-        {
-            var sb = new StringBuilder(code.Length);
-            foreach (var ch in code.Trim())
-            {
-                if (ch == '-' || ch == ' ') continue;
-                var c = char.ToUpperInvariant(ch);
-                if (c == 'I' || c == 'L') c = '1';
-                else if (c == 'O') c = '0';
-                sb.Append(c);
-            }
-            return sb.ToString();
         }
 
         // Dash-group in 4s for readability (dashes are stripped on decode).
