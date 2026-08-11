@@ -163,19 +163,32 @@ namespace Multiplayer.Tactical
             if (_zeroAt <= 0f) return;
             try
             {
+                // NOTHING TO RELEASE INTO — the view died without the level leaving Playing (which would
+                // have Reset us through TacLevelEndBarrier), or the handle stopped resolving. This is the
+                // one arm that swallows a return the player asked for, so it does not do it quietly.
+                if (_view == null || GoToGeoscapeMethod == null)
+                {
+                    Debug.LogError("[MP][return] the held return has nothing left to run — dropping the strip. " +
+                                   "This peer stays where it is; its Continue button still works.");
+                    Reset();
+                    return;
+                }
+                // THE SESSION DIED UNDER THE HOLD: release NOW instead of waiting out a clock nobody is
+                // watching any more. The player asked to go back five seconds ago and the only reason they
+                // have not is us — and there is nobody left to be told about it either (HostBroadcastLeave
+                // self-gates on the session). Dropping the strip and leaving them on the summary screen
+                // costs them a second Continue click for nothing.
                 var engine = NetworkEngine.Instance;
-                // The level went away under us (host left, session torn down, level reloaded). Nothing to
-                // release into; just stop showing a number.
-                if (engine == null || !engine.IsActiveSession || _view == null || GoToGeoscapeMethod == null)
-                { Reset(); return; }
-                if (Time.realtimeSinceStartup < _zeroAt) return;
+                bool sessionGone = engine == null || !engine.IsActiveSession;
+                if (!sessionGone && Time.realtimeSinceStartup < _zeroAt) return;
 
                 var view = _view;
                 _zeroAt = 0f;
                 _view = null;
-                Debug.Log("[MP][return] countdown reached zero — running the game's own " +
-                          "TacticalView.GoToGeoscape (PhoenixGame.FinishLevel) exactly as the summary screen " +
-                          "would have five seconds ago.");
+                Debug.Log("[MP][return] " + (sessionGone
+                              ? "the session ended while the return was held — going back to the geoscape now"
+                              : "countdown reached zero") + " — running the game's own TacticalView.GoToGeoscape " +
+                          "(PhoenixGame.FinishLevel) exactly as the summary screen would have.");
                 // Through TacticalTurnSync's invoker, not our own MethodInfo: this call is what fires
                 // TacLeaveBattleCapture (the hold above deliberately runs first, so the capture only ever
                 // fires here), and if the native body throws the leave latch has to come back off. It owns
