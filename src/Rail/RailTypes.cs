@@ -16,19 +16,19 @@ using UnityEngine;
 namespace Multiplayer.Network.Sync
 {
     /// <summary>
-    /// Shared rail metadata layer (law 6): per-type persistent-field tables derived from the game's OWN
-    /// save-serializer metadata (<c>Serializer.GetSerializedMembers</c> on the configured serializer —
-    /// its field discovery IS our enumerability; TFTV fields ride free), plus the canonical leaf value
-    /// codec. Both the host <see cref="DiffEngine"/> and the client <see cref="GenericApplier"/> derive
-    /// the SAME table (fields sorted by metadata name, ordinal) so a u16 field index is stable on the wire.
+    /// The VOCABULARY of the rail metadata layer: the four types <see cref="RailMeta"/> builds its per-type
+    /// tables out of, and every other rail file reads them through.
     ///
-    /// Two generic sources per type, NO subsystem knowledge anywhere:
-    ///   • direct — the type itself has serialized members ([SerializeType]/[SerializeMember]).
-    ///   • bridge — the type persists through a sibling <c>*InstanceData</c> DTO (GeoFaction, GeoVehicle,
-    ///     GeoSite ("GeoSiteInstaceData" — the game's own typo), Timing…): the DTO's metadata provides the
-    ///     member NAMES, each resolved onto the LIVE type by same-name (then unique-same-class-type)
-    ///     match. Unresolvable/read-only members are EXCLUDED and visible in the coverage report —
-    ///     the opt-out guarantee replacing discover-by-bug.
+    ///   • <see cref="FieldClass"/> — how one field rides: a leaf value, a descended child, a keyed
+    ///     collection, a canonical list, a per-subKey dict.
+    ///   • <see cref="LeafKind"/> — the leaf codec's first byte. It shares its number space with the
+    ///     EntityList / OrderVector / DictCensus markers, and RailCheck L7 asserts the disjointness.
+    ///   • <see cref="RailField"/> — one field's wire identity plus the cached accessor that reads it.
+    ///   • <see cref="RailType"/> — one type's whole table.
+    ///
+    /// These are DERIVED, not declared: <see cref="RailMeta"/> fills them from the game's own save-serializer
+    /// metadata. Nothing here carries subsystem knowledge, and nothing here should — see RailMeta.cs for what
+    /// the derivation is and why a field index is stable on both peers.
     /// </summary>
     public enum FieldClass : byte
     {

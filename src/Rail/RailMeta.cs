@@ -16,6 +16,23 @@ using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Network.Sync
 {
+    /// <summary>
+    /// Shared rail metadata layer (law 6): per-type persistent-field tables derived from the game's OWN
+    /// save-serializer metadata (<c>Serializer.GetSerializedMembers</c> on the configured serializer —
+    /// its field discovery IS our enumerability; TFTV fields ride free), plus the canonical leaf value
+    /// codec. Both the host <see cref="DiffEngine"/> and the client <see cref="GenericApplier"/> derive
+    /// the SAME table (fields sorted by metadata name, ordinal) so a u16 field index is stable on the wire.
+    ///
+    /// Two generic sources per type, NO subsystem knowledge anywhere:
+    ///   • direct — the type itself has serialized members ([SerializeType]/[SerializeMember]).
+    ///   • bridge — the type persists through a sibling <c>*InstanceData</c> DTO (GeoFaction, GeoVehicle,
+    ///     GeoSite ("GeoSiteInstaceData" — the game's own typo), Timing…): the DTO's metadata provides the
+    ///     member NAMES, each resolved onto the LIVE type by same-name (then unique-same-class-type)
+    ///     match. Unresolvable/read-only members are EXCLUDED and visible in the coverage report —
+    ///     the opt-out guarantee replacing discover-by-bug.
+    ///
+    /// The four types the tables are made of live in RailTypes.cs.
+    /// </summary>
     public static class RailMeta
     {
         // ─── Game serializer access (typed; the ONE configured instance) ───
