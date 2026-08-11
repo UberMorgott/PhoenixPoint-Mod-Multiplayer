@@ -1,6 +1,7 @@
 using System;
 using HarmonyLib;
 using Multiplayer.Network;
+using Multiplayer.Network.MessageLayer;
 using Multiplayer.Network.Sync;
 using PhoenixPoint.Tactical.View;
 using UnityEngine;
@@ -8,9 +9,10 @@ using UnityEngine;
 namespace Multiplayer.Tactical
 {
     /// <summary>
-    /// FIVE SECONDS BEFORE THE GEOSCAPE COMES BACK. Owner request 2026-08-10: when a mission ends and the
-    /// peer is about to be taken back to the geoscape, a countdown strip appears at the TOP of the screen
-    /// and ticks 5 → 0; the return happens when it reaches zero.
+    /// FIVE SECONDS BEFORE THE GEOSCAPE COMES BACK, SHOWN TO EVERY PEER. When a mission ends and any peer
+    /// clicks Continue on the battle summary, a countdown strip appears on ALL peers' screens and ticks
+    /// 5 → 0; the return happens when it reaches zero. Any peer can CANCEL it, which stops the countdown
+    /// for everyone — an opt-out, not a quorum.
     ///
     /// THE SEAM IS THE GAME'S OWN AND THERE IS EXACTLY ONE: <c>TacticalView.GoToGeoscape</c>
     /// (TacticalView.cs:1112) is the private callback every end-of-battle route hands to the summary
@@ -20,18 +22,15 @@ namespace Multiplayer.Tactical
     /// second path to forget and nothing torn down early. Same shape as
     /// <c>DeployCountdown.Gate</c> holds a launch, in the other direction.
     ///
-    /// NO WIRE, NO QUORUM (P13). The clock is peer-LOCAL and starts on THIS peer's own click, because the
-    /// return already is: each peer runs its own <c>GoToGeoscape</c> whenever it dismisses its own summary
-    /// screen (measured 2026-08-11 — the two clients reached the geoscape at 475.1 s / 476.7 s and the HOST
-    /// only at 483.6 s). Nothing here reads another peer, nothing waits on a human, and reaching zero
-    /// requires nobody to press anything. A peer that alt-tabs returns the moment its own Update resumes;
-    /// a peer that never left the geoscape never calls <c>GoToGeoscape</c> and so never arms this at all.
+    /// BROADCAST, NOT LOCAL. When any peer clicks Continue, the host arms the countdown for all peers via
+    /// <see cref="PacketType.ReturnCountdown"/> (0x4B). When any peer clicks Cancel, the host clears it
+    /// for all peers. Same two-write shape as <see cref="Lobby.LobbyCountdown"/>: each peer counts its own
+    /// display down from the arm off local realtime. NOT A QUORUM (P13): the countdown expires by itself,
+    /// cancel is an opt-out that any single peer can exercise.
     ///
     /// NO NEW WIDGET (native-UI-first). The strip is the mod's EXISTING top-of-screen countdown plate,
     /// <see cref="Multiplayer.UI.CountdownPanel"/> — the same skinned plate the deployment drop and the
-    /// lobby start already share, anchored under the top edge (CountdownPanel.cs:83-87) and skinned from
-    /// the captured native theme. It only grows a third caption. The CANCEL button is HIDDEN for this one:
-    /// there is nothing to veto — the battle is over and the geoscape is where the game goes next.
+    /// lobby start already share.
     ///
     /// REPAINT SEAM: <c>MultiplayerUI.Update</c>:1977 (<c>_countdownPanel?.Sync()</c>), unconditional and
     /// every frame in every scene, which is what makes the number tick on an already-open screen.
@@ -76,6 +75,77 @@ namespace Multiplayer.Tactical
             return left < 1 ? 1 : left;
         }
 
+        /// <summary>Host arms the countdown for all peers. Called when ANY peer's Continue click reaches the
+        /// host (the host's own click is local, a client's crosses as <see cref="RequestArm"/>).</summary>
+        internal static void HostArm(NetworkEngine engine, TacticalView viewIfHost)
+        {
+            if (engine == null || !engine.IsHost) return;
+            if (_zeroAt > 0f) return;                        // already counting
+            if (viewIfHost != null) _view = viewIfHost;
+            _zeroAt = Time.realtimeSinceStartup + CountdownSeconds;
+            Debug.Log("[MP][return] host arming the return countdown for ALL peers — " + CountdownSeconds +
+                      " s. Any peer can cancel; nobody needs to press anything for it to expire.");
+            engine.BroadcastToAll(new NetworkMessage(PacketType.ReturnCountdown,
+                                                     new byte[] { (byte)CountdownSeconds }));
+        }
+
+        /// <summary>Host clears the countdown for all peers.</summary>
+        internal static void HostCancel(NetworkEngine engine, string who)
+        {
+            if (engine == null || !engine.IsHost) return;
+            if (_zeroAt <= 0f)
+            {
+                Debug.Log("[MP][return] cancel from " + who + " arrived with NO countdown running — nothing to stop.");
+                return;
+            }
+            Debug.Log("[MP][return] countdown CANCELLED by " + who +
+                      " — the return is NOT cancelled, only the countdown: the summary screen is still there " +
+                      "and Continue can be pressed again.");
+            _zeroAt = 0f;
+            engine.BroadcastToAll(new NetworkMessage(PacketType.ReturnCountdown, new byte[] { 0 }));
+        }
+
+        /// <summary>The cancel gesture from either side. On the host it IS the decision; on a client it
+        /// crosses as 0x4C and the host applies it.</summary>
+        internal static void RequestCancel()
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession)
+            {
+                Debug.LogWarning("[MP][return] CANCEL pressed with no active co-op session — the veto goes nowhere.");
+                return;
+            }
+            if (engine.IsHost) { HostCancel(engine, "this host"); return; }
+            Debug.Log("[MP][return] CANCEL leaving this client as 0x" +
+                      ((byte)PacketType.ReturnCountdownCancel).ToString("X2") +
+                      " — the host owns the countdown, so the veto takes one round trip.");
+            engine.SendToHost(new NetworkMessage(PacketType.ReturnCountdownCancel));
+        }
+
+        /// <summary>Client applier for 0x4B: adopt the host's arm (or clear) and start counting locally.</summary>
+        internal static void HandleCountdown(NetworkEngine engine, NetworkMessage msg)
+        {
+            if (engine == null || engine.IsHost) return;
+            int seconds = msg?.Payload != null && msg.Payload.Length > 0 ? msg.Payload[0] : 0;
+            if (seconds <= 0)
+            {
+                _zeroAt = 0f;
+                Debug.Log("[MP][return] countdown CLEARED by the host — either it reached zero and the geoscape " +
+                          "return is happening, or somebody cancelled it.");
+                return;
+            }
+            _zeroAt = Time.realtimeSinceStartup + seconds;
+            Debug.Log("[MP][return] countdown ARMED by the host for " + seconds +
+                      " s — this peer counts its own display down from here. CANCEL stops it for everyone.");
+        }
+
+        /// <summary>Host applier for 0x4C: any peer's cancel.</summary>
+        internal static void HandleCancel(NetworkEngine engine, NetworkMessage msg)
+        {
+            if (engine == null || !engine.IsHost || msg == null) return;
+            HostCancel(engine, "peer=" + msg.SenderSteamId);
+        }
+
         /// <summary>THE HOLD. Returns false to swallow the native return while the strip counts.
         ///
         /// ORDER IS DECLARED, NOT HOPED FOR. The mod puts a SECOND prefix on this very method —
@@ -99,9 +169,9 @@ namespace Multiplayer.Tactical
         /// A leave is real when it happens, not when it is scheduled. The release re-invokes through this
         /// same chain with <see cref="ModDriving"/> set, so the capture runs then, exactly once.
         ///
-        /// IT HOLDS A HUMAN'S CLICK AND NOTHING ELSE. The strip's whole premise is that the clock is
-        /// peer-LOCAL and starts on THIS peer's own click; the mod's own three invocations of this funnel
-        /// are not clicks and must go through untouched:
+        /// IT HOLDS A HUMAN'S CLICK AND NOTHING ELSE. The strip's whole premise is that the countdown is
+        /// HOST-AUTHORITATIVE and starts when any peer clicks Continue; the mod's own three invocations of
+        /// this funnel are not clicks and must go through untouched:
         ///   • the release (<see cref="ModDriving"/>) — obviously, it IS the expiry;
         ///   • <c>TacticalTurnSync.HandleLeaveBattle</c>, the host executing a peer's accepted ask. Held, it
         ///     returned false to a caller that then logged "ACCEPTED — running the host's own GoToGeoscape"
@@ -122,33 +192,39 @@ namespace Multiplayer.Tactical
             {
                 try
                 {
-                    // The mod driving this funnel itself, not a human clicking Continue — see the summary.
                     if (ModDriving || SyncApplyScope.Active) return true;
                     var engine = NetworkEngine.Instance;
-                    // Solo is untouched vanilla: a single player has nobody to be told about, and five
-                    // seconds of waiting is not a thing to add to a game that never had it.
                     if (engine == null || !engine.IsActiveSession) return true;
                     if (GoToGeoscapeMethod == null)
                     {
-                        // NEVER SILENT (P1), and never at the cost of the return: a resolve failure means
-                        // nothing could re-invoke this, so the strip is skipped and the game goes back now.
                         Debug.LogError("[MP][return] TacticalView.GoToGeoscape did not resolve — no countdown " +
                                        "strip for this return; going back to the geoscape immediately.");
                         return true;
                     }
                     if (_zeroAt > 0f) return false;                // already counting; eat the re-click
 
+                    // On the HOST, arm the countdown for everyone. On a CLIENT, ask the host to arm it;
+                    // the client's own _view is latched below so its own Tick can release when the host's
+                    // broadcast comes back and the local clock expires.
                     _view = __instance;
-                    _zeroAt = Time.realtimeSinceStartup + CountdownSeconds;
-                    Debug.Log("[MP][return] mission over — holding this peer's own return to the geoscape for " +
-                              CountdownSeconds + " s and showing the countdown strip. LOCAL clock, no wire: " +
-                              "every peer counts its own from its own summary screen, nobody waits on anybody " +
-                              "(no quorum), and it expires by itself.");
+                    if (engine.IsHost)
+                    {
+                        HostArm(engine, __instance);
+                    }
+                    else
+                    {
+                        Debug.Log("[MP][return] this client clicked Continue — asking the host to arm the " +
+                                  "return countdown for all peers.");
+                        // The arm request rides the cancel's reverse: a byte payload with the seconds.
+                        // The host handler for 0x4B-as-intent treats a non-zero payload from a client as
+                        // "please arm". We reuse the same packet type but coming FROM a client.
+                        engine.SendToHost(new NetworkMessage(PacketType.ReturnCountdown,
+                                                             new byte[] { (byte)CountdownSeconds }));
+                    }
                     return false;
                 }
                 catch (Exception ex)
                 {
-                    // A throw here must never strand a player in a finished battle.
                     Reset();
                     Debug.LogError("[MP][return] arming the pre-geoscape countdown failed — returning now: " + ex);
                     return true;
@@ -163,36 +239,33 @@ namespace Multiplayer.Tactical
             if (_zeroAt <= 0f) return;
             try
             {
-                // NOTHING TO RELEASE INTO — the view died without the level leaving Playing (which would
-                // have Reset us through TacLevelEndBarrier), or the handle stopped resolving. This is the
-                // one arm that swallows a return the player asked for, so it does not do it quietly.
+                var engine = NetworkEngine.Instance;
+                bool isHost = engine != null && engine.IsHost;
+
+                // Only the HOST releases — clients wait for the host's own CLEAR broadcast, which arrives
+                // after the host's Tick fires here. A client whose local clock drifts past zero holds at 1
+                // (DisplaySecondsLeft) until the host says so.
+                if (!isHost) return;
+
                 if (_view == null || GoToGeoscapeMethod == null)
                 {
                     Debug.LogError("[MP][return] the held return has nothing left to run — dropping the strip. " +
                                    "This peer stays where it is; its Continue button still works.");
-                    Reset();
+                    HostCancel(engine, "lost view/method");
                     return;
                 }
-                // THE SESSION DIED UNDER THE HOLD: release NOW instead of waiting out a clock nobody is
-                // watching any more. The player asked to go back five seconds ago and the only reason they
-                // have not is us — and there is nobody left to be told about it either (HostBroadcastLeave
-                // self-gates on the session). Dropping the strip and leaving them on the summary screen
-                // costs them a second Continue click for nothing.
-                var engine = NetworkEngine.Instance;
-                bool sessionGone = engine == null || !engine.IsActiveSession;
+                bool sessionGone = !engine.IsActiveSession;
                 if (!sessionGone && Time.realtimeSinceStartup < _zeroAt) return;
 
                 var view = _view;
                 _zeroAt = 0f;
                 _view = null;
+                // Broadcast the CLEAR so every peer's strip disappears.
+                engine.BroadcastToAll(new NetworkMessage(PacketType.ReturnCountdown, new byte[] { 0 }));
                 Debug.Log("[MP][return] " + (sessionGone
                               ? "the session ended while the return was held — going back to the geoscape now"
                               : "countdown reached zero") + " — running the game's own TacticalView.GoToGeoscape " +
                           "(PhoenixGame.FinishLevel) exactly as the summary screen would have.");
-                // Through TacticalTurnSync's invoker, not our own MethodInfo: this call is what fires
-                // TacLeaveBattleCapture (the hold above deliberately runs first, so the capture only ever
-                // fires here), and if the native body throws the leave latch has to come back off. It owns
-                // ModDriving, which is what gets this re-invoke past the hold.
                 TacticalTurnSync.InvokeNativeLeave(view);
             }
             catch (Exception ex)

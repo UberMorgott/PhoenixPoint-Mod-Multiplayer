@@ -154,6 +154,15 @@ namespace Multiplayer.UI
                 DeployCountdown.RequestCancel();
                 return;
             }
+            if (Multiplayer.Tactical.ReturnCountdown.DisplaySecondsLeft() > 0)
+            {
+                Debug.Log("[MP][return] CANCEL pressed on this peer with " +
+                          Multiplayer.Tactical.ReturnCountdown.DisplaySecondsLeft() +
+                          " s left — one peer's veto stops the return for everyone; " +
+                          "Continue can be pressed again.");
+                Multiplayer.Tactical.ReturnCountdown.RequestCancel();
+                return;
+            }
             Debug.Log("[MP][lobby] CANCEL pressed on this peer with " + LobbyCountdown.DisplaySecondsLeft() +
                       " s left on the " + LobbyCountdown.Subject + " countdown — one peer's veto stops the " +
                       "start for everyone. On the SAVE route it also clears THAT peer's own READY, without " +
@@ -260,7 +269,7 @@ namespace Multiplayer.UI
             if (caption == null)
             {
                 left = Multiplayer.Tactical.ReturnCountdown.DisplaySecondsLeft();
-                if (left > 0) { caption = "RETURNING TO GEOSCAPE IN " + Seconds(left); cancellable = false; }
+                if (left > 0) caption = "RETURNING TO GEOSCAPE IN " + Seconds(left);
             }
             bool show = engine != null && engine.IsActiveSession && caption != null;
 

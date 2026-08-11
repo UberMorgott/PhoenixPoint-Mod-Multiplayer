@@ -85,6 +85,17 @@ namespace Multiplayer.Network.MessageLayer
                                    // clears the CANCELLER'S OWN ready, or every peer would still be ready the
                                    // instant the countdown died and it would re-arm on the very next frame.
                                    // Pair of 0x44 ClientUnready in shape and of 0x47 in direction-of-effect.
+        ReturnCountdown = 0x4B,    // host->all: the post-battle RETURN countdown ARMED or CLEARED. Payload
+                                   // [secondsLeft:u8] — non-zero ARMS, 0 CLEARS. Same two-write shape as
+                                   // LobbyCountdown 0x49: each peer counts its own display down from the
+                                   // arm off local realtime (ReturnCountdown.DisplaySecondsLeft). A top-level
+                                   // id rather than a rail root because the tactical scene's rail lifetime
+                                   // is ending and a mod-root write here would re-enter tactical UI that is
+                                   // about to be torn down. Host-authoritative: only the host arms and clears.
+        ReturnCountdownCancel = 0x4C, // client->host: veto the return countdown. No payload — any peer's
+                                   // cancel stops the countdown for everyone. Unlike the lobby cancel (0x4A),
+                                   // no ready state to clear — the battle is over and there is no gate to
+                                   // re-arm the countdown automatically.
 
         // ActionSync 0x60-0x6F
         // 0x60 (ActionRequest) + 0x61 (ActionApply) + 0x62 (ActionReject) RETIRED at the envelope cutover — the

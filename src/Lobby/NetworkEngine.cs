@@ -710,6 +710,25 @@ namespace Multiplayer.Network
                     LobbyCountdown.HandleCancel(this, msg);
                     break;
 
+                // The post-battle RETURN countdown. Same two-id shape as the lobby countdown above:
+                // 0x4B is host→all (arm/clear), 0x4C is a client's veto. On this surface a non-zero
+                // payload FROM A CLIENT is an arm REQUEST (the client clicked Continue); the host arms
+                // and re-broadcasts. The host's own click arms locally in ReturnHoldPatch.
+                case PacketType.ReturnCountdown:
+                    if (IsHost && msg?.SenderSteamId != 0)
+                    {
+                        int req = msg?.Payload != null && msg.Payload.Length > 0 ? msg.Payload[0] : 0;
+                        if (req > 0) Multiplayer.Tactical.ReturnCountdown.HostArm(this, null);
+                        else         Multiplayer.Tactical.ReturnCountdown.HostCancel(this, "peer=" + msg.SenderSteamId);
+                    }
+                    else
+                        Multiplayer.Tactical.ReturnCountdown.HandleCountdown(this, msg);
+                    break;
+
+                case PacketType.ReturnCountdownCancel:
+                    Multiplayer.Tactical.ReturnCountdown.HandleCancel(this, msg);
+                    break;
+
                 // ─── Save transfer + barrier (Phase B — SaveTransferCoordinator). ─────
                 case PacketType.SaveChunk:
                     SaveTransfer?.OnSaveChunk(msg);
