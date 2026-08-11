@@ -436,6 +436,7 @@ namespace Multiplayer.Network.Sync
             }
             var store = DurableInboxSession.ActiveStore;
             if (store == null || !store.Ledger.Contains(occurrence)) return false;
+            if (!store.Ledger.Members.Contains(winner)) return false;
 
             string choiceValue = index < 0 ? "choice:none" : choice?.Text?.LocalizationKey;
             if (string.IsNullOrWhiteSpace(choiceValue) || (index >= 0 && ev.EventData.Choices.Count(x =>
