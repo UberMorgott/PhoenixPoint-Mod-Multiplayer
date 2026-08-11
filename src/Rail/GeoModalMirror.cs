@@ -433,7 +433,31 @@ namespace Multiplayer.Network.Sync
                 }
                 uint seq = Seq.Next(SurfaceIds.GeoModalRaise);
                 var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoModalRaise, SyncKind.StateDelta, Encode(seq, p));
-                engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
+                var msg = new NetworkMessage(PacketType.SyncEnvelope, env);
+                // MISSION BRIEF UNICAST: mission-start confirmation modals (the 10 brief types) go only to
+                // the peer whose vehicle triggered the mission — the same peer EventPopup unicast the event
+                // window to. The site ref links the brief to the dispatcher recorded at event-raise time.
+                if (kind == StateKind.Modal && modalData is GeoMission briefMission && briefMission.Site != null &&
+                    GeoWindowCoverage.IsMissionStartConfirmation((ModalType)p.ModalType, modalData))
+                {
+                    string siteRef = IdentityResolver.RootRef(briefMission.Site);
+                    if (!string.IsNullOrEmpty(siteRef) &&
+                        EventPopup.TryGetMissionDispatcher(siteRef, out var dispatchPeer))
+                    {
+                        if (dispatchPeer == AircraftDispatch.HostPeer)
+                        {
+                            Debug.Log("[MP][modals] HOST raised '" + name + "' seq=" + seq +
+                                      " NOT mirrored — mission brief for host's own vehicle, site " + siteRef);
+                            return;
+                        }
+                        engine.SendToClient(dispatchPeer, msg);
+                        Debug.Log("[MP][modals] HOST raised '" + name + "' seq=" + seq + " UNICAST to peer " +
+                                  dispatchPeer + " — mission brief, site " + siteRef +
+                                  " (other peers do NOT see this window)");
+                        return;
+                    }
+                }
+                engine.BroadcastToAll(msg);
                 Debug.Log("[MP][modals] HOST raised '" + name + "' seq=" + seq + " kind=" + p.Kind +
                           " shape=" + p.Shape + " ref=" + (p.Ref == "" ? "none" : p.Ref) +
                           " keys=" + p.Keys.Length + " num=" + p.Num + " priority=" + p.Priority);

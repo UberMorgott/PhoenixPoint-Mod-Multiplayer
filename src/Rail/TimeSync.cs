@@ -46,6 +46,16 @@ namespace Multiplayer.Network.Sync
             _byVehicle[vehicle] = peer;
         }
 
+        /// <summary>The peer who last dispatched this vehicle, if the entry has not been pruned yet.
+        /// Unlike <see cref="HasAircraftInFlight"/> this does NOT prune landed entries — the caller
+        /// needs the mapping to survive until the mission event fires (after the vehicle has landed).</summary>
+        internal static bool TryGetDispatcher(PhoenixPoint.Geoscape.Entities.GeoVehicle vehicle, out ulong peer)
+        {
+            if (vehicle != null && _byVehicle.TryGetValue(vehicle, out peer)) return true;
+            peer = 0;
+            return false;
+        }
+
         /// <summary>True when <paramref name="peer"/> ordered an aircraft that is STILL in the air.</summary>
         internal static bool HasAircraftInFlight(ulong peer)
         {

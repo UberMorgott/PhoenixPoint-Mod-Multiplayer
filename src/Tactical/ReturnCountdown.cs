@@ -130,6 +130,7 @@ namespace Multiplayer.Tactical
             if (seconds <= 0)
             {
                 _zeroAt = 0f;
+                _view = null;
                 Debug.Log("[MP][return] countdown CLEARED by the host — either it reached zero and the geoscape " +
                           "return is happening, or somebody cancelled it.");
                 return;

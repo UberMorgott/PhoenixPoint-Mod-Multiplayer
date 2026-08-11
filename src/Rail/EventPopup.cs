@@ -118,7 +118,8 @@ namespace Multiplayer.Network.Sync
             _nextDurableDecisionReplay = 0f;
             Seq.Reset(); lock (_durableHeld) { foreach (var lease in _durableHeld.Values.ToArray()) lease.Dispose();
             _durableHeld.Clear(); } _held.Clear(); _hostCurtained.Clear(); _unanswered.Clear(); _rewards.Clear();
-            _durableRewards.Clear();
+            _durableRewards.Clear(); _missionDispatcher.Clear();
+            _missionUnicastArmed = false; _missionUnicastEvent = null;
         }
         internal static void ClearDurableCarrierState()
         {
@@ -378,7 +379,31 @@ namespace Multiplayer.Network.Sync
                     if (request != null) WindowOrder.BindDurable(request, occurrence);
                 }
                 var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventRaise, SyncKind.StateDelta, Encode(seq, p));
-                engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
+                var msg = new NetworkMessage(PacketType.SyncEnvelope, env);
+                // MISSION UNICAST: a mission start confirmation reaches only the peer whose vehicle triggered
+                // it. The host's own vehicle: no broadcast (the host already has the window natively). A
+                // client's vehicle: SendToClient. Dispatcher unknown: safety fallback to BroadcastToAll.
+                if (IsMissionStartConfirmationEvent(data) && ev.Context?.Vehicle != null &&
+                    AircraftDispatch.TryGetDispatcher(ev.Context.Vehicle, out var dispatchPeer))
+                {
+                    string vehicleRef = p.VehicleRef == "" ? "none" : p.VehicleRef;
+                    if (!string.IsNullOrEmpty(p.SiteRef))
+                        _missionDispatcher[p.SiteRef] = dispatchPeer;
+                    if (dispatchPeer == AircraftDispatch.HostPeer)
+                    {
+                        Debug.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq +
+                                  " NOT mirrored — mission start confirmation for host's own vehicle " + vehicleRef);
+                        MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
+                        return;
+                    }
+                    engine.SendToClient(dispatchPeer, msg);
+                    Debug.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq +
+                              " UNICAST to peer " + dispatchPeer + " — mission start confirmation, vehicle " +
+                              vehicleRef + " (other peers do NOT see this window)");
+                    MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
+                    return;
+                }
+                engine.BroadcastToAll(msg);
                 Debug.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority +
                           " site=" + (p.SiteRef == "" ? "none" : p.SiteRef) + " vehicle=" +
                           (p.VehicleRef == "" ? "none" : p.VehicleRef) + " titleLen=" + p.Title.Length +
@@ -391,6 +416,57 @@ namespace Multiplayer.Network.Sync
             {
                 Debug.LogError("[MP][events] HOST raise broadcast FAILED for '" + ev.EventID + "' — no peer will see " +
                                "this window: " + ex);
+            }
+        }
+
+        /// <summary>Unicast a mission-start event to a SINGLE client whose vehicle triggered the mission.
+        /// Called from the <see cref="EventRaiseBroadcast"/> Postfix when the Prefix suppressed the host's
+        /// native window. Builds the same payload as <see cref="HostBroadcast"/> but sends via SendToClient;
+        /// the host's MissionArrivalNav still watches so it navigates to deployment when the client starts.</summary>
+        internal static void HostBroadcastMissionUnicast(GeoscapeView view, GeoscapeEvent ev, ulong targetPeer)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            var data = ev?.EventData;
+            if (data == null || string.IsNullOrEmpty(ev.EventID)) return;
+            try
+            {
+                var p = new Raise
+                {
+                    EventId = ev.EventID,
+                    SiteRef = IdentityResolver.RootRef(ev.Context?.Site) ?? "",
+                    VehicleRef = IdentityResolver.RootRef(ev.Context?.Vehicle) ?? "",
+                    Title = LiveTitle(data),
+                    Narrative = LiveNarrative(data, ev.Context),
+                    Priority = 0,   // the host has no queued request for this window (its raise was suppressed)
+                };
+                uint seq = Seq.Next(SurfaceIds.GeoEventRaise);
+                var store = DurableInboxSession.ActiveStore;
+                if (store != null)
+                {
+                    var occurrence = new OccurrenceId("EventPopup", "raise:" + seq,
+                        new[] { "event:" + p.EventId,
+                                string.IsNullOrEmpty(p.SiteRef) ? "site:none" : p.SiteRef,
+                                string.IsNullOrEmpty(p.VehicleRef) ? "vehicle:none" : p.VehicleRef });
+                    DurableWindowRegistry.EnqueuePriorityOccurrence(store, occurrence);
+                    Bound.Remove(ev); Bound.Add(ev, new RaiseBinding { Seq = seq, TriggerCount =
+                        RaiseTriggerCount(ev.Record == null ? GeoscapeEventRecordState.Triggered : ev.Record.State,
+                            ev.Record == null ? 0 : ev.Record.TriggerCount), Occurrence = occurrence });
+                }
+                if (!string.IsNullOrEmpty(p.SiteRef))
+                    _missionDispatcher[p.SiteRef] = targetPeer;
+                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventRaise, SyncKind.StateDelta, Encode(seq, p));
+                engine.SendToClient(targetPeer, new NetworkMessage(PacketType.SyncEnvelope, env));
+                Debug.Log("[MP][events] mission raise UNICAST to peer " + targetPeer + " — '" + p.EventId +
+                          "' seq=" + seq + " vehicle=" + (p.VehicleRef == "" ? "none" : p.VehicleRef) +
+                          " site=" + (p.SiteRef == "" ? "none" : p.SiteRef) +
+                          " (host's native window was suppressed)");
+                MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MP][events] mission raise UNICAST FAILED for '" + ev.EventID + "' to peer " +
+                               targetPeer + ": " + ex);
             }
         }
 
@@ -516,6 +592,29 @@ namespace Multiplayer.Network.Sync
             if (_briefProbed.Count > 256) _briefProbed.Clear();
             if (!_briefProbed.Add(key)) return;
             Debug.Log("[MP][brief] " + phase + " '" + (eventId ?? "?") + "' — " + detail);
+        }
+
+        // ─── MISSION UNICAST — site → dispatcher peer ──────────────────────────
+        // Set when a mission-start event is raised (HostBroadcast), read when the mission brief modal is
+        // broadcast (GeoModalMirror) — the brief must reach only the peer whose vehicle triggered the
+        // mission, not every peer on the session. Keyed by site root ref because the brief modal's data is
+        // a GeoMission whose Site links back to the same ref the event used.
+        private static readonly Dictionary<string, ulong> _missionDispatcher =
+            new Dictionary<string, ulong>(StringComparer.Ordinal);
+
+        // Armed in the Prefix when the host's native window must be suppressed (client's vehicle).
+        // Consumed in the Postfix to fire the unicast in the same turn the native body was skipped.
+        internal static bool _missionUnicastArmed;
+        internal static ulong _missionUnicastPeer;
+        internal static GeoscapeEvent _missionUnicastEvent;
+
+        /// <summary>Which peer dispatched the vehicle to this mission site, if tracked. Called from
+        /// <see cref="GeoModalMirror"/> to unicast the brief modal.</summary>
+        internal static bool TryGetMissionDispatcher(string siteRef, out ulong peer)
+        {
+            if (!string.IsNullOrEmpty(siteRef) && _missionDispatcher.TryGetValue(siteRef, out peer)) return true;
+            peer = 0;
+            return false;
         }
 
         /// <summary>Does this choice carry a REAL outcome beyond declining? Walked GENERICALLY over the
@@ -1788,20 +1887,53 @@ namespace Multiplayer.Network.Sync
         /// <summary>THE HOST'S OWN CURTAIN HOLD (2026-08-08). False = skip the native body this time; the
         /// event is parked and <c>EventPopup.DrainHostCurtained</c> re-invokes THIS method after the reveal,
         /// so the window is queued by the game's own code and the postfix below still mirrors it — one raise,
-        /// one broadcast, just later. See <see cref="EventPopup.HostRaiseWaitsForReveal"/>.</summary>
+        /// one broadcast, just later. See <see cref="EventPopup.HostRaiseWaitsForReveal"/>.
+        ///
+        /// MISSION UNICAST (2026-08-11): when a CLIENT's vehicle triggers a mission event, the host's native
+        /// window is SUPPRESSED — only the dispatching client sees the "start / cancel" prompt. The postfix
+        /// sends the unicast; the host's own MissionArrivalNav still watches (it navigates to deployment when
+        /// the client starts the mission, same as any peer that was shown the window).</summary>
         private static bool Prefix(GeoscapeView __instance, GeoscapeEvent geoEvent, out bool __state)
         {
             __state = __instance != null && !__instance.SuppressEvents &&
                       EventPopup.HoldHostRaiseBehindCurtain(geoEvent);
+            if (__state) return false;
+            // Mission unicast: suppress the host's native window when a client dispatched the vehicle
+            var net = NetworkEngine.Instance;
+            if (__instance != null && !__instance.SuppressEvents &&
+                net != null && net.IsActiveSession && net.IsHost &&
+                geoEvent?.EventData != null && EventPopup.IsMissionStartConfirmationEvent(geoEvent.EventData) &&
+                geoEvent.Context?.Vehicle != null &&
+                AircraftDispatch.TryGetDispatcher(geoEvent.Context.Vehicle, out var peer) &&
+                peer != AircraftDispatch.HostPeer)
+            {
+                EventPopup._missionUnicastArmed = true;
+                EventPopup._missionUnicastPeer = peer;
+                EventPopup._missionUnicastEvent = geoEvent;
+                return false;   // suppress native window on host
+            }
             return !__state;
         }
 
         /// <summary><paramref name="__state"/> = "the raise was PARKED". Harmony runs a postfix even when the
         /// prefix skipped the body, and mirroring a window this host has not queued yet would invert the very
         /// order the park exists to align — the clients would insert it while the host still had not. The
-        /// replay re-enters this method, so the broadcast happens then, with the real queued priority.</summary>
+        /// replay re-enters this method, so the broadcast happens then, with the real queued priority.
+        ///
+        /// MISSION UNICAST: when <see cref="EventPopup._missionUnicastArmed"/> is set by the prefix, the
+        /// postfix fires the unicast and returns — HostBroadcast is NOT called (there is no host window to
+        /// read a priority from, and the broadcast is a SendToClient, not a BroadcastToAll).</summary>
         private static void Postfix(GeoscapeView __instance, GeoscapeEvent geoEvent, bool __state)
         {
+            if (EventPopup._missionUnicastArmed)
+            {
+                var targetPeer = EventPopup._missionUnicastPeer;
+                var targetEvent = EventPopup._missionUnicastEvent;
+                EventPopup._missionUnicastArmed = false;
+                EventPopup._missionUnicastEvent = null;
+                EventPopup.HostBroadcastMissionUnicast(__instance, targetEvent, targetPeer);
+                return;
+            }
             if (__state || __instance == null || __instance.SuppressEvents) return;
             EventPopup.HostBroadcast(__instance, geoEvent);
         }
