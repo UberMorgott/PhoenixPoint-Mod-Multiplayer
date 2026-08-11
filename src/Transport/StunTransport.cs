@@ -564,9 +564,10 @@ namespace Multiplayer.Transport
         {
             // Defensive: no path calls this twice on one instance today (Host/Connect each run on a
             // freshly constructed transport), but the failure mode if one ever does is nasty enough to
-            // close here. _running is set BEFORE the field swap and ReceiveLoop re-reads the _udp FIELD
-            // every iteration, so a surviving old thread would resume receiving on the NEW socket — two
-            // threads racing Receive on one UdpClient. Same teardown shape as Shutdown.
+            // close here: _running is set BEFORE the field swap, so an old thread that outlived this would
+            // resume receiving. Same teardown shape as Shutdown. The Join is ADVISORY — it can time out
+            // (ReceiveTimeout is 1000 ms too), which is why ReceiveLoop holds the socket it was started
+            // with rather than re-reading the field; the Close, not the Join, is what kills a survivor.
             _running = false;
             _udp?.Close();
             _receiveThread?.Join(1000);
@@ -582,13 +583,20 @@ namespace Multiplayer.Transport
 
         private void ReceiveLoop()
         {
-            while (_running)
+            // BOUND ONCE, deliberately. Re-reading the _udp FIELD each iteration is what would let a thread
+            // that outlived its socket start receiving on the NEXT one — and StartUdp's Join(1000) cannot
+            // rule that out, since ReceiveTimeout is itself 1000 ms. Holding the socket this loop was
+            // started for means a survivor dies on its own ObjectDisposedException (below) instead, whether
+            // the Join succeeded or not; the field comparison closes the same window for a swap that
+            // happens between two receives.
+            var sock = _udp;
+            while (_running && sock == _udp)
             {
                 byte[] data;
                 var from = new IPEndPoint(IPAddress.Any, 0);
                 try
                 {
-                    data = _udp.Receive(ref from);
+                    data = sock.Receive(ref from);
                 }
                 catch (ObjectDisposedException)
                 {
