@@ -498,9 +498,12 @@ namespace Multiplayer.Tactical
                 return;
             }
             // Direct, NOT through InvokeNativeLeave: L64's leave-apply-hand-rolled arm reads THIS method's IL
-            // for the native handle and does not follow a helper. It also needs no latch rollback — a client
-            // applying the host's leave has broadcast nothing to retract, and its own Continue button still
-            // runs the native exit (the capture prefix is non-blocking), so a throw here strands nobody.
+            // for the native handle and does not follow a helper. The SyncApplyScope therefore does double
+            // duty — it suppresses the capture's echo (law 8) AND is what tells ReturnCountdown's hold that
+            // this is the mod carrying the peer out, not the peer clicking Continue, so the exit runs HERE
+            // and now rather than five seconds later outside this scope, where the capture would have sent
+            // a leave ask straight back to the host. No latch rollback is needed: a peer being carried out
+            // has broadcast nothing to retract and its own Continue still works.
             using (SyncApplyScope.Enter()) GoToGeoscapeMethod.Invoke(tlc.View, null);
             Debug.Log("[Multiplayer][tac] CLIENT host-left-battle APPLIED — running this peer's own " +
                       "GoToGeoscape → FinishLevel → geoscape.");
@@ -692,6 +695,10 @@ namespace Multiplayer.Tactical
         /// IntentRail.HandleInbound and turns it into a reject the asking peer can read).</summary>
         internal static void InvokeNativeLeave(PhoenixPoint.Tactical.View.TacticalView view)
         {
+            // The MOD is driving this funnel, not a human clicking Continue, so the five-second return
+            // strip must let it straight through — see ReturnCountdown.ReturnHoldPatch for why each of the
+            // mod's own invocations is exempt.
+            ReturnCountdown.ModDriving = true;
             try { GoToGeoscapeMethod.Invoke(view, null); }
             catch
             {
@@ -702,6 +709,7 @@ namespace Multiplayer.Tactical
                                "to the geoscape while this one is still in the battle: press Continue again.");
                 throw;
             }
+            finally { ReturnCountdown.ModDriving = false; }
         }
 
         /// <summary>May a remaining peer's Continue click end the battle FOR THE HOST? PURE — plain facts off
@@ -1035,6 +1043,8 @@ namespace Multiplayer.Tactical
             if (state == Level.State.Loading || state == Level.State.Playing) return;
             if (prevState != Level.State.Playing) return;
             TacticalTurnSync.Reset();
+            ReturnCountdown.Reset();       // a strip still counting for a battle that is over would then
+                                           // fire its release into a dead view and log an error for it
             TacticalCommandSync.Reset();   // A3a: 0x82 seq + pending settles must not survive into the next battle
             TacticalDamageSync.Reset();    // A3b: 0x84 seq + the gap cursor + any leaked mirror-apply depth
         }

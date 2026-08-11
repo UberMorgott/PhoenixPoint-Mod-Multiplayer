@@ -1,6 +1,7 @@
 using System;
 using HarmonyLib;
 using Multiplayer.Network;
+using Multiplayer.Network.Sync;
 using PhoenixPoint.Tactical.View;
 using UnityEngine;
 
@@ -51,11 +52,14 @@ namespace Multiplayer.Tactical
         /// the two ways <see cref="Tick"/> gives up.</summary>
         private static TacticalView _view;
 
-        /// <summary>Set only across our own re-invoke, so the prefix lets that one call through.</summary>
-        private static bool _releasing;
+        /// <summary>Set across every invoke the MOD makes through <c>TacticalTurnSync.InvokeNativeLeave</c>
+        /// — our own release at zero, and the host executing an accepted peer ask — so the prefix lets those
+        /// through. <c>ApplyLeave</c> is the third such invoke and rides <c>SyncApplyScope</c> instead,
+        /// because L64 requires it to call the native handle directly.</summary>
+        internal static bool ModDriving;
 
         /// <summary>Session/level teardown — a live count must not survive into the next battle.</summary>
-        internal static void Reset() { _zeroAt = 0f; _view = null; _releasing = false; }
+        internal static void Reset() { _zeroAt = 0f; _view = null; ModDriving = false; }
 
         /// <summary>THE HOLD JUST SWALLOWED THIS CALL — read by <c>TacLeaveBattleCapture</c>, which must not
         /// announce a leave that has not happened. Exactly mirrors the arms on which
@@ -93,7 +97,23 @@ namespace Multiplayer.Tactical
         /// resolving) and a leave announced at the click would then have carried every other peer out of a
         /// battle this one never left — the exact stranding <c>TacLeaveBattleCapture</c> exists to prevent.
         /// A leave is real when it happens, not when it is scheduled. The release re-invokes through this
-        /// same chain with <see cref="_releasing"/> set, so the capture runs then, exactly once.</summary>
+        /// same chain with <see cref="ModDriving"/> set, so the capture runs then, exactly once.
+        ///
+        /// IT HOLDS A HUMAN'S CLICK AND NOTHING ELSE. The strip's whole premise is that the clock is
+        /// peer-LOCAL and starts on THIS peer's own click; the mod's own three invocations of this funnel
+        /// are not clicks and must go through untouched:
+        ///   • the release (<see cref="ModDriving"/>) — obviously, it IS the expiry;
+        ///   • <c>TacticalTurnSync.HandleLeaveBattle</c>, the host executing a peer's accepted ask. Held, it
+        ///     returned false to a caller that then logged "ACCEPTED — running the host's own GoToGeoscape"
+        ///     over nothing, and any throw from the real body surfaced 5 s later inside <see cref="Tick"/>,
+        ///     on a stack where <c>IntentRail.HandleInbound</c>'s catch — the asking peer's only reject —
+        ///     is long gone. The asking peer has ALREADY spent its own five seconds; the host adding five
+        ///     more just delays every other peer behind it.
+        ///   • <c>TacticalTurnSync.ApplyLeave</c> (<see cref="SyncApplyScope"/>), a peer being carried out
+        ///     by the host. Held, the capture ran at the RELEASE instead — outside the apply scope that was
+        ///     the only thing suppressing it — and the carried peer sent a leave ask straight back to the
+        ///     host: the direct echo loop law 8 exists to forbid. A peer that never clicked has nothing to
+        ///     count down anyway.</summary>
         [HarmonyPatch(typeof(TacticalView), "GoToGeoscape")]
         internal static class ReturnHoldPatch
         {
@@ -102,7 +122,8 @@ namespace Multiplayer.Tactical
             {
                 try
                 {
-                    if (_releasing) return true;                   // our own re-invoke, at zero
+                    // The mod driving this funnel itself, not a human clicking Continue — see the summary.
+                    if (ModDriving || SyncApplyScope.Active) return true;
                     var engine = NetworkEngine.Instance;
                     // Solo is untouched vanilla: a single player has nobody to be told about, and five
                     // seconds of waiting is not a thing to add to a game that never had it.
@@ -155,12 +176,11 @@ namespace Multiplayer.Tactical
                 Debug.Log("[MP][return] countdown reached zero — running the game's own " +
                           "TacticalView.GoToGeoscape (PhoenixGame.FinishLevel) exactly as the summary screen " +
                           "would have five seconds ago.");
-                _releasing = true;
                 // Through TacticalTurnSync's invoker, not our own MethodInfo: this call is what fires
                 // TacLeaveBattleCapture (the hold above deliberately runs first, so the capture only ever
-                // fires here), and if the native body throws the leave latch has to come back off.
-                try { TacticalTurnSync.InvokeNativeLeave(view); }
-                finally { _releasing = false; }
+                // fires here), and if the native body throws the leave latch has to come back off. It owns
+                // ModDriving, which is what gets this re-invoke past the hold.
+                TacticalTurnSync.InvokeNativeLeave(view);
             }
             catch (Exception ex)
             {
