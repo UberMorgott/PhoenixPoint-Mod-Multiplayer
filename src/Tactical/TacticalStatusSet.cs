@@ -312,6 +312,27 @@ namespace Multiplayer.Tactical
                 // its very first statement. A target the host had and this peer cannot rebuild is a REFUSAL,
                 // not a null: applying the status anyway is precisely the NRE this line exists to stop.
                 if (!SetTarget(status, actor, targetTag, defName)) return;
+                // A BRIDGED STATUS IS HALF OF A PAIR AND THE PAIR IS ADDRESSED THROUGH ITS SOURCE ACTOR.
+                // ActorBridgeStatus.AfterApply:24 asks GetPairedStatus:32, whose first act is
+                // TacUtil.GetSourceOfType<TacticalActorBase>(Source).Status — unguarded. This rail carries a
+                // source only as a DEF NAME (see Key), and the source of a bridge half is the OTHER ACTOR, so
+                // a half rebuilt here has no source actor and the apply NREs inside ApplyStatus (client log
+                // 2026-08-12, x3 on ConvinceCivilianActorToObjectiveBridgeStatus). Mirroring the second half
+                // is not the answer either: the game makes it itself, in that same AfterApply, from a source
+                // this rail cannot address — both halves arrive on a peer that replays the ability that
+                // created them. So this is a REFUSAL, the same rule SetTarget applies to an address this peer
+                // cannot rebuild, and it leaves the actor's other statuses untouched instead of half-applied.
+                if (status is ActorBridgeStatus &&
+                    PhoenixPoint.Tactical.TacUtil.GetSourceOfType<TacticalActorBase>(status.Source) == null)
+                {
+                    Debug.LogWarning("[Multiplayer][tac] the host's status '" + defName + "' on " + actor.name +
+                                     " is one half of an ACTOR BRIDGE (escort/convince), whose other half is " +
+                                     "addressed through the actor that applied it — an address this rail does " +
+                                     "not carry. It is NOT applied here: it would throw inside AfterApply and " +
+                                     "leave the actor half-updated. This peer gets both halves when it replays " +
+                                     "the ability that created them.");
+                    return;
+                }
                 comp.ApplyStatus(status);
             }
             catch (Exception ex)
