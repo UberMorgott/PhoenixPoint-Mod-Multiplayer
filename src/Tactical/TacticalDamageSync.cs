@@ -348,6 +348,9 @@ namespace Multiplayer.Tactical
         /// must not be removed after the grenade record that removed it. 0x85 stays free.</summary>
         internal const byte OpInventory = 5;
         internal const byte OpEnvDamage = 6;
+        /// <summary>The objective bool, on the SAME stream and for A4's reason again: the objective a move
+        /// completed must not arrive before the move that completed it. See <see cref="TacticalObjectiveSync"/>.</summary>
+        internal const byte OpObjective = 7;
         /// <summary>Op 2 on <see cref="SurfaceIds.TacCommandIntent"/> (op 1 is the command). Registered by
         /// <c>TacticalCommandSync.RegisterIntents</c> — one family, one op table.</summary>
         internal const byte OpIntentResnap = 2;
@@ -777,6 +780,7 @@ namespace Multiplayer.Tactical
                     else if (op == OpDeath) TacticalActorLifecycle.ApplyDeath(r);
                     else if (op == OpInventory) TacticalInventorySync.ApplyInventory(r);
                     else if (op == OpEnvDamage) TacticalDestruction.ApplyEnvDamage(r);
+                    else if (op == OpObjective) TacticalObjectiveSync.ApplyObjective(r);
                     else
                     {
                         Debug.LogError("[Multiplayer][tac] unknown host→all result op " + op + " (seq=" + seq +
