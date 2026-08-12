@@ -21,19 +21,35 @@ namespace RailCheck
     /// <c>_view</c> stayed null, <c>Tick</c> found "nothing left to run", dropped the strip and broadcast the
     /// CLEAR that stopped the asking client's countdown too. Ten Continue presses, ten identical pairs.
     ///
-    /// SO TWO WRITES ARE LOAD-BEARING AND NEITHER IS OBSERVABLE FROM ANY PURE FUNCTION:
+    /// AND THE SAME BUG CAME BACK FROM THE OTHER SIDE (adversarial review, 2026-08-12). The host armed at
+    /// T0 off its own click; the client clicked Continue at T0+3 and armed its OWN clock; the host hit zero
+    /// at T0+5 and broadcast the CLEAR, which zeroed the client's own hold — the click that hold had already
+    /// swallowed was gone and its return never ran. So the countdown state carries an OWNER
+    /// (<c>ReturnCountdown._mine</c>): a hold that swallowed THIS peer's click is ended by this peer alone,
+    /// and every remote clear path reads that bit before touching it. Reaching zero broadcasts nothing at
+    /// all — each peer's own clock expires on its own, and a CLEAR now means only "the arm I broadcast is
+    /// cancelled".
+    ///
+    /// SO THESE WRITES ARE LOAD-BEARING AND NONE IS OBSERVABLE FROM ANY PURE FUNCTION:
     ///   (a) the hold ARMS the peer whose click it just ate — otherwise the swallow is invisible to the
     ///       capture that reads <see cref="ReturnCountdown.Holding"/> to decide whether the leave happened;
     ///   (b) an arm that arrives WITHOUT a view resolves the live one instead of keeping null, or the host
-    ///       cancels the very countdown a client is waiting on.
-    /// Both are IL facts about two small methods, which is why this law reads IL rather than executing a
+    ///       cancels the very countdown a client is waiting on;
+    ///   (c) the client's CLEAR applier consults the ownership bit, so a hold this peer armed for its own
+    ///       swallowed click survives anything the host says about its own strip;
+    ///   (d) the release path broadcasts NOTHING — no CLEAR, no cancel. A peer reaching zero, or losing its
+    ///       level, is not an event about anybody else's hold.
+    /// All are IL facts about a few small methods, which is why this law reads IL rather than executing a
     /// predicate: there is no pure decider here to run.
     ///
     /// NOT A QUORUM (P13, and this law does not create one): every peer releases its own hold on its own
     /// clock in <c>Tick</c>; nobody waits for another human to press anything.
     ///
     /// Falsify: delete the client-branch arm in the prefix → hold-swallows-without-arming; put
-    /// <c>if (viewIfHost != null) _view = viewIfHost;</c> back → asked-arm-holds-no-view.
+    /// <c>if (viewIfHost != null) _view = viewIfHost;</c> back → asked-arm-holds-no-view; delete the
+    /// <c>_mine</c> check from <c>HandleCountdown</c>'s clear branch → remote-clear-ignores-ownership; put
+    /// the zero-CLEAR broadcast (or the <c>HostCancel</c> on a lost view) back into <c>Tick</c> →
+    /// release-cancels-another-peers-hold.
     /// </summary>
     internal static class L425_EveryPeerReleasesItsOwnHeldReturn
     {
@@ -50,8 +66,14 @@ namespace RailCheck
             var hold = countdown.GetNestedType("ReturnHoldPatch", All);
             var prefix = hold == null ? null : hold.GetMethod("Prefix", All);
             var tlc = typeof(TacticalDamageSync).GetMethod("Tlc", All);
+            var mine = countdown.GetField("_mine", All);
+            var handle = countdown.GetMethod("HandleCountdown", All);
+            var tick = countdown.GetMethod("Tick", All);
+            var hostCancel = countdown.GetMethod("HostCancel", All);
+            var broadcast = typeof(Multiplayer.Network.NetworkEngine).GetMethod("BroadcastToAll", All);
             if (zeroAt == null || view == null || hostArm == null || display == null || prefix == null ||
-                tlc == null)
+                tlc == null || mine == null || handle == null || tick == null || hostCancel == null ||
+                broadcast == null)
             {
                 // GUARD. Every arm below is a statement about these six members; without them the law is
                 // asking nothing and must say so rather than pass.
@@ -59,7 +81,10 @@ namespace RailCheck
                              "describes (missing " +
                              (zeroAt == null ? "_zeroAt" : view == null ? "_view" :
                               hostArm == null ? "HostArm" : display == null ? "DisplaySecondsLeft" :
-                              prefix == null ? "ReturnHoldPatch.Prefix" : "TacticalDamageSync.Tlc") +
+                              prefix == null ? "ReturnHoldPatch.Prefix" : tlc == null ? "TacticalDamageSync.Tlc" :
+                              mine == null ? "_mine" : handle == null ? "HandleCountdown" :
+                              tick == null ? "Tick" : hostCancel == null ? "HostCancel" :
+                              "NetworkEngine.BroadcastToAll") +
                              ") — the two writes that keep a client's own Continue from being swallowed " +
                              "forever cannot be checked, so re-derive them before trusting this seam";
                 yield break;
@@ -82,15 +107,39 @@ namespace RailCheck
                              "broadcast the CLEAR that stops the asking peer's own countdown — the exact pair of " +
                              "log lines the 2026-08-12 session repeated ten times.";
 
+            // ── arm (c): a remote CLEAR asks who owns the hold before dropping it.
+            if (!ReadsField(handle, mine))
+                yield return "L425 remote-clear-ignores-ownership: ReturnCountdown.HandleCountdown drops the hold " +
+                             "on a host CLEAR without reading _mine. A peer that clicked Continue has ALREADY had " +
+                             "that click swallowed, so the host zeroing its hold discards the click and nothing " +
+                             "ever runs that peer's return — it sits on the battle summary while the host is back " +
+                             "on the geoscape (adversarial review 2026-08-12).";
+
+            // ── arm (d): the release path tells nobody. A CLEAR at zero is indistinguishable from a cancel.
+            if (Calls(tick, hostCancel) || Calls(tick, broadcast))
+                yield return "L425 release-cancels-another-peers-hold: ReturnCountdown.Tick broadcasts (HostCancel " +
+                             "or BroadcastToAll) when it reaches zero or loses its view. That message lands on " +
+                             "peers holding their own swallowed clicks and stops countdowns nobody asked it to " +
+                             "stop; combined with a host that has already left the battle it arms and cancels " +
+                             "within one round trip and the client can never leave.";
+
             // ── POSITIVE CONTROL: the write detector can say NO. DisplaySecondsLeft only READS _zeroAt, so a
             // detector that answered yes here would make arm (a) green on any body at all.
             if (WritesField(display, zeroAt))
                 yield return "L425 control-failed: the IL write detector claims DisplaySecondsLeft writes " +
                              "_zeroAt, which only reads it — arm (a) cannot distinguish an arming prefix from " +
                              "any other body and proves nothing.";
+            // The read detector must be able to say YES, or arm (c) is green on any body at all; the call
+            // detector's positive control is arm (b), which requires a call it must find.
+            if (!ReadsField(display, zeroAt))
+                yield return "L425 control-failed: the IL read detector cannot see DisplaySecondsLeft reading " +
+                             "_zeroAt, which is its first statement — arm (c) would pass on a HandleCountdown " +
+                             "that never asks who owns the hold.";
         }
 
         private static bool WritesField(MethodBase m, FieldInfo field) => Touches(m, field, 0x80); // stsfld
+
+        private static bool ReadsField(MethodBase m, FieldInfo field) => Touches(m, field, 0x7E);  // ldsfld
 
         private static bool Touches(MethodBase m, FieldInfo field, params byte[] opcodes)
         {
