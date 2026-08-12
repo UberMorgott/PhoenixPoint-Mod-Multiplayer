@@ -81,7 +81,11 @@ namespace Multiplayer.Tactical
         {
             if (engine == null || !engine.IsHost) return;
             if (_zeroAt > 0f) return;                        // already counting
-            if (viewIfHost != null) _view = viewIfHost;
+            // A CLIENT'S ASK ARRIVES WITHOUT A VIEW (NetworkEngine:721 passes null) and the host's own return
+            // is what pulls every other peer out, so the view is taken from the host's live level instead of
+            // left null. Null here is what stranded a whole session on 2026-08-12: Tick found nothing to run,
+            // dropped the strip and broadcast the CLEAR that stopped the asking client's own countdown too.
+            _view = viewIfHost != null ? viewIfHost : TacticalDamageSync.Tlc()?.View;
             _zeroAt = Time.realtimeSinceStartup + CountdownSeconds;
             Debug.Log("[MP][return] host arming the return countdown for ALL peers — " + CountdownSeconds +
                       " s. Any peer can cancel; nobody needs to press anything for it to expire.");
@@ -214,8 +218,17 @@ namespace Multiplayer.Tactical
                     }
                     else
                     {
-                        Debug.Log("[MP][return] this client clicked Continue — asking the host to arm the " +
-                                  "return countdown for all peers.");
+                        // ARM THIS PEER'S OWN CLOCK AT THE CLICK, not when the host's broadcast comes back.
+                        // The swallow above is only safe while Holding is true: TacLeaveBattleCapture reads it
+                        // to decide whether the leave really happened, and a client that swallowed its click
+                        // WITHOUT arming latched LeftBattle over a return that never ran — after which the
+                        // host's own OpLeave was a no-op on that peer and nothing ever took it out of the
+                        // battle (live 2026-08-12, client sat on the summary screen for the rest of the
+                        // session while the host loaded the geoscape). Every peer now holds its own click and
+                        // releases it itself in Tick; nobody waits for anybody to press anything.
+                        _zeroAt = Time.realtimeSinceStartup + CountdownSeconds;
+                        Debug.Log("[MP][return] this client clicked Continue — holding its own return for " +
+                                  CountdownSeconds + " s and asking the host to arm the same strip for all peers.");
                         // The arm request rides the cancel's reverse: a byte payload with the seconds.
                         // The host handler for 0x4B-as-intent treats a non-zero payload from a client as
                         // "please arm". We reuse the same packet type but coming FROM a client.
@@ -243,26 +256,31 @@ namespace Multiplayer.Tactical
                 var engine = NetworkEngine.Instance;
                 bool isHost = engine != null && engine.IsHost;
 
-                // Only the HOST releases — clients wait for the host's own CLEAR broadcast, which arrives
-                // after the host's Tick fires here. A client whose local clock drifts past zero holds at 1
-                // (DisplaySecondsLeft) until the host says so.
-                if (!isHost) return;
-
-                if (_view == null || GoToGeoscapeMethod == null)
+                // EVERY PEER RELEASES ITS OWN HOLD. The hold swallowed a local click, so only this peer can
+                // un-swallow it: waiting for the host's CLEAR left a client that pressed Continue sitting on
+                // its summary screen forever, because the CLEAR only stops a strip — it does not run anybody's
+                // return (live 2026-08-12). Not a quorum in either direction: each peer counts its own five
+                // seconds off its own clock and nobody waits for a human.
+                var view = _view != null ? _view : TacticalDamageSync.Tlc()?.View;
+                if (view == null || GoToGeoscapeMethod == null || TacticalTurnSync.LeftBattle)
                 {
-                    Debug.LogError("[MP][return] the held return has nothing left to run — dropping the strip. " +
-                                   "This peer stays where it is; its Continue button still works.");
-                    HostCancel(engine, "lost view/method");
+                    Debug.Log("[MP][return] the held return has nothing left to run on this peer — dropping the " +
+                              "strip. It has already left the battle, or holds no level any more; its Continue " +
+                              "button still works.");
+                    if (isHost) HostCancel(engine, "lost view/method");
+                    _zeroAt = 0f;
+                    _view = null;
                     return;
                 }
-                bool sessionGone = !engine.IsActiveSession;
+                bool sessionGone = engine == null || !engine.IsActiveSession;
                 if (!sessionGone && Time.realtimeSinceStartup < _zeroAt) return;
 
-                var view = _view;
                 _zeroAt = 0f;
                 _view = null;
-                // Broadcast the CLEAR so every peer's strip disappears.
-                engine.BroadcastToAll(new NetworkMessage(PacketType.ReturnCountdown, new byte[] { 0 }));
+                // Broadcast the CLEAR so every peer's strip disappears. HOST ONLY — a client's release is its
+                // own business and the host owns the strip for everyone else.
+                if (isHost)
+                    engine.BroadcastToAll(new NetworkMessage(PacketType.ReturnCountdown, new byte[] { 0 }));
                 Debug.Log("[MP][return] " + (sessionGone
                               ? "the session ended while the return was held — going back to the geoscape now"
                               : "countdown reached zero") + " — running the game's own TacticalView.GoToGeoscape " +
