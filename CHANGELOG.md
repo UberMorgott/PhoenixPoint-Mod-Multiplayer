@@ -3,6 +3,68 @@
 Player-facing notes for each release. Releases before `0.9.5-beta` are documented on the
 [GitHub releases page](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/releases).
 
+## 0.9.10-beta
+
+A patch release on top of `0.9.9-beta`. Same mod, same install — replace the `Multiplayer` folder
+in your `Mods` directory. **Every player must run the same version**; a mismatch is reported when
+you join. This release changes how actors in a battle are named on the wire, so a `0.9.9-beta`
+player and a `0.9.10-beta` player cannot play together. Connect codes are unchanged from
+`0.9.9-beta`.
+
+This one is mostly one fix: the reason tactical missions drifted apart between players.
+
+### Battles that stay in step
+
+- **The long-standing tactical desync is fixed at its root.** Every actor in a battle — soldier,
+  enemy, civilian, crate — used to be named by the order it turned up on your machine. One actor
+  that a peer had not revealed yet shifted the name of every actor after it, so from that point on
+  the two machines were talking about different things while both believed they agreed. That is
+  what was behind shots landing seconds late on the other player's screen, enemies standing
+  somewhere else or not appearing at all, loot lying in different places, and the mod deciding the
+  whole squad had diverged and resyncing it. Actors are now named by the game's own scene ids, so
+  the name is the same on every machine whatever each player has seen.
+- **A crash when a paired status was mirrored is fixed** — convincing a civilian objective target
+  could throw and leave the mirror half-applied.
+- **A status now carries the actor that applied it**, not only its definition, so effects that care
+  about their source behave the same on every machine.
+
+### Objectives and the end of a mission
+
+- **Objectives now read the same for everybody**, including escort and convince targets, hold-this-
+  tile and capture objectives. An objective that completes completes for the whole group, not only
+  on the machine where it happened.
+- **The end-of-mission board, XP and rewards are scored from the host's objectives** instead of each
+  player recounting his own, so nobody gets a different result screen from the same battle.
+
+### Getting into and out of a mission
+
+- **Joining a mission somebody else is setting up.** While another player has the deployment screen
+  open, a **deployment prep** button appears at the top of your idle geoscape and takes you straight
+  in. Before, trying to join was simply refused with a message that read like a bug. The button
+  disappears again if the player who opened the screen drops.
+- **Nobody is stranded on the mission-summary screen any more.** The return countdown could be
+  cleared by another player's machine, swallowing your own click so your return never ran. Each
+  player now finishes his own way back to the geoscape.
+
+### Smaller things
+
+- **Countdown timers tick audibly** while they run.
+- **A locked-in event choice is explained instead of reported as a failure.** Answering an event
+  somebody already answered showed a diagnostic that one tester read as "mission joining is broken";
+  it now says plainly that the first choice is frozen for everyone.
+- **A refused action names the real cause** — the key, the status or the definition behind it —
+  instead of a generic failure.
+
+### Known issues / unverified
+
+**This release has not been playtested.** No co-op session was run against it; everything above is
+verified against the RailCheck law harness and against the source only. Treat the whole build as
+untested, the identity change above most of all, since it touches every actor in every battle.
+
+One older report is still open: the **objective list in the top-left corner does not appear on the
+client**. It is not fixed here and it is not confirmed either — this build adds a log line naming
+which faction built the panel, so a client-side log from a real session should finally say why.
+
 ## 0.9.9-beta
 
 A patch release on top of `0.9.8-beta`. Same mod, same install — replace the `Multiplayer` folder
