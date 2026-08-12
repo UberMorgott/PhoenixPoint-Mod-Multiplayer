@@ -426,7 +426,7 @@ namespace Multiplayer.Tactical
         }
 
         /// <summary>ONE LINE, AND IT IS A SEPARATE METHOD ON PURPOSE — the same containment
-        /// <c>TacticalActorKey.TieKey</c> uses, for the same reason. <c>Addon.IsVisible</c>:195-203 is
+        /// <c>TacticalActorKey.ContentKeyOf</c> uses, for the same reason. <c>Addon.IsVisible</c>:195-203 is
         /// <c>_visualRootGameObject.activeSelf</c>, i.e. a one-line wrapper around an ECALL, and under
         /// <c>-c Release</c> the JIT inlines it into whoever calls it — which makes THAT method impossible to
         /// JIT outside the Unity player ("ECall methods must be packaged into a system module"), whatever its

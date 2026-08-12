@@ -340,7 +340,6 @@ namespace RailCheck
             Add(laws, () => L357_TheResnapshotRepairsItemsOrSaysWhyNot.Check());
             Add(laws, () => L358_ABodyPartRidesWithTheOrderThatAimedAtIt.Check());
             Add(laws, () => L359_AnOwnerlessReceiverIsStillNamed.Check());
-            Add(laws, () => L360_TwoLookalikeActorsGetTwoKeys.Check());
             Add(laws, () => L361_ASecondGapStillAsksForARescue.Check());
             Add(laws, () => L362_AnUndecodableEnvelopeIsNeverDroppedSilently.Check());
             Add(laws, () => L363_AResnapshotNeverRewindsANewerSettle.Check());
@@ -390,6 +389,7 @@ namespace RailCheck
             Add(laws, () => L423_TheHoldDefersNoWorkOutsideItsApplyScope.Check());
             Add(laws, () => L424_TheDeploymentPrepDoorIsNotAGate.Check());
             Add(laws, () => L425_EveryPeerReleasesItsOwnHeldReturn.Check());
+            Add(laws, () => L426_ABattleStartKeyIsNeverAnOrdinal.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
 

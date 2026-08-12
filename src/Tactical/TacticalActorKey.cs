@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using Base.Core;
 using Base.Entities;
+using Base.Levels.SceneObjectIds;
 using Base.Utils.Maths;
 using HarmonyLib;
 using Multiplayer.Network;
@@ -43,35 +44,52 @@ namespace Multiplayer.Tactical
     /// <c>TacCharacterData</c>:131 <c>GeoUnitId = Id</c>). A3b must name the alien on the receiving end of a
     /// shot, so 0 needs an answer.
     ///
-    /// THE ANSWER IS A SECOND, *DERIVED* KEY — and the first thing to record is what it is NOT, because two
-    /// obvious candidates were checked against the decompile and both are wrong:
-    ///   • THERE IS NO SERIALIZED PER-ACTOR IDENTITY to reuse. <c>ActorInstanceData</c> carries
-    ///     Pos/Rot/Source/SourceTemplate/TimingData and no id; <c>TacActorBaseInstanceData</c> adds def,
-    ///     faction, participant, <c>GeoUnitId</c> and tags — nothing unique for a spawned Pandoran. The
-    ///     <c>SceneObjectId</c> on <c>ActorComponent</c> is a scene-authoring guid, not a spawn identity.
-    ///   • STAMPING A SYNTHETIC <c>GeoUnitId</c> ON ALIENS (which WOULD ride the save for free) is refused:
-    ///     <c>GeoMission</c>:788-795 skips exactly <c>GeoTacUnitId.None</c> and <c>Debug.LogError</c>s any
-    ///     other id it cannot find in the geoscape, and <c>PhoenixStatisticsManager</c>:814-878 keys soldier
-    ///     stats off the same field. A fake id turns every alien into a mission-completion error.
-    /// So the key is derived from state the peers PROVABLY share: the ORDINAL of the actor in the key-less
-    /// set, ordered canonically by its BATTLE-START POSITION. Built ONCE per battle
-    /// (<see cref="BuildBattleKeys"/>, driven from the first turn edge — <c>TacNewTurnHook</c>, which fires on
-    /// every peer running the native turn machine) and then CACHED per actor object, which is what makes it
-    /// survive the two things that kill an ordinal: an actor leaving play (<c>BaseMap</c>:51 removes it from
-    /// the list, renumbering everything after it) and actors moving. Both peers build from the SAME
-    /// mid-tactical save blob (A1), so the positions they sort by are byte-identical, and tiles are exclusive
-    /// (actors are dynamic nav obstacles), so the sort has no ties to break — a tie is reported LOUDLY rather
-    /// than resolved. Derived keys are NEGATIVE so they can never collide with a real <c>GeoTacUnitId</c>
-    /// (the geoscape mints those from a positive counter), and 0 still means "no shared identity".
+    /// THE ANSWER IS A SECOND, *DERIVED* KEY, AND IT IS DERIVED FROM THE ACTOR ALONE — never from the SET the
+    /// actor is in. That distinction is the whole of this file's history:
     ///
-    /// A4 CLOSES THE CEILING A3b LEFT: an actor that ENTERS play after the build cannot be keyed by ANY
-    /// derived scheme, because a derived key is a function of a shared snapshot and that actor was in no
-    /// snapshot. Its key is therefore HOST-ASSIGNED (<see cref="AssignHostKey"/>) and ships WITH the spawn
-    /// event; every other peer <see cref="Adopt"/>s it verbatim. The two schemes share ONE counter
-    /// (<c>_nextDerived</c>) so they can never mint the same number: the build runs first on every peer
-    /// (<see cref="Built"/> gates assignment), consumes -1..-N over the identical shared board, and every
-    /// mid-battle spawn continues from -(N+1). Adoption never consumes the counter — the key is given, not
-    /// minted — which is what keeps a peer that adopts BEFORE its own build from shifting its own ordinals.
+    /// UNTIL 2026-08-12 THE DERIVED KEY WAS AN ORDINAL over the key-less actors, sorted by battle-start
+    /// position. Ordinals are fragile BY CONSTRUCTION: the key of actor #40 is a function of how many actors
+    /// the peer COUNTED before it, so one extra or missing actor shifts every key after it and each one then
+    /// resolves to a different object with no failure anywhere. Live 2026-08-11 that is exactly what happened
+    /// — the host built keys for 118 actors, the client (13 s later, post-reveal) for 119, and the host's key
+    /// -103 named a <c>TacAIWaypoint</c> on the client. Downstream: dropped settles, "ROSTER DIVERGENCE …
+    /// SMALLER battle" x51, holes in the resolved-attack stream, eight forced 124-actor resnapshots, missing
+    /// loot. A 68-vs-68 mission on the same build had zero errors. No tie-breaking rescues an ordinal; only
+    /// not being one does.
+    ///
+    /// AND THE GAME ALREADY SHIPS THE IDENTITY, which this file's own comment used to deny ("the
+    /// <c>SceneObjectId</c> on <c>ActorComponent</c> is a scene-authoring guid, not a spawn identity" — WRONG,
+    /// and the origin of the bug: every actor that shifted those ordinals was scene-AUTHORED).
+    /// <c>ActorComponent.GetActorCreateData</c>:316-333 asserts a hard partition on every actor the game
+    /// saves — <c>IsSpawned</c> XOR <c>IdInScene.IsValid</c>, each side <c>Debug.LogError</c>ing the other —
+    /// so the two branches below are exhaustive:
+    ///   • NOT SPAWNED ⇒ it is placed in the scene and carries a valid <c>SceneObjectId</c>, a serialized
+    ///     guid string (<c>SceneObjectId</c>:16-19) written at save (<c>:321</c>) and resolved back at load
+    ///     (<c>:348</c>). Waypoints, crates, objectives, consoles, key structures and deploy/exit zones are
+    ///     ALL of this kind — the very actors that shifted the ordinals. Its key is a hash of that guid, so
+    ///     it depends on NOTHING any peer counted: an actor one peer has not revealed yet shifts no other
+    ///     key, and the key is mintable without the receiver ever having seen the actor.
+    ///   • SPAWNED at battle start ⇒ it came out of the SHARED mid-tactical save blob (A1), which is also
+    ///     what makes it addressable: its <c>Name</c> round-trips through the save
+    ///     (<c>ActorComponent</c>:322/343) and its position is restored from the same bytes on every peer
+    ///     (<c>ProcessInstanceData</c>:390-393). Its key is a hash of exactly those — again a function of the
+    ///     ACTOR, not of the roster, so a peer that sees one alien fewer keeps every other alien's key.
+    /// STAMPING A SYNTHETIC <c>GeoUnitId</c> instead (which WOULD ride the save for free) stays refused:
+    /// <c>GeoMission</c>:788-795 skips exactly <c>GeoTacUnitId.None</c> and <c>Debug.LogError</c>s any other
+    /// id it cannot find in the geoscape, and <c>PhoenixStatisticsManager</c>:814-878 keys soldier stats off
+    /// the same field. A fake id turns every alien into a mission-completion error.
+    ///
+    /// Derived keys are NEGATIVE so they can never collide with a real <c>GeoTacUnitId</c> (the geoscape
+    /// mints those from a positive counter), and 0 still means "no shared identity". A hash CAN collide;
+    /// what it may not do is collide QUIETLY, so a second actor landing on a live key un-registers BOTH and
+    /// <see cref="Refuse"/>s the number — every record naming it then says so instead of reaching a lookalike.
+    ///
+    /// A4 CLOSES THE CEILING: an actor that ENTERS play after the build has no shared antecedent at all — it
+    /// is in no save blob and in no scene — so its key is HOST-ASSIGNED (<see cref="AssignHostKey"/>) and
+    /// ships WITH the spawn event for every other peer to <see cref="Adopt"/> verbatim. That counter is not
+    /// an ordinal in the fragile sense: its value is TRANSMITTED, never independently re-derived, so nothing
+    /// a peer counts can move it. It lives in -1..-(<see cref="ContentKeyBase"/>-1), a range the content
+    /// hashes are below by construction, so the two schemes cannot meet.
     /// </summary>
     internal static class TacticalActorKey
     {
@@ -92,8 +110,9 @@ namespace Multiplayer.Tactical
         /// cause sends the next reader hunting a lost packet that never existed.</summary>
         private static readonly Dictionary<int, string> _refused = new Dictionary<int, string>();
 
-        /// <summary>The next free derived ordinal, shared by the battle-start build and by every mid-battle
-        /// host assignment (A4). One counter, so the two schemes can never mint the same number.</summary>
+        /// <summary>The next free HOST-ASSIGNED key (A4 only — the battle-start build derives, it never
+        /// counts). Its value rides the spawn record, so it is a host-local unique number, not a quantity any
+        /// other peer re-derives.</summary>
         private static int _nextDerived = -1;
 
         /// <summary>Whether <see cref="BuildBattleKeys"/> has run for this battle. A command that needs a
@@ -146,45 +165,38 @@ namespace Multiplayer.Tactical
             // "ECall methods must be packaged into a system module" before its first line ran. Debug never
             // saw it because nothing inlines there and the harness always passes null.
             if (ReferenceEquals(tlc, null) || ReferenceEquals(tlc.Map, null)) return;
-            var keyless = new List<TacticalActorBase>();
+            int keyed = 0;
             foreach (var a in tlc.Map.GetActors<TacticalActorBase>())
-                // A4: an actor that already carries an ADOPTED host key is deliberately NOT in the ordinal
-                // set. The host built its map before that actor existed, so including it here would shift
-                // every ordinal after it and point this peer's alien keys at different monsters.
-                if ((int)a.GeoUnitId == 0 && !_derived.ContainsKey(a)) keyless.Add(a);
-            keyless.Sort(CanonicalOrder);
-            // A FULL TIE GETS A KEY THAT CARRIES ITS OWN GROUP SIZE. Three Deploy_Crate_ZoneBounds at one
-            // position with one name (live 2026-08-08) are equal on every field CanonicalOrder can compare, so
-            // the ordinal each one takes came down to Map.GetActors enumeration order — and List.Sort is not
-            // even stable, so it need not agree between two peers that DO see the same board. Modelled on
-            // TacticalDestruction.AddressTags:161: the tied members are numbered #i/n and the COUNT rides
-            // inside the key, so a peer that found two where the sender found three mints a DIFFERENT number
-            // and every record naming it is refused OUT LOUD instead of landing on a lookalike. The running
-            // ordinal is still consumed for a tied actor, so no untied actor's key moves because of this.
-            int at = 0;
-            while (at < keyless.Count)
             {
-                int end = at + 1;
-                while (end < keyless.Count && CanonicalOrder(keyless[end - 1], keyless[end]) == 0) end++;
-                int n = end - at;
-                if (n > 1) ReportIndistinguishableRun(keyless[at], n);
-                for (int i = at; i < end; i++)
+                // A4: an actor that already carries an ADOPTED host key keeps it — the host handed that
+                // number out, and re-deriving over it would answer a question that was already answered.
+                if ((int)a.GeoUnitId != 0 || _derived.ContainsKey(a)) continue;
+                int key = ContentKeyOf(a);
+                if (key == 0) continue;                       // ContentKeyOf already said why, out loud
+                TacticalActorBase clash;
+                if (_byDerived.TryGetValue(key, out clash) && !ReferenceEquals(clash, a))
                 {
-                    int key = _nextDerived--;
-                    if (n > 1) key = TieKey(keyless[i], i - at, n);
-                    TacticalActorBase clash;
-                    if (_byDerived.TryGetValue(key, out clash) && !ReferenceEquals(clash, keyless[i]))
-                        Debug.LogError("[Multiplayer][tac] two battle-start actors were minted the SAME derived key " +
-                                       key + " — one of them now answers for both, and every command, hit and " +
-                                       "settle naming it reaches whichever the map hands back first.");
-                    _derived[keyless[i]] = key;
-                    _byDerived[key] = keyless[i];
+                    // BOTH are dropped, not just the newcomer: a hash collision means the number names two
+                    // objects, so answering with EITHER is a wrong hit. The key is refused instead, which is
+                    // what makes every later record naming it print a cause rather than reach a lookalike.
+                    Debug.LogError("[Multiplayer][tac] two battle-start actors hash to the SAME derived key " +
+                                   key + " — neither one may answer for it, so the key is REFUSED here and " +
+                                   "every command, hit and settle naming it says so instead of reaching " +
+                                   "whichever the map hands back first.");
+                    _derived.Remove(clash);
+                    _byDerived.Remove(key);
+                    Refuse(key, "two battle-start actors on this peer hash to derived key " + key +
+                                ", so it names neither of them");
+                    continue;
                 }
-                at = end;
+                _derived[a] = key;
+                _byDerived[key] = a;
+                keyed++;
             }
             _built = true;
-            Debug.Log("[Multiplayer][tac] derived battle keys for " + keyless.Count + " actor(s) the geoscape " +
-                      "never named (ordinals over battle-start position).");
+            Debug.Log("[Multiplayer][tac] derived battle keys for " + keyed + " actor(s) the geoscape never " +
+                      "named (scene guid where the actor is placed, name+position where it was spawned into " +
+                      "the shared entry save — never an ordinal over the roster).");
             // THE ORDERING SEAM IS THIS FLAG, AND THE FLUSH READS IT FROM THE TICK — NOT FROM HERE.
             // Calling TacticalCommandSync.FlushPendedSelections() inline was the obvious wiring and it broke
             // L19: this method's only caller is TacNewTurnHook.Postfix, a postfix on the MODEL method
@@ -194,7 +206,20 @@ namespace Multiplayer.Tactical
             // One frame of extra latency on a wait that was already 0.2 s long.
         }
 
-        /// <summary>The battle-start tie diagnostic, deliberately in its OWN non-inlined method.
+        /// <summary>THE DERIVATION, in its OWN non-inlined method, and the two branches are the game's own
+        /// partition (<c>ActorComponent</c>:325-331 logs an error for either one being false):
+        ///
+        ///   • PLACED IN THE SCENE ⇒ its <c>SceneObjectId</c>, read with the game's OWN call and the game's own
+        ///     arguments — <c>SceneObjectIdsComponent.GetIdInScene(gameObject, gameObject.scene, true)</c>, i.e.
+        ///     <c>ActorComponent</c>:321 verbatim. Asking in the ACTOR'S OWN scene is the load-bearing half:
+        ///     map generation reparents each parcel's ids component into the plot's and destroys the parcel one
+        ///     (<c>MapPlot</c>:230-243), so the level's scene and the active scene both answer wrong — that is
+        ///     the very miss <see cref="TacticalDestruction"/>'s header dissects. The save path proves this
+        ///     spelling works: if it did not, every scene actor would trip :331 on every save.
+        ///   • SPAWNED ⇒ name + battle-start position, both restored from the shared entry save on every peer.
+        ///
+        /// A missing scene id FALLS THROUGH to the spawned shape rather than to 0: it is still content-derived
+        /// and still count-independent, and an addressable-with-a-warning actor beats an unaddressable one.
         ///
         /// Everything hazardous about <see cref="BuildBattleKeys"/> lives in here: <c>UnityEngine.Object.name</c>
         /// and <c>Pos</c> are native ECalls, and so is every Unity <c>==</c>. They are perfectly safe in the
@@ -210,70 +235,43 @@ namespace Multiplayer.Tactical
         /// actor list is empty), while the message itself stays exactly as loud in-game. Same reasoning as
         /// <c>RailCheck.Program.Run</c>, which carries the attribute for the same class of reason.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static void ReportIndistinguishableRun(TacticalActorBase first, int n)
+        private static int ContentKeyOf(TacticalActorBase a)
         {
-            Debug.LogWarning("[Multiplayer][tac] " + n + " key-less actors are indistinguishable at battle start (" +
-                             SafeName(first) + " at " + first.Pos + ") — nothing this peer can compare tells them " +
-                             "apart, so each takes #i/" + n + " in enumeration order. The COUNT rides in their keys: " +
-                             "a peer that found a different number of them mints different keys and refuses every " +
-                             "record naming one, rather than silently answering with a lookalike.");
+            var go = a.gameObject;
+            if (!a.IsSpawned)
+            {
+                // ponytail: the game's own static, which re-runs FindGameObjectsWithTag per actor. ~120 tag
+                // scans, once per battle, at a turn edge. Cache per scene only if a profile ever names it.
+                var id = SceneObjectIdsComponent.GetIdInScene(go, go.scene, true);
+                if (id.IsValid) return ContentKey("scene:" + id.GuidString);
+                Debug.LogWarning("[Multiplayer][tac] " + SafeName(a) + " is placed in the scene and has NO scene " +
+                                 "id — the shape ActorComponent:329-331 calls an error on every save. It is keyed " +
+                                 "by name+position instead, which is still independent of what any peer counted " +
+                                 "but moves if this actor moves before the other peer builds its keys.");
+            }
+            return ContentKey("spawn:" + SafeName(a) + "@" + Mathf.RoundToInt(a.Pos.x * 10f) + "," +
+                              Mathf.RoundToInt(a.Pos.y * 10f) + "," + Mathf.RoundToInt(a.Pos.z * 10f));
         }
 
-        /// <summary>The key for one member of a tie run, and the ONLY key in this scheme that is not a running
-        /// ordinal. It is a function of (name, rounded position, index, GROUP SIZE) — the last field is the
-        /// point: it is what makes a peer that counted the run differently mint a different number.
+        /// <summary>The rule itself, as a PURE function of the string it hashes — so a law can EXECUTE it
+        /// rather than read it. The ECalls (<c>name</c>, <c>Pos</c>, the scene lookup) stay in the caller.
         ///
         /// FNV-1a and not <c>string.GetHashCode</c>: the framework's string hash is explicitly an
-        /// implementation detail and can be randomised per process, so it is not a value two peers may compare.
-        /// The range is far below the running ordinals (which start at -1 and count down over the battle-start
-        /// roster), so a tie key can never collide with one; a collision between two tie keys is checked for
-        /// and shouted about at the call site rather than assumed away.
-        ///
-        /// NoInlining for <see cref="ReportIndistinguishableRun"/>'s reason: <c>name</c> and <c>Pos</c> are
-        /// native ECalls and an inlined ECall makes the whole enclosing method un-compilable outside the
-        /// player.</summary>
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        private static int TieKey(TacticalActorBase a, int index, int n) =>
-            TieKeyOf(SafeName(a), Mathf.RoundToInt(a.Pos.x * 10f), Mathf.RoundToInt(a.Pos.y * 10f),
-                     Mathf.RoundToInt(a.Pos.z * 10f), index, n);
-
-        /// <summary>The rule itself, as a PURE function of the six numbers it is made of — so law L360 can
-        /// execute it rather than read it. <c>name</c> and <c>Pos</c> are the ECalls; they stay in the caller.</summary>
-        internal static int TieKeyOf(string name, int x, int y, int z, int index, int n)
+        /// implementation detail and can be randomised per process, so it is not a value two peers may
+        /// compare. 30 bits of it are kept and pushed below <see cref="ContentKeyBase"/>, so a content key is
+        /// always negative (never a real <c>GeoTacUnitId</c>), never 0 ("no shared identity") and never
+        /// inside the host-assigned range.</summary>
+        internal static int ContentKey(string s)
         {
             uint h = 2166136261u;
-            foreach (char c in name ?? "") h = Fnv(h, c);
-            h = Fnv(h, (uint)x);
-            h = Fnv(h, (uint)y);
-            h = Fnv(h, (uint)z);
-            h = Fnv(h, (uint)index);
-            h = Fnv(h, (uint)n);
-            return -(TieKeyBase + (int)(h & 0x03FFFFFFu));
+            foreach (char c in s ?? "") { h ^= (uint)c & 0xFFu; h *= 16777619u; h ^= (uint)c >> 8; h *= 16777619u; }
+            return -(ContentKeyBase + (int)(h & 0x3FFFFFFFu));
         }
 
-        /// <summary>The first tie key. Every running ordinal is above -1000000 for any roster a battle can
-        /// hold, so the two ranges cannot meet.</summary>
-        private const int TieKeyBase = 1000000;
-
-        private static uint Fnv(uint h, uint word)
-        {
-            for (int i = 0; i < 4; i++) { h ^= (word >> (i * 8)) & 0xFFu; h *= 16777619u; }
-            return h;
-        }
-
-        /// <summary>Position first (the peers' save-restored floats are bit-identical, so this is a total
-        /// order in practice), name as the LAST resort so a reported tie is still deterministic rather than
-        /// left to list order.</summary>
-        private static int CanonicalOrder(TacticalActorBase a, TacticalActorBase b)
-        {
-            int c = a.Pos.x.CompareTo(b.Pos.x);
-            if (c != 0) return c;
-            c = a.Pos.z.CompareTo(b.Pos.z);
-            if (c != 0) return c;
-            c = a.Pos.y.CompareTo(b.Pos.y);
-            if (c != 0) return c;
-            return string.CompareOrdinal(a.name, b.name);
-        }
+        /// <summary>The first content key. Host-assigned keys count down from -1, so a battle would need a
+        /// million mid-battle spawns to reach this — and <see cref="AssignHostKey"/> says so out loud if it
+        /// ever does, rather than minting a number a crate already answers to.</summary>
+        internal const int ContentKeyBase = 1000000;
 
         /// <summary>A4 — THE HOST MINTS the key for an actor that entered play mid-battle, at the moment it
         /// entered. This is the only scheme that can work for such an actor: a DERIVED key is a function of a
@@ -290,19 +288,19 @@ namespace Multiplayer.Tactical
             int existing;
             if (_derived.TryGetValue(actor, out existing)) return existing;
             int key = _nextDerived--;
+            if (key <= -ContentKeyBase)
+                Debug.LogError("[Multiplayer][tac] the host has now assigned " + ContentKeyBase + " mid-battle " +
+                               "spawn keys and has run into the CONTENT-KEY range — key " + key + " may already " +
+                               "belong to a battle-start actor, and both would answer to it.");
             _derived[actor] = key;
             _byDerived[key] = actor;
             return key;
         }
 
         /// <summary>A4 — take the host's number verbatim, and DO NOT touch the counter. The key is GIVEN, not
-        /// minted, and moving the counter for it would shift this peer's own battle-start ordinals whenever a
-        /// spawn record lands before <see cref="BuildBattleKeys"/> runs here. It is safe to leave the counter
-        /// alone because a host-assigned key is ALWAYS below the build range: the host builds first (assignment
-        /// is gated on <see cref="Built"/>), so it has already consumed -1..-N over the same board this peer is
-        /// about to consume -1..-N over, and everything it hands out afterwards starts at -(N+1). A collision
-        /// would therefore mean the two peers disagree about the battle-start roster, which is why the one that
-        /// is detected here is reported as loudly as it is.</summary>
+        /// minted. Since the battle-start keys became content hashes the two ranges cannot meet at all
+        /// (<see cref="ContentKeyBase"/>), so a collision detected here means the host handed the same number
+        /// to two spawns — which is why it is reported as loudly as it is.</summary>
         internal static void Adopt(TacticalActorBase actor, int key)
         {
             if (ReferenceEquals(actor, null) || key >= 0) return;   // 0 = no identity, positive = its own GeoUnitId
