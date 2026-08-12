@@ -164,8 +164,8 @@ namespace Multiplayer.UI
             {
                 Debug.Log("[MP][return] CANCEL pressed on this peer with " +
                           Multiplayer.Tactical.ReturnCountdown.DisplaySecondsLeft() +
-                          " s left — one peer's veto stops the return for everyone; " +
-                          "Continue can be pressed again.");
+                          " s left — this stops THIS peer's own five seconds and nobody else's; " +
+                          "Continue can be pressed again. It does not keep any other peer in the battle.");
                 Multiplayer.Tactical.ReturnCountdown.RequestCancel();
                 return;
             }
@@ -261,10 +261,12 @@ namespace Multiplayer.UI
             // never ambiguous about what it is about to do.
             int left = DeployCountdown.DisplaySecondsLeft();
             string caption = left > 0 ? "MISSION STARTS IN " + Seconds(left) : null;
-            // NOT EVERY COUNTDOWN CAN BE VETOED. The two STARTS are a decision a peer may still stop; the
-            // post-mission RETURN is not — the battle is already over and the geoscape is where the game
-            // goes next, so that one shows the number and no button.
-            bool cancellable = true;
+            // ONE BUTTON, TWO SCOPES, AND THE LABEL SAYS WHICH. The two STARTS are a veto any single peer
+            // may exercise for everyone; the post-mission RETURN is not — pressing it stops only THIS
+            // peer's own five seconds, and a peer whose leave the host already accepted still pulls this
+            // one out through the ordinary OpLeaveBattle (TacticalTurnSync.cs:778). That is correct under
+            // the no-blockers postulate, so the button must not go on promising a veto it does not have.
+            string cancelText = "CANCEL";
             if (caption == null)
             {
                 // The lobby clock counts down to one of TWO things (start-from-save, or the host's new
@@ -275,7 +277,11 @@ namespace Multiplayer.UI
             if (caption == null)
             {
                 left = Multiplayer.Tactical.ReturnCountdown.DisplaySecondsLeft();
-                if (left > 0) caption = "RETURNING TO GEOSCAPE IN " + Seconds(left);
+                if (left > 0)
+                {
+                    caption = "RETURNING TO GEOSCAPE IN " + Seconds(left);
+                    cancelText = "CANCEL MINE";
+                }
             }
             bool show = engine != null && engine.IsActiveSession && caption != null;
 
@@ -286,10 +292,10 @@ namespace Multiplayer.UI
                 return;
             }
             if (!_root.activeSelf) _root.SetActive(true);
-            // BEFORE the caption compare: the button's visibility is not part of the caption, so an early
-            // return on an unchanged number must not be able to leave the wrong one showing.
-            if (_cancel != null && _cancel.gameObject.activeSelf != cancellable)
-                _cancel.gameObject.SetActive(cancellable);
+            // BEFORE the caption compare: the button's label is not part of the caption, so an early
+            // return on an unchanged number must not be able to leave the wrong scope showing.
+            var cancelLabel = _cancel == null ? null : _cancel.GetComponentInChildren<Text>(true);
+            if (cancelLabel != null && cancelLabel.text != cancelText) cancelLabel.text = cancelText;
 
             // Keyed on the whole caption, not on the number alone: three countdowns share this widget, so
             // "5" from one and "5" from another must not be mistaken for the same repaint.

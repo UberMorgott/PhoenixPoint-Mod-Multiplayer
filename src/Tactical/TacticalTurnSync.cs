@@ -928,7 +928,14 @@ namespace Multiplayer.Tactical
         [HarmonyPriority(Priority.Last)]
         private static void Prefix()
         {
-            if (ReturnCountdown.Holding) return;   // swallowed by the strip — announce at the release
+            // Swallowed by the strip — announce at the release. NOT when the MOD is driving this funnel:
+            // a host whose own strip is still counting can execute an accepted peer ask
+            // (HandleLeaveBattle:778 → InvokeNativeLeave), and skipping here left that host leaving the
+            // battle without ever latching LeftBattle or running HostBroadcastLeave — an AFK peer that
+            // never clicked Continue then stayed in a battle everybody else had left (no-blockers).
+            // ModDriving is false again by the time the release re-enters (Tick clears the hold first),
+            // so the ordinary path is unchanged.
+            if (ReturnCountdown.Holding && !ReturnCountdown.ModDriving) return;
             TacticalTurnSync.OnLocalLeaveBattle();
         }
     }

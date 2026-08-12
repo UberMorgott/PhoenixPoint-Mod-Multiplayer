@@ -41,11 +41,14 @@ namespace Multiplayer.Tactical
     /// <see cref="PacketType.ReturnCountdown"/> (0x4B). When any peer clicks Cancel, the host clears it
     /// for all peers. Same two-write shape as <see cref="Lobby.LobbyCountdown"/>: each peer counts its own
     /// display down from the arm off local realtime. NOT A QUORUM (P13): the countdown expires by itself,
-    /// cancel is an opt-out that any single peer can exercise.
+    /// and CANCEL is NOT the two STARTS' shared veto — it ends the pressing peer's OWN hold and nothing
+    /// else. It keeps nobody in the battle either: another peer's accepted <c>OpLeaveBattle</c> still pulls
+    /// this one out (<c>TacticalTurnSync.cs:778</c>), which is correct — no peer may block another.
     ///
     /// NO NEW WIDGET (native-UI-first). The strip is the mod's EXISTING top-of-screen countdown plate,
     /// <see cref="Multiplayer.UI.CountdownPanel"/> — the same skinned plate the deployment drop and the
-    /// lobby start already share.
+    /// lobby start already share. Its CANCEL button says <c>"CANCEL MINE"</c> for this countdown, because
+    /// that is all it does.
     ///
     /// REPAINT SEAM: <c>MultiplayerUI.Update</c>:1977 (<c>_countdownPanel?.Sync()</c>), unconditional and
     /// every frame in every scene, which is what makes the number tick on an already-open screen.
@@ -205,7 +208,8 @@ namespace Multiplayer.Tactical
             if (_zeroAt > 0f) return;                        // never restart a hold that is already running
             _zeroAt = Time.realtimeSinceStartup + seconds;
             Debug.Log("[MP][return] countdown ARMED by the host for " + seconds +
-                      " s — this peer counts its own display down from here. CANCEL stops it for everyone.");
+                      " s — this peer counts its own display down from here. CANCEL stops THIS peer's " +
+                      "countdown only; every other peer keeps its own.");
         }
 
         /// <summary>Host applier for 0x4C: any peer's cancel.</summary>
@@ -270,7 +274,13 @@ namespace Multiplayer.Tactical
                                        "strip for this return; going back to the geoscape immediately.");
                         return true;
                     }
-                    if (_zeroAt > 0f) return false;                // already counting; eat the re-click
+                    // ALREADY COUNTING: eat the re-click — but OWN what was eaten. A peer that clicks
+                    // Continue while it is only MIRRORING the host's arm had its click swallowed here with
+                    // _mine still false, so the next CLEAR (HandleCountdown:194, HostCancel:146) threw that
+                    // click away and nothing ran that peer's return until it pressed Continue again. Every
+                    // path that reaches this line is a LOCAL leave gesture — the mod's own invokes leave
+                    // above on ModDriving/SyncApplyScope — so claiming the hold here is exactly right.
+                    if (_zeroAt > 0f) { _mine = true; return false; }
 
                     // On the HOST, arm the countdown for everyone. On a CLIENT, ask the host to arm it;
                     // the client's own _view is latched below so its own Tick can release when the host's
