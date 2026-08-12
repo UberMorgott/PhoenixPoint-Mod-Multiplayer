@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using HarmonyLib;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
@@ -96,6 +97,46 @@ namespace Multiplayer.Tactical
             using (SyncApplyScope.Enter())
                 objective.SetIsCompleted(done);
             Debug.Log("[Multiplayer][tac] objective " + key + " set completed=" + done + " from the host.");
+        }
+
+        /// <summary>DIAGNOSTIC ONLY — this changes no behaviour and is here to end a question two source
+        /// investigations could not answer.
+        ///
+        /// The top-left objective list did not appear on the client on 2026-08-08. The obvious suspect was
+        /// <c>UIModuleObjectives.Init</c>:22-35 reading <c>LevelController.CurrentFaction.Objectives</c>
+        /// rather than the VIEWER's (the geoscape twin reads <c>Context.ViewerFaction.Objectives</c>,
+        /// <c>UIStateNothingSelected</c>:104) — but that peer's own log disproves it as a cause of NEVER:
+        /// the objectives WERE created there ("Adding objective of type ActivateConsoleFactionObjective ...
+        /// for faction Phoenix"), <c>Init</c> ran 227 times after that through
+        /// <c>UIStateCharacterSelected.EnterState</c>:397, and no exception was thrown on that path. A
+        /// wrong faction at one Init would have repaired itself on the next.
+        ///
+        /// So the missing value is the one nothing prints: WHICH faction each of those 227 inits read, and
+        /// whether the element set it built was actually empty. This prints exactly that, and only when the
+        /// answer changes — no fix is guessed on top of it. Delete it once a playtest has answered.</summary>
+        [HarmonyPatch(typeof(PhoenixPoint.Tactical.View.ViewModules.UIModuleObjectives),
+                      nameof(PhoenixPoint.Tactical.View.ViewModules.UIModuleObjectives.Init))]
+        internal static class ObjectivesPanelProbe
+        {
+            private static string _last;
+
+            private static void Postfix(PhoenixPoint.Tactical.View.ViewModules.UIModuleObjectives __instance,
+                                        PhoenixPoint.Tactical.View.TacticalViewContext Context)
+            {
+                var engine = TacticalDamageSync.LiveEngine();
+                if (engine == null || engine.IsHost) return;
+                if (!__instance.UseMissionObjectives) return;
+                var faction = Context?.LevelController?.CurrentFaction;
+                var objectives = faction?.Objectives;
+                int total = objectives?.Count ?? -1;
+                int shown = objectives == null ? -1 : objectives.Count(o => !o.IsUiHidden);
+                string now = (faction?.TacticalFactionDef?.name ?? "<null>") + " total=" + total + " shown=" + shown;
+                if (now == _last) return;
+                _last = now;
+                Debug.Log("[Multiplayer][tac] objectives panel built from CurrentFaction " + now +
+                          " (viewer is " + (Context?.View?.ViewerFaction?.TacticalFactionDef?.name ?? "<null>") +
+                          ") — shown=0 with a non-empty viewer list is the empty-panel bug.");
+            }
         }
     }
 }
