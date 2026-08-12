@@ -1,6 +1,10 @@
 using System;
+using System.Linq;
+using Base.Core;
+using Base.Defs;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
+using PhoenixPoint.Geoscape.Interception;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -68,6 +72,8 @@ namespace Multiplayer.UI
         private Text _title;
         private Button _cancel;
         private string _shownCaption;
+        private static AK.Wwise.Event _cue;
+        private static bool _cueResolved;
         private bool _loggedFailure;
 
         /// <summary>Build the (hidden) panel under the mod's overlay canvas. One call, from
@@ -288,10 +294,37 @@ namespace Multiplayer.UI
             // Keyed on the whole caption, not on the number alone: three countdowns share this widget, so
             // "5" from one and "5" from another must not be mistaken for the same repaint.
             if (caption == _shownCaption) return;            // per-frame work is one string compare
+            bool ticked = _shownCaption != null;             // null = the panel just opened, not a second elapsing
             _shownCaption = caption;
+            if (ticked) Tick();
 
             _title.text = caption;
             _title.color = LobbyTheme.BodyText;
+        }
+
+        /// <summary>
+        /// ONE CLICK PER DISPLAYED SECOND, for all three countdowns — the caller is the single caption edge
+        /// this widget already has, so there is no per-countdown hook and no new state. The cue is the game's
+        /// own UI click (<c>InterceptionGameSoundDef.EquipmentClick</c>), posted through
+        /// <c>AK.Wwise.Event.Post</c> exactly as <see cref="Multiplayer.UI.PingMarkers"/> posts its refusal,
+        /// so it rides the player's own volume sliders. The def is resolved ONCE, not once a second.
+        /// </summary>
+        private void Tick()
+        {
+            if (!_cueResolved)
+            {
+                _cueResolved = true;
+                _cue = GameUtl.GameComponent<DefRepository>()?.GetAllDefs<InterceptionGameSoundDef>()
+                              .FirstOrDefault()?.EquipmentClick;
+                if (_cue == null || !_cue.IsValid())
+                {
+                    _cue = null;
+                    Debug.LogWarning("[Multiplayer] countdown tick is SILENT for the rest of this run — " +
+                                     "InterceptionGameSoundDef.EquipmentClick is not a valid Wwise event in " +
+                                     "this build. The countdown itself is unaffected; only the sound is gone.");
+                }
+            }
+            if (_cue != null) _cue.Post(_root);
         }
 
         private static string Seconds(int n) => n + (n == 1 ? " SECOND" : " SECONDS");
