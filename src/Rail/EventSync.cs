@@ -177,7 +177,8 @@ namespace Multiplayer.Network.Sync
         internal static string Validate(GeoscapeEventRecordState state, int choiceIndex, int choiceCount)
         {
             if (state != GeoscapeEventRecordState.Triggered && state != GeoscapeEventRecordState.Reset)
-                return "already answered (record=" + state + ") — the first choice is frozen for everyone";
+                return "another player already answered this event — the choice is locked in for everyone, " +
+                       "so nothing is broken and there is nothing you need to do";
             if (choiceIndex < -1 || choiceIndex >= choiceCount)
                 return "choice index " + choiceIndex + " outside [-1," + choiceCount + ") — stale mirror or def mismatch";
             return null;
@@ -213,9 +214,14 @@ namespace Multiplayer.Network.Sync
             ulong expectedRevision)
         {
             if (!ledgerKnowsMember) return null;
-            if (addressedEntry == null) return "no live entitlement for this occurrence on the host";
+            // Both texts are PLAYER-FACING (the call site passes them to IntentRail.Reject with notify),
+            // and both describe a benign co-op race, not a failure — worded so nobody reads a lost race as
+            // a broken game. They stay distinct sentences so the host log still tells the two apart.
+            if (addressedEntry == null) return "this offer is not open for you any more — another player " +
+                                               "has already moved it on; nothing is broken";
             return addressedEntry.LifecycleRevision == expectedRevision
-                ? null : "stale occurrence lifecycle revision";
+                ? null : "that window has already moved on — your click landed on an older copy of it; " +
+                         "nothing is broken, open it again if it is still offered";
         }
 
         internal static string NoOpReason(int current, int value)
@@ -345,8 +351,21 @@ namespace Multiplayer.Network.Sync
 
             string why = Validate(rec.State, index, data.Choices == null ? 0 : data.Choices.Count);
             if (why != null)
-            { IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, "event '" + eventId + "': " + why,
-                                true /* notify */, RecordScope); return; }
+            {
+                // THE PLAYER'S HALF IS NOT THE DIAGNOSTIC (2026-08-12). The nudge used to read
+                // "event 'PROG_NJ0_MISS': already answered (record=Completed) — the first choice is frozen
+                // for everyone" and a live tester read it as "somebody is inside that mission and I cannot
+                // join it" — he spent the whole session believing mission joining was broken. It is not
+                // about a mission at all, and a frozen choice is NORMAL co-op, not a fault. So the toast now
+                // says exactly that in plain words and names no id and no record state; the event id, the
+                // record, the index and the choice count go to the HOST log, which is where they are worth
+                // something. Same reject LOGIC, same freeze, same forced RecordScope re-emit.
+                Debug.LogWarning("[MP][events] answer refused for '" + eventId + "' from peer " + senderPeerId +
+                                 " — record=" + rec.State + " choice=" + index + "/" +
+                                 (data.Choices == null ? 0 : data.Choices.Count) + " — " + why);
+                IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, why, true /* notify */, RecordScope);
+                return;
+            }
 
             // The UI layer's own charge (UIModuleSiteEncounters.cs:571-573) — the client must never pay
             // locally (law 3), so the winner's cost comes out of the host's wallet and rides back as a delta.
