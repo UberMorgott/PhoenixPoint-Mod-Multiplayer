@@ -38,6 +38,7 @@ namespace Multiplayer.UI
         // ─── Co-op player panel (name | ping | status), both scenes ─────────
         private PlayerPanel _playerPanel;
         private CountdownPanel _countdownPanel;
+        private PrepJoinButton _prepJoinButton;
 
         // ─── Lobby panel (built once the menu Canvas is captured) ───────────
         private LobbyPanel _lobby;
@@ -121,6 +122,11 @@ namespace Multiplayer.UI
             // geoscape, research tree, deployment roster — without a view-state transition of any kind.
             _countdownPanel = gameObject.AddComponent<CountdownPanel>();
             _countdownPanel.Attach(EnsureBarCanvas());
+
+            // Same canvas again, and AFTER the countdown panel: that one adds the GraphicRaycaster this
+            // canvas needs before any click on it can reach a handler at all.
+            _prepJoinButton = gameObject.AddComponent<PrepJoinButton>();
+            _prepJoinButton.Attach(EnsureBarCanvas());
 
             // Panels are built lazily in OnMenuReady (they need the native menu Canvas).
             _lobby = new LobbyPanel(this);
@@ -1924,6 +1930,10 @@ namespace Multiplayer.UI
             // Same seam, same argument: an ARMING countdown must reach an already-open screen within one
             // frame of the rail batch that carried it, and a cancel must take it away the same way.
             _countdownPanel?.Sync();
+            // Third reader of the same seam: a peer entering the deployment prep screen must put the join
+            // door on every other peer's ALREADY-OPEN geoscape within one frame, and leaving it must take
+            // the door away — with no view-state transition and no re-entry by the player.
+            _prepJoinButton?.Sync();
             // THE POST-MISSION RETURN HOLD, released here and nowhere else. Unconditional for the same
             // reason the Sync above is: this loop is the only one that runs in the TACTICAL scene, and a
             // held return that never got a tick would strand the player on the summary screen.

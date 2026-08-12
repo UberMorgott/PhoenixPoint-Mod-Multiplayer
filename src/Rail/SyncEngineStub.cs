@@ -54,6 +54,9 @@ namespace Multiplayer.Network.Sync
             // value rail. Its CANCEL is not a surface of its own either — it is op 2 on 0xB8, registered
             // with the launch op above (the geoscape band 0xA0-0xBF has no free id left).
             DeployCountdown.Register();
+            // Fourth mod root, same symmetric registration: "M#prep" is the site whose deployment-prep screen
+            // is open somewhere (DeployPrep). Its two client intents are ops 5/6 on that same 0xB8 surface.
+            DeployPrep.Register();
             // Geoscape rail surfaces ride the one inbound hook (each returns false for foreign ids):
             // the 0xAD manufacture order channel, the intent engine, and the generic value rail
             // (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the host-side intent dedup.
@@ -249,6 +252,8 @@ namespace Multiplayer.Network.Sync
             EquipSync.ResetForReloadBoundary();
             TimeSync.ResetForReloadBoundary();
             DeployCountdown.ResetForReloadBoundary(); // same mod-root contract, same reason as the line below
+            DeployPrep.ResetForReloadBoundary();      // ditto: the belt for the one screen exit (tactical
+                                                      // teardown) that may not run UIStateRosterDeployment.ExitState
             MistSync.ResetForReloadBoundary(); // BEFORE DiffEngine: the mod root must be empty when the
                                                // post-reload baseline snapshot is taken (see its remark)
             DiffEngine.ResetForReloadBoundary();

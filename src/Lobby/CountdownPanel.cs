@@ -209,7 +209,7 @@ namespace Multiplayer.UI
         /// The hover colour is the theme's captured NATIVE accent, not an invented one, so the highlight is
         /// the same amber the rest of the game's UI lights up with.
         /// </summary>
-        private static void SkinButton(Button b)
+        internal static void SkinButton(Button b)
         {
             if (b == null) return;
             var face = b.GetComponent<Image>();

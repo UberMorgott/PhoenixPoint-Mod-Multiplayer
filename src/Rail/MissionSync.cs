@@ -464,6 +464,13 @@ namespace Multiplayer.Network.Sync
         internal const byte OpPrepareHaven = 3;
         internal const byte OpStartDurableOffer = 4;
 
+        /// <summary>The deployment-prep DOOR, both directions of one announcement (<see cref="DeployPrep"/>).
+        /// Body <c>[siteRef]</c> on both. On this surface and not on a new one for the same reason the
+        /// countdown's veto is op 2 here: the geoscape band 0xA0-0xBF has no free id left, and both ops are
+        /// about the same site's mission as the launch itself.</summary>
+        internal const byte OpPrepOpen = 5;
+        internal const byte OpPrepClose = 6;
+
         internal static void RegisterIntents()
         {
             IntentRail.Register(SurfaceIds.GeoMissionIntent, "mission",
@@ -473,6 +480,8 @@ namespace Multiplayer.Network.Sync
                     [OpCancelLaunch] = DeployCountdown.HandleCancel,
                     [OpPrepareHaven] = HandlePrepareHaven,
                     [OpStartDurableOffer] = HandleStartDurableOffer,
+                    [OpPrepOpen] = DeployPrep.HandleOpen,
+                    [OpPrepClose] = DeployPrep.HandleClose,
                 });
         }
 
