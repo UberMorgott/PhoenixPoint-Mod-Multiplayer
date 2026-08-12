@@ -3,6 +3,69 @@
 Player-facing notes for each release. Releases before `0.9.5-beta` are documented on the
 [GitHub releases page](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/releases).
 
+## 0.9.9-beta
+
+A patch release on top of `0.9.8-beta`. Same mod, same install — replace the `Multiplayer` folder
+in your `Mods` directory. **Every player must run the same version**; a mismatch is reported when
+you join. This release adds two new messages to the wire (the shared post-battle countdown), so a
+`0.9.8-beta` player and a `0.9.9-beta` player cannot play together. Connect codes are unchanged
+from `0.9.8-beta`.
+
+This one is about the seams around a mission: who is shown the window that starts it, and what
+happens on the way back out of the battle.
+
+### Reaching and starting a mission
+
+- **A mission window is now shown only to the player whose aircraft raised it.** Everybody else's
+  screen stays clear instead of collecting windows about a mission they are not flying. The launch
+  itself still reaches everyone, as before.
+- **Mission briefs that open without a preceding event popup are routed correctly**, so a scavenging
+  or haven brief no longer lands on the wrong player.
+- **A mission window that has been answered is dropped from the queue when the mission ends**,
+  instead of coming back afterwards.
+- **An event that was disabled and then re-enabled can be completed again**, instead of being
+  refused as stuck.
+- **A client's answer to a shared window is no longer refused as invalid.** Answering from a
+  non-host machine worked in some windows and silently failed in others.
+
+### After a mission
+
+- **The "returning to geoscape" countdown is shown to every player, not just the one who clicked.**
+  Any player can start it, and any player can cancel it for the whole group — it is an opt-out, not
+  a vote, and it still runs out by itself if nobody touches it.
+- **Leaving the battle is announced when the return actually happens**, not the moment the button is
+  pressed, so the other players no longer see you gone while you are still on the map.
+- **A return that was still waiting when the session ended is finished instead of dropped**, and if
+  the game's own exit throws, the host retries it rather than leaving everyone stranded in the
+  after-battle screen.
+- **The mod's own exits are no longer blocked by the return strip.**
+
+### In battle
+
+- **A soldier is released when his order is refused.** He used to stay locked, unable to take a new
+  order for the rest of the turn.
+- **You are told when a held order is given up on**, instead of it quietly disappearing.
+- **A refused action now says what the game actually refused**, rather than a generic failure.
+
+### Hosting and joining
+
+- **A connect code typed with the letter `O` instead of a zero is accepted.**
+- **A save transfer that produces no bytes no longer strands the host** on the transfer screen.
+- **Connecting is cleaner under churn**: a connection that completes after you have already left is
+  discarded, a second start no longer leaves a stray listener behind, and a listener whose socket is
+  gone is shut down instead of lingering.
+
+### Robustness
+
+- **Every value read off the wire is now bounded before it is used** — a corrupt or hostile packet
+  can no longer make the mod allocate or loop on a number it was simply told to trust.
+- **Fog-of-war state that finished encoding across a load boundary is discarded** rather than applied
+  to the wrong campaign.
+- **A geoscape check that could fault on a torn-down level asks the question safely.**
+- **Internal housekeeping**: dead code, an unused per-soldier ownership model and a superseded pause
+  menu were removed, and several oversized source files were split up. No behaviour change intended
+  from any of it.
+
 ## 0.9.8-beta
 
 A release on top of `0.9.6-beta`, and it also carries everything that was tagged as `0.9.7-beta`
