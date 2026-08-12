@@ -51,6 +51,12 @@ namespace Multiplayer.Tactical
     /// <c>TacticalFaction.GiveExperienceForObjectives</c>:220 (the XP/SP), <c>ObjectiveResultElement</c>:22
     /// (the battle summary line) and <c>ObjectiveResult</c>:18 (the geoscape mission result). Patching
     /// <c>GetCompletion</c> instead would mean patching seven separate override bodies for the same effect.
+    /// ALL THREE READ BEFORE <see cref="Reset"/>, the geoscape one included — it is not a live reader of the
+    /// objective at all. <c>ObjectiveResult</c> is built ONCE, in
+    /// <c>TacticalLevelController.GetMissionResult</c>:900, and stores plain ints; its only caller is
+    /// <c>TacticalView.GoToGeoscape</c>:1117, which evaluates it as an argument to <c>FinishLevel</c> — while
+    /// the level is still <c>Playing</c>, ahead of the teardown <c>Reset</c> hangs off
+    /// (<c>TacLevelEndBarrier</c>, <c>OnLevelStateChanged</c> out of Playing).
     ///
     /// THE ADDRESS IS THE OBJECTIVE'S CONTENT, never its index (the lesson of <c>TacticalActorKey</c>):
     /// <c>ObjectivesManager.Evaluate</c>:87-88 APPENDS <c>NextOnSuccess</c> on the peer where the change
@@ -124,7 +130,7 @@ namespace Multiplayer.Tactical
             // on this surface would break.
             var mine = player?.Objectives?.ToList() ?? new List<FactionObjective>();
             var used = new HashSet<FactionObjective>();
-            int corrected = 0, missing = 0;
+            int corrected = 0, missing = 0, regressible = 0;
             for (int i = 0; i < count; i++)
             {
                 string key = WireString.ReadKey(r);
@@ -137,6 +143,17 @@ namespace Multiplayer.Tactical
                 var o = mine.FirstOrDefault(m => !used.Contains(m) && KeyOf(m) == key);
                 if (o == null) { missing++; continue; }
                 used.Add(o);
+                // A REGRESSIBLE OBJECTIVE IS LEFT ALONE, BOTH HALVES. The stamp only survives because
+                // Evaluate:86-89 skips an objective that is no longer InProgress — and CanRegress is the one
+                // flag that turns that skip off, so this peer recounts the state right back over the host's
+                // while the reward postfix stays pinned to the host's number. The result is a board whose
+                // state and payout disagree on one peer and nothing anywhere says so. Consistent-and-local
+                // beats half-mirrored: the peer scores it the way the game will keep re-scoring it anyway.
+                if (o.CanRegress)
+                {
+                    regressible++;
+                    continue;
+                }
                 bool changed = o.State != state;
                 if (changed) SetState(o, state);
                 if (exp != o.GetActualExperienceReward() || sp != o.GetActualSkillPointsReward())
@@ -160,6 +177,12 @@ namespace Multiplayer.Tactical
                 Debug.LogWarning("[Multiplayer][tac] " + missing + " of the host's " + count + " mission-end " +
                                  "objectives do not exist on this peer (a NextOnSuccess chain the host " +
                                  "advanced and this peer did not) — their reward cannot be paid here.");
+            if (regressible > 0)
+                Debug.LogWarning("[Multiplayer][tac] " + regressible + " of the host's " + count + " mission-end " +
+                                 "objectives declare CanRegress, so this peer keeps its OWN state AND its own " +
+                                 "reward for them: the game re-evaluates a regressible objective whatever is " +
+                                 "stamped on it, and a pinned reward over a re-counted state is a board that " +
+                                 "disagrees with itself. Its numbers may differ from the host's.");
             if (corrected > 0)
                 Debug.Log("[Multiplayer][tac] mission-end objective board: " + corrected + " of " + count +
                           " corrected to the host's before this peer's own GameOver runs.");

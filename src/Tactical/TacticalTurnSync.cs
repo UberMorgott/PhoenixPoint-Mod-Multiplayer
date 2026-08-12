@@ -113,6 +113,8 @@ namespace Multiplayer.Tactical
             TacticalUiRepaint.Reset();         // drop the paint memo: it names an actor of the dead battle
             TacticalReadySync.Reset();         // advisory ready flags + the cloned button's handles
             TacticalObjectiveOutcome.Reset();  // the host's reward mirror names objectives of the dead battle
+            TacticalStatusSet.Reset();         // refusals are per-battle: the next one must be heard again
+            TacticalObjectiveSync.ObjectivesPanelProbe.Reset();   // ditto the probe's "only when it changes"
         }
 
         internal static void RegisterIntents()
@@ -995,13 +997,27 @@ namespace Multiplayer.Tactical
             TacticalActorKey.BuildBattleKeys(nextFaction == null ? null : nextFaction.TacticalLevel);
             // L67e — THE ROSTER OUTCOME, at the one boundary both peers cross. A refused key IS an actor that
             // lives on the host and does not exist here, so a non-empty ledger is a divergence, not a note.
-            string diverged = TacticalActorKey.RosterDivergence();
-            if (diverged != null)
-                Debug.LogError("[Multiplayer][tac] ROSTER DIVERGENCE at the turn edge — this peer is fighting a " +
-                               "SMALLER battle than the host. Actor(s) alive on the host will never appear here: " +
-                               diverged + ". Every command, hit and settle naming them is refused for the rest of " +
-                               "the mission. This is not a lost packet — the spawn record arrived and could not be " +
-                               "rebuilt from what it carried.");
+            // …but a refusal this peer caused BY ITSELF (two of its own actors hashing to one derived key) is
+            // not a smaller roster: both actors are standing right here. Reported as its own cause, because a
+            // wrong one sends the next reader hunting a packet that never existed.
+            if (TacticalActorKey.RosterDivergence() != null)
+            {
+                string diverged = TacticalActorKey.HostSideRefusals();
+                if (diverged != null)
+                    Debug.LogError("[Multiplayer][tac] ROSTER DIVERGENCE at the turn edge — this peer is fighting a " +
+                                   "SMALLER battle than the host. Actor(s) alive on the host will never appear here: " +
+                                   diverged + ". Every command, hit and settle naming them is refused for the rest of " +
+                                   "the mission. This is not a lost packet — the spawn record arrived and could not be " +
+                                   "rebuilt from what it carried.");
+                string clashed = TacticalActorKey.LocalKeyClashes();
+                if (clashed != null)
+                    Debug.LogError("[Multiplayer][tac] DERIVED KEY COLLISION at the turn edge — this peer's own " +
+                                   "battle-start actors are not all distinguishable: " + clashed + ". The roster is " +
+                                   "NOT smaller and nothing was lost in transit; the key names two local actors, so " +
+                                   "both were dropped from it and every command, hit and settle naming it is refused " +
+                                   "for the rest of the mission. The fix is the derivation (TacticalActorKey" +
+                                   ".ContentKeyOf), not the network.");
+            }
             // THE ADVISORY READY RESET, on the game's own round edge (constraint 4: no poll, no timer).
             // Every peer clears its own flag; the host additionally clears every seat and ships 0/M.
             TacticalReadySync.OnNewTurn(nextFaction);

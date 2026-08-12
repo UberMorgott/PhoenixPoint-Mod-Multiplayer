@@ -120,6 +120,10 @@ namespace Multiplayer.Tactical
         {
             private static string _last;
 
+            /// <summary>Per-battle. Held over, the SECOND mission opens with the first one's answer already
+            /// in hand and the probe stays silent through a whole battle it was meant to describe.</summary>
+            internal static void Reset() => _last = null;
+
             private static void Postfix(PhoenixPoint.Tactical.View.ViewModules.UIModuleObjectives __instance,
                                         PhoenixPoint.Tactical.View.TacticalViewContext Context)
             {

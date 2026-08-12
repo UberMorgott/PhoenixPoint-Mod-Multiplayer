@@ -445,6 +445,9 @@ namespace Multiplayer.Network
             if (!_clients.TryGetValue(steamId, out var client)) return;
             if (client.IsPaused) return;
             client.IsPaused = true;
+            // A peer that went silent inside the deployment prep screen never runs its ExitState, so the join
+            // button it published would point at a door nobody is standing in until the reload boundary.
+            Multiplayer.Network.Sync.DeployPrep.OnPeerGone(steamId);
             Debug.LogWarning($"[Multiplayer] Peer {steamId} ({client.PlayerName}) PAUSED: {reason}. " +
                              "Roster row kept — it resumes its seat when it comes back.");
             if (_engine.IsHost)
@@ -482,6 +485,7 @@ namespace Multiplayer.Network
             if (existed)
             {
                 client.IsReady = false;
+                Sync.DeployPrep.OnPeerGone(steamId);   // same as PausePeer: its ExitState is never going to run
                 // RELEASE the guid→peer binding: this is the host-side peer-DETACH chokepoint, so the
                 // attach in HandleJoin has exactly one symmetric partner here and every drop path
                 // (transport disconnect, heartbeat reaper, graceful leave, stale-rejoin prune) inherits it.

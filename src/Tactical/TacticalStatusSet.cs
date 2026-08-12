@@ -271,6 +271,21 @@ namespace Multiplayer.Tactical
                              "roster that had diverged.");
         }
 
+        /// <summary>SAY A REFUSAL ONCE, NOT ONCE PER SWEEP. Every turn edge re-asserts the host's whole status
+        /// set, so a status this peer cannot rebuild is re-attempted — and re-refused — for the rest of the
+        /// mission. The attempt must keep happening (the address can become resolvable later, e.g. once the
+        /// spawn record for the actor it names arrives); the ERROR must not, or one unrebuildable escort
+        /// buries every other line in the log. Keyed per distinct refusal, on the file's own
+        /// <c>_said</c> memo, and cleared with the battle by <see cref="Reset"/>.</summary>
+        private static void RefusedOnce(string id, string message)
+        {
+            if (!_said.Add(id)) return;
+            Debug.LogError(message);
+        }
+
+        /// <summary>Per-battle: the next mission's first refusal has to be heard again.</summary>
+        internal static void Reset() => _said.Clear();
+
         private static void ApplyOne(TacticalActorBase actor, StatusComponent comp,
                                      TacticalLevelController tlc, string key)
         {
@@ -281,11 +296,12 @@ namespace Multiplayer.Tactical
                 var def = Resolve(defName);
                 if (def == null)
                 {
-                    Debug.LogError("[Multiplayer][tac] the host has status '" + defName + "' on " + actor.name +
-                                   " and no def of that NAME resolves on this peer. A status def can be minted at " +
-                                   "runtime (L130 is why this rides as a name and not a guid), so this is as likely " +
-                                   "to be a def another mod made only on the host as it is a def-set difference — " +
-                                   "nothing here can tell those apart. That actor's state stays different here.");
+                    RefusedOnce(defName + "|" + actor.name + "|def",
+                                "[Multiplayer][tac] the host has status '" + defName + "' on " + actor.name +
+                                " and no def of that NAME resolves on this peer. A status def can be minted at " +
+                                "runtime (L130 is why this rides as a name and not a guid), so this is as likely " +
+                                "to be a def another mod made only on the host as it is a def-set difference — " +
+                                "nothing here can tell those apart. That actor's state stays different here.");
                     return;
                 }
                 var repo = GameUtl.GameComponent<DefRepository>();
@@ -393,15 +409,27 @@ namespace Multiplayer.Tactical
         {
             int key;
             string why;
-            if (!int.TryParse(tag, NumberStyles.Integer, CultureInfo.InvariantCulture, out key)) return true;
+            if (!int.TryParse(tag, NumberStyles.Integer, CultureInfo.InvariantCulture, out key))
+            {
+                // A REFUSAL, not a pass. Returning true here applied the status with NO source at all — the
+                // exact null this method exists to prevent — and only the ActorBridgeStatus backstop twenty
+                // lines below stopped the throw, for the one status family that happens to be checked there.
+                RefusedOnce(defName + "|" + TacticalActorLifecycle.SafeName(owner) + "|src-tag",
+                            "[Multiplayer][tac] the host's status '" + defName + "' on " +
+                            TacticalActorLifecycle.SafeName(owner) + " names its source actor as '" + tag +
+                            "', which is not a key this peer can read — it is NOT applied here, because a " +
+                            "status whose own OnApply reaches through its source throws instead of applying.");
+                return false;
+            }
             var named = TacticalActorKey.Resolve(tlc, key, out why);
             if (named == null)
             {
-                Debug.LogError("[Multiplayer][tac] the host's status '" + defName + "' on " +
-                               TacticalActorLifecycle.SafeName(owner) + " was applied BY actor " + key +
-                               " and " + why + " — it is NOT applied here, because a status whose own OnApply " +
-                               "reaches through its source (an escort/convince bridge does, on its first " +
-                               "statement) throws instead of applying. That actor's state stays different here.");
+                RefusedOnce(defName + "|" + TacticalActorLifecycle.SafeName(owner) + "|src" + key,
+                            "[Multiplayer][tac] the host's status '" + defName + "' on " +
+                            TacticalActorLifecycle.SafeName(owner) + " was applied BY actor " + key +
+                            " and " + why + " — it is NOT applied here, because a status whose own OnApply " +
+                            "reaches through its source (an escort/convince bridge does, on its first " +
+                            "statement) throws instead of applying. That actor's state stays different here.");
                 return false;
             }
             status.Source = named;
@@ -460,11 +488,12 @@ namespace Multiplayer.Tactical
             var receiver = TacticalActorKey.ResolveReceiver(actor, name, out why);
             if (receiver == null)
             {
-                Debug.LogError("[Multiplayer][tac] the host's status '" + defName + "' on " +
-                               TacticalActorLifecycle.SafeName(actor) + " is targeted at body part '" + name +
-                               "' and " + why + " — it is NOT applied here, because a status rebuilt without the " +
-                               "target its own OnApply dereferences throws instead of applying. That actor's state " +
-                               "stays different on this peer.");
+                RefusedOnce(defName + "|" + TacticalActorLifecycle.SafeName(actor) + "|tgt" + name,
+                            "[Multiplayer][tac] the host's status '" + defName + "' on " +
+                            TacticalActorLifecycle.SafeName(actor) + " is targeted at body part '" + name +
+                            "' and " + why + " — it is NOT applied here, because a status rebuilt without the " +
+                            "target its own OnApply dereferences throws instead of applying. That actor's state " +
+                            "stays different on this peer.");
                 return false;
             }
             status.Target = receiver;
@@ -487,8 +516,9 @@ namespace Multiplayer.Tactical
             var named = TacticalActorKey.Resolve(tlc, refKey, out why);
             if (named == null)
             {
-                Debug.LogError("[Multiplayer][tac] the host's status '" + defName + "' on " + owner.name +
-                               " names actor " + refKey + " and " + why + " — it cannot be rebuilt here.");
+                RefusedOnce(defName + "|" + owner.name + "|ref" + refKey,
+                            "[Multiplayer][tac] the host's status '" + defName + "' on " + owner.name +
+                            " names actor " + refKey + " and " + why + " — it cannot be rebuilt here.");
                 return false;
             }
             f.SetValue(status, named);

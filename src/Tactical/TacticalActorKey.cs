@@ -110,6 +110,11 @@ namespace Multiplayer.Tactical
         /// cause sends the next reader hunting a lost packet that never existed.</summary>
         private static readonly Dictionary<int, string> _refused = new Dictionary<int, string>();
 
+        /// <summary>The subset of <see cref="_refused"/> this peer refused for its OWN local reason (two of
+        /// its battle-start actors hashing to one key). Same ledger, different CAUSE — see
+        /// <see cref="LocalKeyClashes"/>.</summary>
+        private static readonly HashSet<int> _localClash = new HashSet<int>();
+
         /// <summary>The next free HOST-ASSIGNED key (A4 only — the battle-start build derives, it never
         /// counts). Its value rides the spawn record, so it is a host-local unique number, not a quantity any
         /// other peer re-derives.</summary>
@@ -124,6 +129,7 @@ namespace Multiplayer.Tactical
             _derived.Clear();
             _byDerived.Clear();
             _refused.Clear();
+            _localClash.Clear();
             _built = false;
             _nextDerived = -1;
         }
@@ -141,11 +147,25 @@ namespace Multiplayer.Tactical
         /// — every mechanism fired, and the actor still existed on one screen only. So the ledger is read at the
         /// turn edge and a non-empty one is a FAILURE announced as such, not a shrug logged once at arrival and
         /// scrolled past. Returns null when the rosters agree, so the caller has nothing to decide.</summary>
-        internal static string RosterDivergence()
+        internal static string RosterDivergence() => Join(null);
+
+        /// <summary>The refusals this peer caused ENTIRELY BY ITSELF — two of its own battle-start actors
+        /// hashing to one derived key. They belong in the ledger (the key still names nobody), but they are
+        /// NOT a smaller roster and NOT a lost packet: both actors are standing right here. Reported apart
+        /// from <see cref="HostSideRefusals"/> because a cause named wrongly sends the next reader hunting a
+        /// packet that never existed — the same rule <see cref="_refused"/>'s own header states.</summary>
+        internal static string LocalKeyClashes() => Join(true);
+
+        /// <summary>The refusals that really are "the host has an actor this peer cannot rebuild".</summary>
+        internal static string HostSideRefusals() => Join(false);
+
+        private static string Join(bool? local)
         {
-            if (_refused.Count == 0) return null;
             var parts = new List<string>(_refused.Count);
-            foreach (var kv in _refused) parts.Add("key " + kv.Key + " — " + kv.Value);
+            foreach (var kv in _refused)
+                if (local == null || _localClash.Contains(kv.Key) == local.Value)
+                    parts.Add("key " + kv.Key + " — " + kv.Value);
+            if (parts.Count == 0) return null;
             parts.Sort(StringComparer.Ordinal);
             return string.Join("; ", parts.ToArray());
         }
@@ -173,6 +193,9 @@ namespace Multiplayer.Tactical
                 if ((int)a.GeoUnitId != 0 || _derived.ContainsKey(a)) continue;
                 int key = ContentKeyOf(a);
                 if (key == 0) continue;                       // ContentKeyOf already said why, out loud
+                // A number two actors already proved ambiguous is never handed to a third. Without this the
+                // clash pair is dropped from the map and the NEXT actor to hash onto it takes the key over.
+                if (_refused.ContainsKey(key)) continue;
                 TacticalActorBase clash;
                 if (_byDerived.TryGetValue(key, out clash) && !ReferenceEquals(clash, a))
                 {
@@ -185,6 +208,7 @@ namespace Multiplayer.Tactical
                                    "whichever the map hands back first.");
                     _derived.Remove(clash);
                     _byDerived.Remove(key);
+                    _localClash.Add(key);
                     Refuse(key, "two battle-start actors on this peer hash to derived key " + key +
                                 ", so it names neither of them");
                     continue;
@@ -350,9 +374,13 @@ namespace Multiplayer.Tactical
                 // is adopted the moment its spawn record lands, which can legitimately be BEFORE this peer
                 // reaches its own first turn edge. Asking "is the map built?" first would refuse a key that is
                 // sitting right there.
+                // THE REFUSAL IS ASKED FIRST, and that order is load-bearing: a refused key names NOBODY, and
+                // a later actor that hashes onto it registers in the map (the clash pair was removed from it),
+                // after which the map would happily answer with a third actor for a number two others already
+                // proved ambiguous. A5 says a refusal is permanent for the battle, so it outranks the map.
+                if (_refused.TryGetValue(key, out why)) return null;
                 TacticalActorBase derived;
                 if (_byDerived.TryGetValue(key, out derived)) return derived;
-                if (_refused.TryGetValue(key, out why)) return null;   // A5: the documented refusal wins
                 if (!_built)
                 {
                     why = "derived actor key " + key + " arrived before this peer built its battle key map — " +

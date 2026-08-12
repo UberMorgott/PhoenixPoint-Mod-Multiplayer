@@ -66,6 +66,12 @@ namespace Multiplayer.Network.Sync
         /// <see cref="DeployPrepState"/> carry a set of site refs, not a second mechanism here.</summary>
         private static string _mine;
 
+        /// <summary>HOST-ONLY: whose announcement the root currently carries (0 = this host's own screen).
+        /// The one thing a withdrawal-on-drop needs and nothing else knows — <c>ExitState</c> is the only
+        /// other way this root is ever cleared, and a peer that crashed or lost its socket inside the prep
+        /// screen will never run it.</summary>
+        private static ulong _announcer;
+
         /// <summary>PURE (RailCheck L424). IS THE DOOR ON SCREEN? Three booleans, and the point is which
         /// three: a session, an announced site, and THIS peer's own idle geoscape. There is no term for
         /// what any other peer has done, pressed or acknowledged — that is the no-quorum mandate expressed
@@ -97,7 +103,7 @@ namespace Multiplayer.Network.Sync
                 var siteRef = IdentityResolver.RootRef(mission?.Site);
                 if (string.IsNullOrEmpty(siteRef)) return;
                 _mine = siteRef;
-                if (engine.IsHost) { Publish(siteRef); }
+                if (engine.IsHost) { _announcer = 0; Publish(siteRef); }
                 else
                 {
                     IntentRail.Send(SurfaceIds.GeoMissionIntent, MissionSync.OpPrepOpen,
@@ -153,8 +159,29 @@ namespace Multiplayer.Network.Sync
                                  "button is published; that peer's own screen is untouched.");
                 return;
             }
+            _announcer = senderPeerId;
             Publish(siteRef);
             Debug.Log("[MP][deploy] HOST published prep " + siteRef + " nonce=" + nonce + " peer=" + senderPeerId);
+        }
+
+        /// <summary>THE ANNOUNCING PEER IS GONE. Its <c>ExitState</c> will never run, so without this the door
+        /// it left open stays on every other peer's geoscape until the reload boundary and leads nowhere
+        /// (<see cref="Join"/> degrades to a warning, so it is a dead button, never a hang).
+        ///
+        /// NOT A HEARTBEAT AND NOT A QUORUM: it rides the drop the host has ALREADY observed
+        /// (<c>SessionManager.PausePeer</c> / <c>RemoveClient</c>), asks nobody for anything, and clears only
+        /// the announcement that peer itself made — the peer-scoped rule <see cref="ClearsOnWithdraw"/>
+        /// states for the ordinary exit.</summary>
+        internal static void OnPeerGone(ulong steamId)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsHost || steamId == 0 || _announcer != steamId) return;
+            _announcer = 0;
+            if (string.IsNullOrEmpty(State.SiteRef)) return;
+            Debug.Log("[MP][deploy] the peer standing in the deployment prep for " + State.SiteRef +
+                      " is gone — withdrawing its announcement, because it will never run ExitState itself. " +
+                      "Every other peer's join button clears; nothing else changes.");
+            Publish("");
         }
 
         internal static void HandleClose(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
@@ -167,6 +194,7 @@ namespace Multiplayer.Network.Sync
                           "the live door stays open.");
                 return;
             }
+            _announcer = 0;
             Publish("");
         }
 
@@ -222,6 +250,7 @@ namespace Multiplayer.Network.Sync
         internal static void ResetForReloadBoundary()
         {
             _mine = null;
+            _announcer = 0;
             State.SiteRef = "";
         }
     }
