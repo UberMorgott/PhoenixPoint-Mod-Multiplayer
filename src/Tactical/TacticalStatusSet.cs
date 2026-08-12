@@ -76,8 +76,10 @@ namespace Multiplayer.Tactical
         /// is the 2026-08-06 client log verbatim, three times. Carrying it in the key means the plan can never
         /// call two differently-sourced statuses interchangeable, and both peers compute the name the same way
         /// from the same def. NAME, never guid: TFTV mints defs at runtime with <c>Guid.NewGuid()</c> (L130).
-        /// A non-def source (an actor, a live equipment instance) is "" on EVERY peer, so it still matches
-        /// itself and nothing regresses — it is simply not rebuildable, exactly as before.</summary>
+        /// THE SOURCE IS A UNION, not a def name: an ACTOR source rides as this rail's own key tagged
+        /// <c>a:</c> (<see cref="ActorSourceTag"/>), because a bridge status is applied BY the other actor and
+        /// a half rebuilt without it throws on its first statement. Anything that is neither is still "" on
+        /// EVERY peer, so it matches itself and is simply not rebuildable, exactly as before.</summary>
         /// AND ITS TARGET, for the same reason and from the same evidence. <c>Status.Target</c> is a base-class
         /// field the game ALWAYS supplies when it applies a status —
         /// <c>TacticalActorBase.ApplyDamageInternal</c>:930-934 is the engine's own three-line rebuild recipe
@@ -297,7 +299,11 @@ namespace Multiplayer.Tactical
                 // the SAME null then kills OnUnapply:53 one line before SetCone(null) — so the red cone can
                 // never be torn down on the peer that received the status through this rail. Generic: any
                 // status whose lifecycle reads its own source is repaired by this, none of them named here.
-                if (!string.IsNullOrEmpty(sourceName))
+                if (sourceName != null && sourceName.Length > 2 && sourceName[0] == 'a' && sourceName[1] == ':')
+                {
+                    if (!SetActorSource(status, tlc, sourceName.Substring(2), actor, defName)) return;
+                }
+                else if (!string.IsNullOrEmpty(sourceName))
                 {
                     var source = ResolveAnyDef(sourceName);
                     if (source == null)
@@ -314,10 +320,12 @@ namespace Multiplayer.Tactical
                 if (!SetTarget(status, actor, targetTag, defName)) return;
                 // A BRIDGED STATUS IS HALF OF A PAIR AND THE PAIR IS ADDRESSED THROUGH ITS SOURCE ACTOR.
                 // ActorBridgeStatus.AfterApply:24 asks GetPairedStatus:32, whose first act is
-                // TacUtil.GetSourceOfType<TacticalActorBase>(Source).Status — unguarded. This rail carries a
-                // source only as a DEF NAME (see Key), and the source of a bridge half is the OTHER ACTOR, so
-                // a half rebuilt here has no source actor and the apply NREs inside ApplyStatus (client log
-                // 2026-08-12, x3 on ConvinceCivilianActorToObjectiveBridgeStatus). Mirroring the second half
+                // TacUtil.GetSourceOfType<TacticalActorBase>(Source).Status — unguarded. The source of a
+                // bridge half is the OTHER ACTOR, which the rail now carries (ActorSourceTag), so this is the
+                // BACKSTOP rather than the whole answer: it fires when that actor cannot be resolved here at
+                // all — which is what happened while the source rode as a def name only and the apply NREd
+                // inside ApplyStatus (client log 2026-08-12, x3 on
+                // ConvinceCivilianActorToObjectiveBridgeStatus). Mirroring the second half
                 // is not the answer either: the game makes it itself, in that same AfterApply, from a source
                 // this rail cannot address — both halves arrive on a peer that replays the ability that
                 // created them. So this is a REFUSAL, the same rule SetTarget applies to an address this peer
@@ -349,7 +357,55 @@ namespace Multiplayer.Tactical
             var def = s == null ? null : s.BaseDef;
             if (def == null || string.IsNullOrEmpty(def.name)) return null;
             var source = s.Source as BaseDef;
-            return Key(def.name, RefKeyOf(s), source == null ? "" : source.name, TargetTag(s));
+            return Key(def.name, RefKeyOf(s), source != null ? source.name : ActorSourceTag(s), TargetTag(s));
+        }
+
+        /// <summary>THE SECOND SHAPE A SOURCE HAS, and until now it was thrown away as "". A status applied BY
+        /// AN ACTOR is not a def — <c>ActorBridgeStatus</c> (escort/convince) is exactly that, and
+        /// <c>GetPairedStatus</c>:32 dereferences
+        /// <c>TacUtil.GetSourceOfType&lt;TacticalActorBase&gt;(Source).Status</c> unguarded, so a half rebuilt
+        /// with no source NREs inside <c>ApplyStatus</c> (client log 2026-08-12, x3 on
+        /// <c>ConvinceCivilianActorToObjectiveBridgeStatus</c>). The refusal one line above <c>comp.ApplyStatus</c>
+        /// stops the throw; THIS is what makes the status rebuildable in the first place.
+        ///
+        /// The actor rides as this rail's own key with an <c>a:</c> tag, the same shape <see cref="TargetTag"/>
+        /// already uses for its two forms — so a def name (bare, never tagged, and def names carry no colon)
+        /// and an actor stay distinguishable on arrival. Read with the game's OWN accessor, so a source held
+        /// one indirection away resolves exactly as the consumer will read it.
+        ///
+        /// ponytail: a source that is a LIVE item still lands here as its owning actor rather than as the
+        /// item, because that is what GetSourceOfType answers. That is strictly closer than the null it used
+        /// to be — a status casting the source to its own item type gets null either way — and an item
+        /// address (L66c's actor+slot) is the upgrade path if one is ever observed reading it.</summary>
+        private static string ActorSourceTag(Status s)
+        {
+            var actor = PhoenixPoint.Tactical.TacUtil.GetSourceOfType<TacticalActorBase>(s == null ? null : s.Source);
+            if (actor == null) return "";
+            int key = TacticalActorKey.Of(actor);
+            return key == 0 ? "" : "a:" + key.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Put the host's SOURCE ACTOR back on a rebuilt status, or refuse the rebuild — the same
+        /// rule <see cref="SetTarget"/> applies to an address this peer cannot rebuild, and for the same
+        /// reason: a status whose lifecycle reads its source throws instead of applying.</summary>
+        private static bool SetActorSource(Status status, TacticalLevelController tlc, string tag,
+                                           TacticalActorBase owner, string defName)
+        {
+            int key;
+            string why;
+            if (!int.TryParse(tag, NumberStyles.Integer, CultureInfo.InvariantCulture, out key)) return true;
+            var named = TacticalActorKey.Resolve(tlc, key, out why);
+            if (named == null)
+            {
+                Debug.LogError("[Multiplayer][tac] the host's status '" + defName + "' on " +
+                               TacticalActorLifecycle.SafeName(owner) + " was applied BY actor " + key +
+                               " and " + why + " — it is NOT applied here, because a status whose own OnApply " +
+                               "reaches through its source (an escort/convince bridge does, on its first " +
+                               "statement) throws instead of applying. That actor's state stays different here.");
+                return false;
+            }
+            status.Source = named;
+            return true;
         }
 
         /// <summary>The host's <c>Status.Target</c> as something the other peer can rebuild: its SHAPE and its
