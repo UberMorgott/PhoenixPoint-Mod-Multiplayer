@@ -65,6 +65,9 @@ namespace Multiplayer.Tactical
         private const byte OpLeave = 3;
         // 4 host→all is TacticalReadySync.OpReadyTally — it ships on THIS surface (see Send's doc).
         private const byte OpRestart = 5;
+        // 6 host→all is TacticalObjectiveOutcome.OpOutcome — the mission-end objective board, which rides
+        // THIS surface for the one property it needs: it must be strictly ahead of OpEnd, and only a single
+        // seq stream can guarantee that.
         internal const byte OpEndTurn = 1;
         internal const byte OpLeaveBattle = 2;
         // 3 client→host is TacticalReadySync.OpSetReady.
@@ -109,6 +112,7 @@ namespace Multiplayer.Tactical
             HintMirror.Reset();                // ditto for the 0x8A mirror: a name held over silences it next time
             TacticalUiRepaint.Reset();         // drop the paint memo: it names an actor of the dead battle
             TacticalReadySync.Reset();         // advisory ready flags + the cloned button's handles
+            TacticalObjectiveOutcome.Reset();  // the host's reward mirror names objectives of the dead battle
         }
 
         internal static void RegisterIntents()
@@ -244,6 +248,11 @@ namespace Multiplayer.Tactical
             // the settles are on the wire ahead of OpEnd, which is ahead of the native GameOver the clients
             // run from ApplyEnd.
             TacticalCommandSync.HostSettleAllLive("mission end");
+            // ...and the settled board is scored HERE, not recounted there. The sweep above makes the ACTORS
+            // agree; this makes the CONCLUSION drawn from them agree, which is not the same thing once an
+            // objective's own counters are frozen by its state (see TacticalObjectiveOutcome). Ahead of
+            // OpEnd on the same ordered stream, so it is applied before the client's own GameOver runs.
+            TacticalObjectiveOutcome.HostBroadcast(player);
             byte state = (byte)(player?.State ?? TacFactionState.None);
             Send(SurfaceIds.TacTurn, OpEnd, "mission END outcome=" + (TacFactionState)state, w => w.Write(state));
             // AND THE LAST WORD IS THE ONE ABOVE (law L334). ORDER-CRITICAL, both halves: the latch is set
@@ -369,6 +378,8 @@ namespace Multiplayer.Tactical
                     else if (op == OpEnd) ApplyEnd((TacFactionState)r.ReadByte());
                     else if (op == OpLeave) ApplyLeave();
                     else if (op == OpRestart) ApplyRestart();
+                    else if (op == TacticalObjectiveOutcome.OpOutcome)
+                        TacticalObjectiveOutcome.ApplyOutcome(r);
                     else if (op == TacticalReadySync.OpReadyTally)
                         TacticalReadySync.ApplyTally(r.ReadInt32(), r.ReadInt32());
                     else
