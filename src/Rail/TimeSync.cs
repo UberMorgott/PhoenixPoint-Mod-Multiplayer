@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using Base.Core;
 using HarmonyLib;
@@ -233,7 +234,16 @@ namespace Multiplayer.Network.Sync
         /// popup). Two shapes reach the seam and both are covered:
         ///   • the SECTION-BAR click, which pauses BEFORE it switches (UIModuleGeoSectionBar.cs:119/135/
         ///     148/160/172/183/194 — <c>SetGamePauseState(true)</c> then <c>To*State()</c>), so the state
-        ///     still current here is the MAP state the player is leaving;
+        ///     still current here is the MAP state the player is leaving. THE MAP STATES ARE NOT IN THIS
+        ///     TABLE and must never go back in (regression 2026-08-13): naming them made EVERY pause raised
+        ///     while the player stands on the map a "tab pause" — the vanilla arrival pause
+        ///     (UIStateVehicleSelected.OnVehicleArrived:1179 / OnVehicleSiteExplored:1138 /
+        ///     OnVehicleSiteExcavated:1143, UIStateNothingSelected:589 → RequestGamePause) and the SPACEBAR
+        ///     itself, which on the map is a pure <c>SetGamePauseState</c> because the module is bound with
+        ///     <c>pauseTiming: false</c> (UIStateNothingSelected.cs:98-99), so it never writes
+        ///     <c>_timing.Paused</c> and has nothing else to be judged by. The section-bar click is instead
+        ///     identified by <see cref="_sectionBarSwitch"/>, which is set for exactly the duration of that
+        ///     click and by nothing else;
         ///   • the screen's own <c>EnterState</c> pause (UIStateResearch.cs:22/24, UIStateManufacturing
         ///     .cs:53, UIStateReplenish.cs:28, UIStatePhoenixBaseLayout.cs:42, UIStateDiplomacy.cs:26,
         ///     UIStateGeoscapeLog.cs:17, UIStateGeoscapeOptions.cs:35) and the deferred
@@ -246,8 +256,9 @@ namespace Multiplayer.Network.Sync
         /// </summary>
         private static readonly HashSet<Type> PrivateScreens = new HashSet<Type>
         {
-            // the map itself (the section bar pauses from here, before the switch)
-            typeof(UIStateNothingSelected), typeof(UIStateVehicleSelected), typeof(UIStateInitial),
+            // NO MAP STATES HERE — see the header. The section bar's pause-from-the-map is
+            // _sectionBarSwitch's job; everything else raised on the map is the ENGINE or the player's
+            // own key, and both must stop the world exactly like single player.
             // the tabs
             typeof(UIStateResearch), typeof(UIStateManufacturing), typeof(UIStateDiplomacy),
             typeof(UIStatePhoenixpedia), typeof(UIStatePhoenixBaseLayout), typeof(UIStateReplenish),
@@ -265,8 +276,47 @@ namespace Multiplayer.Network.Sync
             typeof(UIStatePhoenixFacilityRosterAssignment), typeof(UIStateVehicleBayAssignment),
         };
 
+        /// <summary>Set for exactly the duration of a SECTION-BAR click. That click is the one tab-open that
+        /// pauses while the MAP state is still current (UIModuleGeoSectionBar.Activate*Content:119-194 —
+        /// <c>SetGamePauseState(true)</c> then <c>To*State()</c>), so it is the only reason the map was ever
+        /// named private — and naming the map swallowed every engine pause raised there. This scope says
+        /// "a tab is opening", which is what the rule actually needs to know.</summary>
+        [ThreadStatic] private static bool _sectionBarSwitch;
+
+        /// <summary>The section-bar scope. Prefix/Finalizer rather than a wrapper so an exception inside the
+        /// native body cannot leave the flag stuck on (a stuck flag would swallow map pauses again).</summary>
+        [HarmonyPatch]
+        internal static class SectionBarSwitchScopePatch
+        {
+            internal static IEnumerable<MethodBase> TargetMethods()
+            {
+                var targets = AccessTools.GetDeclaredMethods(typeof(UIModuleGeoSectionBar))
+                    .Where(m => m.Name.StartsWith("Activate", StringComparison.Ordinal) &&
+                                m.Name.EndsWith("Content", StringComparison.Ordinal) &&
+                                m.GetParameters().Length == 0)
+                    .Cast<MethodBase>().ToList();
+                if (targets.Count == 0)
+                {
+                    Debug.LogError("[MP][pause] SECTION-BAR SCOPE UNBOUND — no UIModuleGeoSectionBar." +
+                                   "Activate*Content() found, so a peer opening a tab from the map will stop " +
+                                   "the clock for EVERY peer (vanilla behaviour, the 2026-08-11 bug).");
+                    // Harmony throws on an EMPTY target list and one throwing class aborts PatchAll, taking
+                    // the whole mod with it. Init pauses nothing, so scoping it is inert.
+                    targets.Add(AccessTools.Method(typeof(UIModuleGeoSectionBar),
+                                                   nameof(UIModuleGeoSectionBar.Init)));
+                }
+                else
+                    Debug.Log("[MP][pause] section-bar scope bound to " + targets.Count + " tab openers");
+                return targets;
+            }
+
+            private static void Prefix() { _sectionBarSwitch = true; }
+            private static void Finalizer() { _sectionBarSwitch = false; }
+        }
+
         private static bool IsPrivateScreenPause(GeoLevelController geo)
         {
+            if (_sectionBarSwitch) return true;   // a tab is opening; the map state is just what it leaves
             var state = geo.View == null ? null : geo.View.CurrentViewState;
             return state != null && PrivateScreens.Contains(state.GetType());
         }

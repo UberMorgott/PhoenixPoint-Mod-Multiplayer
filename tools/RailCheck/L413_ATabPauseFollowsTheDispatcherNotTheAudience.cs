@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Multiplayer.Network.Sync;
+using PhoenixPoint.Geoscape.View.ViewModules;
 using PhoenixPoint.Geoscape.View.ViewStates;
 
 namespace RailCheck
@@ -30,9 +31,10 @@ namespace RailCheck
     /// peer's resume still wins unconditionally (PauseHold).
     ///
     /// THREE THINGS HAVE TO STAY TRUE:
-    ///   (a) the private-screen table names the tabs AND the map states the section bar pauses from
-    ///       (UIModuleGeoSectionBar.cs:119-194 pauses BEFORE it switches), and does NOT name the window
-    ///       states — a window must go on pausing everyone;
+    ///   (a) the private-screen table names the tabs, does NOT name the window states (a window must go on
+    ///       pausing everyone) and does NOT name the MAP states (2026-08-13 — naming them swallowed the
+    ///       aircraft-arrival pause and the spacebar); the section bar's own pause-before-switch
+    ///       (UIModuleGeoSectionBar.cs:112-196) is recognised by <c>TimeSync._sectionBarSwitch</c> instead;
     ///   (b) the host JUDGES a peer's tab pause instead of replaying it (<c>TimeSync.HandleIntentOp</c>
     ///       reaches <c>HonourTabPause</c>);
     ///   (c) the ledger is actually written when a client's travel order is accepted, or it is empty, every
@@ -52,10 +54,9 @@ namespace RailCheck
         private const BindingFlags All = BindingFlags.Public | BindingFlags.NonPublic |
                                          BindingFlags.Instance | BindingFlags.Static;
 
-        // The tabs the owner named, plus the map states the section bar pauses from before it switches.
+        // The tabs the owner named. NOT the map states — see MustNotBeMapState.
         private static readonly Type[] MustBePrivate =
         {
-            typeof(UIStateNothingSelected), typeof(UIStateVehicleSelected),
             typeof(UIStateResearch), typeof(UIStateManufacturing), typeof(UIStateGeoRoster),
             typeof(UIStatePhoenixBaseLayout), typeof(UIStateDiplomacy), typeof(UIStateEditSoldier),
         };
@@ -65,6 +66,28 @@ namespace RailCheck
         {
             typeof(UIStateGeoModal), typeof(UIStateGeoscapeEvent), typeof(UIStateGeoCutscene),
             typeof(UIStateRosterDeployment), typeof(UIStateAssetDeployment),
+        };
+
+        // ARM (a) INVERTED 2026-08-13. These MAP states were named private so the section bar's
+        // pause-before-switch would be judged; naming them made every ENGINE pause raised on the map a "tab
+        // pause" too, and the host declined them all. Reported live: an aircraft arriving at a site of
+        // interest no longer stopped time, and the SPACEBAR stopped pausing on the host — on the map the
+        // time module is bound with pauseTiming:false (UIStateNothingSelected.cs:98-99), so the key IS a
+        // bare SetGamePauseState with nothing else to identify it by. The section-bar click is now scoped
+        // instead (TimeSync._sectionBarSwitch), which is the thing the rule actually needed to know.
+        private static readonly Type[] MustNotBeMapState =
+        {
+            typeof(UIStateNothingSelected), typeof(UIStateVehicleSelected), typeof(UIStateInitial),
+        };
+
+        // The six section-bar tab openers the scope patch must cover (UIModuleGeoSectionBar.cs:112-196):
+        // each is SetGamePauseState(true) followed by To*State(), i.e. the one pause raised while the MAP
+        // state is still current that IS a tab open.
+        private static readonly string[] SectionBarOpeners =
+        {
+            "ActivatePhoenixBasesContent", "ActivateRosterContent", "ActivateVehicleRosterContent",
+            "ActivateResearchContent", "ActivateManufacturingContent", "ActivateDiplomacyContent",
+            "ActivatePhoenixpediaContent",
         };
 
         internal static IEnumerable<string> Check()
@@ -118,6 +141,35 @@ namespace RailCheck
                                  t.Name + ", which is a WINDOW every peer is shown, not one peer's tab. " +
                                  "Treating it as private stops relaying its pause, and the aircraft flies on " +
                                  "while every player reads the popup — the 2026-08-04 bug, restored.";
+
+            foreach (var t in MustNotBeMapState)
+                if (named.Contains(t))
+                    yield return "L413 private-screen-table-swallows-a-map-pause: TimeSync.PrivateScreens " +
+                                 "names " + t.Name + ", a MAP state. Every pause raised while the player " +
+                                 "stands on the map then goes through the dispatcher rule and is declined — " +
+                                 "the vanilla aircraft-arrival pause (UIStateVehicleSelected:1179) and the " +
+                                 "spacebar itself (bound pauseTiming:false, UIStateNothingSelected:98-99) " +
+                                 "both stop working. The section-bar click has its own scope; use it.";
+
+            // The scope that replaced the map states. Guarded on BOTH sides — the flag the rule reads and
+            // the seam that sets it — because either one missing fails SILENTLY: without the flag a tab open
+            // from the map relays a pause to every peer (the 2026-08-11 bug), and nobody reports a pause
+            // that DID happen.
+            var scopeFlag = typeof(TimeSync).GetField("_sectionBarSwitch", All);
+            var scopePatch = typeof(TimeSync).GetNestedType("SectionBarSwitchScopePatch", All);
+            if (scopeFlag == null || scopePatch == null ||
+                scopePatch.GetMethod("Prefix", All) == null || scopePatch.GetMethod("Finalizer", All) == null)
+                yield return "L413 section-bar-scope-gone: TimeSync._sectionBarSwitch / " +
+                             "SectionBarSwitchScopePatch (Prefix+Finalizer) no longer resolves, so the ONE " +
+                             "tab open that pauses while the map state is still current is no longer " +
+                             "recognised — a peer clicking Research from the map freezes the aircraft another " +
+                             "peer is steering.";
+            foreach (var name in SectionBarOpeners)
+                if (typeof(UIModuleGeoSectionBar).GetMethod(name, All, null, Type.EmptyTypes, null) == null)
+                    yield return "L413 section-bar-opener-renamed: UIModuleGeoSectionBar." + name + "() is " +
+                                 "gone, so the scope patch cannot cover it and that tab's pause reaches " +
+                                 "every peer unjudged. Re-point SectionBarOpeners and the patch's " +
+                                 "TargetMethods filter together.";
 
             // POSITIVE CONTROL: the walker must be able to see a HonourTabPause edge it is KNOWN to have —
             // the local half, TimeSync.PrivateScreenPause, calls it outright. Without this, "HandleIntentOp
