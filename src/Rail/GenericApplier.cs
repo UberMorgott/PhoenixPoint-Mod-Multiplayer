@@ -68,6 +68,12 @@ namespace Multiplayer.Network.Sync
         private const float CrcInterval = 1f; // one root subtree per second (see ClientCrcTick)
         private static float _crcNextAt;
         private static int _crcRoot;          // rotation cursor over IdentityResolver.Roots
+        // THE ROOT THIS PEER LAST REPORTED A CRC FOR, and when — the only two facts needed to NAME the
+        // field a divergence report cannot (see the ApplyEntry seam). Window is generous against the
+        // report cadence (CrcInterval * roster) and the host's answer, which lands in ~150 ms.
+        private static string _crcReportedRoot;
+        private static float _crcReportedAt;
+        private const float CrcNameWindowSec = 3f;
 
         public static void Reset()
         {
@@ -831,6 +837,47 @@ namespace Multiplayer.Network.Sync
             _kinds[kindId] = rt;
         }
 
+        /// <summary>Whole-segment root test ("S#9" never matches "S#95"), the apply-side twin of
+        /// <c>DiffEngine.PrefixMatchOne</c>.</summary>
+        internal static bool PathUnderRoot(string path, string root) =>
+            path != null && root != null && path.Length >= root.Length &&
+            string.CompareOrdinal(path, 0, root, 0, root.Length) == 0 &&
+            (path.Length == root.Length || path[root.Length] == '.');
+
+        /// <summary>
+        /// NAME THE FIELD THE CRC BACKSTOP CANNOT.
+        ///
+        /// A divergence report carries ONE hash for a WHOLE subtree, so the host's
+        /// <c>CRC backstop: root 'S#95' DIVERGED</c> can say that a root differs and never WHICH entry —
+        /// and no amount of log reading afterwards can recover it, because nothing per-field ever crossed
+        /// the wire. Live 2026-08-13: root 'S#95' diverged identically on both clients (host B1600030 vs
+        /// client BD0D5BBC), the host force-re-emitted 115 entries, both clients applied it — and the
+        /// session's logs cannot say what was wrong, so the actual defect survives the report.
+        ///
+        /// THE ANSWER IS ALREADY ON THIS PEER'S DOORSTEP. The host answers a divergence with
+        /// <c>DiffEngine.ForceReemit(rootKey)</c> — every entry of that subtree, values plus dict censuses —
+        /// and it arrives here ~150 ms after our own report went out. An entry under the root we JUST
+        /// reported that does NOT equal our bytes (the <see cref="Unchanged"/> gate above already answered
+        /// that question, for free) is the divergence itself. So the naming costs one string compare on
+        /// entries that changed, no wire byte and no new message.
+        ///
+        /// CANDIDATE, not verdict: an ordinary host-driven change to that root inside the window looks the
+        /// same from here. The host's own line is the other half — a candidate printed with no
+        /// <c>root DIVERGED</c> beside it is just a delta. Deduped by <see cref="LogMissOnce"/>.
+        /// </summary>
+        private static void NameTheDivergedField(string path, RailField field, string subKey)
+        {
+            if (_crcReportedRoot == null || field == null) return;
+            if (Time.realtimeSinceStartup - _crcReportedAt >= CrcNameWindowSec) return;
+            if (!PathUnderRoot(path, _crcReportedRoot)) return;
+            LogMissOnce("CRC divergence candidate: " + path + "." + field.Name +
+                        (string.IsNullOrEmpty(subKey) ? "" : "#" + subKey) +
+                        " arrived DIFFERENT from this peer's value within " + CrcNameWindowSec +
+                        "s of our CRC report for root '" + _crcReportedRoot + "' — if the host logged " +
+                        "\"CRC backstop: root '" + _crcReportedRoot + "' DIVERGED\", this is the field it " +
+                        "could not name (a report carries one hash for the whole subtree)");
+        }
+
         private static void ApplyEntry(NetworkEngine engine, GeoLevelController geo, byte kindId, string path, ushort fieldIdx,
                                        string subKey, byte[] value, HashSet<object> touched)
         {
@@ -917,6 +964,7 @@ namespace Multiplayer.Network.Sync
                     Debug.Log("[MP][diag] TacUnits APPLY-SKIP (unchanged) " + path);
                 return; // no-op entry: not applied, not touched, no repaint
             }
+            NameTheDivergedField(path, field, subKey);
 
             try
             {
@@ -1545,12 +1593,19 @@ namespace Multiplayer.Network.Sync
                 // decided it: this peer is PARKED at a site that is explorable and not yet inspected — i.e.
                 // the player is looking at a spinner — and the mirrored order still says "not exploring".
                 // Log-once per (vehicle, reason): exploration is a per-site event, not a per-frame one.
-                if (!should && site != null && site.ExplorationTime != TimeUnit.Zero && !inspected)
+                // AGREEMENT IS NOT A GAP, and the zero-start arm could only ever report agreement. With no
+                // stamp, no host edge and nothing running here, the mirrored order says "not exploring" and
+                // so does this peer — the ordinary state of an aircraft PARKED at a site it has not been
+                // told to explore. Nothing on the wire can distinguish that from a lost order either: there
+                // is no is-exploring leaf (rail-baseline.txt GeoVehicle rows), only the StartExplorationTime
+                // ARRIVAL edge, so the arm asserted a loss it had no evidence for. Live 2026-08-13: 8 such
+                // warnings (4 per client) while BOTH of the host's real explore orders re-seeded correctly
+                // in the same logs — a warning that fires on the normal case buries the two arms below,
+                // which do have evidence (an order in flight, or a start this peer itself stamped).
+                if (!should && site != null && site.ExplorationTime != TimeUnit.Zero && !inspected &&
+                    (start > TimeUnit.Zero || UnderTravelOrder(v)))
                 {
                     string why = UnderTravelOrder(v) ? "the mirrored order still holds a destination (in flight)"
-                               : start <= TimeUnit.Zero ? "no StartExplorationTime delta has landed for this " +
-                                                          "aircraft and nothing is exploring locally, so this peer " +
-                                                          "has no epoch of its own for an exploration"
                                : "the local start " + start + " this peer stamped when the host's order landed, " +
                                  "plus the site's def-fixed ExplorationTime, ends at " + end + ", which the local " +
                                  "clock (" + timing.Now + ") is already past — a STALE start, so the host's DONE " +
@@ -2124,6 +2179,9 @@ namespace Multiplayer.Network.Sync
                     var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoRail, SyncKind.ActionRequest, ms.ToArray());
                     engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
                 }
+                // Remember what we just asked about — the answer names the field (see ApplyEntry).
+                _crcReportedRoot = key;
+                _crcReportedAt = Time.realtimeSinceStartup;
             }
             catch (Exception ex) { Debug.LogError("[Multiplayer][rail] CRC report for '" + key + "' failed: " + ex.Message); }
         }
