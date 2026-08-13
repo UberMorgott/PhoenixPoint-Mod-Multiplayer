@@ -3,6 +3,34 @@
 Player-facing notes for each release. Releases before `0.9.5-beta` are documented on the
 [GitHub releases page](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/releases).
 
+## 0.9.12-beta
+
+A patch release on top of `0.9.11-beta`. Same mod, same install — replace the `Multiplayer` folder
+in your `Mods` directory. **Every player must run the same version**; a mismatch is reported when
+you join. Nothing changed in how the machines talk to each other, so this is only the version
+check — connect codes are unchanged from `0.9.11-beta`.
+
+This one is a single fix, to the clock.
+
+### The geoscape
+
+- **The clock no longer jumps backwards every time the host pauses.** Each pause rewound every
+  client's geoscape clock by as much as ten game-minutes, and the resume yanked it forward again —
+  a sawtooth on every pause, not a slow drift. The time a pause spent in flight to the clients was
+  being charged at the paused rate of zero, instead of at the rate those clients were still running
+  at while the message travelled. What is left over is a few tens of game-seconds.
+
+### Under the hood
+
+- **Releases are now cut by one gated script.** Version bump, deploy, the law harness and the tag
+  all run from a single command that refuses to commit anything if a gate comes back red, so a
+  released build can no longer disagree with the version it claims to be.
+
+### Known issues / unverified
+
+**This release has not been playtested.** Everything above is verified against the RailCheck law
+harness and against the source only.
+
 ## 0.9.11-beta
 
 A patch release on top of `0.9.10-beta`. Same mod, same install — replace the `Multiplayer` folder
