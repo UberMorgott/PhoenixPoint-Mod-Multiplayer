@@ -394,6 +394,7 @@ namespace RailCheck
             Add(laws, () => L428_ADivergenceReportNamesItsField.Check());
             Add(laws, () => L429_ThePublishLagIsPricedAtThePreLatchRate.Check());
             Add(laws, () => L430_ASwallowedClickAlwaysHasAnExit.Check());
+            Add(laws, () => L431_AnItemsAddressIsReadBeforeTheHitNotAfter.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
 

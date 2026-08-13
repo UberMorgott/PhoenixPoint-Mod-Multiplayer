@@ -484,16 +484,35 @@ namespace Multiplayer.Tactical
 
         /// <summary>Ship one resolved hit. <paramref name="receiver"/> is the thing the game just wrote to;
         /// its slot name plus its actor's key is the whole address (law L66c) — and, for an ITEM, its def
-        /// guid as well (see <see cref="ItemGuidOf"/>).</summary>
-        internal static void OnDamageApplied(IDamageReceiver receiver, DamageResult result)
+        /// guid as well (see <see cref="ItemGuidOf"/>).
+        ///
+        /// <paramref name="slotAtCapture"/> IS THE ADDRESS AS IT WAS BEFORE THE HIT, and only an item seam
+        /// passes one. A LETHAL hit on a carried item erases its own address inside the very call this
+        /// postfix follows: the item's health reaches zero, <c>TacticalItem.OnHealthReachedZero</c>:662-665
+        /// runs <c>Destroy</c>:540-570, and <c>Destroy</c>:560 does
+        /// <c>InventoryComponent?.RemoveItem(this)</c> — after which <c>Item.Actor</c> is null and
+        /// <c>ParentItemSlot</c> is gone, so <c>GetActor()</c> answers null and <c>SlotOf</c> answers "".
+        /// The record was then refused as "ownerless" for the ONE hit that matters most, the one that
+        /// destroys the weapon. Measured 2026-08-13 21:24:02.284 / 21:26:52: the host destroyed both enemy
+        /// <c>NJ_Gauss_AssaultRifle_WeaponDef</c>s in combat (host Player.log "Item …destroyed on Soldier_8 /
+        /// Soldier_9"), shipped nothing, and each client kept a rifle its corpse manifest never named — so at
+        /// mission end the host recovered ZERO items and both clients listed loot that does not exist on the
+        /// authority.</summary>
+        internal static void OnDamageApplied(IDamageReceiver receiver, DamageResult result,
+                                             ItemSlot slotAtCapture = null)
         {
             var engine = LiveEngine();
             if (engine == null || !engine.IsHost) return;
             if (MirrorApplyScope.Active) return;          // never re-ship what we are re-applying
             if (receiver == null) return;
             var actor = receiver.GetActor();
-            int key = TacticalActorKey.Of(actor);
             string slot = TacticalActorKey.SlotOf(receiver) ?? "";
+            if (!ReferenceEquals(slotAtCapture, null))
+            {
+                if (ReferenceEquals(actor, null)) actor = slotAtCapture.GetActor();
+                if (slot.Length == 0) slot = slotAtCapture.GetSlotName() ?? "";
+            }
+            int key = TacticalActorKey.Of(actor);
             if (key == 0)
             {
                 // AN OWNERLESS RECEIVER IS LEGITIMATE AND MUST STILL BE NAMEABLE. Item.Actor:24-42 and
@@ -1195,8 +1214,14 @@ namespace Multiplayer.Tactical
     [HarmonyPatch(typeof(TacticalItem), nameof(TacticalItem.ApplyDamage))]
     internal static class ItemDamageSeam
     {
-        private static bool Prefix(TacticalItem __instance)
+        /// <summary>The prefix carries a second job now, and it is the whole of the 2026-08-13 loot fix: it
+        /// reads the item's ADDRESS while the item still has one. A hit that takes the item to zero destroys
+        /// and detaches it before this patch's own postfix runs (see
+        /// <see cref="TacticalDamageSync.OnDamageApplied"/>), so an address read afterwards is already gone.
+        /// <c>__state</c> is assigned on BOTH exits — a prefix that returns false still hands its state on.</summary>
+        private static bool Prefix(TacticalItem __instance, out ItemSlot __state)
         {
+            __state = __instance == null ? null : __instance.ParentItemSlot;
             if (!TacticalDamageSync.DamageIsSomebodyElses()) return true;
             TacticalDamageSync.SayOnce("neuter-item",
                 "[Multiplayer][tac] item damage computed on this client is DISCARDED (first occurrence: " +
@@ -1205,13 +1230,12 @@ namespace Multiplayer.Tactical
             return false;
         }
 
-        private static void Postfix(TacticalItem __instance, DamageResult damageResult)
+        private static void Postfix(TacticalItem __instance, DamageResult damageResult, ItemSlot __state)
         {
-            var slot = __instance.ParentItemSlot;
-            if (!TacticalDamageSync.ItemAppliesItsOwnDamage(slot != null,
-                                                            slot == null ? DamageHandler.AttachedItem : slot.DamageHandler))
+            if (!TacticalDamageSync.ItemAppliesItsOwnDamage(__state != null,
+                                                            __state == null ? DamageHandler.AttachedItem : __state.DamageHandler))
                 return;
-            TacticalDamageSync.OnDamageApplied(__instance, damageResult);
+            TacticalDamageSync.OnDamageApplied(__instance, damageResult, __state);
         }
     }
 
