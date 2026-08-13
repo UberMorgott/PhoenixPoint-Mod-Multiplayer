@@ -3,6 +3,50 @@
 Player-facing notes for each release. Releases before `0.9.5-beta` are documented on the
 [GitHub releases page](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/releases).
 
+## 0.9.11-beta
+
+A patch release on top of `0.9.10-beta`. Same mod, same install — replace the `Multiplayer` folder
+in your `Mods` directory. **Every player must run the same version**; a mismatch is reported when
+you join. Nothing changed in how the machines talk to each other, so this is only the version
+check — connect codes are unchanged from `0.9.10-beta`.
+
+This one is a round of fixes to things that stopped working on the geoscape and at the end of a
+mission, plus a sharper diagnostic for the desync report.
+
+### The geoscape
+
+- **The deployment prep button survives leaving the prep screen.** Pressing Back on a deployment you
+  were not ready to drop yet took the join button away from everybody — including from you, leaving
+  no way back into a deployment your own aircraft was still parked for. The button now stays as long
+  as the drop itself is still open, and only a launch, a cancel or the carrier leaving ends it.
+- **The map pauses again.** An arriving aircraft, a finished exploration or excavation no longer
+  sails past unnoticed, and the host's own spacebar stops the clock. Both had been swallowed by the
+  rule that keeps another player's tab from pausing your game; opening a tab still leaves the clock
+  running for everybody else.
+- **The host sees his own event windows again.** Events with a single choice — the intro sequence,
+  `PROG_NJ0_WIN`, `SDI_01` — are completed by the game before their window is ever shown, and that
+  was read as "another player already answered this", so the host got nothing while both clients saw
+  all five. Events with a real choice to lose are unaffected.
+
+### The end of a mission
+
+- **A cancelled return countdown is cancelled for everyone.** Two players both pressing Continue was
+  ordinary, and the second press went on ticking invisibly after somebody pressed Cancel — then
+  expired and pulled the whole group to the geoscape with no countdown on any screen. Any peer can
+  now cancel, and any later press arms a fresh five seconds.
+
+### Diagnostics
+
+- **A desync report now names the field that diverged**, instead of only the part of the campaign it
+  was under, so a log from a real session says what actually differed.
+- **The "exploration was not re-seeded" warning stopped crying wolf** — it fired on aircraft that
+  were simply not exploring anything. It now warns only where there is real evidence of a lost order.
+
+### Known issues / unverified
+
+**This release has not been playtested.** Everything above is verified against the RailCheck law
+harness and against the source only.
+
 ## 0.9.10-beta
 
 A patch release on top of `0.9.9-beta`. Same mod, same install — replace the `Multiplayer` folder
