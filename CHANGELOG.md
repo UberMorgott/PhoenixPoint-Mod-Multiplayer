@@ -3,6 +3,48 @@
 Player-facing notes for each release. Releases before `0.9.5-beta` are documented on the
 [GitHub releases page](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/releases).
 
+## 0.9.13-beta
+
+A patch release on top of `0.9.12-beta`. Same mod, same install — replace the `Multiplayer` folder
+in your `Mods` directory. **Every player must run the same version**; a mismatch is reported when
+you join. Nothing changed in how the machines talk to each other, so this is only the version
+check — connect codes are unchanged from `0.9.12-beta`.
+
+This one is a round of fixes to the deployment prep door, the post-mission window and the loot
+every player walks away with.
+
+### The geoscape
+
+- **The "return to mission preparation" door actually appears now.** Two separate things kept it
+  shut. The state behind it never crossed the wire at all — it was missing the marker that tells the
+  mod to serialise it, so every client read an empty site no matter what the host announced. And
+  even with the state in hand the button was only offered to a player standing on the bare globe
+  with nothing selected; it now also shows with an aircraft selected — which is what you are
+  actually looking at when the deployment is about that aircraft — while every tab, roster panel and
+  event window still hides it.
+- **A second player pressing "start mission" no longer gets "another player already answered".**
+  Without a visible door, players reached for the site's encounter row, which is not a re-entry: it
+  cancelled the live mission and re-raised a stale dialog for everybody. While the prep door is open
+  for a site, that native gesture is now answered by the door itself.
+
+### The end of a mission
+
+- **The post-mission consequence window can be closed again on the host.** A click the mod could not
+  resolve was swallowed with no way out, leaving the window stuck on screen. Clicks that cannot be
+  resolved now fall back to the game's own close path.
+- **Loot is the same on every peer.** A hit that destroyed a carried item mid-combat was never
+  relayed, because the item's address was read after the hit — when the item no longer existed. The
+  host correctly wrote the weapon off and recovered nothing, while clients kept listing a rifle that
+  was gone. The address is now taken before the hit lands.
+
+### Known issues / unverified
+
+**This release has not been playtested.** Everything above is verified against the RailCheck law
+harness and against the source only.
+
+Clients seeing the post-mission window about three seconds after the host is expected, not a bug —
+they are still finishing their geoscape load when the host's window opens.
+
 ## 0.9.12-beta
 
 A patch release on top of `0.9.11-beta`. Same mod, same install — replace the `Multiplayer` folder
