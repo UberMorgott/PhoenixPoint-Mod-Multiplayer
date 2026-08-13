@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Multiplayer.Network.Sync;
+using PhoenixPoint.Geoscape.View.ViewStates;
 
 namespace RailCheck
 {
@@ -25,9 +26,29 @@ namespace RailCheck
     ///       Without it a stale close from a superseded screen takes somebody else's door away.
     ///   (d) <c>root-unregistered</c> — <c>"M#prep"</c> must still be the registered mod root, because the
     ///       whole mechanism is that one replicated string and nothing else.
+    ///   (e) <c>root-never-crosses</c> — <c>DeployPrepState</c> must CLASSIFY with at least one rail field.
+    ///       Registering a mod root is only half the contract (<c>IdentityResolver.RegisterModRoot</c>): the
+    ///       state class must carry <c>[SerializeType(SerializeAll)]</c> or <c>RailMeta.HasPersistentMembers</c>
+    ///       is false, <c>RailType.Source</c> is "none", the walk emits nothing (DiffEngine.cs:1113-1117) and
+    ///       the announcement never leaves the host. It shipped that way; arms (a)-(d) all passed green over
+    ///       a root no client could ever receive, which is why this arm executes the classifier instead of
+    ///       reading the source.
+    ///   (f) <c>door-only-on-the-bare-globe</c> — <see cref="DeployPrep.IdleGeoscape"/> must accept BOTH map
+    ///       states and reject screens. The 2026-08-13 session: the root was published and live for seven
+    ///       minutes while every peer sat in <c>UIStateVehicleSelected</c> (the aircraft the deployment is
+    ///       about is what the player selects) and the gate only knew <c>UIStateNothingSelected</c>, so the
+    ///       button never appeared once. Both halves are pinned: a narrower set is that bug, a wider one
+    ///       hangs the offer over tabs, rosters and event windows.
+    ///   (g) <c>reoffer-cancels-a-taken-start</c> — <see cref="DeployPrep.ReofferIsRedundant"/> must be true
+    ///       exactly when the live door serves the SAME site. It is what stops the site's encounter row from
+    ///       cancelling a mission whose start is already taken and re-raising a fresh START/CANCEL dialog on
+    ///       peers that then get "another player already answered this event"; and it must be FALSE for a
+    ///       different site or an empty door, or an ordinary re-offer becomes unreachable.
     ///
     /// Falsify: add a "everyone else is ready" parameter to <c>ShowsButton</c> → (a); invert any term → (b);
-    /// make <c>ClearsOnWithdraw</c> return true unconditionally → (c); rename the root → (d).
+    /// make <c>ClearsOnWithdraw</c> return true unconditionally → (c); rename the root → (d); delete the
+    /// <c>[SerializeType]</c> attribute on <c>DeployPrepState</c> → (e); drop <c>UIStateVehicleSelected</c>
+    /// from <c>IdleGeoscape</c> → (f); make <c>ReofferIsRedundant</c> return true unconditionally → (g).
     /// </summary>
     internal static class L424_TheDeploymentPrepDoorIsNotAGate
     {
@@ -39,9 +60,12 @@ namespace RailCheck
             var shows = typeof(DeployPrep).GetMethod("ShowsButton", All);
             var clears = typeof(DeployPrep).GetMethod("ClearsOnWithdraw", All);
             var root = typeof(DeployPrep).GetField("RootKey", All);
-            if (shows == null || clears == null || root == null)
+            var idle = typeof(DeployPrep).GetMethod("IdleGeoscape", All);
+            var redundant = typeof(DeployPrep).GetMethod("ReofferIsRedundant", All);
+            if (shows == null || clears == null || root == null || idle == null || redundant == null)
             {
-                yield return "L424 premise-changed: DeployPrep.ShowsButton / ClearsOnWithdraw / RootKey no " +
+                yield return "L424 premise-changed: DeployPrep.ShowsButton / ClearsOnWithdraw / RootKey / " +
+                             "IdleGeoscape / ReofferIsRedundant no " +
                              "longer resolve. Those three ARE the join door — re-point this law at whatever " +
                              "carries them now; do not delete it, because the door is one boolean away from " +
                              "being the launch quorum P13 forbids.";
@@ -91,6 +115,47 @@ namespace RailCheck
                 yield return "L424 root-unregistered: DeployPrep.RootKey is no longer \"M#prep\". The whole " +
                              "mechanism is that one replicated string on the 0xAC value rail; a renamed root " +
                              "is a root neither peer mirrors and the button never appears on anybody.";
+
+            // ── (e) the root actually classifies ────────────────────────────────────────────────
+            var rt = RailType.Get(typeof(DeployPrepState));
+            if (rt == null || rt.Fields.Count == 0)
+                yield return "L424 root-never-crosses: DeployPrepState classifies with " +
+                             (rt == null ? "no RailType at all" : "ZERO rail fields (Source=" + rt.Source + ")") +
+                             ". Registering \"M#prep\" is only half the mod-root contract — without " +
+                             "[SerializeType(SerializeMembersByDefault = SerializeAll)] the walk emits nothing " +
+                             "for it (DiffEngine.cs:1113-1117), the host's announcement never leaves the host, " +
+                             "and every client's join button reads an empty siteRef forever.";
+
+            // ── (f) which view states are the bare globe ────────────────────────────────────────
+            if (!DeployPrep.IdleGeoscape(typeof(UIStateNothingSelected)) ||
+                !DeployPrep.IdleGeoscape(typeof(UIStateVehicleSelected)))
+                yield return "L424 door-only-on-the-bare-globe: DeployPrep.IdleGeoscape no longer accepts both " +
+                             "map states. UIStateVehicleSelected is the one the player is actually in while a " +
+                             "deployment is announced — the aircraft it is about is what he has selected — and " +
+                             "excluding it is the 2026-08-13 defect where a correctly published root left the " +
+                             "button invisible for seven minutes.";
+            if (DeployPrep.IdleGeoscape(null) ||
+                DeployPrep.IdleGeoscape(typeof(UIStateGeoscapeEvent)) ||
+                DeployPrep.IdleGeoscape(typeof(UIStateRosterDeployment)) ||
+                DeployPrep.IdleGeoscape(typeof(UIStateGeoRoster)) ||
+                DeployPrep.IdleGeoscape(typeof(UIStateViewVehicle)))
+                yield return "L424 door-only-on-the-bare-globe: DeployPrep.IdleGeoscape accepts a state that " +
+                             "is a SCREEN (event window, deployment roster, geoscape roster, vehicle view). " +
+                             "The offer would hang over tabs, panels and the very screen it opens.";
+
+            // ── (g) a re-offer must not cancel a start somebody already took ────────────────────
+            if (!DeployPrep.ReofferIsRedundant("S#7", "S#7"))
+                yield return "L424 reoffer-cancels-a-taken-start: the site's own encounter row is no longer " +
+                             "answered by the live door, so it runs the game's re-offer instead — which " +
+                             "cancels the live mission, resets the shared record and re-raises a fresh " +
+                             "START/CANCEL dialog on peers whose start has already been taken. That is the " +
+                             "\"another player already answered this event\" reject, in the seam that causes it.";
+            if (DeployPrep.ReofferIsRedundant("S#9", "S#7") || DeployPrep.ReofferIsRedundant("", "S#7") ||
+                DeployPrep.ReofferIsRedundant(null, "S#7") || DeployPrep.ReofferIsRedundant("S#7", "") ||
+                DeployPrep.ReofferIsRedundant("S#7", null))
+                yield return "L424 reoffer-cancels-a-taken-start: a re-offer is refused with NO live door for " +
+                             "that site, so a declined offer can never be re-opened at all and the mission is " +
+                             "unreachable — a blocker (P13), which is the opposite of what this arm is for.";
         }
     }
 }

@@ -89,8 +89,29 @@ namespace Multiplayer.Network.Sync
         /// over (see the class header), which is exactly what the player saw as "nothing happens".</summary>
         internal static bool RelayGesture(GeoSite site, string what)
         {
-            if (site == null || IntentRail.ShouldRunNative()) return false;
+            if (site == null) return false;
             string siteRef = IdentityResolver.RootRef(site);
+
+            // THE DOOR IS THE WAY BACK IN, NOT A SECOND OFFER — the 2026-08-13 report's second half, and the
+            // ONE seam both native re-entry doors route through, on BOTH roles. A re-offer is not a re-open:
+            // it ends in GeoCustomMission.Cancel + TriggerGeoscapeEvent, which RESETS the shared record and
+            // broadcasts a fresh START/CANCEL dialog to every peer. Measured: peer 2 started the mission
+            // (record=Completed), re-offered it from the site row, the record went back to Reset, peer 3 was
+            // handed that stale dialog and its click came back as "another player already answered this
+            // event". While this peer's own DEPLOYMENT PREP button serves this very site, the gesture is
+            // ANSWERED BY THAT BUTTON: nothing is cancelled, nothing is re-raised, and no peer is offered a
+            // choice that is already taken. Blocks nobody (P13) — the refusal lasts exactly as long as the
+            // door does, and the door takes itself down when the drop launches, is cancelled or flies off.
+            if (DeployPrep.ReofferIsRedundant(DeployPrep.LiveSiteRef(), siteRef))
+            {
+                EventPopup.BriefProbe(siteRef, "reoffer-has-a-door", what + " — a deployment prep for THIS " +
+                    "site is already announced, so the DEPLOYMENT PREP button on the geoscape is the " +
+                    "entrance. The re-offer is skipped: running it would cancel the live mission and re-raise " +
+                    "a start/cancel dialog on peers whose start has already been taken.");
+                return true;
+            }
+
+            if (IntentRail.ShouldRunNative()) return false;
             if (string.IsNullOrEmpty(siteRef))
             {
                 Debug.LogWarning("[MP][mission] re-offer gesture at an unaddressable site was dropped — the host " +

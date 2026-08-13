@@ -1,7 +1,6 @@
 using System;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
-using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -29,11 +28,12 @@ namespace Multiplayer.UI
     /// which is the same amber the rest of the game's UI lights up with. It sits BELOW the countdown plate's
     /// footprint so the two can be on screen together during the five-second drop.
     ///
-    /// ONLY ON THE BARE GEOSCAPE. The gate is the game's own idle test — <c>GeoscapeView.CurrentViewState is
-    /// UIStateNothingSelected</c>, which the game itself uses at <c>GeoscapeView.cs:1580</c>. Every popup,
-    /// modal, submenu and site/vehicle selection is a DIFFERENT view state, so all of them hide the button
-    /// with no per-screen list to maintain. <c>UIStateVehicleSelected</c> is deliberately NOT idle: an
-    /// aircraft is selected, the site context menu is up, and a second offer over it is clutter.
+    /// ONLY ON THE BARE GEOSCAPE — which is <see cref="DeployPrep.IdleGeoscape"/>, and it is TWO view-state
+    /// classes, not one. <c>UIStateVehicleSelected</c> used to be excluded as clutter; the failing 2026-08-13
+    /// session showed it is the state the player is actually IN, because the aircraft the deployment is about
+    /// is the thing he has selected — <c>UIStateNothingSelected</c> never occurred once in seven minutes of
+    /// live announcement. Every popup, modal, submenu, tab and event window is a DIFFERENT class and still
+    /// hides the button, with no per-screen list to maintain.
     ///
     /// IT OUTLIVES THE SCREEN IT OPENS. The offer used to be withdrawn by <c>ExitState</c>, so pressing Back
     /// — "we are not ready to drop yet, let us do other things first" — took the door away from everybody,
@@ -99,7 +99,7 @@ namespace Multiplayer.UI
             bool show = DeployPrep.ShowsButton(
                 engine != null && engine.IsActiveSession,
                 DeployPrep.LiveSiteRef(),
-                GenericApplier.GeoLevel()?.View?.CurrentViewState is UIStateNothingSelected);
+                DeployPrep.IdleGeoscape(GenericApplier.GeoLevel()?.View?.CurrentViewState?.GetType()));
             if (_button.gameObject.activeSelf != show) _button.gameObject.SetActive(show);
         }
     }

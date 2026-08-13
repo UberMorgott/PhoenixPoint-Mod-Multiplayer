@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using Base.Serialization.General;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Geoscape.Entities;
@@ -12,7 +13,16 @@ namespace Multiplayer.Network.Sync
     /// <summary>The replicated half, and it is ONE identity: the site whose deployment-prep screen is open
     /// somewhere. Same shape as <see cref="DeployCountdownState"/> ("M#deploy") and for the same reason —
     /// a mod root on the generic value rail (0xAC) needs no surface id of its own, and the geoscape band
-    /// 0xA0-0xBF has none free.</summary>
+    /// 0xA0-0xBF has none free.
+    ///
+    /// THE ATTRIBUTE IS THE ROOT (2026-08-13). It is the whole mod-root contract
+    /// (<see cref="IdentityResolver.RegisterModRoot"/>: "one plain class marked [SerializeType(SerializeAll)]
+    /// so RailType.Get classifies it direct") and it was MISSING here while every sibling root
+    /// (<c>ScrapCartState</c>, <c>MistState</c>, <c>DeployCountdownState</c>) carried it. Without it
+    /// <c>RailMeta.HasPersistentMembers</c> is false, <c>RailType.Source</c> is "none", the walk emits ZERO
+    /// fields (DiffEngine.cs:1113-1117) and the host's announcement never crosses the wire — so no client's
+    /// button could ever have a site to point at. L424 arm (e) now executes that classification.</summary>
+    [SerializeType(SerializeMembersByDefault = SerializeMembersType.SerializeAll)]
     public sealed class DeployPrepState
     {
         public string SiteRef = "";
@@ -88,6 +98,28 @@ namespace Multiplayer.Network.Sync
         internal static bool ShowsButton(bool inSession, string siteRef, bool idleGeoscape) =>
             inSession && !string.IsNullOrEmpty(siteRef) && idleGeoscape;
 
+        /// <summary>PURE (RailCheck L424 arm (f)). IS THIS PEER STANDING ON THE PLANET with nothing else open?
+        /// Takes the view state's TYPE, not the instance, so the harness can execute the real answer for the
+        /// real classes headlessly — a geoscape view state cannot be constructed outside a running level, and
+        /// an `is` chain in the button would have been untestable exactly where it was wrong.
+        ///
+        /// TWO STATES, and the second one IS the 2026-08-13 bug. The gate used to be
+        /// <c>UIStateNothingSelected</c> alone, on the argument that a selected aircraft means the site
+        /// context menu is up and a second offer over it is clutter. Measured across the whole announce
+        /// window of the failing session (21:20:20-21:21:25), EVERY <c>[MP][uirepaint]</c> line on both
+        /// clients read <c>UIStateVehicleSelected</c> or <c>UIStateGeoscapeEvent</c> — <c>NothingSelected</c>
+        /// NEVER OCCURRED, because the aircraft the deployment is about is exactly what the player has
+        /// selected. The published root was correct for seven minutes and the button was suppressed the
+        /// entire time. Both states are the bare globe with a selection marker
+        /// (<c>UIStateVehicleSelected</c> owns <c>_selectionMarker</c> + reachable markers, same as
+        /// <c>UIStateNothingSelected</c>); every tab, panel, roster, modal and event window is a DIFFERENT
+        /// class and still hides the button with no per-screen list to maintain. <c>UIStateViewVehicle</c> is
+        /// deliberately NOT here — it drives the roster tabs and character-progression modules, i.e. a
+        /// screen.</summary>
+        internal static bool IdleGeoscape(Type viewState) =>
+            viewState != null && (typeof(UIStateNothingSelected).IsAssignableFrom(viewState) ||
+                                  typeof(UIStateVehicleSelected).IsAssignableFrom(viewState));
+
         /// <summary>PURE (RailCheck L424). MAY THIS WITHDRAWAL CLEAR THE ROOT? Only the peer whose own
         /// announcement is still the live one — otherwise a stale close from a screen that was already
         /// superseded would take somebody else's door away.</summary>
@@ -128,6 +160,21 @@ namespace Multiplayer.Network.Sync
         /// would one day be written. This one is a local fact about this peer's own graph, and it stays out
         /// of the predicate the law guards.</summary>
         internal static string LiveSiteRef() => StillServable(State.SiteRef) ? State.SiteRef : "";
+
+        /// <summary>PURE (RailCheck L424 arm (g)). IS A RE-OFFER OF THIS SITE'S MISSION REDUNDANT, because the
+        /// door into it is already standing? The 2026-08-13 report's second half, and it is the SAME root as
+        /// the first: a peer that could not see the button reached for the only other entrance it had, the
+        /// site's own encounter row — and that row does not re-open a screen, it runs
+        /// <c>MissionReoffer.HostReoffer</c>, which CANCELS the live mission and re-triggers the encounter, so
+        /// a fresh START/CANCEL dialog was broadcast to every peer for a mission whose start had already been
+        /// taken. The peer that answered that stale dialog got "another player already answered this event".
+        ///
+        /// NOT A BLOCKER (P13). It refuses a re-offer only while <see cref="LiveSiteRef"/> still serves the
+        /// SAME site, i.e. exactly while this peer has a working DEPLOYMENT PREP button for it; the moment the
+        /// drop launches, is cancelled or its last carrier leaves, the ref goes "" and the ordinary re-offer
+        /// is available again. Nothing waits on another human either way.</summary>
+        internal static bool ReofferIsRedundant(string liveDoorSiteRef, string siteRef) =>
+            !string.IsNullOrEmpty(siteRef) && string.Equals(liveDoorSiteRef, siteRef, StringComparison.Ordinal);
 
         /// <summary>The only writer of the root. MarkDirty for the same reason
         /// <c>DeployCountdown.ClearPending</c> has it: on the host the write is local, so nothing else
