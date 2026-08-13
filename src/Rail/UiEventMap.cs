@@ -41,7 +41,21 @@ namespace Multiplayer.Network.Sync
     ///     PULL-model (no StorageChanged subscription) → also mark the open screen dirty; the flush
     ///     re-enters it, or for UIStateManufacturing routes to its dedicated per-panel rebuild.
     ///     Covers GeoFaction + GeoSite.
-    ///   • Unknown kind → logged ONCE — the to-do list for the next event-map entry.
+    ///   • Any other kind → the universal repaint, logged ONCE. NOT a to-do list, and reading it as one
+    ///     is a standing invitation to over-engineer: the default arm marks EXACTLY what the per-kind arms
+    ///     mark, so a kind is fully reactive with no arm of its own. An arm earns its place only when a
+    ///     NATIVE cache or derived value sits between the mirrored leaves and the pixels and the game
+    ///     invalidates it from its own write path alone (Wallet, ItemStorage, CharacterProgression,
+    ///     GeoCharacter, GeoPhoenixFacility, CharacterIdentity — every one of them a measured stale screen).
+    ///     Audited 2026-08-13 against a live 3-peer session: all 22 logged kinds — GeoSite, GeoVehicle,
+    ///     GeoHaven, GeoAlienBase, GeoscapeStats, GeoFaction, GeoPhoenixFaction, GeoAlienFaction,
+    ///     GeoPhoenixBase, GeoSquad, GeoCustomMission, GeoScavengingSite, FactionDiplomacy, ItemManufacturing,
+    ///     LevelProgression, PostmissionReplenishManager, PhoenixStatistics, StatusStat, UnityDateTime,
+    ///     MapPlotInstanceData, MistState, DeployCountdownState — repaint through the universal seam, so ZERO
+    ///     arms were added. Two carry their own non-UI surface and would gain nothing from one either:
+    ///     MistState is loaded by the native renderer (MistSync.Apply → MistRendererSystem.ProcessInstanceData)
+    ///     and DeployCountdownState is POLLED per frame by the overlay (DeployCountdown.DisplaySecondsLeft),
+    ///     while its START-button gate rides UIStateRosterDeployment's own Table entry.
     ///   • RELEVANCE: every arm marks through <c>MarkDirty(kind, geo)</c>, so the OPEN screen may
     ///     decline a kind it provably cannot paint (<see cref="UiNativeRepaint.IgnoredKinds"/>).
     ///     Undeclared kind or undeclared screen still marks — the exclusion is opt-in, never implied.
@@ -169,7 +183,7 @@ namespace Multiplayer.Network.Sync
                             // screen paints, and skipping it is logged once per kind per screen.
                             OpenUiRepaint.MarkDirty(entity.GetType(), geo);
                             if (_loggedUnknown.Add(entity.GetType().Name))
-                                Debug.Log("[Multiplayer][rail] UiEventMap: no per-kind mapping for " + entity.GetType().Name + " — universal open-screen repaint (logged once)");
+                                Debug.Log("[Multiplayer][rail] UiEventMap: " + entity.GetType().Name + " rides the universal open-screen repaint (logged once)");
                             break;
                     }
                 }
