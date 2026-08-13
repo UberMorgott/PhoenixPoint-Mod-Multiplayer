@@ -164,8 +164,8 @@ namespace Multiplayer.UI
             {
                 Debug.Log("[MP][return] CANCEL pressed on this peer with " +
                           Multiplayer.Tactical.ReturnCountdown.DisplaySecondsLeft() +
-                          " s left — this stops THIS peer's own five seconds and nobody else's; " +
-                          "Continue can be pressed again. It does not keep any other peer in the battle.");
+                          " s left — this stops the shared five seconds on every peer; Continue can be " +
+                          "pressed again by anybody. It does not keep any other peer in the battle.");
                 Multiplayer.Tactical.ReturnCountdown.RequestCancel();
                 return;
             }
@@ -261,11 +261,10 @@ namespace Multiplayer.UI
             // never ambiguous about what it is about to do.
             int left = DeployCountdown.DisplaySecondsLeft();
             string caption = left > 0 ? "MISSION STARTS IN " + Seconds(left) : null;
-            // ONE BUTTON, TWO SCOPES, AND THE LABEL SAYS WHICH. The two STARTS are a veto any single peer
-            // may exercise for everyone; the post-mission RETURN is not — pressing it stops only THIS
-            // peer's own five seconds, and a peer whose leave the host already accepted still pulls this
-            // one out through the ordinary OpLeaveBattle (TacticalTurnSync.cs:778). That is correct under
-            // the no-blockers postulate, so the button must not go on promising a veto it does not have.
+            // ONE BUTTON, ONE MEANING ON ALL THREE COUNTDOWNS: it takes the seconds back on every peer. It
+            // blocks nobody either way — the summary screen and the Continue button survive a cancelled
+            // return, and a peer whose leave the host already accepted still pulls this one out through the
+            // ordinary OpLeaveBattle (TacticalTurnSync.cs:778), which the no-blockers postulate requires.
             string cancelText = "CANCEL";
             if (caption == null)
             {
@@ -280,7 +279,6 @@ namespace Multiplayer.UI
                 if (left > 0)
                 {
                     caption = "RETURNING TO GEOSCAPE IN " + Seconds(left);
-                    cancelText = "CANCEL MINE";
                 }
             }
             bool show = engine != null && engine.IsActiveSession && caption != null;

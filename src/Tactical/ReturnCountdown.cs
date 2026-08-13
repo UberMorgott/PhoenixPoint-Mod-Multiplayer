@@ -13,14 +13,22 @@ namespace Multiplayer.Tactical
     /// clicks Continue on the battle summary, a countdown strip appears on ALL peers' screens and ticks
     /// 5 → 0; the return happens when it reaches zero.
     ///
-    /// EVERY HOLD HAS EXACTLY ONE OWNER (<see cref="_mine"/>), and that is the whole state machine:
-    ///   • a peer that clicked Continue OWNS the hold that swallowed its click. Only its own clock
-    ///     (<see cref="Tick"/>) and its own CANCEL press may end it. NO remote message — not the host's
-    ///     CLEAR, not another peer's veto — may zero it, because the click it ate is gone otherwise and
-    ///     that peer never leaves the summary screen (live 2026-08-12, both directions);
-    ///   • a strip a peer merely MIRRORS (the host armed it) is not owned here, so a CLEAR drops it;
-    ///   • CLEAR therefore means exactly one thing: "the arm I broadcast is cancelled". Reaching zero
-    ///     broadcasts nothing — every peer's own clock expires on its own.
+    /// ONE COUNTDOWN, AND A CLEAR ENDS IT EVERYWHERE. There is exactly one shared strip per battle, so
+    /// CANCEL restores the pre-arm state on EVERY peer and the next press by ANY peer starts a fresh five
+    /// seconds. Reaching zero broadcasts nothing — every peer's own clock expires on its own — so a CLEAR
+    /// on the wire can only ever mean "a human pressed CANCEL", which is precisely the message that must
+    /// land unconditionally.
+    ///
+    /// THE OWNERSHIP BIT IS GONE (2026-08-13). A hold that had swallowed a peer's own Continue used to
+    /// refuse every remote CLEAR, which was needed only while a CLEAR could go out for reasons other than a
+    /// human cancel — <see cref="Tick"/> broadcasting at zero, its give-up broadcasting, a view-less host
+    /// arming and cancelling within a round trip. None of those broadcasts exist any more (see
+    /// <see cref="Tick"/> and <see cref="HostArm"/>), and what the bit bought instead was an ORPHAN hold:
+    /// two peers clicking Continue at the end of a mission is ordinary, the second click is swallowed by
+    /// the strip already running, and after a CANCEL that swallowed click kept ticking on a peer nobody
+    /// could see. It expired, its leave went out, and every peer was pulled to the geoscape with no
+    /// countdown on screen at all (live 2026-08-13). A cancelled countdown leaves the summary screen up on
+    /// every peer with a live Continue button; nothing is lost but the five seconds.
     /// A host that is no longer in the battle arms nothing, cancels nothing and broadcasts nothing
     /// (<see cref="HostArm"/> refuses without a live view), which is what stops the arm-then-cancel loop
     /// that stranded a client still sitting on the summary.
@@ -40,18 +48,19 @@ namespace Multiplayer.Tactical
     /// BROADCAST, NOT LOCAL. When any peer clicks Continue, the host arms the countdown for all peers via
     /// <see cref="PacketType.ReturnCountdown"/> (0x4B). When any peer clicks Cancel, the host clears it
     /// for all peers. Same two-write shape as <see cref="Lobby.LobbyCountdown"/>: each peer counts its own
-    /// display down from the arm off local realtime. NOT A QUORUM (P13): the countdown expires by itself,
-    /// and CANCEL is NOT the two STARTS' shared veto — it ends the pressing peer's OWN hold and nothing
-    /// else. It keeps nobody in the battle either: another peer's accepted <c>OpLeaveBattle</c> still pulls
-    /// this one out (<c>TacticalTurnSync.cs:778</c>), which is correct — no peer may block another.
+    /// display down from the arm off local realtime. NOT A QUORUM (P13): the countdown expires by itself and
+    /// CANCEL blocks nobody — it takes the five seconds back on every peer and leaves every summary screen
+    /// standing with a live Continue button, so any peer may start a new one on the very next frame. It
+    /// keeps nobody in the battle either: another peer's accepted <c>OpLeaveBattle</c> still pulls this one
+    /// out (<c>TacticalTurnSync.cs:778</c>), which is correct — no peer may block another.
     ///
     /// NO NEW WIDGET (native-UI-first). The strip is the mod's EXISTING top-of-screen countdown plate,
     /// <see cref="Multiplayer.UI.CountdownPanel"/> — the same skinned plate the deployment drop and the
-    /// lobby start already share. Its CANCEL button says <c>"CANCEL MINE"</c> for this countdown, because
-    /// that is all it does.
+    /// lobby start already share, cancel button and all.
     ///
-    /// REPAINT SEAM: <c>MultiplayerUI.Update</c>:1977 (<c>_countdownPanel?.Sync()</c>), unconditional and
-    /// every frame in every scene, which is what makes the number tick on an already-open screen.
+    /// REPAINT SEAM: <c>MultiplayerUI.Update</c>:1932 (<c>_countdownPanel?.Sync()</c>) with <see cref="Tick"/>
+    /// at :1940, unconditional and every frame in every scene — which is what makes the arm appear, the
+    /// number tick and the cancel vanish on an ALREADY-OPEN screen on every peer, with no re-entry.
     /// </summary>
     internal static class ReturnCountdown
     {
@@ -75,16 +84,9 @@ namespace Multiplayer.Tactical
         /// because L64 requires it to call the native handle directly.</summary>
         internal static bool ModDriving;
 
-        /// <summary>THE OWNERSHIP BIT. True when this hold swallowed THIS peer's own Continue click; false
-        /// when the strip is only mirroring an arm the host broadcast. A hold that is <c>_mine</c> is ended by
-        /// this peer alone — its own clock or its own CANCEL press — and every remote clear path refuses to
-        /// touch it. The host's CLEAR landing on a client's own hold is exactly what threw away a click that
-        /// had already been swallowed, leaving that peer on the battle summary for good.</summary>
-        private static bool _mine;
-
-        /// <summary>Drop THIS peer's hold. The only writer that ends a hold, so ownership cannot be lost in
-        /// one place and kept in another.</summary>
-        private static void ClearLocal() { _zeroAt = 0f; _view = null; _mine = false; }
+        /// <summary>Drop THIS peer's hold — the ONE writer that ends one, so no clear path can restore half
+        /// the pre-arm state and leave the rest standing.</summary>
+        private static void ClearLocal() { _zeroAt = 0f; _view = null; }
 
         /// <summary>Session/level teardown — a live count must not survive into the next battle.</summary>
         internal static void Reset() { ClearLocal(); ModDriving = false; }
@@ -127,7 +129,6 @@ namespace Multiplayer.Tactical
                           "on its own clock; nothing here may cancel it.");
                 return;
             }
-            _mine = viewIfHost != null;                      // the host's OWN click owns this hold; an ask does not
             _zeroAt = Time.realtimeSinceStartup + CountdownSeconds;
             Debug.Log("[MP][return] host arming the return countdown for ALL peers — " + CountdownSeconds +
                       " s. Any peer can cancel; nobody needs to press anything for it to expire.");
@@ -135,22 +136,15 @@ namespace Multiplayer.Tactical
                                                      new byte[] { (byte)CountdownSeconds }));
         }
 
-        /// <summary>A REMOTE veto reaching the host. It may clear a strip the host armed on somebody's behalf,
-        /// and it may NOT touch a hold the host armed by its own click — that hold ate the host's own Continue
-        /// and only the host can un-eat it.</summary>
+        /// <summary>A REMOTE cancel reaching the host. It ends the ONE countdown, whoever armed it and whoever
+        /// swallowed a click into it, and the host says so to every peer — a cancel that left a hold running
+        /// anywhere is a hold nobody can see and everybody follows when it expires.</summary>
         internal static void HostCancel(NetworkEngine engine, string who)
         {
             if (engine == null || !engine.IsHost) return;
             if (_zeroAt <= 0f)
             {
                 Debug.Log("[MP][return] cancel from " + who + " arrived with NO countdown running — nothing to stop.");
-                return;
-            }
-            if (_mine)
-            {
-                Debug.Log("[MP][return] cancel from " + who + " does NOT stop this host's own countdown — the " +
-                          "host clicked Continue itself and that click is already swallowed. Every peer ends " +
-                          "its own hold; nobody ends anybody else's.");
                 return;
             }
             Debug.Log("[MP][return] countdown CANCELLED by " + who +
@@ -160,10 +154,10 @@ namespace Multiplayer.Tactical
             engine.BroadcastToAll(new NetworkMessage(PacketType.ReturnCountdown, new byte[] { 0 }));
         }
 
-        /// <summary>THIS peer's own CANCEL press — the owner's opt-out, so it always ends this peer's hold,
-        /// whatever armed it. The host additionally withdraws the arm it broadcast; a client's press is its
-        /// own business and stops nobody else (the host is still returning, and would not be stopped by a
-        /// veto over its own click anyway).</summary>
+        /// <summary>A CANCEL press on this peer. It ends the ONE shared countdown: locally at once, and on
+        /// every other peer through the host — the host broadcasts the clear itself, a client asks the host
+        /// to. Blocks nobody (P13): every summary screen stays up and the next Continue, from any peer,
+        /// arms a fresh five seconds.</summary>
         internal static void RequestCancel()
         {
             bool had = _zeroAt > 0f;
@@ -171,13 +165,13 @@ namespace Multiplayer.Tactical
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession)
             {
-                Debug.LogWarning("[MP][return] CANCEL pressed with no active co-op session — this peer's own " +
+                Debug.LogWarning("[MP][return] CANCEL pressed with no active co-op session — this peer's " +
                                  "countdown is stopped and its Continue button still works.");
                 return;
             }
-            Debug.Log("[MP][return] CANCEL pressed — this peer's own countdown is stopped" +
-                      (had ? "" : " (there was none running)") + ". The return is NOT cancelled: the summary " +
-                      "screen is still there and Continue can be pressed again.");
+            Debug.Log("[MP][return] CANCEL pressed — the countdown is stopped on every peer" +
+                      (had ? "" : " (there was none running here)") + ". The return is NOT cancelled: every " +
+                      "summary screen is still there and Continue can be pressed again by anybody.");
             if (engine.IsHost)
                 engine.BroadcastToAll(new NetworkMessage(PacketType.ReturnCountdown, new byte[] { 0 }));
             else
@@ -191,18 +185,13 @@ namespace Multiplayer.Tactical
             int seconds = msg?.Payload != null && msg.Payload.Length > 0 ? msg.Payload[0] : 0;
             if (seconds <= 0)
             {
-                // OWNERSHIP. A CLEAR withdraws the host's ARM and nothing else. This peer's own swallowed
-                // Continue is not the host's to discard: doing so is what left a client whose click had
-                // already been eaten sitting on the summary with a vanished strip and no return (2026-08-12).
-                if (_mine)
-                {
-                    Debug.Log("[MP][return] the host cleared ITS countdown — this peer keeps its own, because it " +
-                              "clicked Continue itself and that click is already swallowed. It returns on its " +
-                              "own clock.");
-                    return;
-                }
+                // UNCONDITIONAL, and that is the whole point: a CLEAR can only be a human's CANCEL now
+                // (nothing broadcasts at zero), so it puts this peer back exactly where it was before the arm
+                // — including when this peer's own Continue was swallowed into the strip. A hold kept here
+                // ran on invisibly and pulled every peer to the geoscape with no countdown (2026-08-13).
                 ClearLocal();
-                Debug.Log("[MP][return] countdown CLEARED by the host — the arm it broadcast is cancelled.");
+                Debug.Log("[MP][return] countdown CANCELLED — this peer is back where it was before the arm, " +
+                          "summary screen and all. Any peer pressing Continue starts a fresh countdown.");
                 return;
             }
             if (_zeroAt > 0f) return;                        // never restart a hold that is already running
@@ -274,13 +263,10 @@ namespace Multiplayer.Tactical
                                        "strip for this return; going back to the geoscape immediately.");
                         return true;
                     }
-                    // ALREADY COUNTING: eat the re-click — but OWN what was eaten. A peer that clicks
-                    // Continue while it is only MIRRORING the host's arm had its click swallowed here with
-                    // _mine still false, so the next CLEAR (HandleCountdown:194, HostCancel:146) threw that
-                    // click away and nothing ran that peer's return until it pressed Continue again. Every
-                    // path that reaches this line is a LOCAL leave gesture — the mod's own invokes leave
-                    // above on ModDriving/SyncApplyScope — so claiming the hold here is exactly right.
-                    if (_zeroAt > 0f) { _mine = true; return false; }
+                    // ALREADY COUNTING: eat the re-click. It rides the strip that is already running and does
+                    // NOT become a hold of its own — a second click that outlived the shared CANCEL kept
+                    // ticking where nobody could see it and took every peer to the geoscape when it expired.
+                    if (_zeroAt > 0f) return false;
 
                     // On the HOST, arm the countdown for everyone. On a CLIENT, ask the host to arm it;
                     // the client's own _view is latched below so its own Tick can release when the host's
@@ -301,7 +287,6 @@ namespace Multiplayer.Tactical
                         // session while the host loaded the geoscape). Every peer now holds its own click and
                         // releases it itself in Tick; nobody waits for anybody to press anything.
                         _zeroAt = Time.realtimeSinceStartup + CountdownSeconds;
-                        _mine = true;                        // OWNED: no CLEAR from anywhere may discard this click
                         Debug.Log("[MP][return] this client clicked Continue — holding its own return for " +
                                   CountdownSeconds + " s and asking the host to arm the same strip for all peers.");
                         // The arm request rides the cancel's reverse: a byte payload with the seconds.
