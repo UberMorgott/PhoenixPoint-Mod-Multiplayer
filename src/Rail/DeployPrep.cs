@@ -39,13 +39,22 @@ namespace Multiplayer.Network.Sync
     /// the launch is still whoever presses START MISSION first, and <c>DeployCountdown</c> still drops the
     /// battle on the host's own clock with nobody's permission.
     ///
-    /// LIFETIME IS THE SCREEN'S OWN. <c>UIStateRosterDeployment.EnterState</c> announces and
-    /// <c>ExitState</c> withdraws, which is why there is no separate "cleared on launch / cancel /
-    /// unservable" bookkeeping: all three END that screen. A launch exits it into the tactical load, Back
-    /// exits it, and <c>DeploymentWindowClose.CloseCurrent</c> (the unservable arm,
-    /// <c>DeploymentWindow.cs</c>:445) exits it through the game's own door.
+    /// LIFETIME IS THE DEPLOYMENT'S, NOT THE SCREEN'S — and that distinction IS the 2026-08-13 bug.
+    /// <c>UIStateRosterDeployment.EnterState</c> announces; <c>ExitState</c> used to withdraw
+    /// UNCONDITIONALLY, so the ordinary "we are not ready to drop yet, let us do other geoscape things
+    /// first" Back press took the door away from everybody — including from the peer who had just pressed
+    /// it, who then had no gesture left to get back into a screen his own aircraft was still parked for.
+    /// The door now outlives the screen and is withdrawn only when the deployment behind it is actually
+    /// over: <see cref="StillServable"/> asks the GAME's own question
+    /// (<c>DeploymentWindowClose.Servable</c> → <c>GeoMission.GetDeploymentSources</c>), so a launch, a
+    /// cancel and the departed-aircraft close all end it, while a mere Back does not.
     /// <see cref="ResetForReloadBoundary"/> is the belt for the one exit that may not run its state
     /// machine — the level teardown.
+    ///
+    /// A ROOT THAT OUTLIVES ITS LAST <c>ExitState</c> CAN GO STALE (the aircraft flies off while nobody is
+    /// standing in the screen), so the DISPLAY asks the same question every frame:
+    /// <see cref="LiveSiteRef"/> is what the button reads, and it is "" the moment this peer's own graph
+    /// could not serve the deployment. A stale announcement is therefore inert, never a dead button.
     /// </summary>
     internal static class DeployPrep
     {
@@ -85,6 +94,41 @@ namespace Multiplayer.Network.Sync
         internal static bool ClearsOnWithdraw(string announced, string live) =>
             !string.IsNullOrEmpty(announced) && string.Equals(announced, live, StringComparison.Ordinal);
 
+        /// <summary>IS THERE STILL A DEPLOYMENT BEHIND THE ANNOUNCEMENT, on THIS peer's own graph? Not a new
+        /// predicate: it is <c>DeploymentWindowClose.Servable</c> (<c>DeploymentWindow.cs</c>:521), the same
+        /// <c>GeoMission.GetDeploymentSources</c> question that already closes an unservable squad screen and
+        /// its brief — so the door and the screen it opens can never disagree about whether there is anything
+        /// to enrol.
+        ///
+        /// FALSE ON A THROW, deliberately: every caller treats false as "withdraw / hide", which is the
+        /// pre-fix behaviour, and a door that flickers off is strictly better than one that cannot be
+        /// taken down.</summary>
+        private static bool StillServable(string siteRef)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(siteRef)) return false;
+                var geo = GenericApplier.GeoLevel();
+                var site = geo == null ? null : IdentityResolver.Resolve(geo, siteRef, null) as GeoSite;
+                var mission = site?.ActiveMission;
+                return mission != null && DeploymentWindowClose.Servable(mission);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[MP][deploy] could not ask whether " + (siteRef ?? "S#?") + " is still " +
+                               "deployable — treating it as gone, so the join button hides and the next " +
+                               "screen exit withdraws the announcement: " + ex);
+                return false;
+            }
+        }
+
+        /// <summary>THE REF THE BUTTON READS, or "" when the door leads nowhere on this peer. Folded into the
+        /// siteRef term ON PURPOSE rather than added as a fourth <see cref="ShowsButton"/> parameter: L424
+        /// arm (a) pins that arity at three because a fourth term is exactly where "…and peer N has joined"
+        /// would one day be written. This one is a local fact about this peer's own graph, and it stays out
+        /// of the predicate the law guards.</summary>
+        internal static string LiveSiteRef() => StillServable(State.SiteRef) ? State.SiteRef : "";
+
         /// <summary>The only writer of the root. MarkDirty for the same reason
         /// <c>DeployCountdown.ClearPending</c> has it: on the host the write is local, so nothing else
         /// would repaint the screen it changes.</summary>
@@ -120,14 +164,27 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>Leaving the prep screen is NOT the end of the deployment. The one guard, at the one seam
+        /// every exit routes through (<see cref="DeployPrepExitPatch"/>): while the site can still be
+        /// deployed to, the announcement STAYS — that is the whole "we are not ready yet, let us do other
+        /// geoscape things and come back" flow, and it is what puts the door on the leaving peer's own
+        /// geoscape too. Only a deployment that is really over (launched, cancelled, its last aircraft
+        /// departed) withdraws.</summary>
         internal static void Withdraw()
         {
-            string mine = _mine;
-            _mine = null;
             try
             {
                 var engine = NetworkEngine.Instance;
-                if (mine == null || engine == null || !engine.IsActiveSession) return;
+                if (_mine == null || engine == null || !engine.IsActiveSession) { _mine = null; return; }
+                if (StillServable(_mine))
+                {
+                    Debug.Log("[MP][deploy] left the deployment prep for " + _mine + " but the drop is still " +
+                              "servable — the join door STAYS on every peer's geoscape, this one's included. " +
+                              "Nobody is waiting on anybody: it is an offer, not a gate (P13).");
+                    return;
+                }
+                string mine = _mine;
+                _mine = null;
                 if (engine.IsHost)
                 {
                     if (ClearsOnWithdraw(mine, State.SiteRef)) Publish("");
@@ -178,6 +235,18 @@ namespace Multiplayer.Network.Sync
             if (engine == null || !engine.IsHost || steamId == 0 || _announcer != steamId) return;
             _announcer = 0;
             if (string.IsNullOrEmpty(State.SiteRef)) return;
+            // THE DOOR IS THE SITE'S, NOT THE DROPPED PEER'S. Its own ExitState will never run, which is why
+            // this hook exists at all — but the aircraft it announced may still be parked there with a full
+            // squad, and taking the offer away would leave the REMAINING players with no entrance into a
+            // deployment they can still fly (and no way to make one: only entering the screen announces).
+            // The dead-button worry this hook was added for is answered by LiveSiteRef instead.
+            if (StillServable(State.SiteRef))
+            {
+                Debug.Log("[MP][deploy] the peer who announced the deployment prep for " + State.SiteRef +
+                          " is gone, but the drop is still servable — the join door STAYS for everybody " +
+                          "left. It hides by itself the moment the site stops being deployable.");
+                return;
+            }
             Debug.Log("[MP][deploy] the peer standing in the deployment prep for " + State.SiteRef +
                       " is gone — withdrawing its announcement, because it will never run ExitState itself. " +
                       "Every other peer's join button clears; nothing else changes.");

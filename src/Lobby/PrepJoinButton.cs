@@ -35,6 +35,13 @@ namespace Multiplayer.UI
     /// with no per-screen list to maintain. <c>UIStateVehicleSelected</c> is deliberately NOT idle: an
     /// aircraft is selected, the site context menu is up, and a second offer over it is clutter.
     ///
+    /// IT OUTLIVES THE SCREEN IT OPENS. The offer used to be withdrawn by <c>ExitState</c>, so pressing Back
+    /// — "we are not ready to drop yet, let us do other things first" — took the door away from everybody,
+    /// and the peer who pressed it was left with no gesture at all. What it reads is
+    /// <see cref="DeployPrep.LiveSiteRef"/>, which is the announcement AND the game's own "is there still
+    /// anything to enrol here" question, so the button stands for as long as the aircraft does and takes
+    /// itself down when the drop launches, is cancelled, or its last carrier flies off.
+    ///
     /// REACTIVITY IS BY CONSTRUCTION (postulate 1). <see cref="Sync"/> re-reads the mirrored root every frame
     /// from <c>MultiplayerUI.Update</c> — the idiom <see cref="PlayerPanel"/> and <see cref="CountdownPanel"/>
     /// are both already in-game confirmed on — so an announcement lands on an ALREADY-OPEN geoscape within
@@ -91,7 +98,7 @@ namespace Multiplayer.UI
             var engine = NetworkEngine.Instance;
             bool show = DeployPrep.ShowsButton(
                 engine != null && engine.IsActiveSession,
-                DeployPrep.State.SiteRef,
+                DeployPrep.LiveSiteRef(),
                 GenericApplier.GeoLevel()?.View?.CurrentViewState is UIStateNothingSelected);
             if (_button.gameObject.activeSelf != show) _button.gameObject.SetActive(show);
         }
