@@ -94,9 +94,29 @@ namespace Multiplayer.Network.Sync
         /// client-2), against 16-24 ms for a direct order-channel message on the same loopback — so the
         /// walk, not the network, is what the clock was losing.
         /// The correction is therefore the host's OWN publish lag, which the host can measure exactly
-        /// (<see cref="DiffEngine.LastCycleSeconds"/>) and which needs nothing new on the wire, priced at
-        /// the live rate because a paused clock does not advance in flight (rate 0 ⇒ no compensation, which
-        /// is also why a pause latch is untouched and only a RESUME needed fixing).
+        /// (<see cref="DiffEngine.LastCycleSeconds"/>) and which needs nothing new on the wire.
+        ///
+        /// PRICED AT THE RATE FROM BEFORE THE LATCH, and pricing it at the LIVE one was a second bug of its
+        /// own (3-instance session 2026-08-12): every host PAUSE rewound each client's geoscape clock by up
+        /// to ~636 game-seconds, a sawtooth the resume then yanked back, and <see cref="Rebase"/> dragged
+        /// every timed updateable backward with it. The old reasoning — "a paused clock does not advance in
+        /// flight, so a pause latch needs no compensation" — is true only in the HOST's frame. It is the
+        /// CLIENT's clock that runs during the flight, at the rate it still believes in because the pause
+        /// has not reached it yet (M2's client sim is deliberately not frozen, <see cref="ClientSimGate"/>),
+        /// so it arrives at <c>Now + rate x lag</c> and the uncompensated anchor drags it back by exactly
+        /// that. Measured latch→apply that session: 176.7/174.7/123.4/115.4/100.6/88.6/79.3/75.3/67.6/59.6/
+        /// 34.2/26.2 ms, the two clients within 2-12 ms of each other — so it is the walk, not the link, and
+        /// ~3600 game-s per real-s is what turns 176 ms into 636 s.
+        /// <c>_hostDto.Scale</c> IS that pre-latch rate, and it is the own scale rather than
+        /// <c>EffectiveScale</c> on purpose: Timing's Paused setter never touches <c>_scale</c> (decompile
+        /// Base.Core/Timing.cs:99-129), so the last published DTO still carries the RUNNING scale through a
+        /// pause — which also leaves the RESUME latch pricing the same <c>rate x lag</c> it already priced,
+        /// i.e. the path that works is untouched. The invariant is then "every anchor reads
+        /// <c>host Now + rate x lag</c>", held across the whole pause, so a re-latch while paused (drift, a
+        /// speed click) re-states the same value instead of fighting the offset. The parent factor is local
+        /// clock machinery and is read live, as in <see cref="ClientRate"/>. Only the very first latch has
+        /// no prior rate; there the live one is the best available and the clock is not mid-transition
+        /// anyway. RailCheck L429 asserts the pre-latch read; L100 arm D still owns the live fallback.
         /// ponytail: the one-way NETWORK leg (16-24 ms loopback, more on a real link) stays uncompensated —
         /// estimating it needs a wire timestamp, and TimeAnchor deliberately rides the game's own DTO,
         /// which has no field to put one in. Add the ping/pong estimator only when in-game says the
@@ -104,7 +124,8 @@ namespace Multiplayer.Network.Sync
         private static TimingInstanceData Canonical(Timing t)
         {
             double lag = Math.Min(DiffEngine.LastCycleSeconds, MaxPublishLagSeconds);
-            var publishLag = TimeUnit.FromTimeSpan(TimeSpan.FromSeconds(Math.Max(0.0, t.EffectiveScale * lag)));
+            double rate = _hostDto == null ? t.EffectiveScale : _hostDto.Scale * ParentScale(t);
+            var publishLag = TimeUnit.FromTimeSpan(TimeSpan.FromSeconds(Math.Max(0.0, rate * lag)));
             return new TimingInstanceData
             {
                 Paused = t.Paused,
@@ -315,9 +336,16 @@ namespace Multiplayer.Network.Sync
         private static double ClientRate(Timing t)
         {
             bool paused = _clientDto.Paused || (t.ParentTime != null && t.ParentTime.Paused);
-            double parentScale = t.ParentTime != null ? t.ParentTime.CumulativeScale : Time.timeScale;
-            return paused ? 0.0 : _clientDto.Scale * parentScale;
+            return paused ? 0.0 : _clientDto.Scale * ParentScale(t);
         }
+
+        /// <summary>The LOCAL factor of a clock's rate, which no DTO carries and both sides therefore read
+        /// live: <c>CumulativeScale = ParentCumulativeScale x Scale</c> with a no-parent fallback of
+        /// <c>Time.timeScale</c> (decompile Base.Core/Timing.cs:184). Pausing is NOT folded in — callers that
+        /// care about a paused clock decide that themselves, and <see cref="Canonical"/> deliberately does
+        /// not, because its invariant has to survive the pause it is latching.</summary>
+        private static double ParentScale(Timing t)
+            => t.ParentTime != null ? t.ParentTime.CumulativeScale : Time.timeScale;
 
         /// <summary>Client-side counterpart of <see cref="Drifted"/> — the free-run backstop. The rail
         /// diffs HOST state, so a client clock mutated locally (a writer the TimeSync seams do not

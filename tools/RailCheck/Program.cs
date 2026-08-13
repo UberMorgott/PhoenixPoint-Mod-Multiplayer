@@ -392,6 +392,7 @@ namespace RailCheck
             Add(laws, () => L426_ABattleStartKeyIsNeverAnOrdinal.Check());
             Add(laws, () => L427_TheHostBoardIsScoredAheadOfTheVerdict.Check());
             Add(laws, () => L428_ADivergenceReportNamesItsField.Check());
+            Add(laws, () => L429_ThePublishLagIsPricedAtThePreLatchRate.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
 

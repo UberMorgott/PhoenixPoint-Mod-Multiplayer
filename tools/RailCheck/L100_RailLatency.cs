@@ -43,9 +43,10 @@ namespace RailCheck
     /// contain not one TimeAnchor line while the bias was present throughout. A silent swallow with no line
     /// to grep, which is this repo's dominant bug class and the reason it gets a law rather than a comment.
     /// Arms C-E hold the correction in place: the anchor must price the host's OWN measured publish lag
-    /// (<c>DiffEngine.LastCycleSeconds</c>), at the LIVE rate (a paused clock does not advance in flight —
-    /// compensating one would mint game time out of a pause), and the lag must actually be measured rather
-    /// than left at whatever a reset put there.
+    /// (<c>DiffEngine.LastCycleSeconds</c>), at a RATE rather than at a constant, and the lag must actually
+    /// be measured rather than left at whatever a reset put there. Arm D used to read "at the LIVE rate,
+    /// because a paused clock does not advance in flight" — reasoning in the host's frame, and wrong in the
+    /// client's: L429 owns which rate, this arm only owns that there is one.
     ///
     /// Arm F is the one that keeps the cure from becoming the disease. The compensation biases the host's
     /// own drift prediction by <c>rate x lag</c>, and BOTH drift checks fire above <c>max(5 s, rate x 0.5)</c>
@@ -126,7 +127,8 @@ namespace RailCheck
                              "from it renders behind. EnforceDrift cannot see this: it checks the client against " +
                              "its own anchor derivation, not against the host";
 
-            // ── arm D: ...at the LIVE rate, which is what makes a pause cost nothing.
+            // ── arm D: ...at a rate at all. WHICH rate is L429's (the live one survives as the
+            // first-latch fallback, which is what keeps this arm's subject resolvable).
             var scaleGet = effScale?.GetGetMethod(nonPublic: true);
             if (scaleGet == null)
                 yield return "L100 premise-effective-scale-gone: Base.Core.Timing.EffectiveScale did not resolve — " +
@@ -135,9 +137,9 @@ namespace RailCheck
             else if (!CallsMethod(canonical, scaleGet))
                 yield return "L100 anchor-unrated: TimeAnchor.Canonical computes its publish-lag correction without " +
                              "reading Timing.EffectiveScale. The correction is game time, the lag is real time, and " +
-                             "the only thing relating them is the live rate — priced at anything else it is wrong at " +
-                             "every geoscape speed but one, and on a PAUSED clock (rate 0, so the host advanced not " +
-                             "at all in flight) it MINTS game time the host never ran";
+                             "the only thing relating them is a rate — priced at a constant it is wrong at every " +
+                             "geoscape speed but one. EffectiveScale is the first-latch fallback, the only latch " +
+                             "with no prior rate to price against; which rate the other latches use is L429's arm";
 
             // ── arm E: the lag is measured, not remembered.
             var lagSet = lagP.GetSetMethod(nonPublic: true);
