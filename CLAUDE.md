@@ -39,3 +39,13 @@
 - Conventional Commits, lowercase, imperative, subsystem scope: `fix(tactical):`, `fix(personnel):`, `docs(changelog):`, `chore(release):`.
 - Subject states the behaviour change, not the files — e.g. `fix(tactical): release the local UI a mirrored order takes over`.
 - `git log --format='%s' -20` before writing; match it exactly.
+
+## Releases
+- One command, never by hand: `pwsh -File tools/release.ps1 [-Version X.Y.Z] [-GameDir '<pp install>']`. Omit `-Version` to auto-bump the patch.
+- Always rehearse first: add `-WhatIf` — prints every step, changes nothing, builds nothing.
+- Write the CHANGELOG section BEFORE running: header must be exactly `## X.Y.Z-beta`; the script refuses without it.
+- The version lives in **`meta.json` only** (bare `"0.9.11"`, no suffix). The `-beta` suffix exists only in the tag `vX.Y.Z-beta` and the CHANGELOG header — no csproj/README/assembly copy to keep in sync.
+- Script refuses on: not `main`, dirty tree, tag already exists, missing CHANGELOG section, and any RED from `deploy.ps1` / RailCheck / `law-integrity.ps1` — gates run before the commit, so a failure leaves nothing committed or tagged.
+- It commits `chore(release): X.Y.Z-beta` (only `meta.json` + `CHANGELOG.md`) and puts the **annotated** tag on that exact commit, then verifies the tag landed on HEAD.
+- It NEVER pushes. It prints `git push origin main vX.Y.Z-beta`; running that is a deliberate human step.
+- Historical tags are inconsistent — `v0.9.0/1/2/5-beta` are lightweight, `v0.9.3-beta` sits 23 commits past its release commit, `v0.9.5-beta`/`v0.9.10-beta` one commit past, and `v0.9.7-beta` shipped with `meta.json` still reading `0.9.6`. Published tags are left alone; do not "fix" them without the user's explicit OK.
