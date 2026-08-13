@@ -514,30 +514,82 @@ namespace Multiplayer.Network.Sync
                 .Select(x => new CanonicalRewardItemId(occurrence, subject, x)).ToArray();
         }
 
+        /// <summary>What the host-local durable seam DID with a click. Three outcomes, because the two
+        /// questions the caller has to answer — "does the native handler still run?" and "who closes this
+        /// window?" — are not the same question, and collapsing them into one bool is what trapped a player
+        /// behind a live window on 2026-08-13.</summary>
+        internal enum HostLocalAnswer { NotDurable, Refused, Resolved }
+
+        /// <summary>PURE (RailCheck L430). May this outcome BLOCK the game's own <c>OnChoiceSelected</c>
+        /// body? Only when something else already gave the window a way out. <see cref="HostLocalAnswer
+        /// .NotDurable"/> gave it none — no ledger entry means no arbitration was ever going to happen here,
+        /// so the click belongs to the game and the vanilla host path (<c>SelectChoice</c>:598 short-circuits
+        /// on <c>IsCompleted</c> → <c>SetClosingEncounter</c>) is both correct and the player's only exit.</summary>
+        internal static bool BlocksNativeClick(HostLocalAnswer outcome) => outcome != HostLocalAnswer.NotDurable;
+
+        /// <summary>PURE (RailCheck L430). A blocked click that resolved NOTHING must still end the window
+        /// itself — the same "nothing to show — don't strand the player" exit the replay arm uses
+        /// (EventPopup.cs:2004). Never a quorum (P13): this peer closes its OWN copy, asks nobody, and waits
+        /// for no other peer's click.</summary>
+        internal static bool ClosesWindow(HostLocalAnswer outcome) => outcome == HostLocalAnswer.Refused;
+
         internal static bool TryHostLocalDurableAnswer(UIModuleSiteEncounters module, GeoscapeEvent ev,
             GeoEventChoice choice)
         {
             var network = NetworkEngine.Instance;
             if (network == null || !network.IsActiveSession || !network.IsHost) return false;
             if (EventPopup.StartsMission(choice)) return false;
+            var outcome = HostLocalDurableAnswer(module, ev, choice);
+            if (ClosesWindow(outcome)) module.Context?.View?.FinishQueriedState();
+            return BlocksNativeClick(outcome);
+        }
+
+        /// <summary>THE MEASURED FAILURE THIS SHAPE ENDS (live co-op, 2026-08-13 21:27). The post-mission
+        /// consequence event <c>PROG_NJ0_WIN</c> was raised on the host in the same second the geoscape
+        /// finished loading, so no durable occurrence was ever minted for it — and this method answered
+        /// "handled" to fourteen consecutive host clicks while doing nothing at all. The window could not be
+        /// closed by any means and the player killed all three processes. A seam that eats a click it did not
+        /// resolve is unrecoverable BY CONSTRUCTION: there is no later event that can un-eat it.</summary>
+        private static HostLocalAnswer HostLocalDurableAnswer(UIModuleSiteEncounters module, GeoscapeEvent ev,
+            GeoEventChoice choice)
+        {
             OccurrenceId occurrence; var store = DurableInboxSession.ActiveStore;
             if (store == null || !EventPopup.TryGetDurableOccurrence(ev, out occurrence))
-            { Debug.LogError("[MP][events] host-local answer blocked — no exact durable occurrence"); return true; }
+            {
+                Debug.LogWarning("[MP][events] host-local durable answer SKIPPED for '" + ev.EventID +
+                    "' — no exact durable occurrence (the raise landed before this geoscape session's store " +
+                    "existed, or it never bound one), so the click runs the game's OWN handler instead of " +
+                    "being swallowed. The host owns resolutions, which is what the native path does.");
+                return HostLocalAnswer.NotDurable;
+            }
             string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
             var winner = DurableMember(store, local, occurrence);
-            InboxEntry entry;
-            try { entry = store.Ledger.Get(occurrence, winner); }
-            catch { Debug.LogError("[MP][events] host-local answer blocked — no active local entitlement"); return true; }
+            try { store.Ledger.Get(occurrence, winner); }
+            catch
+            {
+                Debug.LogWarning("[MP][events] host-local durable answer SKIPPED for '" + ev.EventID +
+                    "' — no active local entitlement; the click runs the game's own handler.");
+                return HostLocalAnswer.NotDurable;
+            }
             int index = ev.EventData?.Choices == null ? -1 : ev.EventData.Choices.IndexOf(choice);
             var record = ev.Record ?? EventPopup.LiveRecord(ev.EventID, null);
             bool accepted;
             bool handled = TryDurableOrdinaryAnswer(occurrence, winner, ev.EventID, index,
                 ev.EventData?.Choices?.Count ?? 0, record, ev, choice, module.Context.ViewerFaction, out accepted);
-            if (!handled || !accepted)
-            { Debug.LogWarning("[MP][events] host-local durable answer refused for '" + ev.EventID + "'"); return true; }
+            if (!handled) return HostLocalAnswer.NotDurable;   // not a durable answer at all — the game's click
+            if (!accepted)
+            {
+                // REFUSED, deliberately (another peer's decision is locked, or the choice carries a
+                // cinematic/game-over transition the ledger cannot make idempotent). Native must NOT run —
+                // UIModuleSiteEncounters:571-573 would charge this host's wallet for a choice it did not get —
+                // so the window is closed instead of left standing on dead buttons.
+                Debug.LogWarning("[MP][events] host-local durable answer refused for '" + ev.EventID +
+                    "' — this peer's own window is closed rather than left un-closable");
+                return HostLocalAnswer.Refused;
+            }
             EventPopup.NoteOwnAnswer(ev, index);
             EventPopup.ReplayResolution(module, ev, choice);
-            return true;
+            return HostLocalAnswer.Resolved;
         }
 
         internal static int RecoverPendingDurableChoices()
