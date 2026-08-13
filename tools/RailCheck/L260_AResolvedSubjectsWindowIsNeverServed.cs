@@ -7,6 +7,8 @@ using Base.UI;
 using HarmonyLib;
 using Multiplayer.Network.Sync;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Events;
+using PhoenixPoint.Geoscape.Events.Eventus;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewStates;
 
@@ -50,6 +52,10 @@ namespace RailCheck
     ///       <c>UIStateGeoModal._modalData</c>: dropped, and its no-subject twin KEPT.
     ///   (d) <c>prune-off-the-drain-seam</c> — the pruner is reached from the game's ONE drain, so it is
     ///       asked on every frame the queue is pumped rather than once at restore.
+    ///   (f) <c>narrative-window-is-dropped</c> / <c>answered-offer-survives-the-drain</c> — the same REAL
+    ///       verdict over a REAL completed <c>GeoscapeEvent</c>, both choice shapes: a SINGLE-choice event
+    ///       (pre-completed at trigger, before its window is queued) is KEPT, a MULTI-choice one whose offer
+    ///       another peer already took is DROPPED.
     ///   (e) POSITIVE CONTROL, EXECUTED — <see cref="FakeSeam"/> is a pruner that removes nothing; arm (a)'s
     ///       assertions are run against it and MUST come back red.
     ///
@@ -136,6 +142,45 @@ namespace RailCheck
                                      "its three siblings hold no GeoMission at all) falls in that class, " +
                                      "including the post-mission reward events raised seconds after the very " +
                                      "mission this filter is about.";
+                }
+            }
+
+            // ── (f) the REAL verdict over a REAL completed GeoscapeEvent, both choice shapes ───────
+            var offerless = CompletedEvent(1);
+            var offered = CompletedEvent(2);
+            if (offerless == null || offered == null)
+                yield return "L260 premise-changed: a completed GeoscapeEvent carrying a GeoscapeEventData with " +
+                             "N Choices could not be built ('<IsCompleted>k__BackingField' / " +
+                             "'<EventData>k__BackingField' / GeoscapeEventData.Choices). Arm (f) is the only " +
+                             "one that executes the EVENT half of the verdict.";
+            else
+            {
+                var namer = (Func<object, string>)Delegate.CreateDelegate(typeof(Func<object, string>), verdict);
+
+                var narrative = new List<GeoscapeViewStateSwitchRequest> { ModalRequest(offerless) };
+                if (narrative[0] != null)
+                {
+                    prune.Invoke(null, new object[] { narrative, namer });
+                    if (narrative.Count != 1)
+                        yield return "L260 narrative-window-is-dropped: a queued window for a SINGLE-choice event " +
+                                     "with IsCompleted set was removed. That event is pre-completed at trigger " +
+                                     "(GeoscapeEventSystem.OnEventTriggered:651-656) BEFORE GeoscapeEventRaised:657 " +
+                                     "queues its window, so IsCompleted is true for that window's whole life and " +
+                                     "cannot mean 'stale'. Measured 2026-08-13: this dropped every event window on " +
+                                     "the host — IntroBetterGeo_0/1/2, PROG_NJ0_WIN, SDI_01 — while both clients, " +
+                                     "whose mirrored instance never ran CompleteEvent, showed all five.";
+                }
+
+                var offer = new List<GeoscapeViewStateSwitchRequest> { ModalRequest(offered) };
+                if (offer[0] != null)
+                {
+                    prune.Invoke(null, new object[] { offer, namer });
+                    if (offer.Count != 0)
+                        yield return "L260 answered-offer-survives-the-drain: a queued window for a MULTI-choice " +
+                                     "event that is already completed was still served. That is a dead offer — " +
+                                     "another peer took the choice first — and it is the case the event arm of the " +
+                                     "filter exists for. Narrowing the arm to single-choice events must not " +
+                                     "narrow it to nothing.";
                 }
             }
 
@@ -238,6 +283,34 @@ namespace RailCheck
                 var mission = (GeoMission)FormatterServices.GetUninitializedObject(concrete);
                 flag.SetValue(mission, true);
                 return mission.IsCompleted ? mission : null;
+            }
+            catch (Exception) { return null; }
+        }
+
+        /// <summary>A REAL <c>GeoscapeEvent</c> with the game's own completion flag set, carrying a REAL
+        /// <c>GeoscapeEventData</c> with <paramref name="choices"/> choices in it — the two shapes the event
+        /// arm has to tell apart (<c>HasSingleChoice =&gt; Choices.Count &lt;= 1</c>).</summary>
+        private static GeoscapeEvent CompletedEvent(int choices)
+        {
+            try
+            {
+                var data = (GeoscapeEventData)FormatterServices.GetUninitializedObject(typeof(GeoscapeEventData));
+                var list = typeof(GeoscapeEventData).GetField("Choices", All);
+                if (list == null) return null;
+                var made = new List<GeoEventChoice>();
+                for (var i = 0; i < choices; i++)
+                    made.Add((GeoEventChoice)FormatterServices.GetUninitializedObject(typeof(GeoEventChoice)));
+                list.SetValue(data, made);
+
+                var evt = (GeoscapeEvent)FormatterServices.GetUninitializedObject(typeof(GeoscapeEvent));
+                var flag = typeof(GeoscapeEvent).GetField("<IsCompleted>k__BackingField", All);
+                var carries = typeof(GeoscapeEvent).GetField("<EventData>k__BackingField", All);
+                var id = typeof(GeoscapeEvent).GetField("EventID", All);
+                if (flag == null || carries == null || id == null) return null;
+                flag.SetValue(evt, true);
+                carries.SetValue(evt, data);
+                id.SetValue(evt, "L260_" + choices);
+                return evt.IsCompleted && evt.EventData == data ? evt : null;
             }
             catch (Exception) { return null; }
         }

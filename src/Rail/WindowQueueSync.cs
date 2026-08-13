@@ -1190,10 +1190,39 @@ namespace Multiplayer.Network.Sync
                 return mission.MissionDef == null ? "?" : mission.MissionDef.name;
 
             var evt = SubjectEvent(holder);
-            if (evt != null && evt.IsCompleted)
+            if (evt != null && evt.IsCompleted && CarriedAnOffer(evt))
                 return "event:" + (evt.EventID ?? "?");
 
             return null;
+        }
+
+        /// <summary>TRUE = this event's window carried an OFFER that could go dead behind the player's back,
+        /// i.e. a choice somebody else could take first. Only then does <c>IsCompleted</c> mean "stale".
+        ///
+        /// WHY THE EXTRA CONDITION (2026-08-13). A SINGLE-choice event is PRE-COMPLETED at trigger, BEFORE its
+        /// window is ever queued: <c>GeoscapeEventSystem.OnEventTriggered</c>:651-656 calls
+        /// <c>CompleteEvent(Choices.FirstOrDefault())</c> — which sets <c>IsCompleted</c> (GeoscapeEvent.cs:115)
+        /// — and only THEN fires <c>GeoscapeEventRaised</c>:657, which is what puts the window in the queue.
+        /// So on that whole class of events <c>IsCompleted</c> is true from the first frame of the window's
+        /// life and says nothing about staleness: the window is the NARRATIVE/outcome page, and there is no
+        /// offer in it to lose (<c>HasSingleChoice =&gt; Choices.Count &lt;= 1</c>, GeoscapeEventData.cs:65).
+        ///
+        /// MEASURED: host multiplayer.log 20:07-20:20, a fresh campaign. Every single event window the host
+        /// raised — <c>IntroBetterGeo_0/1/2</c>, <c>PROG_NJ0_WIN</c>, <c>SDI_01</c> — was logged as
+        /// "queue DROPS UIStateGeoscapeEvent … already resolved" on its way to the screen, so the host saw NO
+        /// game event all session and went straight to the geoscape. Both clients showed all five: their
+        /// MIRRORED instance never ran <c>CompleteEvent</c> locally (a client is refused at
+        /// <c>EventCompleteArbiter</c>), so its <c>IsCompleted</c> stayed false and the same filter kept the
+        /// window. The multi-choice <c>PROG_NJ0_MISS</c> survived on the host too — it is still open when its
+        /// window is queued, which is exactly the case this filter is for and still covers.
+        ///
+        /// A null <c>EventData</c> (the synthetic closing page, <c>SetClosingEncounter</c>:326-331) answers
+        /// false: it has no offer either, and a window we cannot read an offer out of is never ours to drop —
+        /// same rule as the mission arm's "only drop what you can name".</summary>
+        private static bool CarriedAnOffer(GeoscapeEvent evt)
+        {
+            var choices = evt?.EventData?.Choices;
+            return choices != null && choices.Count > 1;
         }
 
         /// <summary>The game's OWN verdict that a mission is over (<c>UIStateInitial.EnterState</c>:102),
