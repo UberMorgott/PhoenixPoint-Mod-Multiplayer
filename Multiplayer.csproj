@@ -21,6 +21,15 @@
          build in the same tree fails with CS0579 duplicate-attribute. Exclude the roots outright. -->
     <Compile Remove="obj\**" />
     <Compile Remove="bin\**" />
+    <!-- refs/ holds upstream sources vendored for reading only (TFTV). They are gitignored, they do
+         not compile against our reference set, and TFTV's own `Research` type shadows the game's if
+         the glob swallows them. Reference material, never input to this assembly. -->
+    <Compile Remove="refs\**" />
+    <!-- Same for the binaries under refs\: TFTV's ModSDK ships its OWN (older) Assembly-CSharp.dll,
+         and {CandidateAssemblyFiles} — built from @(None) — is searched BEFORE {HintPathFromItem}.
+         Without this the build silently resolves the game API against TFTV's copy instead of
+         $(GameManaged), and fails on whatever the newer game version added. -->
+    <None Remove="refs\**" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="Assembly-CSharp">

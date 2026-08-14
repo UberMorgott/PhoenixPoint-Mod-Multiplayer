@@ -12,6 +12,9 @@ TestResults/
 .idea/
 .vscode/
 
+# upstream sources vendored for reference only (never published)
+refs/
+
 # local tooling caches
 .claude/
 .serena/
