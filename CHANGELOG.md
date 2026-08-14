@@ -3,6 +3,49 @@
 Player-facing notes for each release. Releases before `0.9.5-beta` are documented on the
 [GitHub releases page](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/releases).
 
+## 0.9.14-beta
+
+A patch release on top of `0.9.13-beta`. Same mod, same install — replace the `Multiplayer` folder
+in your `Mods` directory. **Every player must run the same version**; a mismatch is reported when
+you join. Nothing changed in how the machines talk to each other, so this is only the version
+check — connect codes are unchanged from `0.9.13-beta`.
+
+This one teaches the mod about Terror From The Void's base personnel: the ASSIGNMENTS tab and the
+training facility. Tested against TFTV `1.1.4.5`.
+
+### Who works where
+
+- **Your base staff is now the same on every machine.** TFTV rebuilds the Recruits tab into
+  ASSIGNMENTS, where you put people on research, on manufacturing, or into training. That board
+  lived entirely inside TFTV and never crossed the wire, so each player's game decided it
+  separately. Because every assigned worker is worth real research and production output, the two
+  campaigns quietly drifted apart — same day, same base, different science.
+- **Moving someone is now a request, not a local edit.** When a guest drags a worker between
+  columns, presses plus or minus, or multi-selects a group, the click travels to the host, the host
+  applies it against its own base, and the result comes back to everyone. Costs, free slots and
+  living space are always re-checked on the host, so a guest can no longer end up with an
+  arrangement its own game thought was legal.
+- **The board redraws by itself.** When the host moves people around, an open ASSIGNMENTS screen
+  updates in place instead of waiting for you to leave and re-enter it.
+
+### Training
+
+- **Recruits in training, their timers and the slots they occupy are shared.** Previously each
+  machine ran its own training clock.
+- **The graduate is created once, by the host.** When a trainee finishes, the game rolls a brand new
+  operative — with rolled stats. Left alone, every machine would have rolled a *different* person
+  for the same slot. Now the host rolls once and everyone receives that operative.
+- **The pop-up that appears when training completes** no longer fires on guests. It used to finish
+  the training itself, straight from the interface, which is exactly where the duplicate people came
+  from.
+
+### Notes
+
+- This is the first release of the assignments mirror. If you see someone sitting in the wrong
+  column, or a trainee that appears on one machine and not the other, that is worth reporting —
+  include both players' logs.
+- The Auto-Assign toggle already travelled with the campaign and needed no changes.
+
 ## 0.9.13-beta
 
 A patch release on top of `0.9.12-beta`. Same mod, same install — replace the `Multiplayer` folder
