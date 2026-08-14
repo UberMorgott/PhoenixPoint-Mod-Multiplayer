@@ -72,7 +72,10 @@ namespace Multiplayer.Network.Sync
         // so the signature below is computed over exactly the rows the module would rebuild.
         private static readonly FieldInfo TrackerFaction =
             AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_faction");
-        private static string _agendaSignature;
+        /// <summary>Last repaint key per strip — see <see cref="RepaintNeeded"/>. A dictionary rather than a
+        /// field per strip so the SECOND caller costs a line, not a mechanism.</summary>
+        private static readonly System.Collections.Generic.Dictionary<string, string> _repaintKeys =
+            new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal);
 
         // UIModuleInfoBar: private no-arg UpdatePopulation():276 and the Init(context):144 field that
         // proves the module is live (it dereferences `_context.View` unguarded, so calling it before
@@ -144,7 +147,7 @@ namespace Multiplayer.Network.Sync
             var mods = view?.GeoscapeModules;
             if (mods == null) return; // no geoscape view at all (tactical / main menu) — nothing to repaint
             RefreshAgendaTracker(mods);
-            RefreshInfoBar(mods);
+            RefreshInfoBar(geo, mods);
             RefreshSiteContextualMenu(geo, mods, view.CurrentViewState);
         }
 
@@ -191,11 +194,27 @@ namespace Multiplayer.Network.Sync
         /// <summary>Does the strip owe a full rebuild? True on the first call of a session, on any change to
         /// <see cref="AgendaSignature"/>, and whenever the signature could not be read (null = rebuild, the
         /// safe direction). Its own memory, so L492 can drive it without a live tracker.</summary>
-        internal static bool AgendaNeedsRebuild(string signature)
+        internal static bool AgendaNeedsRebuild(string signature) => RepaintNeeded("agenda", signature);
+
+        /// <summary>
+        /// THE ONE REPAINT-IF-CHANGED GATE, for every persistent-HUD strip. A rail flush lands ~10 times a
+        /// second on a live geoscape, so driving a module's repaint from every flush is 10 Hz of whatever
+        /// that repaint costs — a full row teardown for the agenda strip (the 2026-08-14 flicker, L492), and
+        /// every postfix any other mod has hung on it for the info bar (TFTV's TopInforBar:127 does string
+        /// Transform.Find lookups, a LINQ walk of the alien bases and a sprite load).
+        ///
+        /// True on the first call for a strip, on any change of its key, and whenever the key could not be
+        /// read (null = repaint, the safe direction — REACTIVITY is a hard mandate, so an unreadable model
+        /// may cost a repaint and may never cost a stale strip). Its own memory, so a law can drive it with
+        /// no live module.
+        /// </summary>
+        internal static bool RepaintNeeded(string strip, string key)
         {
-            bool rebuild = signature == null || !string.Equals(signature, _agendaSignature, StringComparison.Ordinal);
-            _agendaSignature = signature;
-            return rebuild;
+            string previous;
+            bool needed = key == null || !_repaintKeys.TryGetValue(strip, out previous) ||
+                          !string.Equals(key, previous, StringComparison.Ordinal);
+            _repaintKeys[strip] = key;
+            return needed;
         }
 
         /// <summary>
@@ -261,9 +280,10 @@ namespace Multiplayer.Network.Sync
         /// <c>UpdatePopulation</c>:276 is the module's own repaint that TFTV's TopInforBar:127 postfixes
         /// to write the Anu/Nj/Syn reputation numbers, so driving it repaints them — read-direction only,
         /// no view-state transition.</summary>
-        private static void RefreshInfoBar(GeoscapeModulesData mods)
+        private static void RefreshInfoBar(GeoLevelController geo, GeoscapeModulesData mods)
         {
             if (InfoBarUpdatePopulation == null || InfoBarContext == null) return;
+            if (!RepaintNeeded("infobar", InfoBarKey(geo))) return;
             var bar = mods.ResourcesModule;
             if (bar == null)
             {
@@ -284,6 +304,64 @@ namespace Multiplayer.Network.Sync
                 if (_loggedFailures.Add("InfoBar"))
                     MpLog.LogWarning("[Multiplayer][rail] info-bar refresh threw — the top-right reputation " +
                                      "percentages may stay stale until the next screen change (logged once): " + ex);
+            }
+        }
+
+        /// <summary>
+        /// EVERYTHING THE INFO BAR DRAWS, AS ONE STRING — the repaint key for <see cref="RefreshInfoBar"/>,
+        /// through the same <see cref="RepaintNeeded"/> gate the agenda strip uses.
+        ///
+        /// THE NATIVE HALF IS EXACT. <c>UIModuleInfoBar.UpdatePopulation</c>:276-288 reads three values and
+        /// nothing else — <c>WorldPopulation</c>, <c>GameOverWorldPopulation</c>,
+        /// <c>StartingWorldPopulation</c> off the view — so those three ARE the native draw.
+        ///
+        /// THE POSTFIX HALF IS COVERED BY MODEL, NOT BY MOD. Everything TFTV's <c>TopInforBar</c>:127 paints
+        /// on top is read from first-party state, so the key reads that state generically and names no mod,
+        /// no def and no type of theirs: the three diplomacy values (:176/:180/:183
+        /// <c>&lt;Faction&gt;.Diplomacy.GetDiplomacy(PhoenixFaction)</c> — the STORED field the rail writes
+        /// directly, which is why this repaint exists at all) and the alien base list by type def name
+        /// (:146-161, the nest/lair/citadel counts behind the ODI meter).
+        ///
+        /// AND A ONE-SECOND FLOOR, WHICH IS THE HONEST PART. A key over a panel a THIRD-PARTY postfix draws
+        /// can never be complete — TFTV also reads the three "Discovered" diplomacy GameTags (:200/:211/:219,
+        /// and <c>GameTagsProviderList</c> exposes no count to key on), an event-system variable, a void-omen
+        /// check and an event record's chosen answer, and chasing those would mean naming their defs here,
+        /// i.e. exactly the bespoke per-panel patch this consolidation exists to stop. The floor bounds that
+        /// gap absolutely
+        /// instead of pretending it away: the strip repaints at least once a second no matter what, which is
+        /// the module's own native poll rate, so nothing this key does not model can ever be staler than it
+        /// is in vanilla — while the 10 Hz flush rate stops driving a sprite load and a Transform.Find walk.
+        /// Returns null when the model cannot be read; null repaints.
+        /// ponytail: a coarse clock term, not a modelled input. Drop it the day the strip's remaining
+        /// inputs are all first-party and cheap to read.
+        /// </summary>
+        private static string InfoBarKey(GeoLevelController geo)
+        {
+            var view = geo == null ? null : geo.View;
+            if (view == null) return null;
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.Append(view.WorldPopulation).Append('/').Append(view.GameOverWorldPopulation)
+                  .Append('/').Append(view.StartingWorldPopulation).Append('|');
+                var phoenix = geo.PhoenixFaction;
+                foreach (var f in geo.Factions)
+                {
+                    if (f == null || f.Diplomacy == null || ReferenceEquals(f, phoenix)) continue;
+                    sb.Append(f.Diplomacy.GetDiplomacy(phoenix)).Append(',');
+                }
+                sb.Append('|');
+                if (geo.AlienFaction != null)
+                    foreach (var b in geo.AlienFaction.Bases)
+                        sb.Append(b == null || b.AlienBaseTypeDef == null ? "?" : b.AlienBaseTypeDef.name).Append(',');
+                return sb.Append('|').Append((int)Time.realtimeSinceStartup).ToString();
+            }
+            catch (Exception ex)
+            {
+                if (_loggedFailures.Add("InfoBarKey"))
+                    MpLog.LogWarning("[Multiplayer][rail] info-bar repaint key threw — the strip falls back to " +
+                                     "repainting on every flush (logged once): " + ex);
+                return null;
             }
         }
 
@@ -568,8 +646,8 @@ namespace Multiplayer.Network.Sync
             _loggedFailures.Clear();
             _loggedFallback.Clear();
             _loggedSkips.Clear();
-            // …and a dead session's agenda strip must not vouch for the next one's rows: null = rebuild once.
-            _agendaSignature = null;
+            // …and a dead session's strips must not vouch for the next one's: empty = repaint once each.
+            _repaintKeys.Clear();
             // Next session's first refresh must not read a dead session's site refs as a fresh edge.
             _exploringSites.Clear();
         }
