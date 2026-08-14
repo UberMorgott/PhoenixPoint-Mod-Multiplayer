@@ -24,7 +24,8 @@ namespace Multiplayer.Network.Sync
     /// value itself changes. Skipping the ONE chokepoint keeps every hourly mutator silent while the
     /// clock keeps ticking; the coroutine stays scheduled by returning the same next-hour reschedule
     /// the native method would.
-    /// (Research.Update keeps its own gate in ResearchSync — it is also reachable outside this tick.)
+    /// (Research progression has its own funnel gate below, <see cref="ClientResearchGate"/>: THIS gate
+    /// opens whenever the engine is unknown, and research cannot afford that window.)
     /// </summary>
     [HarmonyPatch(typeof(GeoLevelController), "LevelHourlyUpdateCrt")]
     internal static class ClientSimGate
@@ -487,6 +488,91 @@ namespace Multiplayer.Network.Sync
             if (_logged.Add(who))
                 MpLog.Log("[MP][diag] AutomanufactureGate BLOCK " + who +
                           " — the client never derives a manufacturing queue; the host's queue arrives via the rail");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// TENTH seam, same law, at the RESEARCH PROGRESSION funnel: <c>GeoFaction.UpdateResearch</c>
+    /// (GeoFaction.cs:1409-1417) — the ONE caller of <c>Research.Update</c> in the whole game assembly,
+    /// and the method that also DRAINS the research wallet (:1414) and restamps
+    /// <c>NextResearchUpdate</c> (:1416).
+    ///
+    /// WHY IT MOVED UP (RCA 2026-08-14 — "on a client the first completed research completes the WHOLE
+    /// queue at once"). The gate used to sit on <c>Research.Update</c> alone (ResearchSync.SimGatePatch).
+    /// Two facts make that placement fatal:
+    ///   • <c>NextResearchUpdate</c> is deliberately NOT mirrored (rail-baseline.txt:544, "EXCLUDED
+    ///     NextResearchUpdate: bridge-unresolved"), so on a client it is permanently STALE — the
+    ///     <c>CanUpdateResearch</c> guard (:1396-1407) is therefore always satisfied.
+    ///   • <c>Research.Update</c>:654-660 hands the ENTIRE research wallet to
+    ///     <c>AddProgressToCurrentResearch(..., propagate: true)</c>, which walks the whole
+    ///     <c>_researchQueue</c> passing leftover points down the line (Research.cs:736-748).
+    /// So a client that runs this method for ONE tick converts its accumulated wallet into a cascade that
+    /// completes every queued research at once. It only needs one tick.
+    ///
+    /// CLOSED BY DEFAULT, and that is the actual fix. The old gate opened on
+    /// <c>engine == null || !engine.IsActiveSession</c> — i.e. it opened precisely in the UNKNOWN window
+    /// (mid-load, mission boundary, a <c>Session.HostPeerId</c> that is momentarily unset), which is the
+    /// only window in which a client could ever have run this. This gate never consults
+    /// <c>IsActiveSession</c>: a peer whose engine exists and is not the host is a CLIENT, session
+    /// predicate or not, and when the engine is gone entirely the level-scoped latch below still refuses
+    /// on the level this peer was last seen playing as a client on. Solo is unaffected — a solo campaign
+    /// has no engine and was never latched. Host is fully native (and clears the latch on sight).
+    ///
+    /// Latch shape borrowed from <c>SessionEnd.InProgress</c>: a Level, not a bool. A bool would survive a
+    /// return-to-menu and freeze research in a later SOLO campaign; keyed on the level it self-clears with
+    /// no hook to wire.
+    ///
+    /// BOTH declarations are patched. <c>GeoAlienFaction</c> overrides the method
+    /// (GeoAlienFaction.cs:831-844) and completes <c>SmallFlyerResearchDef</c> BEFORE delegating to base,
+    /// so patching the base alone would leave that write running on every client. Void method; nothing
+    /// dereferences the skip.
+    /// </summary>
+    [HarmonyPatch]
+    internal static class ClientResearchGate
+    {
+        // The level this peer was last seen playing as a CLIENT on. Consulted ONLY when the engine is
+        // gone; see the class doc for why it is a Level and not a bool.
+        private static Base.Levels.Level _clientLevel;
+        private static bool _loggedBlock, _loggedWindow;
+
+        // internal: RailCheck L451 reads this to assert the gate still covers both declarations.
+        internal static IEnumerable<MethodBase> TargetMethods()
+        {
+            yield return AccessTools.DeclaredMethod(typeof(GeoFaction), "UpdateResearch");
+            yield return AccessTools.DeclaredMethod(
+                typeof(PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction), "UpdateResearch");
+        }
+
+        private static bool Prefix(GeoFaction __instance)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine != null && engine.IsHost) { _clientLevel = null; return true; } // host: fully native
+
+            bool known = engine != null;
+            if (known) _clientLevel = GameUtl.CurrentLevel();                           // client, latch the level
+            else if (_clientLevel == null || !ReferenceEquals(GameUtl.CurrentLevel(), _clientLevel))
+                return true;                                                            // solo: native
+
+            // Log-once, not per-frame: this funnel fires on every faction, every research tick.
+            if (!_loggedBlock)
+            {
+                _loggedBlock = true;
+                MpLog.Log("[MP][research] ClientResearchGate BLOCK (" +
+                          (__instance?.Def == null ? "?" : __instance.Def.name) +
+                          ") — a client never runs native research progression; NextResearchUpdate is not " +
+                          "mirrored, so one tick here would burn the whole queue at once");
+            }
+            // The evidence line the RCA asked for: the OLD predicate (engine==null || !IsActiveSession)
+            // would have let this through. If this ever prints, the unknown window is real and observed.
+            if (!_loggedWindow && (engine == null || !engine.IsActiveSession))
+            {
+                _loggedWindow = true;
+                MpLog.Log("[MP][research] ClientResearchGate WINDOW — engine=" +
+                          (engine == null ? "null" : "present,IsActiveSession=false") +
+                          ": the previous Research.Update gate would have been OPEN here and the client " +
+                          "would have cascaded its whole research queue");
+            }
             return false;
         }
     }

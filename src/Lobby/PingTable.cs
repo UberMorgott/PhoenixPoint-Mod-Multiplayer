@@ -75,6 +75,17 @@ namespace Multiplayer.Network
             return true;
         }
 
+        /// <summary>The host clock as the LAST SAMPLE this peer ever took says it is, staleness ignored.
+        /// <see cref="TryHostNowMs"/> answers "is this measurement fresh"; this answers "was there ever a
+        /// measurement at all". A scheduler must not turn a stale sample into "start now" — a drifted offset
+        /// still puts every peer holding the same last sample on the same instant, while "now" puts each peer
+        /// on its own. False only when no sample was ever observed.</summary>
+        public static bool TryLastKnownHostNowMs(bool isHost, out long hostNow)
+        {
+            hostNow = NowMs() + (isHost ? 0 : _hostClockOffsetMs);
+            return isHost || _hostClockKnown;
+        }
+
         internal static bool HostClockUsable(bool known, long now, long sampledAt) =>
             known && sampledAt > 0 && now >= sampledAt && now - sampledAt <= HostClockStaleMs;
 

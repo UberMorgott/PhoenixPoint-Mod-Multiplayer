@@ -100,7 +100,14 @@ namespace Multiplayer.Tactical
         // Wire v2: actionId + executeAt precede the command. Keep old op 1 retired so mixed DLLs reject
         // cleanly instead of decoding actorKey bytes as an epoch.
         private const byte OpActivate = 7;
-        private const byte OpMoveActivate = 8;
+        // OP 8 (OpMoveActivate) IS RETIRED AND MUST NEVER BE REUSED — 2026-08-14, law L445. It carried a move
+        // with NO actionId and NO executeAt and was applied ON RECEIPT, which is the hole every peer's clock
+        // agreement leaked through: the move started at the click on one peer and half an RTT later on every
+        // other, and the shot released at the shared epoch then queued behind that still-running move
+        // (ShootAbility.Activate:173 EnqueueAction(soloAfterCurrent:true)) on exactly the peers that were
+        // behind. Moves now ride OpActivate like every other activation. Retired the same way op 1 was: the
+        // number is left dead so a peer on the old build hits ApplyInbound's unknown-op refusal — loud and
+        // terminal — instead of having its move bytes decoded as an epoch.
         private const byte OpSettle = 2;
         /// <summary>A7 — SELECTING A WEAPON IS NOT AN ABILITY, which is why it never crossed. The model
         /// funnel is <c>EquipmentComponent.SetSelectedEquipment</c>:242 (it fires the game's own
@@ -870,12 +877,6 @@ namespace Multiplayer.Tactical
                 // native roll here and memoizes it, so :1109 gets the same value and the bit rides WITH the
                 // order. Clients never roll at all (FumbleCheckGate).
                 bool fumbled = FumbleGate.RollForHost(ability);
-                if (ability is IMoveAbility)
-                {
-                    Send(OpMoveActivate, "legacy move " + actor.name + " " + name, _replayOriginPeer,
-                         w => { WriteCommand(w, key, guid, target); w.Write(fumbled); });
-                    return;
-                }
                 ulong actionId = ++_nextActionId;
                 long executeAt = PingTable.NowMs() + HostExecuteLeadMs(engine);
                 // WHOSE ORDER IS NOW RUNNING ON THIS SOLDIER. Every accepted order — the host's own click and
@@ -2261,14 +2262,13 @@ namespace Multiplayer.Tactical
                 return;
             }
 
-            if (ability is IMoveAbility)
-            {
-                _replayOriginPeer = senderPeerId;
-                FillLiveTargetObject(ability, target);
-                try { ability.Activate(target); }
-                finally { _replayOriginPeer = 0; }
-                return;
-            }
+            // A MOVE IS NOT EXEMPT FROM THE SHARED CLOCK (law L445). It used to return here and activate
+            // immediately, shipping op 8 with no executeAt — so the move began at the click on one peer and
+            // half an RTT later on the others, and the SHOT that followed, released at its shared epoch, sat
+            // behind that still-running move in the engine's per-actor channel on whichever peers were behind.
+            // That is the animation desync, six regressions running. Moves take the same epoch as everything
+            // else; only the FollowupAbility exemption (TacAbilityTargetCodec.Dropped, see
+            // OrderWaitsForTheEcho) still keeps the ACTING peer playing its own move at click time.
 
             // Mint one future host-clock epoch before any peer, including this host, enters native Activate.
             // The fixed lead covers ordinary RTT/frame jitter; nobody waits for an ack or another player.
@@ -2501,15 +2501,6 @@ namespace Multiplayer.Tactical
                             QueueActivation(epoch, actionId, executeAt, actorKey, abilityGuid, target, fumbled, unresolved);
                         };
                     }
-                    else if (op == OpMoveActivate)
-                    {
-                        int actorKey = r.ReadInt32();
-                        string abilityGuid = WireString.ReadKey(r);
-                        var unresolved = new List<string>();
-                        var target = ReadCommandTarget(r, unresolved);
-                        bool fumbled = r.ReadBoolean();
-                        commit = () => ApplyActivate(actorKey, abilityGuid, target, fumbled, unresolved);
-                    }
                     else if (op == OpSettle)
                     {
                         int key = r.ReadInt32();
@@ -2534,7 +2525,13 @@ namespace Multiplayer.Tactical
                     else
                     {
                         MpLog.LogError("[Multiplayer][tac] unknown host→all command op " + op + " (seq=" + seq +
-                                       ") — this peer can no longer follow the shared battle.");
+                                       ") — this peer can no longer follow the shared battle." +
+                                       (op == 1 || op == 8
+                                        ? " Op " + op + " is RETIRED (op 1 = the pre-epoch action record, op 8 = " +
+                                          "the unscheduled move record): the peer that sent it is running an OLDER " +
+                                          "build whose moves start on its own clock. Refused out loud rather than " +
+                                          "decoded — a silent desync is exactly what retiring the number prevents."
+                                        : ""));
                         return;
                     }
                     // TRANSACTION BOUNDARY: every byte is decoded and exact EOF is proved before commit.
@@ -2628,8 +2625,27 @@ namespace Multiplayer.Tactical
             long hostNow = preliminaryNow;
             if (!clockKnown)
             {
-                MpLog.LogError("[MP][tac] host clock unknown/stale; action=" + id + " starts immediately, never blocks.");
-                executeAt = hostNow;
+                // DEGRADE DETERMINISTICALLY, NEVER "START NOW" (law L445). Starting immediately is the one
+                // answer that is different on every peer — it is the same defect op 8 shipped, arriving through
+                // the receipt path instead of the wire. A stale sample is still a SHARED number: every peer
+                // holding the same last offset lands on the same instant, drift and all. With no sample ever
+                // taken there is nothing shared to land on, so the record is pushed out by the fixed minimum
+                // lead instead — a constant, not a clock, and bounded either way. Nothing waits on a human.
+                long lastKnown;
+                if (PingTable.TryLastKnownHostNowMs(engine != null && engine.IsHost, out lastKnown))
+                {
+                    hostNow = lastKnown;
+                    MpLog.LogWarning("[MP][tac] host clock stale; action=" + id + " scheduled against the last " +
+                                     "known offset (hostNow≈" + hostNow + "), not against local now.");
+                }
+                else
+                {
+                    hostNow = preliminaryNow;
+                    executeAt = hostNow + MinExecuteLeadMs;
+                    MpLog.LogError("[MP][tac] no host clock sample has ever been taken; action=" + id +
+                                   " scheduled " + MinExecuteLeadMs + "ms out on this peer's own clock. It cannot " +
+                                   "be simultaneous with anybody — say so rather than start instantly.");
+                }
             }
             if (executeAt - hostNow > MaxExecuteFutureMs || hostNow - executeAt > MaxExecutePastMs)
             {
@@ -2650,9 +2666,12 @@ namespace Multiplayer.Tactical
         {
             if (_scheduledActivations.Count == 0 || engine == null) return;
             long now;
-            if (!PingTable.TryHostNowMs(engine.IsHost, out now))
+            if (!PingTable.TryHostNowMs(engine.IsHost, out now) &&
+                !PingTable.TryLastKnownHostNowMs(engine.IsHost, out now))
             {
-                MpLog.LogError("[MP][tac] host clock became stale with pending actions; releasing immediately.");
+                // Same rule as QueueActivation's: a stale sample is still shared and is used as-is; only a peer
+                // that never had one at all releases its backlog, and it releases it rather than strand it.
+                MpLog.LogError("[MP][tac] no host clock sample with pending actions; releasing immediately.");
                 now = long.MaxValue;
             }
             while (_scheduledActivations.Count > 0 && ExecuteEpochReached(now, _scheduledActivations[0].ExecuteAt))
@@ -2665,7 +2684,8 @@ namespace Multiplayer.Tactical
                 MpLog.Log("[MP][tac] action=" + a.Id + " executeAt=" + a.ExecuteAt +
                           " actual=" + now + " lateness=" + late + "ms actor=" + a.Key);
                 ApplyActivate(a.Key, a.Guid, a.Target, a.Fumbled, a.Unresolved);
-                if (!PingTable.TryHostNowMs(engine.IsHost, out now)) now = long.MaxValue;
+                if (!PingTable.TryHostNowMs(engine.IsHost, out now) &&
+                    !PingTable.TryLastKnownHostNowMs(engine.IsHost, out now)) now = long.MaxValue;
             }
         }
 

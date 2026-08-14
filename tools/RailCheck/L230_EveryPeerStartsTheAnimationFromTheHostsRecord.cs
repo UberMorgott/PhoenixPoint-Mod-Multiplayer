@@ -269,8 +269,8 @@ namespace RailCheck
             scheduled.Clear();
             arrived.SetValue(null, -123f);
             byte op7 = (byte)sync.GetField("OpActivate", AllMembers).GetRawConstantValue();
-            byte op8 = (byte)sync.GetField("OpMoveActivate", AllMembers).GetRawConstantValue();
-            foreach (var op in new[] { op7, op8 })
+            // op 8 is retired (L445) — a trailing record on the dead number must be as inert as one on op 7.
+            foreach (var op in new byte[] { op7, 8 })
                 for (int repeat = 0; repeat < 2; repeat++)
                     apply.Invoke(null, new object[] { TrailingRecord(op, op == op7) });
             return scheduled.Count == 0 && (float)arrived.GetValue(null) == -123f;

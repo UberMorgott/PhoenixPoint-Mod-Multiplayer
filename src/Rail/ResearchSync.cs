@@ -480,21 +480,14 @@ namespace Multiplayer.Network.Sync
                 => CaptureIntent(__instance, element, OpInsertAt, position);
         }
 
-        /// <summary>
-        /// Sim gating (law 4b): the client's clock is NOT frozen, so its own hourly tick would add local
-        /// research progress (and locally complete research = run the reward chain twice). Skip the whole
-        /// native progression tick on a client in an active session — host deltas are the only research
-        /// progression source. Gates ALL factions: NPC research is frozen on the client until its
-        /// subsystem migrates (host-authoritative copies arrive with diplomacy/faction sync).
-        /// </summary>
-        [HarmonyPatch(typeof(Research), nameof(Research.Update))]
-        internal static class SimGatePatch
-        {
-            private static bool Prefix()
-            {
-                var engine = NetworkEngine.Instance;
-                return engine == null || !engine.IsActiveSession || engine.IsHost;
-            }
-        }
+        // The research SIM GATE used to live here as a prefix on Research.Update. It moved UP one level to
+        // the single funnel that calls it — ClientSimGate.ClientResearchGate on GeoFaction.UpdateResearch —
+        // because Research.Update is only HALF the tick: the same funnel also drains the research wallet
+        // (GeoFaction.cs:1414) and restamps NextResearchUpdate (:1416), and that stamp is NOT mirrored
+        // (rail-baseline.txt:544). Gating the inner half left the outer half free to run with a permanently
+        // stale stamp, which is how one completed research burned the WHOLE queue in a frame
+        // (Research.AddProgressToCurrentResearch propagates leftover points through every queued element,
+        // Research.cs:736-748). One gate, one level up, and NOT a second one here: two gates on the same
+        // tick can disagree, and the disagreement was the bug.
     }
 }

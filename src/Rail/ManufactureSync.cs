@@ -239,10 +239,24 @@ namespace Multiplayer.Network.Sync
                 // int points in the key (production accrues in integer steps → no float jitter → no churn).
                 sb.Append(def.Guid).Append(':').Append((int)qi.AccumulatedPoints).Append('|');
             }
+            // ManufacturableItems is NOT a [SerializeMember] (only _queue is) so the generic rail never
+            // carries it, and the producing chain (ManufactureResearchReward.GiveReward → AddAvailableItem)
+            // is host-only — a research unlock would otherwise never reach the client. Ride this surface:
+            // fold the unlocked def guids into the change key so an unlock alone triggers a send.
+            var available = new List<string>(manufacture.ManufacturableItems.Count);
+            sb.Append('#');
+            foreach (var mi in manufacture.ManufacturableItems)
+            {
+                var def = mi?.RelatedItemDef;
+                if (def == null) continue;
+                available.Add(def.Guid);
+                sb.Append(def.Guid).Append('|');
+            }
+
             string queueKey = sb.ToString();
             if (queueKey == _lastSentQueue) return;
             _lastSentQueue = queueKey;
-            Send(engine, EncodeSnapshot(Seq.Next(SurfaceIds.GeoManufacture), entries));
+            Send(engine, EncodeSnapshot(Seq.Next(SurfaceIds.GeoManufacture), entries, available));
         }
 
         private static void Unhook()
@@ -295,7 +309,15 @@ namespace Multiplayer.Network.Sync
                         float pts = r.ReadSingle();
                         entries.Add(new KeyValuePair<string, float>(guid, pts));
                     }
-                    ApplySnapshot(entries, seq);
+                    // Trailing unlocked-set block; absent in an old-format payload → null = don't reconcile.
+                    List<string> available = null;
+                    if (ms.Position < ms.Length)
+                    {
+                        int m = r.ReadUInt16();
+                        available = new List<string>(m);
+                        for (int i = 0; i < m; i++) available.Add(WireString.ReadKey(r));
+                    }
+                    ApplySnapshot(entries, available, seq);
                 }
             }
             catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] ManufactureSync inbound failed: " + ex); }
@@ -431,12 +453,25 @@ namespace Multiplayer.Network.Sync
 
         // ─── CLIENT: snapshot apply (inside SyncApplyScope, law 8) ─────────
 
-        private static void ApplySnapshot(List<KeyValuePair<string, float>> entries, uint seq)
+        private static void ApplySnapshot(List<KeyValuePair<string, float>> entries, List<string> available, uint seq)
         {
             var manufacture = PhoenixManufacture();
             if (manufacture == null) return;
             using (SyncApplyScope.Enter())
             {
+                // Unlocked set FIRST (research rewards / RemoveReward), so the queue rebuild below finds the
+                // real local ManufacturableItem instead of falling back to a def-rebuilt one. Both natives are
+                // idempotent (AddAvailableItem self-tests with Any(), :274; RemoveAvailableItem RemoveAll).
+                if (available != null)
+                {
+                    var repo = GameUtl.GameComponent<DefRepository>();
+                    foreach (var guid in available)
+                        if (repo?.GetDef(guid) is ItemDef def) manufacture.AddAvailableItem(def);
+                    foreach (var mi in manufacture.ManufacturableItems.ToList())
+                        if (mi?.RelatedItemDef != null && !available.Contains(mi.RelatedItemDef.Guid))
+                            manufacture.RemoveAvailableItem(mi);
+                }
+
                 // Rebuild the live queue IN PLACE (same List instance — Queue exposes _queue by reference) to
                 // the host's exact order. No native game logic runs: we build ManufactureQueueItems directly.
                 var queue = manufacture.Queue;
@@ -979,7 +1014,7 @@ namespace Multiplayer.Network.Sync
 
         // ─── Wire codecs (inner payloads) ───────────────────────────────────
 
-        private static byte[] EncodeSnapshot(uint seq, List<KeyValuePair<string, float>> entries)
+        private static byte[] EncodeSnapshot(uint seq, List<KeyValuePair<string, float>> entries, List<string> available)
         {
             using (var ms = new MemoryStream())
             using (var w = new BinaryWriter(ms, Encoding.UTF8))
@@ -991,6 +1026,10 @@ namespace Multiplayer.Network.Sync
                     w.Write(entries[i].Key ?? "");
                     w.Write(entries[i].Value);
                 }
+                // Trailing block: the unlocked manufacturable set (research rewards). Appended AFTER the
+                // queue block so an old decoder simply stops reading — the decoder guards on stream end.
+                w.Write((ushort)Math.Min(available.Count, ushort.MaxValue));
+                for (int i = 0; i < available.Count && i < ushort.MaxValue; i++) w.Write(available[i] ?? "");
                 return ms.ToArray();
             }
         }

@@ -103,6 +103,13 @@ namespace Multiplayer.Network.Sync
         private static bool _bindFailed;
         private static bool _mirrorSeen;
 
+        /// <summary>Armed by <see cref="ResetForReloadBoundary"/>, consumed by the first host projection after
+        /// it. It cannot be a <c>DiffEngine.ForceReemit</c> call inside the reset itself: SyncEngine runs
+        /// <c>AssignSync.ResetForReloadBoundary</c> BEFORE <c>DiffEngine.ResetForReloadBoundary</c>
+        /// (SyncEngineStub.cs:276-277), and the latter clears <c>_forcePrefixes</c> — the arm would be wiped
+        /// the same frame it was set.</summary>
+        private static bool _reemitPending;
+
         private static Dictionary<string, SpecializationDef> _specsByName;
         private static int _lastAppliedFingerprint, _lastAttemptedFingerprint, _lastUnresolved = -1, _retryTicks;
         private static bool _heldLogged;
@@ -142,6 +149,14 @@ namespace Multiplayer.Network.Sync
             _retryTicks = 0;
             _heldLogged = false;
             _mirrorSeen = false;
+            // THE CLEAR IS ONLY HALF THE CONTRACT. Clearing satisfies "empty at the boundary", but the very
+            // next host tick re-projects the whole table one line BEFORE the walk (SyncEngineStub.cs:157-159),
+            // so an HONEST post-boundary baseline (DiffEngine.cs:1000, same-level save transfer — a join)
+            // records the refilled table as "the clients already have this" and emits NOTHING. The client's
+            // transferred save carries no TFTV ModData, so its own cleared table never refills and the board
+            // freezes for the rest of the campaign. Re-announce the subtree instead; DiffEngine.cs:1006-1008
+            // keeps an armed prefix alive across a racing baseline.
+            _reemitPending = true;
         }
 
         internal static void Reset() => ResetForReloadBoundary();
@@ -287,6 +302,10 @@ namespace Multiplayer.Network.Sync
 
             ProjectIntDict(_h.Applied, State.AppliedStatLevel);
             ProjectIntDict(_h.Pending, State.PendingStatLevel);
+
+            // The other half of the boundary contract (see _reemitPending): announce the re-projected table
+            // once, AFTER DiffEngine's own boundary reset has run, so the baseline cannot swallow it.
+            if (_reemitPending) { _reemitPending = false; DiffEngine.ForceReemit(RootKey); }
         }
 
         private static void ProjectIntDict(FieldInfo field, Dictionary<int, int> mirror)
