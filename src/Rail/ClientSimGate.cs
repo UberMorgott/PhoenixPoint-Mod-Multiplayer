@@ -24,16 +24,19 @@ namespace Multiplayer.Network.Sync
     /// value itself changes. Skipping the ONE chokepoint keeps every hourly mutator silent while the
     /// clock keeps ticking; the coroutine stays scheduled by returning the same next-hour reschedule
     /// the native method would.
-    /// (Research progression has its own funnel gate below, <see cref="ClientResearchGate"/>: THIS gate
-    /// opens whenever the engine is unknown, and research cannot afford that window.)
+    /// (Research progression keeps its own funnel gate below, <see cref="ClientResearchGate"/>: this one
+    /// covers the hourly ENTRY, that one covers every other route into <c>UpdateResearch</c>.)
     /// </summary>
     [HarmonyPatch(typeof(GeoLevelController), "LevelHourlyUpdateCrt")]
     internal static class ClientSimGate
     {
         private static bool Prefix(Timing timing, ref NextUpdate __result)
         {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
+            // ONE predicate for every client refusal gate (L506). Solo/host/torn-down: native. The session
+            // term this gate used to carry let the WHOLE hourly sim — income, haven updates, base
+            // production, the research wallet drain, Manufacture.Update, recruit generation, aircraft
+            // repair — run locally on a client in the unknown window, which is the widest hole of the set.
+            if (!ClientAuthority.IsClient()) return true;
             __result = NextUpdate.After(TimeUtils.GetNextHour(timing));
             return false; // client: hourly sim is host-only; state arrives via the rail
         }
