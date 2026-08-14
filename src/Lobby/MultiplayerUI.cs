@@ -1788,6 +1788,9 @@ namespace Multiplayer.UI
             _gate?.Tick();
 
             var engine = NetworkEngine.Instance;
+            // Shout this session on the local wire while hosting, so a peer's browser lists it without
+            // anyone reading an address out loud. Self-throttling (2 s) and self-disposing when false.
+            Multiplayer.Util.LanBeacon.HostTick(engine?.IsActive == true && engine.IsHost);
             if (engine?.IsActive == true)
             {
                 engine.Update();

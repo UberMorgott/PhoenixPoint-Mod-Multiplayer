@@ -61,6 +61,49 @@ namespace Multiplayer.UI
             return text;
         }
 
+        /// <summary>
+        /// A bare square image cell (no sprite yet, no raycast) — the avatar cell every roster surface
+        /// puts left of the nickname. preserveAspect so a non-square Steam picture is letterboxed rather
+        /// than stretched; raycastTarget off because none of the three surfaces wants it to eat a click.
+        /// </summary>
+        public static Image CreateImage(GameObject parent, string name, Vector2 pos, Vector2 size,
+            Vector2? anchor = null)
+        {
+            var go = new GameObject(name);
+            go.transform.SetParent(parent.transform, false);
+            var rect = go.AddComponent<RectTransform>();
+            var a = anchor ?? new Vector2(0f, 0.5f);
+            rect.anchorMin = a;
+            rect.anchorMax = a;
+            rect.pivot = a;
+            rect.sizeDelta = size;
+            rect.anchoredPosition = pos;
+
+            var img = go.AddComponent<Image>();
+            img.raycastTarget = false;
+            img.preserveAspect = true;
+            return img;
+        }
+
+        /// <summary>
+        /// THE AVATAR REPAINT SEAM — one call from each per-frame row paint, and the whole of the
+        /// reactivity story for this feature. There is no event to raise and nothing to invalidate: the
+        /// roster paints already run every frame, so a picture that finishes downloading, or a peer that
+        /// joins, shows up on an ALREADY-OPEN lobby / player panel on the very next frame.
+        ///
+        /// The cell is INACTIVE while there is no picture (id 0 = a LAN / direct-IP peer, or Steam absent).
+        /// In a layout group an inactive child is skipped entirely, so those rows keep exactly the layout
+        /// they had before this cell existed.
+        /// </summary>
+        public static void PaintAvatar(Image cell, ulong steamId)
+        {
+            if (cell == null) return;
+            var sprite = Multiplayer.Transport.SteamProbe.Avatar(steamId);
+            if (!ReferenceEquals(cell.sprite, sprite)) cell.sprite = sprite;
+            var show = sprite != null;
+            if (cell.gameObject.activeSelf != show) cell.gameObject.SetActive(show);
+        }
+
         public static Button CreateButton(GameObject parent, string name, string label,
             Vector2 pos, Vector2 size, Vector2 anchor, Action onClick)
         {

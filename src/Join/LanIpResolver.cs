@@ -27,6 +27,10 @@ namespace Multiplayer.Util
         {
             public string Interface;
             public IPAddress Ip;
+            /// <summary>The IPv4 subnet mask, or null when the adapter reports none. Carried because the
+            /// only correct broadcast for this address is the SUBNET-DIRECTED one (LanBeacon), and the mask
+            /// is the one thing that says where this subnet ends.</summary>
+            public IPAddress Mask;
         }
 
         // CACHED, WITH A TTL — the lobby asks every frame and GetAllNetworkInterfaces is a syscall sweep,
@@ -61,7 +65,9 @@ namespace Multiplayer.Util
                         var b = a.GetAddressBytes();
                         if (b[0] == 127) continue;                 // loopback — reachable by nobody else
                         if (b[0] == 169 && b[1] == 254) continue;  // APIPA — a failed DHCP, not an address
-                        found.Add(new LocalAddress { Interface = ni.Name, Ip = a });
+                        IPAddress mask = null;
+                        try { mask = ua.IPv4Mask; } catch { }   // not every platform/adapter answers this
+                        found.Add(new LocalAddress { Interface = ni.Name, Ip = a, Mask = mask });
                     }
                 }
             }

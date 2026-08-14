@@ -542,6 +542,12 @@ namespace Multiplayer.Transport
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static void CallOpenInviteOverlay() => SteamInvite.OpenInviteOverlay();
 
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static Sprite CallAvatar(ulong steamId) => SteamAvatars.Get(steamId);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private static ulong CallLocalSteamId() => SteamClient.IsValid ? SteamClient.SteamId.Value : 0UL;
+
         /// <summary>True when local Steam is running. False — never a throw — when it is not, or when
         /// there is no Steam runtime in this process at all.</summary>
         internal static bool IsAlive()
@@ -612,6 +618,26 @@ namespace Multiplayer.Transport
             if (_unavailable) return;
             try { CallOpenInviteOverlay(); }
             catch (Exception e) { Latch(e); }
+        }
+
+        /// <summary>A peer's Steam profile picture, or NULL while it downloads / when there is no Steam.
+        /// Called per row per frame by the roster paints (a dictionary lookup after the first call), which
+        /// is what makes the badge appear on an ALREADY-OPEN screen the frame the download finishes.</summary>
+        internal static Sprite Avatar(ulong steamId)
+        {
+            if (_unavailable || steamId == 0) return null;
+            try { return CallAvatar(steamId); }
+            catch (Exception e) { Latch(e); return null; }
+        }
+
+        /// <summary>Our OWN SteamID64, or 0 with no Steam. The roster cannot supply it: the self-entry
+        /// carries <c>NetworkEngine.LocalSteamId</c>, which is a TRANSPORT handle (0 on DirectIP) and
+        /// deliberately not an identity — so the one surface that knows it is me asks Steam directly.</summary>
+        internal static ulong LocalSteamId()
+        {
+            if (_unavailable) return 0UL;
+            try { return CallLocalSteamId(); }
+            catch (Exception e) { Latch(e); return 0UL; }
         }
 
         /// <summary>Steam is not available in this process — ONE latch and ONE log for the whole run.

@@ -154,6 +154,7 @@ namespace Multiplayer.UI
         // pooled-row pencil had to re-ask on every click cannot be asked wrong here.
         private GameObject _selfCard;
         private Text _selfName;
+        private Image _selfAvatar;   // own Steam profile picture, left of the self card's nickname
         private Text _selfHostChip;
         private Text _selfStatus;      // local transfer/load line; hidden when there is nothing to say
 
@@ -179,6 +180,7 @@ namespace Multiplayer.UI
             public GameObject Go;
             public Image Tint;         // row backing plate: lit for the host's row, clear otherwise
             public Text Crown;         // col 1: host crown, blank on every other row
+            public Image Avatar;       // col 1b: Steam profile picture; INACTIVE (zero width) without one
             public Text NameLabel;     // col 2: nickname — FLEXES, so a long one stops clipping
             public Text StatusChip;    // col 3: the status IN WORDS ("READY" / "SEAT HELD" / progress)
             public Button WarnBtn;     // col 4: parity badge ("MODS ≠"); click → exact diff list
@@ -1000,6 +1002,16 @@ namespace Multiplayer.UI
             hlg.childForceExpandWidth = false;
             hlg.childForceExpandHeight = true;
             hlg.childAlignment = TextAnchor.MiddleLeft;
+
+            // Own Steam profile picture, left of the nickname — same square cell the roster rows carry,
+            // sized to the name line. Inactive until PaintAvatar has one, so the card is unchanged off Steam.
+            var selfAvatarW = nameH;
+            _selfAvatar = UiToolkit.CreateImage(top, "SelfAvatar", Vector2.zero,
+                new Vector2(selfAvatarW, selfAvatarW), new Vector2(0.5f, 0.5f));
+            var sale = LE(_selfAvatar.gameObject);
+            sale.minWidth = selfAvatarW; sale.preferredWidth = selfAvatarW; sale.flexibleWidth = 0;
+            sale.minHeight = selfAvatarW; sale.preferredHeight = selfAvatarW; sale.flexibleHeight = 0;
+            _selfAvatar.gameObject.SetActive(false);
 
             _selfName = UiToolkit.CreateText(top, "SelfName", Vector2.zero,
                 new Vector2(LobbyTheme.ScaledRosterNameWidth, nameH), "",
@@ -1860,7 +1872,7 @@ namespace Multiplayer.UI
         /// gate, the row paint and the display order — which is three chances for a rename to land on the
         /// wrong peer while each copy looks correct on its own.
         /// </summary>
-        private static bool IsMe(PeerListEntry p, NetworkEngine engine, System.Guid localGuid)
+        internal static bool IsMe(PeerListEntry p, NetworkEngine engine, System.Guid localGuid)
             => engine.IsHost ? p.IsHost : p.PlayerGuid == localGuid;
 
         // Rebuild/refresh the player rows from the unified lobby roster (host self-entry + clients).
@@ -1923,6 +1935,10 @@ namespace Multiplayer.UI
 
             row.Crown.text = p.IsHost ? HostCrown : "";
             row.Crown.color = held ? LobbyTheme.MutedText : LobbyTheme.Accent;
+
+            // The roster list never holds the local player (that is the self card), so every row here is
+            // someone else — isLocal: false.
+            UiToolkit.PaintAvatar(row.Avatar, PingTable.AvatarIdFor(engine.Session, engine, p, false));
 
             row.NameLabel.text = string.IsNullOrEmpty(p.Nickname)
                 ? (p.IsHost ? "Host" : FallbackName(p.SteamId, ref row.FallbackNameFor, ref row.FallbackName))
@@ -1990,6 +2006,10 @@ namespace Multiplayer.UI
             var show = me != null;
             if (_selfCard.activeSelf != show) _selfCard.SetActive(show);
             if (!show) return;
+
+            // isLocal: true — this card IS me, and it is the only surface allowed to fall back to the
+            // real Steam account id when the roster's self-entry carries only a transport handle.
+            UiToolkit.PaintAvatar(_selfAvatar, PingTable.AvatarIdFor(engine.Session, engine, me, true));
 
             _selfName.text = string.IsNullOrEmpty(me.Nickname)
                 ? (me.IsHost ? "Host" : FallbackName(me.SteamId, ref _selfFallbackFor, ref _selfFallbackName))
@@ -2116,6 +2136,19 @@ namespace Multiplayer.UI
             var crle = LE(crown.gameObject);
             crle.minWidth = crownW; crle.preferredWidth = crownW; crle.flexibleWidth = 0;
 
+            // (1b) AVATAR — the peer's Steam profile picture, immediately left of the nickname and built
+            // exactly like the crown cell beside it: one fixed square, minWidth AND preferredWidth pinned
+            // (see the paragraph above — preferredWidth alone is a cell that collapses). Starts INACTIVE
+            // and is toggled by UiToolkit.PaintAvatar, so a peer with no Steam picture costs no width at
+            // all and the row is the row it always was.
+            var avatarW = Mathf.RoundToInt(RowHeight) - LobbyTheme.Scale(4);
+            var avatar = UiToolkit.CreateImage(go, "Avatar", Vector2.zero, new Vector2(avatarW, avatarW),
+                new Vector2(0.5f, 0.5f));
+            var avle = LE(avatar.gameObject);
+            avle.minWidth = avatarW; avle.preferredWidth = avatarW; avle.flexibleWidth = 0;
+            avle.minHeight = avatarW; avle.preferredHeight = avatarW; avle.flexibleHeight = 0;
+            avatar.gameObject.SetActive(false);
+
             // (2) NICKNAME — the ONLY cell that gives up width, and the only one that has to be clipped.
             // preferredWidth is pinned to the same base minimum so the nickname's LENGTH stops inflating
             // the group's total preferred width (which is what dragged every other cell toward its
@@ -2234,7 +2267,7 @@ namespace Multiplayer.UI
 
             return new RosterRow
             {
-                Go = go, Tint = tint, Crown = crown, NameLabel = nameLabel, StatusChip = statusChip,
+                Go = go, Tint = tint, Crown = crown, Avatar = avatar, NameLabel = nameLabel, StatusChip = statusChip,
                 WarnBtn = warnBtn, Bars = bars, PingText = pingText,
                 ParityDiffs = "", PingShown = int.MinValue
             };

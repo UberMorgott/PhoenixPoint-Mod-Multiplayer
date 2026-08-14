@@ -57,6 +57,11 @@ namespace Multiplayer.UI
         // every native menu canvas on top of the lobby.
         private bool _ownsChrome;
 
+        // The LAN feed's version as of the rows currently drawn. Tick() compares against the live one, so a
+        // host that starts (or stops) shouting while this screen is ALREADY OPEN repaints it — nobody has
+        // to leave the browser and come back to see a session appear.
+        private int _lanVersion = -1;
+
         public bool IsVisible => _canvas != null && _canvas.gameObject.activeSelf;
 
         public NetworkGatePanel(MultiplayerUI owner)
@@ -322,7 +327,7 @@ namespace Multiplayer.UI
 
             var hdrH = LobbyTheme.ScaledSectionHeaderFontSize + pad / 2;
             var hdr = UiToolkit.CreateText(card, "FriendsHdr", Vector2.zero,
-                new Vector2(LobbyTheme.Scale(300), hdrH), "STEAM FRIENDS IN A SESSION",
+                new Vector2(LobbyTheme.Scale(300), hdrH), "SESSIONS ON STEAM AND THIS NETWORK",
                 LobbyTheme.ScaledSectionHeaderFontSize, TextAnchor.UpperLeft, new Vector2(0f, 1f));
             hdr.color = LobbyTheme.Accent;
             hdr.fontStyle = FontStyle.Bold;
@@ -384,17 +389,32 @@ namespace Multiplayer.UI
             // statics, no Facepunch assembly) faults. The probe answers "no Steam, no friends" instead.
             List<HostingFriend> friends = SteamProbe.Friends();
 
+            // THE SECOND FEED. A host on this wire shouts its own endpoint (LanBeacon) and every live
+            // beacon becomes a row in the SAME list — no LAN section, no second screen. Read once here so
+            // the empty-state below counts both feeds, and remembered so Tick() can tell when it moved.
+            _lanVersion = Multiplayer.Util.LanBeacon.Poll();
+            var lanSessions = Multiplayer.Util.LanBeacon.Snapshot();
+
             if (_friendsEmpty != null)
             {
+                var total = friends.Count + lanSessions.Count;
                 _friendsEmpty.text = !SteamProbe.IsAlive()
                     ? "Steam is not running — type an address or invite code above."
-                    : friends.Count == 0
-                        ? "No Steam friend is in a session right now."
+                    : total == 0
+                        ? "No Steam friend and no LAN session right now."
                         : "";
-                _friendsEmpty.gameObject.SetActive(friends.Count == 0);
+                _friendsEmpty.gameObject.SetActive(total == 0);
             }
 
-            var rowH = LobbyTheme.ScaledRowHeight;
+            // A LAN row is an ADDRESS, so its click is the pasted-address path verbatim — the same
+            // technology the row names, which is the rule L155 pins (no entry point silently changes
+            // transport). It carries no Steam identity because the beacon has none to carry.
+            for (int i = 0; i < lanSessions.Count; i++)
+            {
+                var address = lanSessions[i].Address;
+                AddSessionRow("Lan" + i, "LAN   " + address + "   —   JOIN", () => _owner.OnGateJoin(address));
+            }
+
             for (int i = 0; i < friends.Count; i++)
             {
                 var f = friends[i];
@@ -409,22 +429,29 @@ namespace Multiplayer.UI
                 var label = occupancy == null
                     ? f.Label + "   —   JOIN"
                     : f.Label + "   (" + occupancy + ")   —   JOIN";
-                var btn = UiToolkit.CreateButton(_friendsList, "Friend" + i,
-                    label, Vector2.zero,
-                    new Vector2(LobbyTheme.Scale(300), rowH), new Vector2(0f, 1f),
-                    () => _owner.OnGateJoinFriend(lobbyId, hostId, who));
-                var rle = LobbyPanel.LE(btn.gameObject);
-                rle.minHeight = rowH;
-                rle.flexibleHeight = 0;
-                // A persona name is arbitrary length and the label is an Overflow Text, so without a mask
-                // a long one draws straight past the row — the same clip the roster's nickname cell uses.
-                btn.gameObject.AddComponent<RectMask2D>();
-                var lbl = btn.GetComponentInChildren<Text>();
-                if (lbl != null)
-                {
-                    lbl.alignment = TextAnchor.MiddleLeft;
-                    lbl.fontSize = LobbyTheme.ScaledRowFontSize;
-                }
+                AddSessionRow("Friend" + i, label, () => _owner.OnGateJoinFriend(lobbyId, hostId, who));
+            }
+        }
+
+        /// <summary>One clickable session row. Both feeds draw through here, so a LAN row and a Steam row
+        /// are the same widget with the same styling and the same clip — the only difference is what the
+        /// click does.</summary>
+        private void AddSessionRow(string name, string label, System.Action onClick)
+        {
+            var rowH = LobbyTheme.ScaledRowHeight;
+            var btn = UiToolkit.CreateButton(_friendsList, name, label, Vector2.zero,
+                new Vector2(LobbyTheme.Scale(300), rowH), new Vector2(0f, 1f), onClick);
+            var rle = LobbyPanel.LE(btn.gameObject);
+            rle.minHeight = rowH;
+            rle.flexibleHeight = 0;
+            // A persona name is arbitrary length and the label is an Overflow Text, so without a mask
+            // a long one draws straight past the row — the same clip the roster's nickname cell uses.
+            btn.gameObject.AddComponent<RectMask2D>();
+            var lbl = btn.GetComponentInChildren<Text>();
+            if (lbl != null)
+            {
+                lbl.alignment = TextAnchor.MiddleLeft;
+                lbl.fontSize = LobbyTheme.ScaledRowFontSize;
             }
         }
 
@@ -456,6 +483,9 @@ namespace Multiplayer.UI
             // so this never runs twice.
             if (screen == Screen.Join && _friendsList != null && !_friendsList.activeSelf) RefreshFriends();
             _screen = screen;
+            // The discovery socket lives exactly as long as the screen that shows its rows — one bind while
+            // the browser is up, gone the moment it is not. Idempotent, so the repeated calls are free.
+            Multiplayer.Util.LanBeacon.Listen(screen == Screen.Join);
             if (_gateRoot != null) _gateRoot.SetActive(screen == Screen.Gate);
             if (_joinRoot != null) _joinRoot.SetActive(screen == Screen.Join);
 
@@ -473,6 +503,7 @@ namespace Multiplayer.UI
         public void Hide()
         {
             _screen = Screen.None;
+            Multiplayer.Util.LanBeacon.Listen(false);   // no socket outlives the screen that opened it
             if (_canvas != null) _canvas.gameObject.SetActive(false);
             ReleaseChrome();
         }
@@ -528,6 +559,10 @@ namespace Multiplayer.UI
             if (!IsVisible) return;
             if (_scaler != null) _scaler.matchWidthOrHeight = LobbyTheme.CurrentMatch;
             if (_screen == Screen.Join && UiToolkit.SubmittedThisFrame(_target)) Submit();
+            // REACTIVITY: repaint the OPEN browser when the LAN feed changes. Poll() is a dictionary sweep
+            // over at most LanBeacon.MaxEntries, and the rebuild only runs on the frame the set moved.
+            if (_screen == Screen.Join && _friendsList != null && _friendsList.activeSelf &&
+                Multiplayer.Util.LanBeacon.Poll() != _lanVersion) RefreshFriends();
         }
 
         // Restore the chrome ONLY if we are the panel that hid it. HideMenuChrome/RestoreMenuChrome are a

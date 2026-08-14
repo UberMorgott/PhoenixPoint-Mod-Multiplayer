@@ -204,10 +204,34 @@ namespace Multiplayer.Network
         public static int PingMsFor(SessionManager session, NetworkEngine engine, PeerListEntry entry)
         {
             if (session == null || entry == null) return -1;
-            var id = entry.IsHost && engine != null && !engine.IsHost && session.HostPeerId.HasValue
+            return session.Ping.GetPingMs(PeerIdFor(session, engine, entry));
+        }
+
+        /// <summary>The remap itself, as its own answer: the transport id THIS machine knows this row's
+        /// peer by. Split out of <see cref="PingMsFor"/> when the roster grew a second thing keyed by that
+        /// id (the Steam avatar), for the reason the block above already gives — the rule may exist once.</summary>
+        public static ulong PeerIdFor(SessionManager session, NetworkEngine engine, PeerListEntry entry)
+        {
+            if (session == null || entry == null) return 0UL;
+            return entry.IsHost && engine != null && !engine.IsHost && session.HostPeerId.HasValue
                 ? session.HostPeerId.Value
                 : entry.SteamId;
-            return session.Ping.GetPingMs(id);
+        }
+
+        /// <summary>
+        /// The SteamID64 whose PROFILE PICTURE this row shows, or 0 for a row that has none (a LAN /
+        /// direct-IP peer, or no Steam at all — the cell then takes no width).
+        ///
+        /// The local row is the one case <see cref="PeerIdFor"/> cannot answer: the self-entry carries
+        /// this machine's own transport handle, which is 0 off Steam and in any case is not an identity.
+        /// Only the surface that knows the row is ME may substitute the real account id, so it is asked
+        /// for here and nowhere else.
+        /// </summary>
+        public static ulong AvatarIdFor(SessionManager session, NetworkEngine engine, PeerListEntry entry, bool isLocal)
+        {
+            var id = PeerIdFor(session, engine, entry);
+            if (id == 0UL && isLocal) id = Multiplayer.Transport.SteamProbe.LocalSteamId();
+            return id;
         }
 
         // ─── Wire ────────────────────────────────────────────────────────────

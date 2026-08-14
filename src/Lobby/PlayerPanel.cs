@@ -94,7 +94,14 @@ namespace Multiplayer.UI
         /// keep on screen.</summary>
         private static int PingW => LobbyTheme.Scale(44);
         private static int StatusW => LobbyTheme.Scale(18);
-        private static int PanelW => Pad * 2 + NameW + Pad + PingW + Pad + StatusW;
+        /// <summary>The square Steam-avatar cell left of the name. A hair under the row so stacked
+        /// pictures do not touch.</summary>
+        private static int AvatarW => RowH - Pad;
+        /// <summary>Panel width WITH or WITHOUT the avatar column. This layout is absolute (no layout
+        /// group to skip an inactive child for us), so "zero width off Steam" has to be arithmetic: a
+        /// roster where nobody has a Steam id gets exactly the panel it always had.</summary>
+        private static int PanelW(bool avatars) =>
+            Pad * 2 + (avatars ? AvatarW + Pad : 0) + NameW + Pad + PingW + Pad + StatusW;
         internal static int NameFont => LobbyTheme.Scale(13);
         internal static int NumberFont => LobbyTheme.Scale(11);
 
@@ -110,12 +117,17 @@ namespace Multiplayer.UI
         private sealed class Row
         {
             public GameObject Go;
+            public Image Avatar;       // Steam profile picture, left of the name; hidden without one
             public Text Name;
             public Text Status;
             public Text Number;        // "123 ms" on hover, or the em-dash when there is no sample
             public RectTransform PingCell;
             public Image[] Bars;
         }
+
+        /// <summary>Does ANY row in the current roster have a Steam picture to draw? One answer for the
+        /// whole panel, so the columns line up instead of jittering per row.</summary>
+        private bool _avatarCol;
 
         private RectTransform _canvasRect;
         private GameObject _root;
@@ -188,6 +200,20 @@ namespace Multiplayer.UI
             if (!_root.activeSelf) _root.SetActive(true);
 
             var roster = session.GetLobbyRoster();
+
+            // Resolve every row's avatar id ONCE per frame: the answer decides the column (and therefore
+            // the panel width) as well as what each row draws, and asking twice could disagree.
+            var localGuid = ClientIdentity.PlayerGuid;
+            if (_avatarIds.Length < roster.Count) _avatarIds = new ulong[roster.Count];
+            bool avatars = false;
+            for (int i = 0; i < roster.Count; i++)
+            {
+                _avatarIds[i] = PingTable.AvatarIdFor(session, engine, roster[i],
+                    LobbyPanel.IsMe(roster[i], engine, localGuid));
+                if (_avatarIds[i] != 0UL) avatars = true;
+            }
+            _avatarCol = avatars;
+
             EnsureRows(roster.Count);
             Place(anchor, roster.Count);
 
@@ -198,14 +224,21 @@ namespace Multiplayer.UI
                 bool used = i < roster.Count;
                 if (row.Go.activeSelf != used) row.Go.SetActive(used);
                 if (!used) continue;
-                Paint(row, roster[i], session, engine, mouse);
+                Paint(row, roster[i], session, engine, mouse, _avatarIds[i]);
             }
         }
 
+        /// <summary>Per-frame scratch for the resolved avatar ids — grown, never reallocated per frame.</summary>
+        private ulong[] _avatarIds = new ulong[0];
+
         /// <summary>Name, meter, glyph. The one method that turns a roster row into pixels.</summary>
         private void Paint(Row row, PeerListEntry entry, SessionManager session, NetworkEngine engine,
-                           Vector2 mouse)
+                           Vector2 mouse, ulong avatarId)
         {
+            // THE REPAINT SEAM on this surface: Sync runs every frame, so a picture that finishes
+            // downloading mid-battle lands on the already-open panel on the next frame.
+            UiToolkit.PaintAvatar(row.Avatar, avatarId);
+
             row.Name.text = string.IsNullOrEmpty(entry.Nickname) ? "Player" : entry.Nickname;
             row.Name.color = entry.Paused ? LobbyTheme.MutedText : LobbyTheme.BodyText;
 
@@ -304,7 +337,7 @@ namespace Multiplayer.UI
         /// </summary>
         private void Place(RectTransform anchor, int rowCount)
         {
-            var size = new Vector2(PanelW, Pad * 2 + RowH * Mathf.Max(rowCount, 1));
+            var size = new Vector2(PanelW(_avatarCol), Pad * 2 + RowH * Mathf.Max(rowCount, 1));
             _rootRect.sizeDelta = size;
 
             anchor.GetWorldCorners(_corners);
@@ -357,7 +390,9 @@ namespace Multiplayer.UI
         /// rows are deactivated by the caller. Rebuilt only when the seat count changes.</summary>
         private void EnsureRows(int count)
         {
-            var signature = count.ToString();
+            // The avatar column is part of the signature: turning it on shifts every cell right, and that
+            // is exactly the "seat count changed" kind of event this rebuild exists for.
+            var signature = count + (_avatarCol ? "a" : "");
             if (signature == _signature) return;
             _signature = signature;
 
@@ -366,7 +401,20 @@ namespace Multiplayer.UI
             {
                 var rt = _rows[i].Go.GetComponent<RectTransform>();
                 rt.anchoredPosition = new Vector2(Pad, -(Pad + RowH * i));
+                LayoutRow(_rows[i]);
             }
+        }
+
+        /// <summary>Place the row's cells left to right, with or without the avatar column. Absolute
+        /// positions (this panel has no layout group), so the shift is one x offset applied to the three
+        /// cells that follow the picture.</summary>
+        private void LayoutRow(Row row)
+        {
+            int x = _avatarCol ? AvatarW + Pad : 0;
+            row.Avatar.rectTransform.anchoredPosition = Vector2.zero;
+            row.Name.rectTransform.anchoredPosition = new Vector2(x, 0f);
+            row.PingCell.anchoredPosition = new Vector2(x + NameW + Pad, 0f);
+            row.Status.rectTransform.anchoredPosition = new Vector2(x + NameW + Pad + PingW + Pad, 0f);
         }
 
         private Row CreateRow(int index)
@@ -375,7 +423,12 @@ namespace Multiplayer.UI
             go.transform.SetParent(_root.transform, false);
             var rt = go.AddComponent<RectTransform>();
             rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0f, 1f);
-            rt.sizeDelta = new Vector2(PanelW - Pad * 2, RowH);
+            rt.sizeDelta = new Vector2(PanelW(true) - Pad * 2, RowH);
+
+            // The avatar cell. Position comes from LayoutRow (it moves with the column), and the cell is
+            // inactive until UiToolkit.PaintAvatar has a picture for this row.
+            var avatar = UiToolkit.CreateImage(go, "Avatar", Vector2.zero, new Vector2(AvatarW, AvatarW));
+            avatar.gameObject.SetActive(false);
 
             var name = UiToolkit.CreateText(go, "Name", Vector2.zero, new Vector2(NameW, RowH), "",
                 NameFont, TextAnchor.MiddleLeft, new Vector2(0f, 0.5f));
@@ -403,7 +456,8 @@ namespace Multiplayer.UI
             number.raycastTarget = false;
             status.raycastTarget = false;
 
-            return new Row { Go = go, Name = name, Status = status, Number = number, PingCell = cell, Bars = bars };
+            return new Row { Go = go, Avatar = avatar, Name = name, Status = status, Number = number,
+                             PingCell = cell, Bars = bars };
         }
     }
 }
