@@ -481,8 +481,11 @@ namespace Multiplayer.Network.Sync
 
         private static bool Prefix(GeoFaction __instance)
         {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            // ONE predicate for every client refusal gate (L506). Solo/host/torn-down: native. The session
+            // term this gate used to carry opened it in the UNKNOWN window, and that is precisely when the
+            // funnel fires on a client: _automanufactureVehicles is seeded in OnLevelStart:392, on the save
+            // the client just took from the host, so the first RegisterVehicle is already inside it.
+            if (!ClientAuthority.IsClient()) return true;
 
             // Never silent (the dominant bug class): name the faction whose replacement order was refused.
             // Log-once per faction — the funnel fires per vehicle registered or unregistered.

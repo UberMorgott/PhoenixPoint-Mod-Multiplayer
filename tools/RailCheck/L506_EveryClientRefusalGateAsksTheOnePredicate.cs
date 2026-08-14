@@ -61,6 +61,7 @@ namespace RailCheck
             typeof(ClientResearchGate),
             typeof(HavenResearchGate),
             typeof(FacilityPowerGate),
+            typeof(AutomanufactureGate),
         };
 
         /// <summary>Gates that legitimately still read the engine themselves, each for a stated reason. This
@@ -88,7 +89,7 @@ namespace RailCheck
             "ActorDamageClientGate", "AccumulationClientGate", "FumbleCheckGate",
             "ClientAiGate", "ClientAiEvaluationSeamGate", "MissionCancelGate", "GeoscapeEventRaiseGate",
             // not yet converted — steps 2..5
-            "AutomanufactureGate", "ClientSimGate", "EquipStorageGate",
+            "ClientSimGate", "EquipStorageGate",
             "VehicleArrivalGate", "SiteExploredOutcomeGate",
             "FactionSpawnerGestureGate", "VehicleGestureGate", "CameraAbilityHintGate",
             "TacLaunchGate", "ClientDeployGate",
