@@ -33,7 +33,8 @@ namespace Multiplayer.Network.Sync
     /// discards it, so nothing dereferences a blocked call.
     ///
     /// CLOSED BY DEFAULT, and it never consults <c>IsActiveSession</c> — the same argument
-    /// <see cref="ClientResearchGate"/> records. The client's very first reach into this funnel is
+    /// <see cref="ClientResearchGate"/> records, now stated once in <see cref="ClientAuthority"/>.
+    /// The client's very first reach into this funnel is
     /// GeoPhoenixFaction:341 at level start, i.e. inside the UNKNOWN window right after the save transfer
     /// (<c>Session.HostPeerId</c> momentarily unset), and ONE tick there re-rolls every haven of the
     /// faction. A peer whose engine exists and is not the host is a CLIENT, session predicate or not; solo
@@ -64,8 +65,10 @@ namespace Multiplayer.Network.Sync
 
         private static bool Prefix(GeoFaction owner)
         {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || engine.IsHost) return true; // solo/host: native — see "CLOSED BY DEFAULT"
+            // ONE predicate for every client refusal gate (L506). Solo/host/torn-down: native — see
+            // "CLOSED BY DEFAULT". The IsActive term ClientAuthority adds is what keeps a SOLO campaign
+            // native after a lobby back-out: Shutdown leaves Instance non-null with IsHost=false.
+            if (!ClientAuthority.IsClient()) return true;
 
             // Diagnostics only — never let a log path decide whether the gate holds (and RailCheck L480
             // invokes this prefix outside Unity, where the logger has no runtime under it).

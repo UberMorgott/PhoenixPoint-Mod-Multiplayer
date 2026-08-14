@@ -514,10 +514,12 @@ namespace Multiplayer.Network.Sync
     /// <c>engine == null || !engine.IsActiveSession</c> — i.e. it opened precisely in the UNKNOWN window
     /// (mid-load, mission boundary, a <c>Session.HostPeerId</c> that is momentarily unset), which is the
     /// only window in which a client could ever have run this. This gate never consults
-    /// <c>IsActiveSession</c>: a peer whose engine exists and is not the host is a CLIENT, session
-    /// predicate or not, and when the engine is gone entirely the level-scoped latch below still refuses
-    /// on the level this peer was last seen playing as a client on. Solo is unaffected — a solo campaign
-    /// has no engine and was never latched. Host is fully native (and clears the latch on sight).
+    /// <c>IsActiveSession</c>: it asks <see cref="ClientAuthority.IsClient"/>, the one predicate every
+    /// client refusal gate asks — a peer whose engine is LIVE and is not the host is a CLIENT, session
+    /// predicate or not. When the engine is gone the level-scoped latch below still refuses on the level
+    /// this peer was last seen playing as a client on. Solo is unaffected: a solo campaign has no live
+    /// engine, and (the fix that came with ClientAuthority) neither does one whose engine was
+    /// <c>Shutdown</c> but not <c>TearDown</c>. Host is fully native.
     ///
     /// Latch shape borrowed from <c>SessionEnd.InProgress</c>: a Level, not a bool. A bool would survive a
     /// return-to-menu and freeze research in a later SOLO campaign; keyed on the level it self-clears with
@@ -553,12 +555,16 @@ namespace Multiplayer.Network.Sync
 
         private static bool Prefix(GeoFaction __instance)
         {
-            var engine = NetworkEngine.Instance;
-            if (engine != null && engine.IsHost) { _clientLevel = null; return true; } // host: fully native
-
-            if (engine != null) _clientLevel = CurrentLevel() ?? _clientLevel;          // client, latch the level
+            // ONE predicate for every client refusal gate (L506). It adds the IsActive term this gate used
+            // to lack, which is the SOLO fix: Shutdown() (NetworkEngine.cs:246) leaves Instance non-null
+            // with IsHost=false, so "engine != null" alone latched — and then FROZE RESEARCH — in a
+            // single-player campaign started after backing out of the lobby.
+            if (ClientAuthority.IsClient()) _clientLevel = CurrentLevel() ?? _clientLevel; // latch the level
             else if (_clientLevel == null || !ReferenceEquals(CurrentLevel(), _clientLevel))
-                return true;                                                            // solo: native
+            {
+                _clientLevel = null;   // self-clearing: the latched level is gone, so is the refusal
+                return true;   // host, solo, or a torn-down engine on a level nobody played as a client on
+            }
 
             // Diagnostics only — never let a log path decide whether the gate holds (and RailCheck L451
             // invokes this prefix outside Unity, where Debug.Log has no runtime under it).
@@ -587,11 +593,10 @@ namespace Multiplayer.Network.Sync
                 }
                 // The evidence line the RCA asked for: the OLD predicate (engine==null || !IsActiveSession)
                 // would have let this through. If this prints, the unknown window is real and observed.
-                if (!_loggedWindow && (engine == null || !engine.IsActiveSession))
+                if (!_loggedWindow && ClientAuthority.InUnknownWindow())
                 {
                     _loggedWindow = true;
-                    MpLog.Log("[MP][research] ClientResearchGate WINDOW — engine=" +
-                              (engine == null ? "null" : "present,IsActiveSession=false") +
+                    MpLog.Log("[MP][research] ClientResearchGate WINDOW — IsActiveSession reads false" +
                               ": the previous Research.Update gate would have been OPEN here and the client " +
                               "would have cascaded its whole research queue");
                 }

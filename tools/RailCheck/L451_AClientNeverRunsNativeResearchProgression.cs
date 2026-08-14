@@ -135,11 +135,13 @@ namespace RailCheck
             var prefix = typeof(ClientResearchGate).GetMethod("Prefix", All);
             var instance = typeof(NetworkEngine).GetProperty("Instance", All);
             var isHost = typeof(NetworkEngine).GetProperty("IsHost", All);
-            if (prefix == null || instance?.GetSetMethod(true) == null || isHost?.GetSetMethod(true) == null)
+            var isActive = typeof(NetworkEngine).GetProperty("IsActive", All);
+            if (prefix == null || instance?.GetSetMethod(true) == null || isHost?.GetSetMethod(true) == null ||
+                isActive?.GetSetMethod(true) == null)
             {
-                yield return "L451 premise-changed: ClientResearchGate.Prefix, NetworkEngine.Instance or " +
-                             "NetworkEngine.IsHost cannot be driven reflectively any more, so the behavioural " +
-                             "arm below proves nothing.";
+                yield return "L451 premise-changed: ClientResearchGate.Prefix, NetworkEngine.Instance, " +
+                             "NetworkEngine.IsActive or NetworkEngine.IsHost cannot be driven reflectively any " +
+                             "more, so the behavioural arm below proves nothing.";
                 yield break;
             }
 
@@ -149,6 +151,10 @@ namespace RailCheck
             {
                 var engine = (NetworkEngine)FormatterServices.GetUninitializedObject(typeof(NetworkEngine));
                 instance.SetValue(null, engine);
+                // LIVE engine, no Session: IsActiveSession still reads false (Session.HostPeerId unset),
+                // which is exactly the unknown window the RCA named — but the engine itself is up, which is
+                // what tells a client apart from a Shutdown() husk sitting in front of a solo campaign.
+                isActive.SetValue(engine, true);
 
                 isHost.SetValue(engine, false);
                 if ((bool)prefix.Invoke(null, new object[] { null }))

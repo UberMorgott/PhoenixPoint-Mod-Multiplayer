@@ -430,6 +430,7 @@ namespace RailCheck
             Add(laws, () => L500_AStructuralCreateWiresOnlyAfterItsValuesLand.Check());
             Add(laws, () => L501_ARefusalNoticeIsThePlayersSentenceSaidOnce.Check());
             Add(laws, () => L505_ADerivedSetterNeverRidesTheWire.Check(game));
+            Add(laws, () => L506_EveryClientRefusalGateAsksTheOnePredicate.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -477,8 +478,8 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 328;
-        private const string ExpectedExecutionIdentityDigest = "f0bcad66301e6c73635a7b7e367b7d01fe8ae3b0b31faf350f95f03aebcf4be6";
+        private const int ExpectedLawRegistrations = 329;
+        private const string ExpectedExecutionIdentityDigest = "7cbc91c1e57ebb1bdb707c9aa0ad4c207f12fb40e5cfe86c5ce53699f74a4455";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

@@ -120,11 +120,13 @@ namespace RailCheck
             var prefix = typeof(HavenResearchGate).GetMethod("Prefix", All);
             var instance = typeof(NetworkEngine).GetProperty("Instance", All);
             var isHost = typeof(NetworkEngine).GetProperty("IsHost", All);
-            if (prefix == null || instance?.GetSetMethod(true) == null || isHost?.GetSetMethod(true) == null)
+            var isActive = typeof(NetworkEngine).GetProperty("IsActive", All);
+            if (prefix == null || instance?.GetSetMethod(true) == null || isHost?.GetSetMethod(true) == null ||
+                isActive?.GetSetMethod(true) == null)
             {
-                yield return "L480 premise-changed: HavenResearchGate.Prefix, NetworkEngine.Instance or " +
-                             "NetworkEngine.IsHost cannot be driven reflectively any more, so the behavioural " +
-                             "arm below proves nothing.";
+                yield return "L480 premise-changed: HavenResearchGate.Prefix, NetworkEngine.Instance, " +
+                             "NetworkEngine.IsActive or NetworkEngine.IsHost cannot be driven reflectively any " +
+                             "more, so the behavioural arm below proves nothing.";
                 yield break;
             }
 
@@ -134,6 +136,10 @@ namespace RailCheck
             {
                 var engine = (NetworkEngine)FormatterServices.GetUninitializedObject(typeof(NetworkEngine));
                 instance.SetValue(null, engine);
+                // LIVE engine, no Session: IsActiveSession still reads false, i.e. the unknown window right
+                // after the save transfer — but the engine is UP, which is what separates a real client from
+                // a Shutdown() husk in front of a solo campaign (ClientAuthority's IsActive term).
+                isActive.SetValue(engine, true);
 
                 isHost.SetValue(engine, false);
                 if ((bool)prefix.Invoke(null, new object[] { null }))
