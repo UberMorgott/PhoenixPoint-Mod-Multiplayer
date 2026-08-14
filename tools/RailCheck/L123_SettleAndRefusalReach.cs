@@ -277,9 +277,25 @@ namespace RailCheck
                 // single player cannot produce a second commander, so vanilla has no control to grey and the
                 // player is left with a soldier that wound up and cancelled for no visible reason (measured:
                 // the reject nudge reached the client's log and never its screen, 22:28:30). The notify bit is
-                // computed per refusal (ReferenceEquals(refusal, BusyRefusal)), so every OTHER arm of Validate
-                // — the game's own ability gate, AP, WP, target-not-offered — still crosses quietly.
+                // computed per refusal (ReferenceEquals against BusyRefusal / TargetNotOfferedRefusal), so
+                // every OTHER arm of Validate — the game's own ability gate, AP, WP — still crosses quietly.
+                //
+                // TargetNotOfferedRefusal is the second arm, and it meets the same test: the client's
+                // targeting UI drew that target because the client's OWN GetTargets() published it, so on
+                // that peer vanilla had nothing to grey. The refusal exists ONLY because the two boards
+                // disagree, which single player cannot produce (live 2026-08-14 21:40:34 / 21:41:15: two
+                // aimed orders died into the host's log while the player watched a wind-up and a cancel).
                 "Multiplayer.Tactical.TacticalCommandSync.HandleActivate",
+                // Same test, geoscape side. ExploreSiteAbility.GetDisabledStateInternal:24 tests ONLY
+                // Units.Any(), and "already exploring" lives nowhere but ActivateInternal:12's silent
+                // `if (!IsExploringSite)` — so the explore button is never greyed and the engine eats the
+                // click. Single player survives that because the player is watching his own spinner; a client
+                // whose mirror says NOT exploring has no spinner and no word (live 2026-08-14: five refused
+                // explore clicks on one aircraft, 21:44:12 → 22:09:42, plus a sixth on the inspected site at
+                // 22:19:01). Its own call site, so this cannot widen into the whole vehicle family — every
+                // other vehicle refusal (not docked, cannot redirect, already parked, no crew) still crosses
+                // quietly through VehicleSync.Reject, and those ARE greyed by the game's own gates.
+                "Multiplayer.Network.Sync.VehicleSync.RejectAndNotify",
                 // The give-up arm of the SAME hold L146's entry is about, one ceiling later. An order held
                 // behind its own peer's previous one is a co-op-only object: it exists because that peer plays
                 // speculatively and is a whole order ahead of the host's presentation, which single player

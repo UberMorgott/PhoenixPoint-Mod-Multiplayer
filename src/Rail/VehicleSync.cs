@@ -90,6 +90,35 @@ namespace Multiplayer.Network.Sync
         private static void Reject(ulong peer, string vehicleRef, string why) =>
             IntentRail.Reject(SurfaceIds.GeoVehicleIntent, peer, (vehicleRef ?? "V#?") + " — " + why, Scope(vehicleRef));
 
+        /// <summary>The SAME reject, but PUT ON THE PLAYER'S SCREEN — a SEPARATE call site on the notifying
+        /// overload precisely so L123's allowlist covers this one arm and cannot widen into the whole vehicle
+        /// family (the EquipSync.RejectAndNotify precedent, EquipSync.cs:1189). Reached only from
+        /// <see cref="HandleExploreSite"/>'s two mirror-disagreement arms — see the reason consts.</summary>
+        private static void RejectAndNotify(ulong peer, string vehicleRef, string why) =>
+            IntentRail.Reject(SurfaceIds.GeoVehicleIntent, peer, (vehicleRef ?? "V#?") + " — " + why,
+                              true, Scope(vehicleRef));
+
+        /// <summary>THE TWO EXPLORE REFUSALS VANILLA HAS NO CONTROL TO GREY, named so the handler can decide
+        /// the notify bit by IDENTITY (the <c>BusyRefusal</c> pattern, TacticalCommandSync.cs:1752) instead of
+        /// by re-matching text after concatenation. <c>ExploreSiteAbility.GetDisabledStateInternal</c>:24 tests
+        /// ONLY <c>Units.Any()</c>, and "already exploring" is enforced nowhere but
+        /// <c>ActivateInternal</c>:12's silent <c>if (!IsExploringSite)</c> — so the button stays LIT and the
+        /// engine swallows the click. In single player that is harmless: the player is looking at his own
+        /// spinner. On a client whose mirror says NOT exploring there is no spinner to look at, which is the
+        /// co-op-invented half — live session 2026-08-14, peer 2 clicked explore on V#1 five times between
+        /// 21:44:12 and 22:09:42 and the host refused every one into its own log alone.</summary>
+        internal const string AlreadyExploringReason = "already exploring that site — nothing to order";
+
+        internal const string NotExplorableReason =
+            "the aircraft's current site cannot be explored (no site, nothing to find, or already inspected) — stale mirror";
+
+        /// <summary>WHICH vehicle refusal earns the player's screen — pure so RailCheck L485 can drive the REAL
+        /// decision instead of a copy that can agree with itself while the handler disagrees. True for exactly
+        /// the two arms above; every other refusal (not docked, cannot redirect, already parked, no crew,
+        /// nothing that can explore) is one the game's OWN gate greys, so a modal for it would be noise.</summary>
+        internal static bool ShouldNotify(string why) =>
+            ReferenceEquals(why, AlreadyExploringReason) || ReferenceEquals(why, NotExplorableReason);
+
         // ─── THE ONE VALIDATOR (pure — RailCheck L32 drives it) ─────────────
 
         /// <summary>Every fact an op is allowed to be validated against: all of it is either REPLICATED
@@ -152,11 +181,10 @@ namespace Multiplayer.Network.Sync
                         return "slot count off by " + f.SlotCountDelta + " — stale mirror or def/mod mismatch";
                     return null;
                 case OpExploreSite:
-                    if (!f.SiteExplorable)
-                        return "the aircraft's current site cannot be explored (no site, nothing to find, or already inspected) — stale mirror";
+                    if (!f.SiteExplorable) return NotExplorableReason;
                     if (!f.CanExploreSites) return "this aircraft carries nothing that can explore a site";
                     if (!f.HasCrew) return "no soldiers aboard — the exploration gesture needs a crew";
-                    if (f.AlreadyExploring) return "already exploring that site — nothing to order";
+                    if (f.AlreadyExploring) return AlreadyExploringReason;
                     return null;
                 default:
                     return "op " + op + " is registered on the vehicle surface but has no validator";
@@ -530,7 +558,17 @@ namespace Multiplayer.Network.Sync
                     HasCrew = vehicle != null && vehicle.Units.Any(),
                     AlreadyExploring = vehicle != null && vehicle.IsExploringSite,
                 });
-                if (why != null) { Reject(senderPeerId, vehicleRef, "explore: " + why); return; }
+                if (why != null)
+                {
+                    // The two mirror-disagreement arms get the SCREEN, the rest keep the quiet form (no crew /
+                    // nothing that can explore ARE greyed by GetDisabledStateInternal:24, so vanilla already
+                    // said it). Identity, not text — `why` is the const itself here, before concatenation.
+                    if (ShouldNotify(why))
+                        RejectAndNotify(senderPeerId, vehicleRef, "explore: " + why);
+                    else
+                        Reject(senderPeerId, vehicleRef, "explore: " + why);
+                    return;
+                }
 
                 vehicle.StartExploringCurrentSite();
                 MpLog.Log("[MP][vehicle] HOST intent APPLIED op=exploreSite " + vehicleRef + " site=" +

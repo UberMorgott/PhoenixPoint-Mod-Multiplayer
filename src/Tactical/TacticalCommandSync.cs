@@ -1751,6 +1751,22 @@ namespace Multiplayer.Tactical
         internal const string BusyRefusal =
             "that actor is already executing an ability — another peer commanded it first (first-to-act-wins)";
 
+        /// <summary>THE OTHER REFUSAL WITH NOTHING TO GREY, named for the same reason <see cref="BusyRefusal"/>
+        /// is: the notify bit is decided by IDENTITY at the handler. The client's targeting UI drew this target
+        /// because the client's OWN <c>GetTargets()</c> published it — so on that peer vanilla had no control to
+        /// disable, and the refusal exists only because the two boards disagree, which single player cannot
+        /// produce. Live session 2026-08-14, 21:40:34 and 21:41:15: two aimed orders (Soldier_6, Soldier_4)
+        /// died into the host's log while the player saw a wind-up and a cancel.</summary>
+        internal const string TargetNotOfferedRefusal =
+            "the chosen target is not one this ability offers on the host — the two peers disagree " +
+            "about the board, and the host's own target list is what an order may name";
+
+        /// <summary>WHICH command refusal earns the player's screen — pure so RailCheck L485 can drive the REAL
+        /// decision. True for exactly the two co-op-invented arms; the game's own ability gate, AP and WP are
+        /// refusals vanilla expresses by DISABLING the control, and a modal per click for those is noise.</summary>
+        internal static bool ShouldNotify(string refusal) =>
+            ReferenceEquals(refusal, BusyRefusal) || ReferenceEquals(refusal, TargetNotOfferedRefusal);
+
         internal static string Validate(bool actorFound, bool actorAlive, bool actorIsPlayerControlled,
                                         bool factionIsPlayingTurn, bool abilityFound, bool abilityIsRider,
                                         bool actorBusy, string abilityDisabledReason, bool targetIsOffered,
@@ -1781,8 +1797,7 @@ namespace Multiplayer.Tactical
             // against the ability's own set (capacity is computed locally, VehicleComponent.IsFull:37). This
             // arm makes the game's OWN enumeration the authority for the choice as well as for its existence.
             if (!targetIsOffered)
-                return "the chosen target is not one this ability offers on the host — the two peers disagree " +
-                       "about the board, and the host's own target list is what an order may name";
+                return TargetNotOfferedRefusal;
             if (actionPoints < actionPointCost)
                 return "not enough AP: " + actionPoints.ToString("0.##") + " left, " +
                        actionPointCost.ToString("0.##") + " needed";
@@ -2248,10 +2263,12 @@ namespace Multiplayer.Tactical
                 // refusal that leaves the player with a dead gesture and no other feedback — "another peer
                 // already took this soldier" is the textbook case, and it was the one arriving silently: the
                 // reason reached the client's LOG and never its screen, so the second player saw a wind-up,
-                // a cancel and no word. Every other arm keeps the quiet form (vanilla greys those controls).
+                // a cancel and no word. TargetNotOfferedRefusal joined it for the same reason (see its doc):
+                // the client's own GetTargets published that target, so vanilla greyed nothing on that peer.
+                // Every other arm keeps the quiet form (vanilla greys those controls).
                 IntentRail.Reject(SurfaceIds.TacCommandIntent, senderPeerId,
                                   "command for " + SafeActorName(actor) + ": " + refusal,
-                                  ReferenceEquals(refusal, BusyRefusal));
+                                  ShouldNotify(refusal));
                 // Snap his speculative local play back — but only if the actor is idle HERE. If it is busy, the
                 // command that won is still running and its own end-of-action settle is the corrector; a settle
                 // taken mid-flight would ship a position the host itself is about to leave.
