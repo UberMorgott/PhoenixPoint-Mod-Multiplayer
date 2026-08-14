@@ -88,6 +88,22 @@ namespace Multiplayer.Network.Sync
             // commit a stale UI→model flush inside CleanupView and NRE the level-switch coroutine
             // (carried over from 4f0b5b5, whose own copy of this check targeted a gate that no longer exists).
             if (SessionEnd.InProgress) return false;
+            // ONE predicate for every client refusal gate (L506). The client arm was already "never, apply
+            // or no apply"; what the session term still bought it was an OPEN unknown window — engine live,
+            // not host, Session.HostPeerId momentarily unset — in which an open equip screen flushed its
+            // pre-transfer widget lists straight into the faction's storage. Nothing is lost by refusing:
+            // this is a UI→MODEL write-back, so the model simply stays as the rail left it.
+            if (ClientAuthority.IsClient()) return false;
+            return HostOrSolo();
+        }
+
+        /// <summary>The HOST/SOLO half, unchanged to the character. It lives in its own method so the client
+        /// REFUSAL above is the whole of <c>Prefix</c> and L506's IL sweep reads one predicate and no engine:
+        /// this arm is not a client test at all, it is the apply-time host guard the 2026-07-18 RCA bought,
+        /// and expressing it through the negated client predicate is precisely the mistake that would let the
+        /// host revert a delta it had just applied.</summary>
+        private static bool HostOrSolo()
+        {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true; // solo: the screen owns the model
             return engine.IsHost && !SyncApplyScope.Active;

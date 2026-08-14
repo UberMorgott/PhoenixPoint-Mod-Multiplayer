@@ -36,7 +36,11 @@ namespace RailCheck
     ///   (b) <c>derives-its-own</c> — IL sweep of each registered Prefix: EXACTLY ONE call to
     ///       <c>ClientAuthority.IsClient</c>, and ZERO calls to <c>NetworkEngine.get_Instance</c>,
     ///       <c>get_IsActiveSession</c> or <c>get_IsHost</c>. A gate that re-derives the predicate is how the
-    ///       spellings drifted apart in the first place.
+    ///       spellings drifted apart in the first place. The sweep is over <c>Prefix</c>, i.e. over the
+    ///       REFUSAL DECISION. <c>EquipStorageGate</c> is the one registered gate that also carries a HOST
+    ///       arm (<c>IsHost &amp;&amp; !SyncApplyScope.Active</c>, the 2026-07-18 revert guard); that arm is
+    ///       not a client test and cannot be spelled with the client predicate, so it lives in its own
+    ///       <c>HostOrSolo</c> method and the client refusal is the whole of the Prefix.
     ///   (c) <c>premise-changed</c> / <c>not-closed</c> — the predicate RUN, not read, outside Unity: it must
     ///       answer FALSE both with <c>Instance == null</c> (solo runs native) and for a <c>Shutdown()</c>
     ///       husk (<c>IsActive=false, IsHost=false</c>) — the state that froze research in single player.
@@ -63,6 +67,7 @@ namespace RailCheck
             typeof(FacilityPowerGate),
             typeof(AutomanufactureGate),
             typeof(ClientSimGate),
+            typeof(EquipStorageGate),
         };
 
         /// <summary>Gates that legitimately still read the engine themselves, each for a stated reason. This
@@ -90,7 +95,6 @@ namespace RailCheck
             "ActorDamageClientGate", "AccumulationClientGate", "FumbleCheckGate",
             "ClientAiGate", "ClientAiEvaluationSeamGate", "MissionCancelGate", "GeoscapeEventRaiseGate",
             // not yet converted — steps 2..5
-            "EquipStorageGate",
             "VehicleArrivalGate", "SiteExploredOutcomeGate",
             "FactionSpawnerGestureGate", "VehicleGestureGate", "CameraAbilityHintGate",
             "TacLaunchGate", "ClientDeployGate",
