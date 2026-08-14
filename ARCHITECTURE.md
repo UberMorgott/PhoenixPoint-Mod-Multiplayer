@@ -11,6 +11,7 @@ Numbering:
   never write a bare number. `P11` (repaint) ≠ `L11` (no `LocalizedTextBind` rides covered).
 - `L-A`…`L-F` = ride/refuse letters, [`docs/boundary-law.md`](docs/boundary-law.md).
 - Full catalog (every P, every L, origin + evidence): [`docs/laws.md`](docs/laws.md).
+- Deferred work, standing fail-open decisions, unverified questions: [`docs/OPEN-DEBTS.md`](docs/OPEN-DEBTS.md).
 
 ## Why the delta is a live-graph walk, not a blob diff
 

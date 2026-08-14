@@ -121,7 +121,7 @@ The mod writes its own log to `%USERPROFILE%\AppData\LocalLow\Snapshot Games Inc
 
 ## Architecture
 
-The technical deep dive lives in [`ARCHITECTURE.md`](ARCHITECTURE.md), [`docs/rail-contract.txt`](docs/rail-contract.txt) and [`docs/rail-baseline.txt`](docs/rail-baseline.txt).
+The technical deep dive lives in [`ARCHITECTURE.md`](ARCHITECTURE.md), [`docs/rail-contract.txt`](docs/rail-contract.txt) and [`docs/rail-baseline.txt`](docs/rail-baseline.txt). Known deferred work and standing decisions: [`docs/OPEN-DEBTS.md`](docs/OPEN-DEBTS.md).
 
 ## License
 
