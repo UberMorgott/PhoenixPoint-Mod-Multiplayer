@@ -155,6 +155,11 @@ namespace Multiplayer.Network.Sync
             AccessTools.Field(typeof(UIModuleTheMarketplace), "_geoEvent");
         private static readonly MethodInfo ModuleSetEncounter =
             AccessTools.Method(typeof(UIModuleTheMarketplace), "SetEncounter", new[] { typeof(GeoscapeEvent) });
+        /// <summary>The module's OPENING flag, and the only thing that resets the scroll — see
+        /// <see cref="RepaintOpenMarketplace"/>. Native <c>ShowEncounter</c>:156-158 raises it around its own
+        /// <c>SetEncounter</c> call; a repaint that skips it inherits the old scroll offset.</summary>
+        private static readonly FieldInfo ModuleIsInit =
+            AccessTools.Field(typeof(UIModuleTheMarketplace), "_isInit");
 
         // ─── THE OFFER KEY: one address for every kind of goods ───
 
@@ -440,7 +445,24 @@ namespace Multiplayer.Network.Sync
         /// the class remark. Repainted through the module's OWN rebuild (<c>UpdateVisuals</c>:161 public +
         /// the private <c>SetEncounter</c>:188 → <c>UpdateList</c>), never <c>ShowEncounter</c>: that one
         /// re-posts the shop's opening narration sound on every push. Nothing happens when the shop is not
-        /// the open screen.</summary>
+        /// the open screen.
+        ///
+        /// THE SCROLL RESET IS NOT COSMETIC — it is why this repaint used to THROW and keep a stale screen
+        /// (log 2026-08-14, host 2x + client 1x: "repaint of the open shop threw" / ArgumentOutOfRangeException).
+        /// TFTV replaces <c>UpdateList</c> wholesale (TFTVVanillaFixes.cs:4754 <c>UIModuleTheMarketplace_UpdateList_patch</c>,
+        /// a Prefix returning false) and, when the shop holds more than 7 offers, hands
+        /// <c>VirtualScrollRect.InitVertical</c> a PHANTOM extra row: <c>count = MarketplaceChoices.Count + 1</c>
+        /// (:4774-4777) while its element callback still indexes <c>MarketplaceChoices[index]</c> (:4784).
+        /// <c>VirtualScrollRect.SetElementsTransforms</c>:264-270 walks
+        /// <c>_firstVisibleIndex … _firstVisibleIndex + _visibleElements - 1</c>, and <c>GetTopLeftIndex</c>:258
+        /// clamps that top index to <c>_totalNumElements - _visibleElements</c> — so the LAST realised index is
+        /// exactly <c>Count</c>, one past the end, for any scroll position that is not the top. Native never hits
+        /// it because <c>ShowEncounter</c>:156-158 raises <c>_isInit</c> around its <c>SetEncounter</c> call and
+        /// <c>UpdateList</c>:197-200 then snaps the scroll back to the top; the shrink case (a purchase removed a
+        /// row) is worse still, because the retained offset is clamped ONTO that last window. We invoked the
+        /// private <c>SetEncounter</c> directly, so the flag stayed false and every repaint of a scrolled 8+
+        /// offer shop threw. The fix is the native invariant, not a wider catch: raise the same flag the game
+        /// raises, and the repaint lands. The catch stays as a backstop and now says so.</summary>
         internal static void RepaintOpenMarketplace()
         {
             try
@@ -449,22 +471,39 @@ namespace Multiplayer.Network.Sync
                 if (!(view?.CurrentViewState is UIStateMarketplaceGeoscapeEvent)) return;
                 var module = view.GeoscapeModules?.TheMarketplaceModule;
                 var ev = module == null ? null : ModuleGeoEvent?.GetValue(module) as GeoscapeEvent;
-                if (module == null || ev == null || ModuleSetEncounter == null)
+                if (module == null || ev == null || ModuleSetEncounter == null || ModuleIsInit == null)
                 {
                     MpLog.LogWarning("[MP][market] open shop NOT repainted — the module's own rebuild is not " +
-                                     "reachable (module=" + (module == null) + " event=" + (ev == null) + "); the " +
+                                     "reachable (module=" + (module == null) + " event=" + (ev == null) +
+                                     " isInit=" + (ModuleIsInit == null) + "); the " +
                                      "rows are already correct in the model and reopening the shop shows them");
                     return;
                 }
                 // law 8: the native rebuild fires UI events our own capture seams listen to.
-                using (SyncApplyScope.Enter())
-                {
-                    module.UpdateVisuals();
-                    ModuleSetEncounter.Invoke(module, new object[] { ev });
-                }
+                using (SyncApplyScope.Enter()) RebuildOpenShopList(module, ev);
             }
             catch (Exception ex)
-            { MpLog.LogError("[MP][market] repaint of the open shop threw — screen kept: " + ex); }
+            {
+                // BACKSTOP, not the normal path: reaching here means the open shop is now STALE for this peer
+                // while every other peer moved on — a reactivity defect, not a safe fallback.
+                MpLog.LogError("[MP][market] REACTIVITY BROKEN — repaint of the open shop threw and the screen is " +
+                               "now stale; the rows are correct in the model, reopening the shop shows them: " + ex);
+            }
+        }
+
+        /// <summary>THE REBUILD ITSELF, split out so RailCheck L471 can assert the scroll reset on a body that
+        /// holds NOTHING ELSE that touches <see cref="ModuleIsInit"/> — inside the caller a null-guard read
+        /// would satisfy any reachability check and the deleted reset would go unnoticed, which is the whole
+        /// failure this law exists to catch. Both handles are non-null: the caller refuses otherwise.</summary>
+        private static void RebuildOpenShopList(UIModuleTheMarketplace module, GeoscapeEvent ev)
+        {
+            module.UpdateVisuals();
+            // The flag IS the scroll reset (ShowEncounter:156-158) — without it the retained offset makes
+            // TFTV's phantom row index one past the end of MarketplaceChoices. Restored in a finally so a
+            // throw inside the rebuild cannot leave the module wedged "opening".
+            ModuleIsInit.SetValue(module, true);
+            try { ModuleSetEncounter.Invoke(module, new object[] { ev }); }
+            finally { ModuleIsInit.SetValue(module, false); }
         }
 
         // ─── THE PURCHASE: capture (client) / re-broadcast (host) at ONE funnel ───

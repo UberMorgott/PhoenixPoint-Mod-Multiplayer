@@ -67,6 +67,8 @@ namespace Multiplayer.Network.Sync
         // landed. Deferred, never dropped — drained by PumpDeferredCompletions from the sync tick.
         private static readonly List<string> _deferredCompleted = new List<string>();
         private static bool _deferralAnnounced;
+        // Has this peer EVER stood on a geoscape map surface in this session? Sticky, one-way.
+        private static bool _everOnMapSurface;
 
         // ─── Reflection (private members only; everything else is typed) ──
         private static readonly System.Reflection.FieldInfo OnResearchStartedField =
@@ -90,7 +92,39 @@ namespace Multiplayer.Network.Sync
         // ─── Lifecycle (driven by SyncEngine) ──────────────────────────────
 
         /// <summary>Full session teardown. (The intent dedup/nonce live in <see cref="IntentRail"/>.)</summary>
-        public static void Reset() => ResetForReloadBoundary();
+        public static void Reset()
+        {
+            _everOnMapSurface = false; // a fresh session starts BEFORE this peer's first map surface
+            ResetForReloadBoundary();
+        }
+
+        /// <summary>
+        /// LATCH ONE COMPLETION FOR PRESENTATION — or swallow it. The ONE door into the deferral list, so
+        /// the gate cannot be walked around: sticky one-way on this peer's OWN first geoscape map surface,
+        /// not a quorum, nothing waits on another human. Returns true when the completion was queued.
+        ///
+        /// THE BUG (live 2026-08-14). A client joining a FRESH campaign sits in the intro cutscene while the
+        /// host grants the whole campaign-opening research list (6 grants across 21:22-21:27 in the reference
+        /// session). <see cref="SeedLatchFromMirror"/> ran BEFORE those grants arrived, so every one of them
+        /// looked like a genuine transition, got deferred, and then flushed as back-to-back "research
+        /// completed" modals the instant the peer first reached UIStateVehicleSelected at 21:27:49 — read by
+        /// the player as "all researches completed at once".
+        ///
+        /// Before that first surface the mirror is still ARRIVING, so a completion there is backlog and is
+        /// latched silently (the same swallow the unseeded path uses). After it, behaviour is unchanged and
+        /// every real completion still presents — including one that lands while this peer is off the map,
+        /// which is the deferral in <see cref="PumpDeferredCompletions"/> and stays exactly as it was.
+        /// </summary>
+        internal static bool LatchCompletion(string researchId, bool onMapSurfaceNow)
+        {
+            if (onMapSurfaceNow) _everOnMapSurface = true;
+            if (!_everOnMapSurface) return false; // backlog: latched in _presentedCompleted, never shown
+            _deferredCompleted.Add(researchId);
+            return true;
+        }
+
+        /// <summary>Test seam for L475: how many completions are waiting to be shown.</summary>
+        internal static int DeferredCompletionCount => _deferredCompleted.Count;
 
         /// <summary>Mid-session reload boundary (rca-3 contract): drop the presentation latches — the
         /// transferred save replaces the mirror, so the next research delta re-seeds them silently
@@ -263,13 +297,17 @@ namespace Multiplayer.Network.Sync
             if (research == null || research.AllResearchesArray == null) return;
             bool seeded = _presentedCompleted != null;
             if (!seeded) _presentedCompleted = new HashSet<string>(StringComparer.Ordinal);
+            // Sticky first-map-surface gate: the campaign-opening grant list arrives while this peer is still
+            // in the intro and must latch silently, not queue six modals for the first frame of the map.
+            bool onMapSurface = DurableWindowRegistry.MayPresent(true,
+                geo.View == null || geo.View.CurrentViewState == null ? null : geo.View.CurrentViewState.GetType());
 
             foreach (var el in research.AllResearchesArray)
             {
                 if (el == null || el.State != ResearchState.Completed || !_presentedCompleted.Add(el.ResearchID))
                     continue;
                 if (!seeded) continue; // backlog latched silently (SeedLatchFromMirror normally got there first)
-                _deferredCompleted.Add(el.ResearchID);
+                LatchCompletion(el.ResearchID, onMapSurface);
             }
             // The raise itself is NOT made here: UiEventMap.Fire calls PumpDeferredCompletions right after
             // this, so the one apply-driven raise site stays visible to L49's ordering arm.
