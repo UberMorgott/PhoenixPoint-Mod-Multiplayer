@@ -67,7 +67,10 @@ namespace Multiplayer.Network.Parity
                 // still falls through generically: "Multiplayer is absent" is a different sentence.)
                 else if (!string.Equals(kv.Value, cv, StringComparison.Ordinal) &&
                          !string.Equals(kv.Key, ParityManifest.MultiplayerModId, StringComparison.Ordinal))
-                    diffs.Add($"Mod version differs: {kv.Key} host v{kv.Value} != client v{cv}");
+                {
+                    var line = ModIdentityDiff(kv.Key, kv.Value, cv);
+                    if (line.Length > 0) diffs.Add(line); // "" = same version, one side's bytes unreadable
+                }
             }
             foreach (var kv in clientMods)
                 if (!hostMods.ContainsKey(kv.Key))
@@ -86,6 +89,31 @@ namespace Multiplayer.Network.Parity
             }
 
             return diffs;
+        }
+
+        /// <summary>ONE mod, two identities that disagree — said in the words that match WHICH half moved.
+        /// The version-only sentence was the whole blind spot: host and client ran different TFTV binaries
+        /// that BOTH reported "1.1.4.5", so with versions alone there was no sentence to print at all. Now
+        /// the identity carries a crc32 of the assembly (<see cref="ParityManifest.ComposeVersion"/>), and
+        /// the two cases read differently because the fix differs: a version gap means "update the mod", a
+        /// same-version BUILD gap means "you two are running different files of the same release" — the
+        /// local-build-vs-Workshop case, which no version string can ever show.
+        /// "" (NO DIFF) for one case only: the reported versions agree and one side stated no hash — an
+        /// older Multiplayer build, or an assembly we failed to read. Same arm as the GameVersion gate: an
+        /// unknown must never invent a mismatch, it only degrades to the old version-only comparison.</summary>
+        public static string ModIdentityDiff(string modId, string hostVersion, string clientVersion)
+        {
+            var hb = ParityManifest.BaseVersion(hostVersion);
+            var cb = ParityManifest.BaseVersion(clientVersion);
+            var hh = ParityManifest.ContentHash(hostVersion);
+            var ch = ParityManifest.ContentHash(clientVersion);
+            if (string.Equals(hb, cb, StringComparison.Ordinal) && (hh.Length == 0 || ch.Length == 0))
+                return "";
+            if (string.Equals(hb, cb, StringComparison.Ordinal))
+                return $"Mod BUILD differs: {modId} v{hb} — same version, DIFFERENT file " +
+                       $"(host {hh} != client {ch}). One of you runs a local build and the other the " +
+                       "Workshop one; copy the same file to both machines.";
+            return $"Mod version differs: {modId} host v{hostVersion} != client v{clientVersion}";
         }
 
         /// <summary>This peer's OWN Multiplayer-mod version, pulled out of the manifest's ordinary mod list

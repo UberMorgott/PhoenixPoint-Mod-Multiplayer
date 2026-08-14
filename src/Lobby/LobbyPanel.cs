@@ -1949,10 +1949,28 @@ namespace Multiplayer.UI
             // readiness because a peer that has gone silent is not "not ready", it is not here, and its
             // last-known readiness is the one thing this cell must not repeat. A live transfer outranks
             // readiness because it is what is actually happening to that peer right now.
+            // PARITY badge: shown only when this peer's row carries diffs (host sees it on the
+            // mismatched client's row; the client sees it on its OWN row). Click → exact diff list.
+            row.ParityDiffs = p.ParityDiffs ?? "";
+            var warn = row.ParityDiffs.Length > 0;
+            if (row.WarnBtn.gameObject.activeSelf != warn) row.WarnBtn.gameObject.SetActive(warn);
+
             if (held)
             {
                 row.StatusChip.text = "SEAT HELD";
                 row.StatusChip.color = LobbyTheme.MutedText;
+            }
+            // ...AND IN WORDS, in the status cell, because the badge alone was missable. A parity mismatch
+            // used to be a small "MODS ≠" button you had to notice and then CLICK to learn anything — an
+            // operator read the row, saw no READY, assumed "not ready yet" and started the session anyway.
+            // The status cell is the one place on this row that is already a sentence about the peer, so
+            // the mismatch says itself there; the badge stays as the detail surface. Outranked only by a
+            // held seat (a peer that is gone is not "mismatched", it is not here) and it outranks READY
+            // because a mismatched peer cannot ready at all (ParityComparer.ReadyAllowed).
+            else if (warn)
+            {
+                row.StatusChip.text = "INSTALL DIFFERS";
+                row.StatusChip.color = LobbyTheme.Accent;
             }
             else
             {
@@ -1969,12 +1987,6 @@ namespace Multiplayer.UI
                 }
                 else row.StatusChip.text = "";
             }
-
-            // PARITY badge: shown only when this peer's row carries diffs (host sees it on the
-            // mismatched client's row; the client sees it on its OWN row). Click → exact diff list.
-            row.ParityDiffs = p.ParityDiffs ?? "";
-            var warn = row.ParityDiffs.Length > 0;
-            if (row.WarnBtn.gameObject.activeSelf != warn) row.WarnBtn.gameObject.SetActive(warn);
 
             PaintPing(row, PingTable.PingMsFor(engine.Session, engine, p));
         }

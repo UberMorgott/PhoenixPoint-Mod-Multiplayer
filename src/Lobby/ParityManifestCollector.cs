@@ -62,7 +62,11 @@ namespace Multiplayer.Network
                         if (mod != null) seen++;
                         if (mod == null || !mod.Enabled) continue;
                         var version = mod.MetaData?.Version?.ToString() ?? "0.0";
-                        mods.Add((mod.ID, version));
+                        // CONTENT, not self-report: the version string alone let two different TFTV
+                        // binaries both pass as "1.1.4.5". AssemblyIdentity appends a crc32 of the file the
+                        // game actually loaded; the path/size go to the log line only (see ComposeVersion).
+                        mods.Add((mod.ID, ParityManifest.ComposeVersion(version, AssemblyIdentity(mod, out var asmNote))));
+                        if (asmNote.Length > 0) MpLog.Log("[Multiplayer] parity: " + mod.ID + " " + asmNote);
 
                         // THIS mod's own settings are PER FIELD, not all-or-nothing. Parity exists to catch
                         // CONTENT divergence between peers, and most of what we ship is a local preference —
@@ -114,6 +118,39 @@ namespace Multiplayer.Network
                       " game='" + gameVersion + "' crc=" + ParityManifest.HashEntries(ids).ToString("X8", CultureInfo.InvariantCulture));
 
             return ParityManifest.Build(dlc, mods, settings, gameVersion);
+        }
+
+        /// <summary>
+        /// The crc32 (8 hex) of the assembly the game ACTUALLY LOADED for this mod, plus a human note
+        /// ("file=… size=… source=Workshop|Mods") for the local log. Two builds that report the same
+        /// version and differ in bytes must not compare equal — that exact case (a local TFTV.dll,
+        /// 3202048 B, vs the Workshop one, 3165184 B, both calling themselves 1.1.4.5) cost a session.
+        ///
+        /// The file comes from the LOADED assembly (mod.Instance.Main's type), never from the mod folder:
+        /// the folder can hold stale or extra DLLs, and it is the loaded bytes that decide behaviour.
+        /// Anything unreadable returns "" — an unreadable file must never invent a mismatch, it just
+        /// degrades to the old version-only comparison.
+        /// </summary>
+        internal static string AssemblyIdentity(PhoenixPoint.Modding.ModEntry mod, out string note)
+        {
+            note = "";
+            try
+            {
+                var path = mod?.Instance?.Main?.GetType().Assembly.Location;
+                if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return "";
+                var bytes = System.IO.File.ReadAllBytes(path);
+                var crc = Multiplayer.Util.Crc32.Compute(bytes).ToString("X8", CultureInfo.InvariantCulture);
+                // Path SOURCE is informative only (identical bytes in a different folder behave
+                // identically), so it is logged, never compared — see ParityManifest.ComposeVersion.
+                var source = path.IndexOf("workshop", StringComparison.OrdinalIgnoreCase) >= 0 ? "Workshop" : "Mods";
+                note = "crc=" + crc + " size=" + bytes.Length + " source=" + source + " file=" + path;
+                return crc;
+            }
+            catch (Exception e)
+            {
+                MpLog.LogWarning("[Multiplayer] parity: assembly hash of '" + (mod?.ID ?? "?") + "' failed: " + e.Message);
+                return "";
+            }
         }
 
         // Deterministic, dependency-free value → string (no Newtonsoft ref in the mod). Scalars stringify

@@ -106,6 +106,45 @@ namespace Multiplayer.Network.Parity
             var canonical = string.Join("\n", sortedEntries ?? Enumerable.Empty<string>());
             return Multiplayer.Util.Crc32.Compute(Encoding.UTF8.GetBytes(canonical));
         }
+
+        // ── CONTENT IDENTITY ─────────────────────────────────────────────────────────────────────────
+        // A mod's SELF-REPORTED version is not its identity. Two TFTV builds both said "1.1.4.5" — a
+        // host-local build (Mods\TFTV\TFTV.dll, 3202048 B) and the Workshop one (2872311902, 3165184 B) —
+        // and the manifest, which compared version strings only, reported full parity while a field present
+        // in one build and absent in the other silently killed a whole replicated surface. So the version
+        // that travels on the wire is the version string WITH a crc32 of the loaded assembly appended
+        // ("1.1.4.5+C67311FA"): same version + different bytes is now a diff, which is the whole point.
+        // Rides the EXISTING ModRef.Version field on purpose — no new wire field, no codec change, and a
+        // peer on an older Multiplayer build simply sends the bare version (its own Multiplayer version
+        // already diffs by name). The PATH SOURCE (Workshop vs local Mods) is deliberately NOT part of the
+        // compared string: identical bytes in a different folder behave identically, so diffing on it would
+        // be a pure false positive. It is logged locally by the collector instead.
+
+        /// <summary>Separator between the reported version and the assembly crc32. '+' is semver's own
+        /// build-metadata marker and appears in no Phoenix Point mod version string.</summary>
+        public const char ContentTagSeparator = '+';
+
+        /// <summary>version ⊕ content hash. An empty hash (unreadable assembly) yields the bare version —
+        /// an unreadable file must never invent a mismatch.</summary>
+        public static string ComposeVersion(string version, string contentHash)
+            => string.IsNullOrEmpty(contentHash) ? (version ?? "")
+             : (version ?? "") + ContentTagSeparator + contentHash;
+
+        /// <summary>The self-reported half of a composed version ("1.1.4.5+C67311FA" → "1.1.4.5").</summary>
+        public static string BaseVersion(string composed)
+        {
+            if (string.IsNullOrEmpty(composed)) return "";
+            var i = composed.IndexOf(ContentTagSeparator);
+            return i < 0 ? composed : composed.Substring(0, i);
+        }
+
+        /// <summary>The content half ("" when the peer stated none).</summary>
+        public static string ContentHash(string composed)
+        {
+            if (string.IsNullOrEmpty(composed)) return "";
+            var i = composed.IndexOf(ContentTagSeparator);
+            return i < 0 ? "" : composed.Substring(i + 1);
+        }
     }
 
     public sealed class ModRef
