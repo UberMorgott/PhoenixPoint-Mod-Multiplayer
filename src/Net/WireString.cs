@@ -57,10 +57,30 @@ namespace Multiplayer.Network.MessageLayer
         /// refused, small enough that the allocation is bounded at kilobytes rather than gigabytes.</summary>
         internal const int Prose = 64 * 1024;
 
+        /// <summary>A railed string leaf, which is not prose at all when the state IS a blob: mist coverage
+        /// ships <c>MistState.MistData</c> — the game's own deflate+base64 of <c>_mistData</c> — as a plain
+        /// <c>string</c> member, ~40 KB early and ~900 KB late-campaign
+        /// (<see cref="Multiplayer.Network.Sync.MistSync.MaxMistDataBytes"/>). Under
+        /// <see cref="Prose"/> that leaf started failing to APPLY the moment a campaign's mist passed 64 KB
+        /// ("implausible length 67220", 35× in one session) and the CRC backstop then re-emitted a subtree
+        /// no re-emit could heal.
+        ///
+        /// NOT an invented number, and not a wider door than the wire has: a leaf's bytes reach the decoder
+        /// only after <c>GenericApplier.Reassemble</c>, which itself refuses a total above
+        /// <see cref="Multiplayer.Network.Sync.RailMeta.MaxReassembledBytes"/> before it allocates — so this
+        /// is that same ceiling restated, and the per-message transport limit
+        /// (<c>NetworkMessage.MaxPayloadBytes</c>, 8 MB) is never approached because
+        /// <c>DiffEngine.FragmentForWire</c> splits an oversize value into ≤64 KB fragments regardless.
+        /// The stream bound in <see cref="MessageSerializer.ReadBoundedString"/> still applies underneath,
+        /// so a declared length the buffer cannot back is refused here exactly as before.</summary>
+        internal const int Blob = Multiplayer.Network.Sync.RailMeta.MaxReassembledBytes;
+
         internal static string ReadKey(BinaryReader r) => MessageSerializer.ReadBoundedString(r, Key);
 
         internal static string ReadText(BinaryReader r) => MessageSerializer.ReadBoundedString(r, Text);
 
         internal static string ReadProse(BinaryReader r) => MessageSerializer.ReadBoundedString(r, Prose);
+
+        internal static string ReadBlob(BinaryReader r) => MessageSerializer.ReadBoundedString(r, Blob);
     }
 }

@@ -1207,9 +1207,12 @@ namespace Multiplayer.Network.Sync
                 case LeafKind.UInt64: return Coerce(r.ReadUInt64(), declared);
                 case LeafKind.Single: return Coerce(r.ReadSingle(), declared);
                 case LeafKind.Double: return Coerce(r.ReadDouble(), declared);
-                // Prose, not Key: this arm carries ANY string member of ANY railed type, which includes a
-                // def description, not just an id. A Key ceiling here would refuse legitimate state.
-                case LeafKind.String: return WireString.ReadProse(r);
+                // Blob, not Key and not Prose: this arm carries ANY string member of ANY railed type — a def
+                // description, but also MistState.MistData, the game's own deflate+base64 of the mist buffer
+                // at ~900 KB late-campaign. Prose (64 KB) refused it outright once a campaign grew, so the
+                // ceiling here is the reassembly ceiling the bytes already passed (WireString.Blob); the
+                // stream bound inside ReadBoundedString still refuses a length the buffer cannot back.
+                case LeafKind.String: return WireString.ReadBlob(r);
                 case LeafKind.Enum: return Enum.ToObject(declared, r.ReadInt64());
                 case LeafKind.TimeSpanTicks:
                 {

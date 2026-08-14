@@ -49,6 +49,12 @@ namespace Multiplayer.Network.Sync
     {
         internal const string RootKey = "M#mist";
 
+        /// <summary>What <see cref="MistState.MistData"/> can actually be, in bytes — the observed
+        /// late-campaign ceiling of the deflate+base64 blob (see <see cref="MistState"/>), rounded up.
+        /// The rail's string-leaf read bound must CLEAR this or the mist leaf silently fails to apply on
+        /// every peer; RailCheck L470 is that assertion, and 64 KB (<c>WireString.Prose</c>) failed it.</summary>
+        internal const int MaxMistDataBytes = 1024 * 1024;
+
         /// <summary>Host walks its instance; on a client this is the generic applier's write target.</summary>
         internal static readonly MistState State = new MistState();
 
