@@ -3,6 +3,87 @@
 Player-facing notes for each release. Releases before `0.9.5-beta` are documented on the
 [GitHub releases page](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/releases).
 
+## 0.9.15-beta
+
+A patch release on top of `0.9.14-beta`. Same mod, same install — replace the `Multiplayer` folder
+in your `Mods` directory. **Every player must run the same version**; a mismatch is reported when
+you join. This one *does* change what the machines send each other, so `0.9.15-beta` and
+`0.9.14-beta` cannot play together at all.
+
+A broad round of co-op fixes: state that never reached the guests, a few numbers that drifted
+apart over a long campaign, and a batch of screens that showed stale values until you left and
+came back.
+
+### Finding and joining a game
+
+- **Sessions on your own network are now listed by themselves.** A host announces itself on the
+  local network every couple of seconds and an open browser turns each announcement into an
+  ordinary clickable row — no address to read out, no Steam friendship required. The old
+  friends list and the connect code both still work.
+- **A different build of the same mod version no longer blocks READY.** Two copies that report
+  the same version can still differ byte for byte — a Workshop copy against a local build is the
+  everyday case. That difference is now shown as a badge next to the player instead of stopping
+  the lobby.
+- **Mod parity compares what is actually loaded.** Other mods are identified by the bytes of the
+  assembly rather than by the version text they print, so two TFTV builds both calling themselves
+  `1.1.4.5` are no longer declared identical when one of them is missing a field the mod relies on.
+
+### The campaign stays the same on every machine
+
+- **Items unlocked by research reach the guests.** Manufacturing a newly researched weapon or
+  vehicle was a host-only privilege; clients kept the starting catalogue for the whole campaign.
+- **Haven research assignments come from the host.** Each machine used to roll its own pairing of
+  havens to research projects, and the two campaigns drifted from the first day.
+- **Research no longer runs twice.** A guest could quietly push its own faction's research forward
+  during the moment right after a load, dumping the accumulated wallet in one tick.
+- **The mist replicates on long campaigns.** The mist layer travels as one compressed blob that
+  grows from about 40 KB to nearly a megabyte over a campaign; past a certain size it silently
+  stopped arriving, and the guest's fog stopped matching the host's.
+- **Soldier stats stop inflating.** Every sync re-applied a derived value on top of itself, so
+  numbers crept upward on the receiving machine with each update.
+- **TFTV base assignments survive a reload.** The personnel board re-announces itself after a save
+  or a mission boundary, and a guest whose TFTV build is missing a newer field now loses only that
+  field instead of the entire ASSIGNMENTS screen.
+- **The campaign-opening research grants no longer arrive as a stack of pop-ups** when a guest
+  first reaches the globe.
+
+### The geoscape
+
+- **Foreign aircraft fly the same route on every machine.** Other factions' craft were re-derived
+  from each peer's own clock and position; they now start from the host's departure moment.
+- **The exploration spinner keeps turning on guests.** A site exploration could stall on a client
+  after the first one, waiting on a timer that had already expired.
+- **Crew health and stamina bars update again** on the strip beside a flying aircraft.
+- **The faction reputation percentages agree between players** and redraw when they change.
+- **The top information strip stops flickering** — it now redraws only when what it shows actually
+  changes, instead of about ten times a second.
+- **A new mission is fully described the moment it appears**, rather than being registered a
+  fraction of a second before the details that describe it.
+
+### In battle
+
+- **Every activation now starts from the host's own moment**, movement included, so shots and
+  animations play at the same time on every screen instead of drifting apart over a turn.
+
+### When the mod says no
+
+- **Refusals are written in plain language, once.** A click the mod could not allow used to answer
+  with an internal sentence — root keys, operation codes, a third-party mod named as the author of
+  the failure — sometimes several times over. It now says what happened in a player's words.
+- **Event windows wait for the screen you are on.** A pop-up could push its way onto an open screen
+  during a load or a transition; the queue now asks the screen itself whether it is busy.
+
+### Under the hood
+
+- All the "this is a guest, do not do this locally" gates now ask one shared question instead of
+  each guessing on its own. Besides closing the gaps above, this fixes a single-player campaign
+  where research froze after backing out of the lobby.
+
+### Known issues / unverified
+
+**This release has not been playtested end to end.** Everything above is verified against the
+RailCheck law harness (329 laws) and against the source.
+
 ## 0.9.14-beta
 
 A patch release on top of `0.9.13-beta`. Same mod, same install — replace the `Multiplayer` folder
