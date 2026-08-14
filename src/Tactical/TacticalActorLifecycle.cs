@@ -131,7 +131,7 @@ namespace Multiplayer.Tactical
 
         private static void SayOnce(string key, string message)
         {
-            if (_said.Add(key)) Debug.LogError(message);
+            if (_said.Add(key)) MpLog.LogError(message);
         }
 
         // ─── SPAWN ─────────────────────────────────────────────────────────
@@ -339,7 +339,7 @@ namespace Multiplayer.Tactical
                                 : "TacticalFactionDef guid '" + factionGuid + "', which resolves to nothing here") +
                              ", so it exists on the host alone and can never be rebuilt on this peer";
                 TacticalActorKey.Refuse(key, why);
-                Debug.LogError("[Multiplayer][tac] host spawn key " + key + " REFUSED — " + why +
+                MpLog.LogError("[Multiplayer][tac] host spawn key " + key + " REFUSED — " + why +
                                ". It will fight on the host's screen and be absent from this one for the rest of " +
                                "the mission; every command and every hit naming it is refused with this reason.");
                 return;
@@ -348,7 +348,7 @@ namespace Multiplayer.Tactical
             var tlc = TacticalDamageSync.Tlc();
             if (tlc == null || tlc.Map == null)
             {
-                Debug.LogError("[Multiplayer][tac] a host spawn (key " + key + ", " + setDef.name + ") arrived with no " +
+                MpLog.LogError("[Multiplayer][tac] a host spawn (key " + key + ", " + setDef.name + ") arrived with no " +
                                "tactical map on this peer — the battles have parted ways.");
                 return;
             }
@@ -357,7 +357,7 @@ namespace Multiplayer.Tactical
                 foreach (var z in tlc.Map.GetActors<TacticalDeployZone>())
                     if (z.name == zoneName) { zone = z; break; }
             if (zone == null && !string.IsNullOrEmpty(zoneName))
-                Debug.LogWarning("[Multiplayer][tac] the host's spawn source zone '" + zoneName + "' does not exist on " +
+                MpLog.LogWarning("[Multiplayer][tac] the host's spawn source zone '" + zoneName + "' does not exist on " +
                                  "this peer; the actor is built without one (its Source is then null, which only " +
                                  "matters if this peer ever writes a tactical save).");
 
@@ -367,7 +367,7 @@ namespace Multiplayer.Tactical
                 spawned = TacticalDeployZone.SpawnActor(setDef, null, factionDef, participant, pos, rot, zone);
             if (spawned == null)
             {
-                Debug.LogError("[Multiplayer][tac] the game's own spawner returned nothing for the host's " +
+                MpLog.LogError("[Multiplayer][tac] the game's own spawner returned nothing for the host's " +
                                setDef.name + " (key " + key + ") — this peer is now short one actor.");
                 return;
             }
@@ -376,7 +376,7 @@ namespace Multiplayer.Tactical
             // through the game's own GameTagsList, and law 8 forbids a mirrored write echoing back out.
             using (SyncApplyScope.Enter())
                 TftvChampIdentity.Apply(spawned, champ, "the host's spawn record");
-            Debug.Log("[Multiplayer][tac] CLIENT spawned the host's " + setDef.name + " key=" + key + " @ " + pos);
+            MpLog.Log("[Multiplayer][tac] CLIENT spawned the host's " + setDef.name + " key=" + key + " @ " + pos);
         }
 
         /// <summary>The client half of law L67e: REGENERATE the host's set def from the authored template rather
@@ -490,7 +490,7 @@ namespace Multiplayer.Tactical
             var actor = TacticalActorKey.Resolve(TacticalDamageSync.Tlc(), key, out why);
             if (actor == null)
             {
-                Debug.LogError("[Multiplayer][tac] the host reports actor " + key + " DEAD but " + why +
+                MpLog.LogError("[Multiplayer][tac] the host reports actor " + key + " DEAD but " + why +
                                " — this peer keeps fighting something the host has already buried.");
                 return;
             }
@@ -512,12 +512,12 @@ namespace Multiplayer.Tactical
         internal static void ForceDeath(TacticalActorBase actor, string because)
         {
             if (actor.IsDead) return;
-            Debug.LogWarning("[Multiplayer][tac] forcing " + SafeName(actor) + " dead from " + because +
+            MpLog.LogWarning("[Multiplayer][tac] forcing " + SafeName(actor) + " dead from " + because +
                              " — it was alive here at " + ((float)actor.Health).ToString("0.##") + " hp, which means " +
                              "its death reached this peer by a route the damage stream does not carry.");
             using (SyncApplyScope.Enter()) actor.Health.Set(0f);
             if (!actor.IsDead)
-                Debug.LogError("[Multiplayer][tac] " + SafeName(actor) + " survived being set to zero health — the " +
+                MpLog.LogError("[Multiplayer][tac] " + SafeName(actor) + " survived being set to zero health — the " +
                                "native death trigger did not fire and this peer is now fighting a corpse.");
         }
 
@@ -583,7 +583,7 @@ namespace Multiplayer.Tactical
             }
             if (_droppable == null || _shouldDestroy == null)
             {
-                Debug.LogError("[Multiplayer][tac] DieAbility.GetDroppableItems / ShouldDestroyItem did not resolve — " +
+                MpLog.LogError("[Multiplayer][tac] DieAbility.GetDroppableItems / ShouldDestroyItem did not resolve — " +
                                "the corpse's contents cannot be pre-rolled, so every client keeps every item the host " +
                                "may have destroyed. AccessTools does EXACT parameter matching; a signature change here " +
                                "is silent otherwise.");
@@ -593,7 +593,7 @@ namespace Multiplayer.Tactical
             try { items = (IEnumerable<TacticalItem>)_droppable.Invoke(die, null); }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac] enumerating " + TacticalActorLifecycle.SafeName(actor) +
+                MpLog.LogError("[Multiplayer][tac] enumerating " + TacticalActorLifecycle.SafeName(actor) +
                                "'s droppable items THREW — the corpse's contents will differ on every peer: " + ex);
                 return list;
             }
@@ -603,7 +603,7 @@ namespace Multiplayer.Tactical
                 try { destroy = (bool)_shouldDestroy.Invoke(die, new object[] { item }); }
                 catch (Exception ex)
                 {
-                    Debug.LogError("[Multiplayer][tac] the host's loot roll for " +
+                    MpLog.LogError("[Multiplayer][tac] the host's loot roll for " +
                                    (item == null || item.TacticalItemDef == null ? "<def-less item>" : item.TacticalItemDef.name) +
                                    " THREW; it is shipped as 'keep': " + ex);
                     destroy = false;
@@ -658,7 +658,7 @@ namespace Multiplayer.Tactical
                 if (byDef.Count == 0) _declared.Remove(actorKey);
                 return true;
             }
-            Debug.LogError("[Multiplayer][tac] the host's corpse manifest for actor " + actorKey + " has no answer " +
+            MpLog.LogError("[Multiplayer][tac] the host's corpse manifest for actor " + actorKey + " has no answer " +
                            "left for item def '" + itemGuid + "' — this peer KEEPS it rather than guessing, so this " +
                            "corpse holds more than the host's does.");
             return false;
@@ -771,7 +771,7 @@ namespace Multiplayer.Tactical
         private static bool Prefix(TacticalAbility __instance, TacticalExitZone exitZone)
         {
             if (exitZone != null) return true;
-            Debug.LogError("[Multiplayer][tac] evacuation for " +
+            MpLog.LogError("[Multiplayer][tac] evacuation for " +
                            TacticalActorLifecycle.SafeName(__instance == null ? null : __instance.TacticalActorBase) +
                            " is REFUSED — no unlocked exit zone contains it on this peer. Vanilla would NRE here " +
                            "with the actor already stripped of every status and marked evacuated; it stays whole " +

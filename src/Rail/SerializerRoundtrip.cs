@@ -72,7 +72,7 @@ namespace Multiplayer.Rail
                     var gameUtlType = AccessTools.TypeByName("Base.Core.GameUtl");
                     if (serCompType == null || gameUtlType == null)
                     {
-                        Debug.LogError("[Multiplayer][rail] ResolveGameSerializer: SerializationComponent/GameUtl type not found");
+                        MpLog.LogError("[Multiplayer][rail] ResolveGameSerializer: SerializationComponent/GameUtl type not found");
                         return null;
                     }
                     var gc = AccessTools.Method(gameUtlType, "GameComponent");
@@ -81,16 +81,16 @@ namespace Multiplayer.Rail
                 }
                 if (_gameComponentSerComp == null || _serCompSerializerProp == null)
                 {
-                    Debug.LogError("[Multiplayer][rail] ResolveGameSerializer: GameComponent<>/Serializer accessor not found");
+                    MpLog.LogError("[Multiplayer][rail] ResolveGameSerializer: GameComponent<>/Serializer accessor not found");
                     return null;
                 }
                 object serComp = _gameComponentSerComp.Invoke(null, null);
                 object serializer = serComp != null ? _serCompSerializerProp.GetValue(serComp, null) : null;
                 if (serializer == null)
-                    Debug.LogError("[Multiplayer][rail] ResolveGameSerializer: SerializationComponent/Serializer is null (not initialized yet?)");
+                    MpLog.LogError("[Multiplayer][rail] ResolveGameSerializer: SerializationComponent/Serializer is null (not initialized yet?)");
                 return serializer;
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] ResolveGameSerializer failed: " + ex); return null; }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] ResolveGameSerializer failed: " + ex); return null; }
         }
 
         /// <summary>Serialize a root-object graph to bytes via the native game Serializer.
@@ -104,10 +104,10 @@ namespace Multiplayer.Rail
             {
                 // PROBE: host input graph (element count + concrete type names).
                 if (!quiet)
-                    Debug.Log("[Multiplayer][rail] Write input graph count=" + (graph?.Length ?? -1) +
+                    MpLog.Log("[Multiplayer][rail] Write input graph count=" + (graph?.Length ?? -1) +
                               " types=[" + GraphTypeNames(graph) + "]");
                 object serializer = ResolveGameSerializer();
-                if (serializer == null) { Debug.LogError("[Multiplayer][rail] SerializeGraph: no game Serializer — skipping"); return null; }
+                if (serializer == null) { MpLog.LogError("[Multiplayer][rail] SerializeGraph: no game Serializer — skipping"); return null; }
                 // ByRef<byte[]> dest. Base.Utils.ByRef<T> has a SINGLE ctor `ByRef(T value = default)` —
                 // an optional param, NO parameterless ctor — so Activator.CreateInstance(Type) (no args)
                 // throws MissingMethodException. Pass the argument explicitly (default(byte[]) == null).
@@ -118,7 +118,7 @@ namespace Multiplayer.Rail
 
                 var write = AccessTools.Method(_serializerType, "Write",
                     new[] { typeof(IEnumerable<object>), typeof(string), byRefBytes, _timeSliceType });
-                if (write == null) { Debug.LogError("[Multiplayer][rail] Serializer.Write(byte[]) overload not found"); return null; }
+                if (write == null) { MpLog.LogError("[Multiplayer][rail] Serializer.Write(byte[]) overload not found"); return null; }
 
                 IEnumerable<object> objects = graph;
                 // Drive the native serializer coroutine via the engine's own synchronous runner
@@ -132,7 +132,7 @@ namespace Multiplayer.Rail
 
                 // PROBE: output length + checksum (host-sent bytes, compare to client-received bytesHash).
                 if (!quiet)
-                    Debug.Log("[Multiplayer][rail] Write output destLen=" + (outBytes?.Length ?? -1) +
+                    MpLog.Log("[Multiplayer][rail] Write output destLen=" + (outBytes?.Length ?? -1) +
                               " bytesHash " + BytesHash(outBytes));
 
                 // PROBE: in-process host self-roundtrip — proves the Read contract on our own bytes.
@@ -143,17 +143,17 @@ namespace Multiplayer.Rail
                     {
                         Type elemType = (graph != null && graph.Length > 0 && graph[0] != null) ? graph[0].GetType() : null;
                         object self = DeserializeGraph(outBytes, elemType);
-                        Debug.Log("[Multiplayer][rail] HOST self-roundtrip result=" +
+                        MpLog.Log("[Multiplayer][rail] HOST self-roundtrip result=" +
                                   (self == null ? "NULL" : self.GetType().Name) + " expectedType=" +
                                   (elemType?.Name ?? "any"));
                     }
-                    catch (Exception sx) { Debug.LogError("[Multiplayer][rail] HOST self-roundtrip threw: " + sx); }
+                    catch (Exception sx) { MpLog.LogError("[Multiplayer][rail] HOST self-roundtrip threw: " + sx); }
                     finally { _inSelfRoundtrip = false; }
                 }
 
                 return outBytes;
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] SerializeGraph failed: " + ex); return null; }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] SerializeGraph failed: " + ex); return null; }
         }
 
         /// <summary>Deserialize bytes back into a graph and return the first element assignable to
@@ -167,12 +167,12 @@ namespace Multiplayer.Rail
             try
             {
                 if (!quiet)
-                    Debug.Log("[Multiplayer][rail] Read input bytesHash " + BytesHash(bytes) +
+                    MpLog.Log("[Multiplayer][rail] Read input bytesHash " + BytesHash(bytes) +
                               " expectedType=" + (expectedType?.Name ?? "any"));
                 // MUST be the same engine-configured Serializer the writer used (Context =
                 // SerializationComponent), else silent empty graph. See ResolveGameSerializer.
                 object serializer = ResolveGameSerializer();
-                if (serializer == null) { Debug.LogError("[Multiplayer][rail] DeserializeGraph: no game Serializer — returning null"); return null; }
+                if (serializer == null) { MpLog.LogError("[Multiplayer][rail] DeserializeGraph: no game Serializer — returning null"); return null; }
                 // ByRef<IEnumerable<object>> outRef — same single-optional-ctor trap as SerializeGraph.
                 Type byRefEnum = _byRefType.MakeGenericType(typeof(IEnumerable<object>));
                 object outRef = Activator.CreateInstance(byRefEnum, new object[] { null });
@@ -181,7 +181,7 @@ namespace Multiplayer.Rail
                 // Read(ByRef<IEnumerable<object>> objects, TimeSlice slice, string formatExt, byte[] srcData, string section=null)
                 var read = AccessTools.Method(_serializerType, "Read",
                     new[] { byRefEnum, _timeSliceType, typeof(string), typeof(byte[]), typeof(string) });
-                if (read == null) { Debug.LogError("[Multiplayer][rail] Serializer.Read(byte[]) overload not found"); return null; }
+                if (read == null) { MpLog.LogError("[Multiplayer][rail] Serializer.Read(byte[]) overload not found"); return null; }
 
                 var coroutine = (IEnumerator<NextUpdate>)read.Invoke(serializer, new object[] { outRef, slice, ".b", bytes, null });
                 Timing.RunUntilComplete(coroutine);
@@ -191,7 +191,7 @@ namespace Multiplayer.Rail
 
                 List<object> graphList = result == null ? null : new List<object>(result);
                 if (!quiet)
-                    Debug.Log("[Multiplayer][rail] Read graph " +
+                    MpLog.Log("[Multiplayer][rail] Read graph " +
                               (result == null ? "NULL (ByRef.Value==null → empty graph)"
                                               : ("count=" + graphList.Count + " types=[" +
                                                  string.Join(",", graphList.ConvertAll(o => o?.GetType().Name).ToArray()) + "]")));
@@ -200,7 +200,7 @@ namespace Multiplayer.Rail
                     if (o != null && (expectedType == null || expectedType.IsInstanceOfType(o))) return o;
                 return null;
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] DeserializeGraph failed: " + ex); return null; }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] DeserializeGraph failed: " + ex); return null; }
         }
 
         // ─── Scheduling gate (TacticalHydrateSchedulingGate pattern) ───────
@@ -216,7 +216,7 @@ namespace Multiplayer.Rail
             object timing = ResolveTiming(timingOwner);
             if (timing != null && InvokeTimingStart(timing, body()))
                 return true;
-            Debug.LogError("[Multiplayer][rail] RunOnTiming: no Timing resolvable — running inline (serializer may throw)");
+            MpLog.LogError("[Multiplayer][rail] RunOnTiming: no Timing resolvable — running inline (serializer may throw)");
             var crt = body();
             while (crt.MoveNext()) { }
             return false;
@@ -257,7 +257,7 @@ namespace Multiplayer.Rail
                     if (!restOptional) continue;
                     if (best == null || pars.Length < best.GetParameters().Length) best = m;
                 }
-                if (best == null) { Debug.LogError("[Multiplayer][rail] InvokeTimingStart: no Start overload found"); return false; }
+                if (best == null) { MpLog.LogError("[Multiplayer][rail] InvokeTimingStart: no Start overload found"); return false; }
                 var bp = best.GetParameters();
                 var args = new object[bp.Length];
                 args[0] = crt;
@@ -265,7 +265,7 @@ namespace Multiplayer.Rail
                 best.Invoke(timing, args);
                 return true;
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] InvokeTimingStart failed: " + ex); return false; }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] InvokeTimingStart failed: " + ex); return false; }
         }
     }
 }

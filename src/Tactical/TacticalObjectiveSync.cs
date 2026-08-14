@@ -61,7 +61,7 @@ namespace Multiplayer.Tactical
                 int key = TacticalActorKey.Of(__instance);
                 if (key == 0)
                 {
-                    Debug.LogWarning("[Multiplayer][tac] an objective completed on the host before this battle's " +
+                    MpLog.LogWarning("[Multiplayer][tac] an objective completed on the host before this battle's " +
                                      "key map was built, so no peer can be told WHICH objective it was. The other " +
                                      "peers keep it open until they complete it themselves, and their " +
                                      "GiveExperienceForObjectives will disagree with this one's.");
@@ -85,7 +85,7 @@ namespace Multiplayer.Tactical
             var objective = found as TacticalObjective;
             if (objective == null)
             {
-                Debug.LogError("[Multiplayer][tac] the host completed objective " + key + " and " +
+                MpLog.LogError("[Multiplayer][tac] the host completed objective " + key + " and " +
                                (found == null
                                    ? why
                                    : "that key names a " + found.GetType().Name + " here, not an objective") +
@@ -96,7 +96,7 @@ namespace Multiplayer.Tactical
             if (objective.IsCompleted == done) return;
             using (SyncApplyScope.Enter())
                 objective.SetIsCompleted(done);
-            Debug.Log("[Multiplayer][tac] objective " + key + " set completed=" + done + " from the host.");
+            MpLog.Log("[Multiplayer][tac] objective " + key + " set completed=" + done + " from the host.");
         }
 
         /// <summary>DIAGNOSTIC ONLY — this changes no behaviour and is here to end a question two source
@@ -137,7 +137,7 @@ namespace Multiplayer.Tactical
                 string now = (faction?.TacticalFactionDef?.name ?? "<null>") + " total=" + total + " shown=" + shown;
                 if (now == _last) return;
                 _last = now;
-                Debug.Log("[Multiplayer][tac] objectives panel built from CurrentFaction " + now +
+                MpLog.Log("[Multiplayer][tac] objectives panel built from CurrentFaction " + now +
                           " (viewer is " + (Context?.View?.ViewerFaction?.TacticalFactionDef?.name ?? "<null>") +
                           ") — shown=0 with a non-empty viewer list is the empty-panel bug.");
             }

@@ -201,7 +201,7 @@ namespace Multiplayer.Network.Sync
                 manufacture.OnItemCompleted += HostOnItemChanged;
                 manufacture.OnQueueReordered += HostOnReordered;
                 _hooked = manufacture;
-                Debug.Log("[Multiplayer][rail] ManufactureSync: hooked queue events (host)");
+                MpLog.Log("[Multiplayer][rail] ManufactureSync: hooked queue events (host)");
             }
 
             // Drift backstop (≤2 Hz): the known apply points push immediately (HandleIntent success + the
@@ -268,7 +268,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (ArgumentOutOfRangeException ex)
             {
-                Debug.LogError("[Multiplayer][rail] ManufactureSync: payload exceeds envelope u16 — " + ex.Message);
+                MpLog.LogError("[Multiplayer][rail] ManufactureSync: payload exceeds envelope u16 — " + ex.Message);
             }
         }
 
@@ -298,7 +298,7 @@ namespace Multiplayer.Network.Sync
                     ApplySnapshot(entries, seq);
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] ManufactureSync inbound failed: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] ManufactureSync inbound failed: " + ex); }
             return true;
         }
 
@@ -334,7 +334,7 @@ namespace Multiplayer.Network.Sync
                         var st = GenericApplier.GeoLevel()?.PhoenixFaction?.ItemStorage;
                         int made = (st != null && item.RelatedItemDef != null && st.Items.TryGetValue(item.RelatedItemDef, out var gi))
                             ? gi.CommonItemData.Count : -1;
-                        Debug.Log("[Multiplayer][mfgdiag] HOST made def=" + defGuid + " nonce=" + nonce + " -> hostStorageCount=" + made);
+                        MpLog.Log("[Multiplayer][mfgdiag] HOST made def=" + defGuid + " nonce=" + nonce + " -> hostStorageCount=" + made);
                     }
                 }
                 else IntentRail.Reject(SurfaceIds.GeoManufactureIntent, senderPeerId, "cannot manufacture " + defGuid);
@@ -355,7 +355,7 @@ namespace Multiplayer.Network.Sync
                 }
                 else IntentRail.Reject(SurfaceIds.GeoManufactureIntent, senderPeerId,
                                        "scrap missing/insufficient " + defGuid + " need=" + index);
-                if (MpDiag.On) Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x" + index + " ok=" + ok);
+                if (MpDiag.On) MpLog.Log("[MP][scrap] HOST scrapped " + defGuid + " x" + index + " ok=" + ok);
             }
             else if (op == OpScrapVehicle)
             {
@@ -367,7 +367,7 @@ namespace Multiplayer.Network.Sync
                     if (veh != null) { GenericApplier.GeoLevel().PhoenixFaction.ScrapVehicleEquipment(veh); ok = true; }
                 }
                 else IntentRail.Reject(SurfaceIds.GeoManufactureIntent, senderPeerId, "scrapVehicle missing " + defGuid);
-                if (MpDiag.On) Debug.Log("[MP][scrap] HOST scrapped " + defGuid + " x1 ok=" + ok);
+                if (MpDiag.On) MpLog.Log("[MP][scrap] HOST scrapped " + defGuid + " x1 ok=" + ok);
             }
             else if (op == OpQuickProduce)
             {
@@ -391,7 +391,7 @@ namespace Multiplayer.Network.Sync
                 else IntentRail.Reject(SurfaceIds.GeoManufactureIntent, senderPeerId,
                                        "quick-produce " + (def == null ? "unknown def" : "not manufacturable or unaffordable") +
                                        " " + defGuid);
-                if (MpDiag.On) Debug.Log("[MP][quickproduce] HOST bought " + defGuid + " ok=" + ok);
+                if (MpDiag.On) MpLog.Log("[MP][quickproduce] HOST bought " + defGuid + " ok=" + ok);
             }
             else
             {
@@ -424,7 +424,7 @@ namespace Multiplayer.Network.Sync
                 // stale — repaint it like the client-apply path does.
                 RepaintManufacturingUi();
                 PushQueueSnapshot(engine);
-                Debug.Log("[Multiplayer][rail] ManufactureSync HOST intent APPLIED op=" + op + " def=" + defGuid +
+                MpLog.Log("[Multiplayer][rail] ManufactureSync HOST intent APPLIED op=" + op + " def=" + defGuid +
                           " idx=" + index + " peer=" + senderPeerId);
             }
         }
@@ -454,7 +454,7 @@ namespace Multiplayer.Network.Sync
                         var def = GameUtl.GameComponent<DefRepository>()?.GetDef(e.Key) as ItemDef;
                         if (def == null)
                         {
-                            Debug.LogWarning("[Multiplayer][rail] ManufactureSync: unknown manufacturable def " + e.Key + " — skipped");
+                            MpLog.LogWarning("[Multiplayer][rail] ManufactureSync: unknown manufacturable def " + e.Key + " — skipped");
                             continue;
                         }
                         // ponytail: def-rebuilt costs ignore live SetCostMultiplier tweaks (ManufacturableItem
@@ -467,7 +467,7 @@ namespace Multiplayer.Network.Sync
                 }
                 RepaintManufacturingUi();
                 Seq.Mark(SurfaceIds.GeoManufacture, seq);
-                Debug.Log("[Multiplayer][rail] ManufactureSync CLIENT applied queue count=" + queue.Count);
+                MpLog.Log("[Multiplayer][rail] ManufactureSync CLIENT applied queue count=" + queue.Count);
             }
         }
 
@@ -488,7 +488,7 @@ namespace Multiplayer.Network.Sync
                 SetupQueueMethod?.Invoke(module, null);
                 DoFilterMethod?.Invoke(module, new object[] { null, null });
             }
-            catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] ManufactureSync: screen rebuild failed: " + ex.Message); }
+            catch (Exception ex) { MpLog.LogWarning("[Multiplayer][rail] ManufactureSync: screen rebuild failed: " + ex.Message); }
         }
 
         /// <summary>Scrap mode feeds its available-item list from SNAPSHOT copies of faction storage taken
@@ -600,7 +600,7 @@ namespace Multiplayer.Network.Sync
                 var staged = kv.Value.CommonItemData;
                 var have = snapshot.Items.TryGetValue(kv.Key, out var pool) ? pool.CommonItemData : null;
                 if (have != null && have.Count >= staged.Count && have.TotalCharges >= staged.TotalCharges) continue;
-                Debug.LogError("[MP][scrapcart] SHORTFALL " + kv.Key?.name + ": cart holds " + staged.Count +
+                MpLog.LogError("[MP][scrapcart] SHORTFALL " + kv.Key?.name + ": cart holds " + staged.Count +
                                " item(s)/" + staged.TotalCharges + " charges but the scrap pool offers only " +
                                (have?.Count ?? 0) + "/" + (have?.TotalCharges ?? 0) +
                                " — the subtract underflows and the def drops off the screen. Shared store says " +
@@ -708,7 +708,7 @@ namespace Multiplayer.Network.Sync
                     // (GeoFaction.cs:1217-1228) = ghost resources. Solo cannot race — prune only in-session.
                     if (CartHostRecording())
                         try { PruneCartsToLiveStorage(__instance); }
-                        catch (Exception ex) { Debug.LogWarning("[MP][scrap] cart prune failed: " + ex.Message); }
+                        catch (Exception ex) { MpLog.LogWarning("[MP][scrap] cart prune failed: " + ex.Message); }
                     return true; // host / no session / apply-scope → run native authoritatively
                 }
 
@@ -826,7 +826,7 @@ namespace Multiplayer.Network.Sync
                 if (cur <= 0) return;
                 if (cur == 1) store.Remove(defGuid); else store[defGuid] = cur - 1;
             }
-            if (MpDiag.On) Debug.Log("[MP][scrapcart] HOST op=" + op + " def=" + defGuid + " veh=" + veh + " peer=" + peer);
+            if (MpDiag.On) MpLog.Log("[MP][scrapcart] HOST op=" + op + " def=" + defGuid + " veh=" + veh + " peer=" + peer);
         }
 
         /// <summary>Host: scrap the WHOLE shared store — any peer's confirm. Every entry is clamped to
@@ -860,7 +860,7 @@ namespace Multiplayer.Network.Sync
             }
             Cart.Items.Clear();
             Cart.Vehicles.Clear();
-            Debug.Log("[MP][scrapcart] HOST scrapped shared cart (confirm by peer=" + peer + " nonce=" + nonce + ")");
+            MpLog.Log("[MP][scrapcart] HOST scrapped shared cart (confirm by peer=" + peer + " nonce=" + nonce + ")");
         }
 
         /// <summary>Queue-for-scrap gesture (UIModuleManufacturing.AddToScrapQueue:1094). CLIENT: block
@@ -931,7 +931,7 @@ namespace Multiplayer.Network.Sync
                         DoFilterMethod?.Invoke(__instance, new object[] { null, null });
                     }
                 }
-                catch (Exception ex) { Debug.LogWarning("[MP][scrapcart] reopen splice failed — cart stays local this open: " + ex.Message); }
+                catch (Exception ex) { MpLog.LogWarning("[MP][scrapcart] reopen splice failed — cart stays local this open: " + ex.Message); }
             }
         }
 
@@ -968,7 +968,7 @@ namespace Multiplayer.Network.Sync
                 var def = ItemToProduceField(__instance);
                 if (def == null) return true;
                 SendIntent(OpQuickProduce, def.Guid, 0);
-                if (MpDiag.On) Debug.Log("[MP][quickproduce] CLIENT blocked local buy, sent intent def=" + def.Guid);
+                if (MpDiag.On) MpLog.Log("[MP][quickproduce] CLIENT blocked local buy, sent intent def=" + def.Guid);
                 // No local Wallet.Take, no local GeoItem: the host's wallet + storage deltas on 0xAC are
                 // the only source. (The client wallet IS mirrored, but a diff rail only resends on a
                 // HOST-side change — a client-local Take would sit wrong until the host's wallet happened

@@ -221,7 +221,7 @@ namespace Multiplayer.Transport
                         // host is local — redirect to loopback on the host's default STUN port.
                         if (_publicEndPoint != null && ip.Equals(_publicEndPoint.Address))
                         {
-                            Debug.Log($"[Multiplayer] STUN same-machine: target {ip}:{remotePort} == own public " +
+                            MpLog.Log($"[Multiplayer] STUN same-machine: target {ip}:{remotePort} == own public " +
                                       $"address; redirecting to loopback 127.0.0.1:{DefaultStunPort}.");
                             ip = IPAddress.Loopback;
                             remotePort = DefaultStunPort;
@@ -330,7 +330,7 @@ namespace Multiplayer.Transport
             }
             else
             {
-                Debug.LogWarning($"[Multiplayer] STUN connect failed: {failReason ?? "unknown"}");
+                MpLog.LogWarning($"[Multiplayer] STUN connect failed: {failReason ?? "unknown"}");
                 // Surface the precise reason via LocalEndpoint so the UI failure dialog shows WHY the
                 // hole-punch/discovery failed, not a generic "connection failed".
                 LocalEndpoint = $"STUN(failed: {failReason ?? "unknown"})";
@@ -721,7 +721,7 @@ namespace Multiplayer.Transport
             if (data.Length > SafeDatagramBytes && !_oversizeWarned)
             {
                 _oversizeWarned = true;
-                UnityEngine.Debug.LogWarning($"[Multiplayer] StunTransport: sending a {data.Length}-byte datagram, " +
+                MpLog.LogWarning($"[Multiplayer] StunTransport: sending a {data.Length}-byte datagram, " +
                                              $"over the {SafeDatagramBytes}-byte fragmentation-free bound. This " +
                                              $"transport has no retransmit, so one lost IP fragment loses the whole " +
                                              $"message silently. Prefer Direct TCP to a reachable host.");
@@ -739,7 +739,7 @@ namespace Multiplayer.Transport
                 if (!_sendFailureWarned)
                 {
                     _sendFailureWarned = true;
-                    Debug.LogWarning($"[Multiplayer] StunTransport: send to {target} failed: " +
+                    MpLog.LogWarning($"[Multiplayer] StunTransport: send to {target} failed: " +
                                      $"{ex.GetType().Name}: {ex.Message}");
                 }
             }

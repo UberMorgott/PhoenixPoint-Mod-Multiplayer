@@ -42,7 +42,7 @@ namespace Multiplayer.Tactical
         {
             try
             {
-                Debug.LogError(Tag + " TFTV REPORTED AN EXCEPTION (mirrored here because TFTV's own log is " +
+                MpLog.LogError(Tag + " TFTV REPORTED AN EXCEPTION (mirrored here because TFTV's own log is " +
                                "truncated at every game launch and is shared between same-machine instances): " +
                                (ex == null ? "<null>" : ex.ToString()));
                 // If a mission restart is in flight, this lands in that trace too, so one grep shows both.

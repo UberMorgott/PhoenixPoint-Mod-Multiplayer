@@ -356,7 +356,7 @@ namespace Multiplayer.UI
 
             if (_loggedRefusal) return;
             _loggedRefusal = true;
-            Debug.LogWarning("[Multiplayer] geoscape ping REFUSED (nothing under the cursor) but SILENTLY — " +
+            MpLog.LogWarning("[Multiplayer] geoscape ping REFUSED (nothing under the cursor) but SILENTLY — " +
                              (def == null
                                  ? "the def repository names no InterceptionGameSoundDef"
                                  : "InterceptionGameSoundDef.DisabledEquipmentClick is not a valid Wwise " +
@@ -398,7 +398,7 @@ namespace Multiplayer.UI
         public static void Show(byte[] payload)
         {
             try { ShowCore(payload, false); }
-            catch (Exception e) { Debug.LogWarning("[Multiplayer] ping marker not shown: " + e.Message); }
+            catch (Exception e) { MpLog.LogWarning("[Multiplayer] ping marker not shown: " + e.Message); }
         }
 
         /// <summary>THE SENDER'S OWN DOOR, called from <see cref="Update"/> and from nowhere else. Same
@@ -407,7 +407,7 @@ namespace Multiplayer.UI
         public static void ShowLocal(byte[] payload)
         {
             try { ShowCore(payload, true); }
-            catch (Exception e) { Debug.LogWarning("[Multiplayer] own ping marker not shown: " + e.Message); }
+            catch (Exception e) { MpLog.LogWarning("[Multiplayer] own ping marker not shown: " + e.Message); }
         }
 
         private static void ShowCore(byte[] payload, bool mine)
@@ -417,7 +417,7 @@ namespace Multiplayer.UI
             // a ping is cheap, so it can afford to say why it vanished.
             if (_instance == null)
             {
-                Debug.LogWarning("[Multiplayer] ping DROPPED — PingMarkers has no live instance, so there is " +
+                MpLog.LogWarning("[Multiplayer] ping DROPPED — PingMarkers has no live instance, so there is " +
                                  "nothing holding the marker list. The component is created with the mod's UI " +
                                  "host, so this is a packet that arrived before that host existed or after it " +
                                  "was torn down. Nothing else is affected.");
@@ -425,7 +425,7 @@ namespace Multiplayer.UI
             }
             if (payload == null || payload.Length < 2)
             {
-                Debug.LogWarning("[Multiplayer] ping DROPPED — payload is " +
+                MpLog.LogWarning("[Multiplayer] ping DROPPED — payload is " +
                                  (payload == null ? "null" : payload.Length + " byte(s)") + " and the header " +
                                  "alone is 2 (scene, kind). Either the datagram was truncated or the sender " +
                                  "speaks a different build's ping format.");
@@ -466,7 +466,7 @@ namespace Multiplayer.UI
             {
                 // Not an error — a peer on another screen legitimately has no globe to draw on — but it is
                 // the difference between "he is in a battle" and "the ping broke", so it says which.
-                Debug.LogWarning("[Multiplayer] geoscape ping DROPPED — no live globe to draw it on (level=" +
+                MpLog.LogWarning("[Multiplayer] geoscape ping DROPPED — no live globe to draw it on (level=" +
                                  (geo == null ? "not geoscape" : "geoscape") + ", view=" +
                                  (geo?.View == null ? "none" : "live") + ", globe root=" +
                                  (root == null ? "none" : "live") + ", container=" +
@@ -484,7 +484,7 @@ namespace Multiplayer.UI
                 // site does not learn of it from somebody else's key press.
                 if (actor != null && !Known(geo, actor))
                 {
-                    Debug.Log("[Multiplayer] geoscape ping on '" + entityRef + "' NOT DRAWN — that site is " +
+                    MpLog.Log("[Multiplayer] geoscape ping on '" + entityRef + "' NOT DRAWN — that site is " +
                               "not revealed to this peer's faction (GeoSite.GetVisible is false), and a ping " +
                               "is not allowed to be the thing that reveals it. Working as intended: the " +
                               "sender can see it, this peer cannot, and the two globes legitimately differ.");
@@ -493,7 +493,7 @@ namespace Multiplayer.UI
                 var surface = actor?.Surface;
                 if (surface == null)
                 {
-                    Debug.LogWarning("[Multiplayer] ping names '" + entityRef + "', which does not resolve to " +
+                    MpLog.LogWarning("[Multiplayer] ping names '" + entityRef + "', which does not resolve to " +
                                      "a geoscape actor with a globe surface on this peer — nothing to point at.");
                     return;
                 }
@@ -548,7 +548,7 @@ namespace Multiplayer.UI
                 var actor = TacticalActorKey.Resolve(tlc, actorKey, out why);
                 if (actor == null)
                 {
-                    Debug.LogWarning("[Multiplayer] ping names actor key " + actorKey + ", unresolved: " + why);
+                    MpLog.LogWarning("[Multiplayer] ping names actor key " + actorKey + ", unresolved: " + why);
                     return;
                 }
                 // AN ACTOR PING PAINTS THE MODEL, IT DOES NOT PLANT A SHAFT — see Repaint. The shaft is
@@ -562,7 +562,7 @@ namespace Multiplayer.UI
                     _instance.Track(painted);
                     return;
                 }
-                Debug.LogWarning("[Multiplayer] ping on actor key " + actorKey + " falls back to the beacon shaft — " +
+                MpLog.LogWarning("[Multiplayer] ping on actor key " + actorKey + " falls back to the beacon shaft — " +
                                  (painted.Paint == null
                                      ? actor.GetType().Name + " is not IHighlightable, so it owns no body materials to repaint."
                                      : "LightingSettingsCharacters names no BodypartHighlightShader in this scene.") +
@@ -671,7 +671,7 @@ namespace Multiplayer.UI
             // INFERRED from that and both fed into a wrong fix. They are now measured (see LateUpdate), so
             // this line is the runtime falsification of that measurement: the live build must show
             // MeshRenderer, animators>=1 and particleSystems=0, or the prefab is not the one that was read.
-            Debug.Log("[Multiplayer] ping marker tinted " + (mine ? "OWN green" : "PEER blue") +
+            MpLog.Log("[Multiplayer] ping marker tinted " + (mine ? "OWN green" : "PEER blue") +
                       " on _Color (RGB only — the clip owns the alpha) over " + seen.Count +
                       " renderer(s): " + string.Join(", ", seen.ToArray()) + "; animators=" +
                       go.GetComponentsInChildren<Animator>(true).Length +
@@ -756,7 +756,7 @@ namespace Multiplayer.UI
             foreach (var r in rs) if (r != null && IsWave(r)) waves++;
             if (waves == 0)
             {
-                Debug.LogWarning("[Multiplayer] ping marker keeps its ring — no renderer named Pulse* under " +
+                MpLog.LogWarning("[Multiplayer] ping marker keeps its ring — no renderer named Pulse* under " +
                                  "the haven-defence prefab, so hiding the rest would leave nothing at all " +
                                  "to see. The tint log names the renderers this build actually has.");
                 return;
@@ -810,7 +810,7 @@ namespace Multiplayer.UI
                 if (on) Shader.SetGlobalColor("BodypartHighlightColor", p.Mine ? Own : Peer);
                 p.Paint.SetSpecialShader(on ? LightingSettingsCharacters.Instance?.BodypartHighlightShader : p.PriorShader);
             }
-            catch (Exception e) { Debug.LogWarning("[Multiplayer] ping paint not applied: " + e.Message); }
+            catch (Exception e) { MpLog.LogWarning("[Multiplayer] ping paint not applied: " + e.Message); }
         }
 
         /// <summary>What the actor's special-shader slot held before the ping took it. Read by reflection
@@ -988,7 +988,7 @@ namespace Multiplayer.UI
             var world = WorldOf(p);
             if (!world.HasValue)
             {
-                Debug.LogWarning("[Multiplayer] ping arrow clicked but NOT followed — the ping has no world " +
+                MpLog.LogWarning("[Multiplayer] ping arrow clicked but NOT followed — the ping has no world " +
                                  "position on this peer any more (the object it named is gone, or the screen " +
                                  "it was drawn for has been unloaded under it). The arrow will expire on its " +
                                  "own; nothing else is affected.");
@@ -1000,7 +1000,7 @@ namespace Multiplayer.UI
                 var director = GenericApplier.GeoLevel()?.View?.CameraDirector;
                 if (director == null)
                 {
-                    Debug.LogWarning("[Multiplayer] ping arrow clicked but NOT followed — the geoscape view " +
+                    MpLog.LogWarning("[Multiplayer] ping arrow clicked but NOT followed — the geoscape view " +
                                      "has no CameraDirector, so there is nothing to hint. This is the globe " +
                                      "being torn down mid-click.");
                     return;
@@ -1017,7 +1017,7 @@ namespace Multiplayer.UI
                 var director = Tlc()?.View?.CameraDirector;
                 if (director == null)
                 {
-                    Debug.LogWarning("[Multiplayer] ping arrow clicked but NOT followed — the tactical view " +
+                    MpLog.LogWarning("[Multiplayer] ping arrow clicked but NOT followed — the tactical view " +
                                      "has no CameraDirector, so there is nothing to hint. This is the battle " +
                                      "being torn down mid-click.");
                     return;
@@ -1029,7 +1029,7 @@ namespace Multiplayer.UI
                 });
             }
 
-            Debug.Log("[Multiplayer] ping arrow CLICKED — centring this peer's own camera on the " +
+            MpLog.Log("[Multiplayer] ping arrow CLICKED — centring this peer's own camera on the " +
                       (p.Follow != null ? "pinged object" : "pinged point") + " at " + world.Value + " on the " +
                       (p.Geo ? "geoscape" : "battlefield") + " (" + (p.Mine ? "own" : "peer") + " ping). " +
                       "Nobody else's camera moves.");

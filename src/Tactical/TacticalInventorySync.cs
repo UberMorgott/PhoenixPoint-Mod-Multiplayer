@@ -135,7 +135,7 @@ namespace Multiplayer.Tactical
 
         private static void SayOnce(string key, string message)
         {
-            if (_said.Add(key)) Debug.LogError(message);
+            if (_said.Add(key)) MpLog.LogError(message);
         }
 
         // ─── THE ADDRESS ───────────────────────────────────────────────────
@@ -255,7 +255,7 @@ namespace Multiplayer.Tactical
                     " — the items the host dropped there stay in their owner's pack on this screen.");
                 return found;
             }
-            Debug.Log("[Multiplayer][tac] mirrored a pile of dropped items at " + pos + ".");
+            MpLog.Log("[Multiplayer][tac] mirrored a pile of dropped items at " + pos + ".");
             found.Add(spawned.Inventory);
             return found;
         }
@@ -496,7 +496,7 @@ namespace Multiplayer.Tactical
                     "in none of the host's — it is left where it is rather than guessed at, so this soldier " +
                     "carries something the host's does not.");
             if (moved > 0)
-                Debug.Log("[Multiplayer][tac] applied an inventory batch: " + moved + " item(s) moved across " +
+                MpLog.Log("[Multiplayer][tac] applied an inventory batch: " + moved + " item(s) moved across " +
                           slots.Count + " container(s).");
             // LAW 11, and it is the whole reason the 2026-08-01 run looked dead (RCA below). This is the ONE
             // funnel every mirrored batch passes through — the host validating a client's intent and every peer
@@ -839,7 +839,7 @@ namespace Multiplayer.Tactical
             bool charged, partial;
             var slots = ReadLayout(r, out payerKey, out payerAp, out charged, out partial);
             if (partial)
-                Debug.LogWarning("[Multiplayer][tac] peer=" + senderPeerId + " sent a PARTIAL inventory batch — one of " +
+                MpLog.LogWarning("[Multiplayer][tac] peer=" + senderPeerId + " sent a PARTIAL inventory batch — one of " +
                                  "its containers is neither an actor's own two nor a pile on the ground, so it has no " +
                                  "shared identity at all. The contents check is skipped, so the items it swallowed " +
                                  "stay where they are on this peer instead of the whole batch being refused.");
@@ -878,7 +878,7 @@ namespace Multiplayer.Tactical
             TacticalDamageSync.Send(TacticalDamageSync.OpInventory,
                 "inventory settle from peer=" + senderPeerId + " (" + settled.Count + " container(s))",
                 w => WriteLayout(w, settled, payerKey, ap, charged, partial));
-            Debug.Log("[Multiplayer][tac] HOST inventory batch from peer=" + senderPeerId + " ACCEPTED — " +
+            MpLog.Log("[Multiplayer][tac] HOST inventory batch from peer=" + senderPeerId + " ACCEPTED — " +
                       settled.Count + " container(s)" + (charged ? ", action points charged" : "") +
                       " nonce=" + nonce);
         }
@@ -899,7 +899,7 @@ namespace Multiplayer.Tactical
             using (SyncApplyScope.Enter()) applied = ApplyLayout(slots, validateContents: false);
             if (applied != null)
             {
-                Debug.LogError("[Multiplayer][tac] the host's inventory batch CANNOT be applied — " + applied +
+                MpLog.LogError("[Multiplayer][tac] the host's inventory batch CANNOT be applied — " + applied +
                                ". Somebody's kit is now wrong on this screen.");
                 return;
             }
@@ -942,7 +942,7 @@ namespace Multiplayer.Tactical
             // every item went at the gesture that moved it — but it is the first commit that runs after
             // ExitState:440 charged the action, and that charge still has to reach the other peers.
             bool charge = TacticalInventorySync.HasPendingCharge;
-            Debug.Log("[Multiplayer][tac] inventory commit seam fired, queries=" + total +
+            MpLog.Log("[Multiplayer][tac] inventory commit seam fired, queries=" + total +
                       " willModify=" + willModify + (charge ? " charge-pending" : "") +
                       (willModify == 0 && !charge ? " (nothing was moved — nothing to ship)" : ""));
             if (willModify > 0 || charge) TacticalInventorySync.OnBatchCommitting(queries);

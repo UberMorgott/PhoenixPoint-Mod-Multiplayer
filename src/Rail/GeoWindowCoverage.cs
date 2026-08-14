@@ -487,7 +487,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][windows] could not ask the game whether '" + modalType + "' is a mission " +
+                MpLog.LogError("[MP][windows] could not ask the game whether '" + modalType + "' is a mission " +
                                "START confirmation — treating it as NOT one, which leaves the launch on its " +
                                "pre-2026-08-10 path: " + ex);
                 return false;
@@ -513,7 +513,7 @@ namespace Multiplayer.Network.Sync
             {
                 if (_briefBindLogged) return false;
                 _briefBindLogged = true;
-                Debug.LogError("[MP][windows] GeoscapeView.GetMissionBriefModal did not bind, so the per-peer " +
+                MpLog.LogError("[MP][windows] GeoscapeView.GetMissionBriefModal did not bind, so the per-peer " +
                                "answer class is EMPTY — one peer declining a mission brief will cancel the " +
                                "mission for every peer again (GeoMission.Cancel:253 nulls Site.ActiveMission)");
                 return false;
@@ -530,7 +530,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][windows] could not ask the game whether '" + modalType + "' is a mission " +
+                MpLog.LogError("[MP][windows] could not ask the game whether '" + modalType + "' is a mission " +
                                "brief/outcome — treating it as NOT per-peer, which is the pre-fix behaviour " +
                                "(one peer's Cancel can then delete the mission for everyone): " + ex);
                 return false;
@@ -549,13 +549,13 @@ namespace Multiplayer.Network.Sync
             if (stateType == null || !_announced.Add(stateType)) return;
             var rule = RuleFor(stateType);
             if (rule == null)
-                Debug.LogError("[MP][windows] UNDECLARED geoscape window '" + stateType.FullName + "' was queued at " +
+                MpLog.LogError("[MP][windows] UNDECLARED geoscape window '" + stateType.FullName + "' was queued at " +
                                "GeoscapeViewSwitchQuery.QueryStateSwitch — nothing in GeoWindowCoverage.Declared says " +
                                "whether it should reach the other peer, so it is almost certainly showing on ONE " +
                                "screen only. Declare it (Mirrored / LocalOnly / Gap) with a reason; RailCheck L48 " +
                                "fails on it until someone does");
             else if (rule.Sync == WindowSync.Gap)
-                Debug.LogWarning("[MP][windows] '" + stateType.Name + "' is a KNOWN un-mirrored window — the other " +
+                MpLog.LogWarning("[MP][windows] '" + stateType.Name + "' is a KNOWN un-mirrored window — the other " +
                                  "peer does not get it: " + rule.Why);
         }
 
@@ -570,13 +570,13 @@ namespace Multiplayer.Network.Sync
             if (!EventPopup.InSession || !_announcedModals.Add(modal)) return;
             var rule = RuleForModal(modal);
             if (rule == null)
-                Debug.LogError("[MP][windows] UNDECLARED modal '" + modal + "' (" + (int)modal + ") was opened at " +
+                MpLog.LogError("[MP][windows] UNDECLARED modal '" + modal + "' (" + (int)modal + ") was opened at " +
                                "GeoscapeView.OpenModal/OpenModalPersistent — nothing in GeoWindowCoverage" +
                                ".DeclaredModals says whether it should reach the other peer, so it is almost " +
                                "certainly showing on ONE screen only. Declare it (Mirrored / LocalOnly / Gap) with " +
                                "a reason; RailCheck L49 fails on it until someone does");
             else if (rule.Sync == WindowSync.Gap)
-                Debug.LogWarning("[MP][windows] modal '" + modal + "' is a KNOWN un-mirrored window — the other " +
+                MpLog.LogWarning("[MP][windows] modal '" + modal + "' is a KNOWN un-mirrored window — the other " +
                                  "peer does not get it: " + rule.Why);
         }
 
@@ -625,7 +625,7 @@ namespace Multiplayer.Network.Sync
                 list.RemoveAt(last);
                 _dropped++;
                 if (_dropped == 1 || _dropped % 32 == 0)
-                    Debug.LogError("[MP][windows] window queue OVERFLOW — dropped the lowest-priority pending " +
+                    MpLog.LogError("[MP][windows] window queue OVERFLOW — dropped the lowest-priority pending " +
                                    "window '" + (dropped == null ? "<null>" : dropped.GetType().Name) + "' to hold " +
                                    "the queue at " + QueueCap + " (" + _dropped + " dropped this session). The queue " +
                                    "only drains when a peer answers the current window (ProcessQueriedStateSwitch:60), " +
@@ -674,7 +674,7 @@ namespace Multiplayer.Network.Sync
                 // happen exactly as it always did, and only THEN is the list trimmed back to its bound.
                 GeoWindowCoverage.TrimQueue(__instance);
             }
-            catch (Exception ex) { Debug.LogError("[MP][windows] coverage gate threw: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[MP][windows] coverage gate threw: " + ex); }
         }
     }
 }

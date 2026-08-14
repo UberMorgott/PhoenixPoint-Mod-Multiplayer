@@ -94,7 +94,7 @@ namespace RailCheck
             {
                 typeof(GameObject).GetProperty("layer", AllMembers)?.GetSetMethod(true),
                 typeof(Graphic).GetProperty("depth", AllMembers)?.GetGetMethod(true),
-                typeof(Debug).GetMethod("Log", BindingFlags.Public | BindingFlags.Static, null,
+                typeof(Multiplayer.MpLog).GetMethod("Log", BindingFlags.Public | BindingFlags.Static, null,
                                         new[] { typeof(object) }, null),
                 typeof(EventSystem).GetMethod("RaycastAll", AllMembers),
                 typeof(Graphic).GetProperty("raycastTarget", AllMembers)?.GetSetMethod(true),
@@ -165,7 +165,7 @@ namespace RailCheck
         /// <summary>Arm (b), over one method.</summary>
         private static IEnumerable<string> ScanPress(MethodBase press, string label)
         {
-            if (!Reaches(press, "Debug", "Log"))
+            if (!Reaches(press, "MpLog", "Log"))
                 yield return "L220 ready-press-is-silent: " + label + " must reach Debug.Log on the path that " +
                              "actually flips the flag. A LogWarning on the no-session bail is not this: with " +
                              "only that, a build where the button is unreachable produces logs BYTE-IDENTICAL " +
@@ -203,7 +203,7 @@ namespace RailCheck
                              "pointer can reach this button — raycastTarget, layer and depth all read healthy " +
                              "on the dead one. The only component that knows is the raycaster the game itself " +
                              "uses, so it has to be asked at the button's own centre.";
-            else if (!Reaches(asker, "Debug", "LogError"))
+            else if (!Reaches(asker, "MpLog", "LogError"))
                 yield return "L220 ready-reachability-unasked: " + label + "." + asker.Name + " asks " +
                              "EventSystem.RaycastAll and cannot reach Debug.LogError, so a NO comes back " +
                              "silent. A probe that only speaks when the answer is good is the same green-over-" +

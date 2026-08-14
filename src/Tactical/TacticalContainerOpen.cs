@@ -79,7 +79,7 @@ namespace Multiplayer.Tactical
             if (!InventoryWindowMayOpen(true, exists, exists && ReferenceEquals(view.SelectedActor, actor)))
             {
                 var holding = !exists || view.SelectedActor == null ? "nobody" : view.SelectedActor.name;
-                Debug.Log("[Multiplayer][tac] the container window for " +
+                MpLog.Log("[Multiplayer][tac] the container window for " +
                           (actor == null ? "<no actor>" : actor.name) + " was NOT opened on this peer — this " +
                           "peer's view is holding " + holding + ". The crate's lid still opens here; the " +
                           "inventory belongs to the peer whose soldier walked up to it. UIStateInventory." +

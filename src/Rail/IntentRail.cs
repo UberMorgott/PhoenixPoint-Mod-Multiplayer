@@ -121,14 +121,14 @@ namespace Multiplayer.Network.Sync
                 }
                 var env = SyncProtocol.EncodeEnvelope(surfaceId, SyncKind.ActionRequest, inner);
                 engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
-                Debug.Log("[MP][intent] CLIENT " + Tag(surfaceId) + " " + what + " nonce=" + _nextNonce);
+                MpLog.Log("[MP][intent] CLIENT " + Tag(surfaceId) + " " + what + " nonce=" + _nextNonce);
             }
             catch (Exception ex)
             {
                 // A block-first gesture whose intent never reached the host: host state is unchanged, so
                 // no delta will ever repaint what the client staged — reconverge like the reject path
                 // does (repaint the open screen from the un-mutated local model). Never silent.
-                Debug.LogError("[MP][intent] " + Tag(surfaceId) + " send failed (" + what + ") — reconverging local UI: " + ex);
+                MpLog.LogError("[MP][intent] " + Tag(surfaceId) + " send failed (" + what + ") — reconverging local UI: " + ex);
                 OpenUiRepaint.MarkDirty();
             }
         }
@@ -167,7 +167,7 @@ namespace Multiplayer.Network.Sync
                 // refusal the host marked `notify` reaches the screen.
                 bool notify;
                 string reason = DecodeNudge(payload, out notify);
-                Debug.Log("[MP][intent] CLIENT " + Tag(surfaceId) + " reject nudge — repainting open UI" +
+                MpLog.Log("[MP][intent] CLIENT " + Tag(surfaceId) + " reject nudge — repainting open UI" +
                           (reason == null ? "" : " — " + reason) + (notify ? " [notify]" : ""));
                 OpenUiRepaint.MarkDirty();
                 if (notify && reason != null) SessionNotifier.ShowToast(reason, modalFallback: true);
@@ -215,7 +215,7 @@ namespace Multiplayer.Network.Sync
                 // ONLY word the acting player gets, so it carries the inner message; the full outer
                 // exception still goes to the host log, where the stack trace is what has value.
                 var cause = (ex as System.Reflection.TargetInvocationException)?.InnerException ?? ex;
-                Debug.LogError("[MP][intent] HOST " + Tag(surfaceId) + " handler threw: " + ex);
+                MpLog.LogError("[MP][intent] HOST " + Tag(surfaceId) + " handler threw: " + ex);
                 Reject(surfaceId, senderPeerId, "(throw) " + cause.Message);
             }
             return true;
@@ -241,7 +241,7 @@ namespace Multiplayer.Network.Sync
         /// existing call sites keep their prefixes unchanged AND cannot silently acquire a popup.</summary>
         public static void Reject(byte surfaceId, ulong peer, string why, bool notify, params string[] reemitPrefixes)
         {
-            Debug.LogWarning("[MP][intent] HOST " + Tag(surfaceId) + " REJECT peer=" + peer +
+            MpLog.LogWarning("[MP][intent] HOST " + Tag(surfaceId) + " REJECT peer=" + peer +
                              (notify ? " [notify]" : "") + " — " + why);
             int scoped = 0;
             if (reemitPrefixes != null)
@@ -272,7 +272,7 @@ namespace Multiplayer.Network.Sync
                         SyncProtocol.EncodeEnvelope(surfaceId, SyncKind.ActionRequest,
                                                     EncodeNudge(why, notify))));
             }
-            catch (Exception ex) { Debug.LogError("[MP][intent] reject nudge send failed: " + ex.Message); }
+            catch (Exception ex) { MpLog.LogError("[MP][intent] reject nudge send failed: " + ex.Message); }
         }
 
         // ─── The reject-nudge framing: [notify:u8][reason UTF8] ─────────────

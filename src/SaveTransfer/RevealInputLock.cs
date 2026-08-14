@@ -141,9 +141,9 @@ namespace Multiplayer.Network
                                " refCount=" + (CallHandlersRefField?.GetValue(input) ?? "?");
                 if (string.Equals(probe, _lastProbe, StringComparison.Ordinal)) return;
                 _lastProbe = probe;
-                Debug.Log("[MP][input] " + probe);
+                MpLog.Log("[MP][input] " + probe);
             }
-            catch (Exception e) { Debug.LogError("[MP][input] probe failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[MP][input] probe failed: " + e.Message); }
         }
     }
 }

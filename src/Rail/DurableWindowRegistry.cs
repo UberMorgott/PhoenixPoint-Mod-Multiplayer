@@ -282,7 +282,7 @@ namespace Multiplayer.Network.Sync
             // already ignores this bool. Loud, never silent (P1).
             // ponytail: no deferred retry — there is no durable per-frame host pump to hang one on. If these
             // start showing up in Player.log, add one where the geoscape tick already runs.
-            UnityEngine.Debug.LogError("[MP][inbox] could not enrol priority occurrence '" +
+            MpLog.LogError("[MP][inbox] could not enrol priority occurrence '" +
                 occurrence.EventId + "/" + occurrence.TriggerId + "' after 32 attempts — the store refused " +
                 "every commit (a native transition is in flight, or the candidate ledger failed validation). " +
                 "The window still opens locally; it is NOT durable-mirrored for this peer.");
@@ -308,7 +308,7 @@ namespace Multiplayer.Network.Sync
             // CaptureDeployment / CaptureAssetDestination), and a throw there does not merely lose an
             // enrolment — it tears the transition apart mid-flight. All three already handle a null
             // (`if (occurrence.HasValue && request != null)`), so the window opens natively unmirrored.
-            UnityEngine.Debug.LogError("[MP][inbox] could not enrol native priority occurrence '" + family +
+            MpLog.LogError("[MP][inbox] could not enrol native priority occurrence '" + family +
                 "/" + stableTrigger + "' after 32 attempts — the store refused every commit (a native " +
                 "transition is in flight, or the candidate ledger failed validation). The screen still " +
                 "opens; it is NOT durable-mirrored for this peer.");

@@ -61,7 +61,7 @@ namespace Multiplayer.Network
             GameConsoleWindow.DisableConsoleAccess = true;
             if (_said) return;
             _said = true;
-            Debug.Log("[MP][consolelock] developer console refused — this peer is a CLIENT in an active " +
+            MpLog.Log("[MP][consolelock] developer console refused — this peer is a CLIENT in an active " +
                       "session. Host-only: a client console command edits this world behind the rail and " +
                       "the host never learns of it. Logged once per lock, not per keypress.");
         }

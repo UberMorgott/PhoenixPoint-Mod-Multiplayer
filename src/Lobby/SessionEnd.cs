@@ -83,7 +83,7 @@ namespace Multiplayer.Network
         {
             _endedOn = GameUtl.CurrentLevel();
             if (MpDiag.On)
-                Debug.Log("[MP][sessionend] begin — " + (notice ?? "caller already notified") +
+                MpLog.Log("[MP][sessionend] begin — " + (notice ?? "caller already notified") +
                           " (level=" + (_endedOn == null ? "none" : _endedOn.name) + ")");
 
             QuiesceOpenUi();
@@ -121,30 +121,30 @@ namespace Multiplayer.Network
                 var view = level == null ? null : level.GetComponent<GameView>();
                 if (view == null)
                 {
-                    if (MpDiag.On) Debug.Log("[MP][sessionend] quiesce: no GameView on the current level — nothing open");
+                    if (MpDiag.On) MpLog.Log("[MP][sessionend] quiesce: no GameView on the current level — nothing open");
                     return;
                 }
 
                 var stack = AccessTools.Field(view.GetType(), "_statesStack")?.GetValue(view);
                 if (stack == null)
                 {
-                    if (MpDiag.On) Debug.Log("[MP][sessionend] quiesce: " + view.GetType().Name + " has no live state stack");
+                    if (MpDiag.On) MpLog.Log("[MP][sessionend] quiesce: " + view.GetType().Name + " has no live state stack");
                     return;
                 }
 
                 var clear = AccessTools.Method(stack.GetType(), "Clear");
                 if (clear == null)
                 {
-                    Debug.LogWarning("[MP][sessionend] quiesce: StateStack.Clear unresolved on " + stack.GetType().Name);
+                    MpLog.LogWarning("[MP][sessionend] quiesce: StateStack.Clear unresolved on " + stack.GetType().Name);
                     return;
                 }
 
                 // law 8: the native Exit/Pop this fires must not echo an intent back to the departing host.
                 using (SyncApplyScope.Enter())
                     clear.Invoke(stack, null);
-                if (MpDiag.On) Debug.Log("[MP][sessionend] quiesced " + view.GetType().Name + " state stack");
+                if (MpDiag.On) MpLog.Log("[MP][sessionend] quiesced " + view.GetType().Name + " state stack");
             }
-            catch (Exception e) { Debug.LogError("[MP][sessionend] quiesce failed: " + e); }
+            catch (Exception e) { MpLog.LogError("[MP][sessionend] quiesce failed: " + e); }
         }
 
         // ─── (c) notice ────────────────────────────────────────────────────
@@ -158,7 +158,7 @@ namespace Multiplayer.Network
                 GameUtl.GetMessageBox()?.ShowSimplePrompt(
                     notice, MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
             }
-            catch (Exception e) { Debug.LogError("[MP][sessionend] notice failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[MP][sessionend] notice failed: " + e.Message); }
         }
 
         // ─── (d) native quit-to-menu chokepoint ────────────────────────────
@@ -168,7 +168,7 @@ namespace Multiplayer.Network
         private static void FinishLevel()
         {
             try { GameUtl.GameComponent<PhoenixGame>()?.FinishLevelAndGoToLobby(); }
-            catch (Exception e) { Debug.LogError("[MP][sessionend] return-to-menu failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[MP][sessionend] return-to-menu failed: " + e.Message); }
         }
 
         // ─── (e) teardown ──────────────────────────────────────────────────
@@ -179,12 +179,12 @@ namespace Multiplayer.Network
             // the belt for a Begin() outside a level, where that patch never fires. TearDown is idempotent
             // and is also what drives the one rail-static reset (Sync.DetachAllChannels).
             try { NetworkEngine.Instance?.TearDown(); }
-            catch (Exception e) { Debug.LogError("[MP][sessionend] TearDown failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[MP][sessionend] TearDown failed: " + e.Message); }
 
             // The network TearDown does NOT reset the UI lobby FSM or clear the chosen save; without this
             // the next host/join inherits a stale ClientLobby state and a phantom _pendingChosenSave.
             try { Multiplayer.UI.MultiplayerUI.Instance?.TeardownLobbyOnSessionEnd(); }
-            catch (Exception e) { Debug.LogError("[MP][sessionend] UI teardown failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[MP][sessionend] UI teardown failed: " + e.Message); }
         }
     }
 }

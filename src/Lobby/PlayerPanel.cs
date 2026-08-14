@@ -160,7 +160,7 @@ namespace Multiplayer.UI
                 if (_root != null) _root.SetActive(false);
                 if (_loggedFailure) return;
                 _loggedFailure = true;
-                Debug.LogError("[Multiplayer] player panel FAILED and is hidden for the rest of this run " +
+                MpLog.LogError("[Multiplayer] player panel FAILED and is hidden for the rest of this run " +
                                "(nothing else is affected — it reads state and decides nothing): " + e);
             }
         }

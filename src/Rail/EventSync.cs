@@ -360,7 +360,7 @@ namespace Multiplayer.Network.Sync
                 // says exactly that in plain words and names no id and no record state; the event id, the
                 // record, the index and the choice count go to the HOST log, which is where they are worth
                 // something. Same reject LOGIC, same freeze, same forced RecordScope re-emit.
-                Debug.LogWarning("[MP][events] answer refused for '" + eventId + "' from peer " + senderPeerId +
+                MpLog.LogWarning("[MP][events] answer refused for '" + eventId + "' from peer " + senderPeerId +
                                  " — record=" + rec.State + " choice=" + index + "/" +
                                  (data.Choices == null ? 0 : data.Choices.Count) + " — " + why);
                 IntentRail.Reject(SurfaceIds.GeoEventIntent, senderPeerId, why, true /* notify */, RecordScope);
@@ -378,7 +378,7 @@ namespace Multiplayer.Network.Sync
             // no outcome — takes the payment and returns WITHOUT completing (:571-582); we complete
             // anyway, because a record left Triggered is a window no peer can ever close.
             var reward = ev.CompleteEvent(choice != null && choice.Outcome == null ? null : choice, faction);
-            Debug.Log("[MP][events] HOST answered '" + eventId + "' choice=" + index + " → record=" + rec.State +
+            MpLog.Log("[MP][events] HOST answered '" + eventId + "' choice=" + index + " → record=" + rec.State +
                       " selected=" + rec.SelectedChoice + " nonce=" + nonce + " peer=" + senderPeerId +
                       (clearedStale ? " (cleared stale IsCompleted from prior raise)" : ""));
 
@@ -393,7 +393,7 @@ namespace Multiplayer.Network.Sync
             var mission = reward?.ApplyResult?.StartMission;
             if (mission == null) return;
             if (geo.View == null)
-                Debug.LogWarning("[MP][events] '" + eventId + "' generated a mission but there is no GeoscapeView to launch it");
+                MpLog.LogWarning("[MP][events] '" + eventId + "' generated a mission but there is no GeoscapeView to launch it");
             else
             {
                 MissionEncounterNav.FinishOwnEncounterWindow(geo.View, eventId, true);   // :611
@@ -449,7 +449,7 @@ namespace Multiplayer.Network.Sync
             if (EventPopup.StartsMission(choice)) return false;
             if (choice?.Outcome?.Cinematic != null || choice?.Outcome?.GameOverVictoryFaction != null)
             {
-                Debug.LogError("[MP][events] durable choice refused before PRE: cinematic/game-over is an " +
+                MpLog.LogError("[MP][events] durable choice refused before PRE: cinematic/game-over is an " +
                     "external transition not covered by campaign-checkpoint idempotence");
                 return true;
             }
@@ -489,7 +489,7 @@ namespace Multiplayer.Network.Sync
                 }, out stored);
             if (accepted)
             {
-                Debug.Log("[MP][events] durable choice locked '" + eventId + "' token=" + stored.EffectToken.Value +
+                MpLog.Log("[MP][events] durable choice locked '" + eventId + "' token=" + stored.EffectToken.Value +
                     " winner=" + stored.Winner.PlayerGuid);
             }
             return true;
@@ -556,7 +556,7 @@ namespace Multiplayer.Network.Sync
             OccurrenceId occurrence; var store = DurableInboxSession.ActiveStore;
             if (store == null || !EventPopup.TryGetDurableOccurrence(ev, out occurrence))
             {
-                Debug.LogWarning("[MP][events] host-local durable answer SKIPPED for '" + ev.EventID +
+                MpLog.LogWarning("[MP][events] host-local durable answer SKIPPED for '" + ev.EventID +
                     "' — no exact durable occurrence (the raise landed before this geoscape session's store " +
                     "existed, or it never bound one), so the click runs the game's OWN handler instead of " +
                     "being swallowed. The host owns resolutions, which is what the native path does.");
@@ -567,7 +567,7 @@ namespace Multiplayer.Network.Sync
             try { store.Ledger.Get(occurrence, winner); }
             catch
             {
-                Debug.LogWarning("[MP][events] host-local durable answer SKIPPED for '" + ev.EventID +
+                MpLog.LogWarning("[MP][events] host-local durable answer SKIPPED for '" + ev.EventID +
                     "' — no active local entitlement; the click runs the game's own handler.");
                 return HostLocalAnswer.NotDurable;
             }
@@ -583,7 +583,7 @@ namespace Multiplayer.Network.Sync
                 // cinematic/game-over transition the ledger cannot make idempotent). Native must NOT run —
                 // UIModuleSiteEncounters:571-573 would charge this host's wallet for a choice it did not get —
                 // so the window is closed instead of left standing on dead buttons.
-                Debug.LogWarning("[MP][events] host-local durable answer refused for '" + ev.EventID +
+                MpLog.LogWarning("[MP][events] host-local durable answer refused for '" + ev.EventID +
                     "' — this peer's own window is closed rather than left un-closable");
                 return HostLocalAnswer.Refused;
             }
@@ -609,7 +609,7 @@ namespace Multiplayer.Network.Sync
                 new DelegateDurableChoiceEffect(_ => { }, _ => DurableEffectObservation.Diverged),
                 EventPopup.RepaintDurableChoice).RecoverPending(); }
             catch (Exception ex)
-            { Debug.LogError("[MP][events] durable choice ledger recovery failed: " + ex); return 0; }
+            { MpLog.LogError("[MP][events] durable choice ledger recovery failed: " + ex); return 0; }
         }
 
         /// <summary>HOST: replay the client's variable write through the game's OWN setter. NEVER the
@@ -634,13 +634,13 @@ namespace Multiplayer.Network.Sync
             string noop = NoOpReason(es.GetVariable(name, int.MinValue), value);
             if (noop != null)
             {
-                Debug.Log("[MP][events] HOST variable '" + name + "'=" + value + " NOT applied — " + noop +
+                MpLog.Log("[MP][events] HOST variable '" + name + "'=" + value + " NOT applied — " + noop +
                           " nonce=" + nonce + " peer=" + senderPeerId);
                 return;
             }
 
             es.SetVariable(name, value);   // GeoscapeEventSystem.cs:251 — the game's own setter
-            Debug.Log("[MP][events] HOST variable '" + name + "'=" + value + " nonce=" + nonce + " peer=" + senderPeerId);
+            MpLog.Log("[MP][events] HOST variable '" + name + "'=" + value + " nonce=" + nonce + " peer=" + senderPeerId);
         }
 
         // ─── LOCAL PREFERENCE: an event variable that is a VIEW SETTING, not campaign state ─────
@@ -679,7 +679,7 @@ namespace Multiplayer.Network.Sync
             bool changed = !_localPreferences.TryGetValue(variable, out had) || had != value;
             _localPreferences[variable] = value;
             if (changed)
-                Debug.Log("[MP][events] local preference '" + variable + "'=" + value +
+                MpLog.Log("[MP][events] local preference '" + variable + "'=" + value +
                           " kept off the rail — this is a per-player view setting, not campaign state");
             return true;
         }
@@ -842,7 +842,7 @@ namespace Multiplayer.Network.Sync
 
             EventPopup.MarkResolvedInstance(__instance);
             __result = __instance.ChoiceReward;
-            Debug.Log("[MP][events] CompleteEvent for '" + __instance.EventID + "' skipped — " + why);
+            MpLog.Log("[MP][events] CompleteEvent for '" + __instance.EventID + "' skipped — " + why);
             return false;
         }
     }
@@ -877,7 +877,7 @@ namespace Multiplayer.Network.Sync
                 "the marketplace window is a purely LOCAL gesture (MarketplaceAbility.ActivateInternal:43 → " +
                 "GeoscapeView.ToMarketplace:734), so nothing on the rail legitimately reaches it here");
             if (why == null) return true;
-            Debug.Log("[MP][events] CompleteMarketplaceEvent for '" + __instance?.EventID + "' skipped — " + why);
+            MpLog.Log("[MP][events] CompleteMarketplaceEvent for '" + __instance?.EventID + "' skipped — " + why);
             return false;
         }
     }

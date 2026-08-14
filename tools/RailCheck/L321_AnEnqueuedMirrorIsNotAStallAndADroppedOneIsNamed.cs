@@ -90,7 +90,7 @@ namespace RailCheck
             else
             {
                 var after = seq.Skip(at + 1).ToList();
-                var said = after.FirstOrDefault(c => c.DeclaringType == typeof(UnityEngine.Debug) &&
+                var said = after.FirstOrDefault(c => c.DeclaringType == typeof(Multiplayer.MpLog) &&
                                                     (c.Name == "LogError" || c.Name == "LogWarning"));
                 if (said != null)
                     yield return "L321 handoff-reported-as-a-stall: ApplyActivate reaches Debug." + said.Name +
@@ -115,7 +115,7 @@ namespace RailCheck
             var sweep = Program.CalleeSequence(tick);
             int enq = sweep.FindIndex(c => c.Name == "get_IsEnqueued");
             var reports = sweep.Select((c, i) => new { c, i })
-                               .Where(x => x.c.DeclaringType == typeof(UnityEngine.Debug) && x.c.Name == "LogError")
+                               .Where(x => x.c.DeclaringType == typeof(Multiplayer.MpLog) && x.c.Name == "LogError")
                                .Select(x => x.i).ToList();
             if (enq < 0)
                 yield return "L321 drop-unnamed: TickQueuedMirrors never reads TacticalAbility.IsEnqueued, which " +

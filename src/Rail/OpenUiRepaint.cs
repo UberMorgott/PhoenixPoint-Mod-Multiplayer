@@ -142,7 +142,7 @@ namespace Multiplayer.Network.Sync
             if (tracker == null)
             {
                 if (_loggedFailures.Add("AgendaTrackerMissing"))
-                    Debug.LogWarning("[Multiplayer][rail] GeoscapeModulesData.FactionDataTracker is null — the " +
+                    MpLog.LogWarning("[Multiplayer][rail] GeoscapeModulesData.FactionDataTracker is null — the " +
                                      "top-right activity strip has no handle to repaint and will only ever update " +
                                      "on its own game-clock poll (logged once)");
                 return;
@@ -160,7 +160,7 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex)
             {
                 if (_loggedFailures.Add("PersistentHud"))
-                    Debug.LogWarning("[Multiplayer][rail] persistent-HUD refresh threw — the top-right tracker may " +
+                    MpLog.LogWarning("[Multiplayer][rail] persistent-HUD refresh threw — the top-right tracker may " +
                                      "stay stale until the next screen change (logged once): " + ex);
             }
         }
@@ -223,7 +223,7 @@ namespace Multiplayer.Network.Sync
                 // Not silent, and not once-per-site-per-session either: this is a per-exploration event, so
                 // a line per close is a line per order — and "the menu closed on its own" is otherwise
                 // indistinguishable in a log from "the player clicked something".
-                Debug.Log("[MP][uirepaint] site menu CLOSED for " + IdentityResolver.RootRef(menu.SelectedSite) +
+                MpLog.Log("[MP][uirepaint] site menu CLOSED for " + IdentityResolver.RootRef(menu.SelectedSite) +
                           " — its exploration has started, so the offer this menu made is already taken " +
                           "(the game closes it the same way on the peer that clicked)");
                 menu.HideContextualMenu();
@@ -248,7 +248,7 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex)
             {
                 if (_loggedFailures.Add("SiteContextualMenu"))
-                    Debug.LogWarning("[Multiplayer][rail] site contextual-menu re-derive threw — its buttons may stay " +
+                    MpLog.LogWarning("[Multiplayer][rail] site contextual-menu re-derive threw — its buttons may stay " +
                                      "stale until the player clicks the site again (logged once): " + ex);
             }
         }
@@ -327,7 +327,7 @@ namespace Multiplayer.Network.Sync
                 // freeze it exists to report, while a diag-gated one would leave the default build silent
                 // about work it declined to do.
                 if (_loggedSkips.Add(screen.GetType().Name + ":" + kind.Name))
-                    Debug.Log("[MP][uirepaint] SKIP " + kind.Name + " on " + screen.GetType().Name +
+                    MpLog.Log("[MP][uirepaint] SKIP " + kind.Name + " on " + screen.GetType().Name +
                               " — kind declared irrelevant to this screen (logged once per kind per screen)");
                 MarkHudDirty();
                 return;
@@ -401,7 +401,7 @@ namespace Multiplayer.Network.Sync
             GeoCharacter next;
             if (!ReleaseBinding(roster, destroyed, boundField.GetValue(screen) as GeoCharacter, out next))
                 return;
-            Debug.Log("[MP][uirepaint] released " + screen.GetType().Name + " from destroyed U#" +
+            MpLog.Log("[MP][uirepaint] released " + screen.GetType().Name + " from destroyed U#" +
                       (int)destroyed.Id + " → " + (next == null ? "no unit left, back to the geoscape"
                                                                 : "U#" + (int)next.Id));
             // law 8: a state transition fires native UI events an intent-capture seam listens to.
@@ -484,7 +484,7 @@ namespace Multiplayer.Network.Sync
                 if (!_deferLogged)
                 {
                     _deferLogged = true;
-                    Debug.LogWarning("[Multiplayer][rail] open-UI repaint forced after " + MaxDeferFrames +
+                    MpLog.LogWarning("[Multiplayer][rail] open-UI repaint forced after " + MaxDeferFrames +
                                      " deferred frames — a drag or gesture flag is stuck (please report)");
                 }
             }
@@ -537,7 +537,7 @@ namespace Multiplayer.Network.Sync
             // below would ever look at it — and an unservable one served later opens EMPTY (four measured
             // cases, 2026-08-08/09). Dropped here, once per flush, through the game's own pending list.
             try { DeploymentWindowClose.DropUnservableQueued(); }
-            catch (Exception ex) { Debug.LogError("[MP][deploy] queued-window sweep threw: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[MP][deploy] queued-window sweep threw: " + ex); }
             var view = GenericApplier.GeoLevel()?.View;
             var current = view?.CurrentViewState;
             if (current == null) return;
@@ -564,7 +564,7 @@ namespace Multiplayer.Network.Sync
                         if (MpDiag.On && Time.realtimeSinceStartup >= _nextDiagAt)
                         {
                             _nextDiagAt = Time.realtimeSinceStartup + 1f;
-                            Debug.Log("[MP][uirepaint] native rebuild " + current.GetType().Name + " marks=" + marks);
+                            MpLog.Log("[MP][uirepaint] native rebuild " + current.GetType().Name + " marks=" + marks);
                         }
                         return;
                     }
@@ -576,7 +576,7 @@ namespace Multiplayer.Network.Sync
                 // keep using the table on later batches (law 11 outranks log tidiness). Never demote to
                 // Exit+Enter: that transition is exactly what the table exists to avoid.
                 if (_loggedFailures.Add(current.GetType().Name + ":NativeRebuild"))
-                    Debug.LogWarning("[Multiplayer][rail] native rebuild for " + current.GetType().Name +
+                    MpLog.LogWarning("[Multiplayer][rail] native rebuild for " + current.GetType().Name +
                                      " threw — screen kept (logged once per screen): " + rebuildEx);
                 return;
             }
@@ -594,7 +594,7 @@ namespace Multiplayer.Network.Sync
             if (PauseHold.IsCurrentQueuedWindow(view, current))
             {
                 if (_loggedSkips.Add("queued:" + current.GetType().Name))
-                    Debug.Log("[MP][uirepaint] SKIP re-enter of queued window " + current.GetType().Name +
+                    MpLog.Log("[MP][uirepaint] SKIP re-enter of queued window " + current.GetType().Name +
                               " — a one-shot presentation has no repaint, and Exit+Enter would replay it " +
                               "(logged once per screen)");
                 return;
@@ -602,7 +602,7 @@ namespace Multiplayer.Network.Sync
             // LAST RESORT: lifecycle re-enter for screens with no native-rebuild registration yet.
             // One-time inventory line per screen type = the to-do list for the next table entry.
             if (_loggedFallback.Add(current.GetType().Name))
-                Debug.Log("[MP][uirepaint] fallback re-enter: " + current.GetType().Name);
+                MpLog.Log("[MP][uirepaint] fallback re-enter: " + current.GetType().Name);
             if (!(StatesStackField?.GetValue(view) is StateStack<GeoscapeViewContext> stack)) return;
             try
             {
@@ -616,7 +616,7 @@ namespace Multiplayer.Network.Sync
                         // GeoscapeViewState.cs:98) — bailing out after a thrown ExitState would leave the
                         // screen DEAF. Always fall through to Enter: AddUnique re-subscribes idempotently.
                         if (_loggedFailures.Add(current.GetType().Name + ":Exit"))
-                            Debug.LogWarning("[Multiplayer][rail] open-UI Exit for " + current.GetType().Name +
+                            MpLog.LogWarning("[Multiplayer][rail] open-UI Exit for " + current.GetType().Name +
                                              " threw — attempting Enter anyway (logged once per screen): " + exitEx);
                     }
                     current.Enter(stack);
@@ -626,7 +626,7 @@ namespace Multiplayer.Network.Sync
                 if (MpDiag.On && Time.realtimeSinceStartup >= _nextDiagAt)
                 {
                     _nextDiagAt = Time.realtimeSinceStartup + 1f;
-                    Debug.Log("[MP][uirepaint] re-entered " + current.GetType().Name + " marks=" + marks);
+                    MpLog.Log("[MP][uirepaint] re-entered " + current.GetType().Name + " marks=" + marks);
                 }
             }
             catch (Exception ex)
@@ -647,7 +647,7 @@ namespace Multiplayer.Network.Sync
                 // law 11 (reactivity) outranks log tidiness. Once per state TYPE the full exception is logged,
                 // then it goes quiet — a per-frame stack dump was its own kind of freeze.
                 if (_loggedFailures.Add(current.GetType().Name))
-                    Debug.LogWarning("[Multiplayer][rail] open-UI re-enter for " + current.GetType().Name +
+                    MpLog.LogWarning("[Multiplayer][rail] open-UI re-enter for " + current.GetType().Name +
                                      " threw — screen kept, that panel may be partially painted until the " +
                                      "underlying subtree is complete (logged once per screen): " + ex);
             }

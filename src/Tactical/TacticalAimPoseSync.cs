@@ -279,14 +279,14 @@ namespace Multiplayer.Tactical
                 // dedup compare answers differently on different screens.
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.TacAimPose, SyncKind.StateDelta, inner)));
-                Debug.Log("[Multiplayer][tac] HOST aim-pose " + actorKey + " -> " +
+                MpLog.Log("[Multiplayer][tac] HOST aim-pose " + actorKey + " -> " +
                           (targetKey == 0 ? "<none>" : targetKey.ToString()) + " seq=" + seq);
             }
             catch (Exception ex)
             {
                 // A dropped stance leaves the other peers replaying the aim-in animation before every shot
                 // this soldier fires — the exact desync this surface exists to remove. Never silent.
-                Debug.LogError("[Multiplayer][tac] HOST aim-pose FAILED to reach the wire: " + ex);
+                MpLog.LogError("[Multiplayer][tac] HOST aim-pose FAILED to reach the wire: " + ex);
             }
         }
 
@@ -308,7 +308,7 @@ namespace Multiplayer.Tactical
                     if (!Seq.ShouldApply(SurfaceIds.TacAimPose, seq)) return true;  // stale re-delivery (law 7)
                     if (op != OpAim)
                     {
-                        Debug.LogError("[Multiplayer][tac] unknown host→all aim-pose op " + op + " (seq=" + seq + ")");
+                        MpLog.LogError("[Multiplayer][tac] unknown host→all aim-pose op " + op + " (seq=" + seq + ")");
                         return true;
                     }
                     int actorKey = r.ReadInt32(), targetKey = r.ReadInt32();
@@ -319,7 +319,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac] aim-pose inbound FAILED: " + ex);
+                MpLog.LogError("[Multiplayer][tac] aim-pose inbound FAILED: " + ex);
             }
             return true;
         }
@@ -360,7 +360,7 @@ namespace Multiplayer.Tactical
             if (animator == null)
             {
                 if (actor == null && why != null && _loggedFailures.Add(why))
-                    Debug.LogWarning("[Multiplayer][tac] aim pose for actor key " + actorKey +
+                    MpLog.LogWarning("[Multiplayer][tac] aim pose for actor key " + actorKey +
                                      " not applied yet: " + why);
                 // A stance we cannot clear on an actor that is not there is moot; a stance we cannot SET is
                 // owed to that actor the moment it exists.

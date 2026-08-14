@@ -148,7 +148,7 @@ namespace Multiplayer.Harmony
                                   "nothing after the throw ran: " + e.Message);
                 // Never throw into FinishLevel — an escaping exception here kills the level-switch coroutine
                 // outright ("Broken coroutine call chain"), which is law L70's blocker one level down.
-                Debug.LogError("[Multiplayer] LoadBarrierGate.Prefix failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] LoadBarrierGate.Prefix failed: " + e.Message);
             }
             return true;
         }

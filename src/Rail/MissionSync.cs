@@ -108,7 +108,7 @@ namespace Multiplayer.Network.Sync
             lock (SourceDeltaGate)
             {
                 if (ScheduledSourceDeltas.Count >= MaxScheduledSourceDeltas)
-                { Debug.LogWarning("[MP][inbox] source-revalidation buffer full; bounded delta refused"); return; }
+                { MpLog.LogWarning("[MP][inbox] source-revalidation buffer full; bounded delta refused"); return; }
                 ScheduledSourceDeltas.Add(delta);
             }
         }
@@ -139,11 +139,11 @@ namespace Multiplayer.Network.Sync
                     bool success = duplicate || readiness == SourceDeltaReadiness.Ready &&
                         store.InstallSourceRevalidationBatch(delta, out why);
                     if (!success && readiness == SourceDeltaReadiness.Ready)
-                    { Debug.LogWarning("[MP][inbox] scheduled source-revalidation delta refused: " + why); continue; }
+                    { MpLog.LogWarning("[MP][inbox] scheduled source-revalidation delta refused: " + why); continue; }
                     lock (SourceDeltaGate) ScheduledSourceDeltas.Remove(delta);
                     progressed = true;
                     if (!success)
-                    { Debug.LogWarning("[MP][inbox] conflicting source-revalidation delta dropped"); continue; }
+                    { MpLog.LogWarning("[MP][inbox] conflicting source-revalidation delta dropped"); continue; }
                     DurableSourceRevalidationEngine.RetryTerminalTeardown(store,
                         delta.Items.Where(x => x.Terminal).Select(x => x.Occurrence));
                     if (!duplicate)
@@ -179,7 +179,7 @@ namespace Multiplayer.Network.Sync
             {
                 PreparationEditDelta edit; string why;
                 if (!DurableInboxCodec.TryDecodePreparationEdit(payload, out edit, out why))
-                { Debug.LogWarning("[MP][inbox] malformed preparation-edit StateDelta refused: " + why); return true; }
+                { MpLog.LogWarning("[MP][inbox] malformed preparation-edit StateDelta refused: " + why); return true; }
                 if (engine == null || engine.IsHost || engine.Session == null ||
                     !IsAuthoritativeTransitionSender(engine.Session.HostPeerId, senderPeerId)) return true;
                 var clientStore = DurableInboxSession.ActiveStore;
@@ -196,7 +196,7 @@ namespace Multiplayer.Network.Sync
             {
                 SourceRevalidationBatchDelta sourceDelta; string why;
                 if (!DurableInboxCodec.TryDecodeSourceRevalidation(payload, out sourceDelta, out why))
-                { Debug.LogWarning("[MP][inbox] malformed source-revalidation StateDelta refused: " + why); return true; }
+                { MpLog.LogWarning("[MP][inbox] malformed source-revalidation StateDelta refused: " + why); return true; }
                 if (engine == null || engine.IsHost || engine.Session == null ||
                     !IsAuthoritativeTransitionSender(engine.Session.HostPeerId, senderPeerId)) return true;
                 ScheduleSourceRevalidationDelta(sourceDelta);
@@ -321,7 +321,7 @@ namespace Multiplayer.Network.Sync
                 .TryRevalidateBatch(plans, out delta, out refusal))
             { BroadcastSourceRevalidation(delta); OpenUiRepaint.MarkDirty(); }
             else if (!string.IsNullOrEmpty(refusal))
-                Debug.LogWarning("[MP][inbox] source departure batch refused: " + refusal);
+                MpLog.LogWarning("[MP][inbox] source departure batch refused: " + refusal);
         }
 
         internal static void AbandonCapturedVehicleDeparture(GeoVehicle vehicle) => TakeDepartureCapture(vehicle);
@@ -617,7 +617,7 @@ namespace Multiplayer.Network.Sync
                 var units = (squad ?? mission?.Squad)?.Units;
                 if (siteRef == null || units == null || units.Count == 0)
                 {
-                    Debug.LogWarning("[MP][mission] CLIENT launch DROPPED — " +
+                    MpLog.LogWarning("[MP][mission] CLIENT launch DROPPED — " +
                                      (siteRef == null ? "the mission's site has no rail identity" : "no squad to deploy") +
                                      "; nothing was sent and nothing ran locally");
                     OpenUiRepaint.MarkDirty();
@@ -629,7 +629,7 @@ namespace Multiplayer.Network.Sync
                     var r = IdentityResolver.RootRef(c);
                     if (r == null)
                     {
-                        Debug.LogWarning("[MP][mission] CLIENT launch DROPPED — soldier '" +
+                        MpLog.LogWarning("[MP][mission] CLIENT launch DROPPED — soldier '" +
                                          (c == null ? "<null>" : c.DisplayName) + "' has no rail identity, so the host " +
                                          "cannot be told who to deploy; reconverging the open screen");
                         OpenUiRepaint.MarkDirty();
@@ -650,7 +650,7 @@ namespace Multiplayer.Network.Sync
             {
                 // Nothing ran and nothing shipped: no delta will ever repaint the launch the screen already
                 // drew, so reconverge from the un-mutated local model exactly as the reject path does.
-                Debug.LogError("[MP][mission] CLIENT launch capture failed for " + (siteRef ?? "S#?") +
+                MpLog.LogError("[MP][mission] CLIENT launch capture failed for " + (siteRef ?? "S#?") +
                                " — reconverging local UI: " + ex);
                 OpenUiRepaint.MarkDirty();
             }
@@ -713,7 +713,7 @@ namespace Multiplayer.Network.Sync
                                          : DeployCountdown.CountdownRunning
                                              ? "REFUSED — a countdown is already running; nothing ran"
                                              : "APPLIED";
-                Debug.Log("[MP][mission] HOST intent " + outcome + " op=launch " + siteRef +
+                MpLog.Log("[MP][mission] HOST intent " + outcome + " op=launch " + siteRef +
                           " squad=" + units.Count + " nonce=" + nonce + " peer=" + senderPeerId);
             }
             catch (Exception ex) { Reject(senderPeerId, siteRef, "launch (throw) " + ex.Message); }
@@ -815,7 +815,7 @@ namespace Multiplayer.Network.Sync
                 }
 
                 var mission = haven.PrepareHavenMission(def, zone);
-                Debug.Log("[MP][mission] HOST intent APPLIED op=prepare-haven " + siteRef + " def=" + def.name +
+                MpLog.Log("[MP][mission] HOST intent APPLIED op=prepare-haven " + siteRef + " def=" + def.name +
                           " zone=" + (zoneIdx < 0 ? "<derived by the game>" : zoneIdx.ToString()) +
                           " mission=" + (mission == null ? "<null>" : mission.GetType().Name) +
                           " nonce=" + nonce + " peer=" + senderPeerId +
@@ -914,7 +914,7 @@ namespace Multiplayer.Network.Sync
                 __result = null;   // never hand back a mission of a different def
                 if (siteRef == null || missionTypeDef == null || string.IsNullOrEmpty(missionTypeDef.Guid))
                 {
-                    Debug.LogWarning("[MP][mission] CLIENT haven mission DROPPED — " +
+                    MpLog.LogWarning("[MP][mission] CLIENT haven mission DROPPED — " +
                                      (siteRef == null ? "the haven's site has no rail identity"
                                                       : "the mission type def has no guid") +
                                      "; nothing was sent and nothing was minted locally. The host is unchanged, " +
@@ -934,7 +934,7 @@ namespace Multiplayer.Network.Sync
                     zoneIdx = __instance.Zones.ToList().IndexOf(zone);
                     if (zoneIdx < 0)
                     {
-                        Debug.LogWarning("[MP][mission] CLIENT haven mission at " + siteRef + " DROPPED — the " +
+                        MpLog.LogWarning("[MP][mission] CLIENT haven mission at " + siteRef + " DROPPED — the " +
                                          "chosen zone is not in this haven's own Zones list, so there is no index " +
                                          "to name it by and a tag lookup could pick a different zone. Nothing was " +
                                          "sent and nothing was minted locally");
@@ -953,7 +953,7 @@ namespace Multiplayer.Network.Sync
                         w.Write(missionTypeDef.Guid);
                         w.Write((short)zoneIdx);
                     });
-                Debug.Log("[MP][mission] CLIENT haven mission BLOCKED at " + siteRef + " — PrepareHavenMission " +
+                MpLog.Log("[MP][mission] CLIENT haven mission BLOCKED at " + siteRef + " — PrepareHavenMission " +
                           "writes Site.SetActiveMission (GeoHaven.cs:1091) and a mission minted here is a " +
                           "structural create on this peer's OWN graph the host-vs-host diff can never correct " +
                           "(2026-08-08: 'launch: that site has no runnable mission' + CRC DIVERGED). Asked the " +
@@ -962,7 +962,7 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex)
             {
                 __result = null;
-                Debug.LogError("[MP][mission] CLIENT haven mission capture failed for " + (siteRef ?? "S#?") +
+                MpLog.LogError("[MP][mission] CLIENT haven mission capture failed for " + (siteRef ?? "S#?") +
                                " — nothing was minted locally; reconverging the open screen: " + ex);
                 OpenUiRepaint.MarkDirty();
             }
@@ -992,7 +992,7 @@ namespace Multiplayer.Network.Sync
         private static bool Prefix(GeoMission mission)
         {
             if (mission != null) return true;
-            Debug.LogWarning("[MP][mission] deployment screen NOT opened — the mission is NULL. Something handed " +
+            MpLog.LogWarning("[MP][mission] deployment screen NOT opened — the mission is NULL. Something handed " +
                              "ToDeploymentState:592 a blocked or missing mission; on a client that is normally " +
                              "HavenMissionGate holding the click while the host mints it, and MissionArrivalNav " +
                              "opens the screen when it lands. Opening it now would build UIStateRosterDeployment " +
@@ -1131,7 +1131,7 @@ namespace Multiplayer.Network.Sync
             var module = view.GeoscapeModules?.SiteEncountersModule;
             if (module == null || FinishEncounterMethod == null) return;
             FinishEncounterMethod.Invoke(module, null);
-            Debug.Log("[MP][mission] closing this peer's own encounter window for '" + eventId + "' — the " +
+            MpLog.Log("[MP][mission] closing this peer's own encounter window for '" + eventId + "' — the " +
                       "squad screen was QUEUED behind it (ToDeploymentState:596, priority int.MaxValue) and " +
                       "GeoscapeViewSwitchQuery.ProcessQueriedStateSwitch serves nothing while this window is " +
                       "the current request; SelectChoice:611 makes the same call before :612's LaunchMission");
@@ -1178,7 +1178,7 @@ namespace Multiplayer.Network.Sync
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession)
             {
-                Debug.Log("[MP][mission] deployment not opened because this peer is not in a session — solo, " +
+                MpLog.Log("[MP][mission] deployment not opened because this peer is not in a session — solo, " +
                           "where UIModuleSiteEncounters.SelectChoice:598-613 ran end to end and :612 already " +
                           "opened the squad screen natively.");
                 return;
@@ -1193,7 +1193,7 @@ namespace Multiplayer.Network.Sync
                 int idx = rec == null ? -1 : rec.SelectedChoice;
                 if (choices == null || idx < 0 || idx >= choices.Count)
                 {
-                    Debug.Log("[MP][mission] deployment for '" + (ev?.EventID ?? "?") + "' not opened because " +
+                    MpLog.Log("[MP][mission] deployment for '" + (ev?.EventID ?? "?") + "' not opened because " +
                               "this peer has no answered choice to read (choices=" +
                               (choices == null ? "none" : choices.Count.ToString()) + ", selected=" + idx +
                               ") — the record delta has not landed here yet. MissionArrivalNav still owns it.");
@@ -1203,7 +1203,7 @@ namespace Multiplayer.Network.Sync
                 // MissionTypeDef is (GeoEventChoiceOutcome:315, same test EventPopup.StartsMission uses).
                 if (choices[idx].Outcome?.StartMission?.MissionTypeDef == null)
                 {
-                    Debug.Log("[MP][mission] deployment for '" + ev.EventID + "' not opened because the answered " +
+                    MpLog.Log("[MP][mission] deployment for '" + ev.EventID + "' not opened because the answered " +
                               "choice (" + idx + ") starts no mission — correct, and the ordinary case for " +
                               "every event window that is not a mission-start.");
                     return;
@@ -1213,7 +1213,7 @@ namespace Multiplayer.Network.Sync
                 if (!ShouldOpenDeployment(true, engine.IsHost, EventPopup.ClickWasReplayed(ev),
                                           AlreadyHeadedForDeployment(view)))
                 {
-                    Debug.Log("[MP][mission] deployment for '" + ev.EventID + "' not opened because this peer " +
+                    MpLog.Log("[MP][mission] deployment for '" + ev.EventID + "' not opened because this peer " +
                               "does not owe itself the call — " +
                               (NativeSelectChoiceRan(engine.IsHost, EventPopup.ClickWasReplayed(ev))
                                   ? "its own SelectChoice:612 already ran"
@@ -1226,14 +1226,14 @@ namespace Multiplayer.Network.Sync
                 if (mission == null || !mission.IsRunnable)
                 {
                     // Never silent, and never role-blind — see NoDeploymentReason.
-                    Debug.LogWarning("[MP][mission] deployment for '" + ev.EventID + "' at " +
+                    MpLog.LogWarning("[MP][mission] deployment for '" + ev.EventID + "' at " +
                                      (IdentityResolver.RootRef(site) ?? "S#?") + " NOT opened — " +
                                      NoDeploymentReason(engine.IsHost, mission == null));
                     return;
                 }
 
                 view.LaunchMission(mission, ev.Context.Vehicle);
-                Debug.Log("[MP][mission] " + (engine.IsHost ? "HOST" : "CLIENT") + " squad screen opened for '" +
+                MpLog.Log("[MP][mission] " + (engine.IsHost ? "HOST" : "CLIENT") + " squad screen opened for '" +
                           ev.EventID + "' at " + (IdentityResolver.RootRef(site) ?? "S#?") + " — re-issuing the " +
                           "LaunchMission call SelectChoice:612 could not make here (this peer's click " +
                           (engine.IsHost ? "was replayed: another peer's answer won the race" : "is always relayed") +
@@ -1241,7 +1241,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][mission] deployment navigation failed — this peer stays on the " +
+                MpLog.LogError("[MP][mission] deployment navigation failed — this peer stays on the " +
                                "geoscape and can still reach the mission from the aircraft's Launch button: " + ex);
             }
         }
@@ -1360,7 +1360,7 @@ namespace Multiplayer.Network.Sync
         {
             if (!_watched.ContainsKey(key) && _watched.Count >= MaxWatched)
             {
-                Debug.LogWarning("[MP][mission] not watching '" + key + "' for its squad screen — " +
+                MpLog.LogWarning("[MP][mission] not watching '" + key + "' for its squad screen — " +
                                  MaxWatched + " mission windows are already being watched, which means the " +
                                  "watches are not retiring; this peer can still reach the mission from the " +
                                  "aircraft's Launch button");
@@ -1423,7 +1423,7 @@ namespace Multiplayer.Network.Sync
                 try { Step(engine, geo, view, id, _watched[id]); }
                 catch (Exception ex)
                 {
-                    Debug.LogError("[MP][mission] arrival watch for '" + id + "' failed and remains armed for " +
+                    MpLog.LogError("[MP][mission] arrival watch for '" + id + "' failed and remains armed for " +
                                    "a retry — no durable occurrence or native carrier is discarded: " + ex);
                 }
             }
@@ -1459,7 +1459,7 @@ namespace Multiplayer.Network.Sync
             if (choices != null && !EventPopup.StartsMission(choices[idx]))
             {
                 _watched.Remove(key);
-                Debug.Log("[MP][mission] arrival watch for '" + key + "' retired — the answer (choice " + idx +
+                MpLog.Log("[MP][mission] arrival watch for '" + key + "' retired — the answer (choice " + idx +
                           ") starts no mission, so there is no squad screen owed to anybody.");
                 return;
             }
@@ -1473,7 +1473,7 @@ namespace Multiplayer.Network.Sync
             {
                 if (!ArrivalGivenUp(w.ResolvedAt, Time.realtimeSinceStartup)) return;
                 _watched.Remove(key);
-                Debug.LogWarning("[MP][mission] arrival watch for '" + key + "' at " + w.SiteRef + " GIVEN UP — " +
+                MpLog.LogWarning("[MP][mission] arrival watch for '" + key + "' at " + w.SiteRef + " GIVEN UP — " +
                                  ArrivalWindowSeconds + "s after " + because + " the site still has " +
                                  (site == null ? "not resolved at all" : mission == null
                                      ? "no ActiveMission" : "a mission that is not runnable") +
@@ -1490,7 +1490,7 @@ namespace Multiplayer.Network.Sync
                                                           MissionEncounterNav.AlreadyHeadedForDeployment(view)))
             {
                 _watched.Remove(key);
-                Debug.Log("[MP][mission] arrival watch for '" + key + "' retired — this peer is already in, or " +
+                MpLog.Log("[MP][mission] arrival watch for '" + key + "' retired — this peer is already in, or " +
                           "queued for, UIStateRosterDeployment; re-issuing LaunchMission would leave a SECOND " +
                           "deployment request in a queue that is part of the save.");
                 return;
@@ -1525,7 +1525,7 @@ namespace Multiplayer.Network.Sync
                 if (!w.PresentationDeferred)
                 {
                     w.PresentationDeferred = true;
-                    Debug.Log("[MP][brief] deployment-deferred '" + key + "' — " + because + " and the mission " +
+                    MpLog.Log("[MP][brief] deployment-deferred '" + key + "' — " + because + " and the mission " +
                               "has arrived, but this peer is on " + (viewState == null ? "no view state" :
                               viewState.Name) + ", which is not a geoscape map surface. The watch stays armed " +
                               "and opens the preparation screen the moment this peer is back on the map; no " +
@@ -1537,7 +1537,7 @@ namespace Multiplayer.Network.Sync
             var container = IdentityResolver.Resolve(geo, w.VehicleRef, null) as GeoVehicle
                             ?? view.GetVehicleOnSite(site);
             view.LaunchMission(mission, container);                                  // ToDeploymentState:596
-            Debug.Log("[MP][brief] deployment-presented '" + key + "' at " + w.SiteRef + " on " +
+            MpLog.Log("[MP][brief] deployment-presented '" + key + "' at " + w.SiteRef + " on " +
                       (engine.IsHost ? "HOST" : "CLIENT") + " — " + because + "; the preparation screen was " +
                       "opened from the MISSION'S ARRIVAL through the game's own LaunchMission, from " +
                       (viewState == null ? "the map" : viewState.Name) + ". Nothing waited on a dialog " +
@@ -1646,7 +1646,7 @@ namespace Multiplayer.Network.Sync
             // gesture, not a per-frame one.
             string who = IdentityResolver.RootRef(__instance?.Site) ?? "S#?";
             if (_logged.Add(who + (host ? "|host" : "|client")))
-                Debug.Log("[MP][mission] " + (host ? "HOST" : "CLIENT") + " cancel of the mission at " + who +
+                MpLog.Log("[MP][mission] " + (host ? "HOST" : "CLIENT") + " cancel of the mission at " + who +
                           " BLOCKED — it deletes shared campaign state (Site.ActiveMission/DestroySite, " +
                           "GeoMission.cs:253-265) every peer is playing" + (host
                               ? ", and this one came from the squad screen's own Back button " +
@@ -1692,7 +1692,7 @@ namespace Multiplayer.Network.Sync
                                        != ModalType.None) return;
                 string what = mission == null ? "<null mission>" : mission.GetType().Name;
                 if (!_logged.Add(what)) return;
-                Debug.LogWarning("[MP][mission] NO BRIEF WINDOW on this peer for " + what + " at " +
+                MpLog.LogWarning("[MP][mission] NO BRIEF WINDOW on this peer for " + what + " at " +
                                  (IdentityResolver.RootRef(mission?.Site) ?? "S#?") + " — GetMissionBriefModal " +
                                  "answered None, so ShowMissionBriefing:1905 opened nothing, 0x" +
                                  SurfaceIds.GeoModalRaise.ToString("X2") + " shipped nothing, and this player " +
@@ -1703,7 +1703,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][mission] could not tell whether " +
+                MpLog.LogError("[MP][mission] could not tell whether " +
                                (mission == null ? "<null>" : mission.GetType().Name) +
                                " has a brief window on this peer: " + ex);
             }
@@ -1782,7 +1782,7 @@ namespace Multiplayer.Network.Sync
                 if (startCommitted && result == ModalResult.Confirm)
                 {
                     if (_logged.Add(modalType + ":start-already-committed"))
-                        Debug.Log("[MP][mission] '" + modalType + "' confirmed by this peer AFTER the mission " +
+                        MpLog.Log("[MP][mission] '" + modalType + "' confirmed by this peer AFTER the mission " +
                                   "start was already committed — the deployment preparation window is already " +
                                   "in every peer's queue, so this Confirm closes THIS copy and launches " +
                                   "nothing a second time (logged once per type)");
@@ -1790,7 +1790,7 @@ namespace Multiplayer.Network.Sync
                 }
                 if (Runs(true, perPeer, false)) return true;
                 if (_logged.Add(modalType + ":" + result))
-                    Debug.Log("[MP][mission] '" + modalType + "' answered " + result + " on THIS PEER ONLY — the " +
+                    MpLog.Log("[MP][mission] '" + modalType + "' answered " + result + " on THIS PEER ONLY — the " +
                               "game's own arm here is GeoMission.Cancel (ModalResultCallback:825-826), which " +
                               "nulls Site.ActiveMission and can DestroySite, i.e. one player declining would " +
                               "delete the mission for the whole team. The window is closed for this peer and " +
@@ -1800,7 +1800,7 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex)
             {
                 // Never block on a question we could not ask: falling through is vanilla behaviour.
-                Debug.LogError("[MP][mission] per-peer answer check threw for '" + modalType + "' — running the " +
+                MpLog.LogError("[MP][mission] per-peer answer check threw for '" + modalType + "' — running the " +
                                "game's own callback, so a Cancel here may still cancel the mission for every " +
                                "peer: " + ex);
                 return true;

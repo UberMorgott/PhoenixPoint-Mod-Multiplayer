@@ -98,7 +98,7 @@ namespace Multiplayer.Tactical
                     coord.ArmSelfLoadBarrier("tac-entry, native local build");
                     return true;
                 }
-                Debug.LogWarning("[Multiplayer][tac] client LaunchTacticalGame BLOCKED — a client enters the " +
+                MpLog.LogWarning("[Multiplayer][tac] client LaunchTacticalGame BLOCKED — a client enters the " +
                                  "battle from the host's mid-tactical save transfer, never by self-launching.");
                 return false;
             }
@@ -150,13 +150,13 @@ namespace Multiplayer.Tactical
             // battle they had just loaded into, while the host stayed put.
             if (!TacLaunchGate.ConsumeSessionEntry())
             {
-                Debug.Log("[Multiplayer][tac] host tactical level Playing, but this peer did not LAUNCH this " +
+                MpLog.Log("[Multiplayer][tac] host tactical level Playing, but this peer did not LAUNCH this " +
                           "battle — it came from a save blob every peer already loaded (no geo→tac transition " +
                           "ran). No second transfer: one session entry, one load.");
                 return;
             }
 
-            Debug.Log("[Multiplayer][tac] host tactical level Playing — waiting for deploy-ready (HasAnyTurnStarted).");
+            MpLog.Log("[Multiplayer][tac] host tactical level Playing — waiting for deploy-ready (HasAnyTurnStarted).");
             __instance.Timing.Start(CaptureWhenPlayableCrt(__instance, coord));
         }
 
@@ -170,11 +170,11 @@ namespace Multiplayer.Tactical
             }
 
             if (!tlc.HasAnyTurnStarted)
-                Debug.LogError("[Multiplayer][tac] deploy-ready gate TIMED OUT after " + CaptureReadyMaxFrames +
+                MpLog.LogError("[Multiplayer][tac] deploy-ready gate TIMED OUT after " + CaptureReadyMaxFrames +
                                " frames — HasAnyTurnStarted never set. Capturing anyway; the client may " +
                                "receive a half-initialised battle.");
             else
-                Debug.Log("[Multiplayer][tac] deploy-ready after " + frames + " frame(s) → mid-tactical save transfer.");
+                MpLog.Log("[Multiplayer][tac] deploy-ready after " + frames + " frame(s) → mid-tactical save transfer.");
 
             // NATIVE-ENTRY EXPERIMENT (law L103, off by default): in native mode every peer built this
             // battle from the host's shipped TacticalGameParams, so there is nothing to transfer — UNLESS a
@@ -183,7 +183,7 @@ namespace Multiplayer.Tactical
             // during the deploy-ready wait above.
             if (NativeTacticalEntry.Enabled && !NativeTacticalEntry.FallbackArmed)
             {
-                Debug.Log("[Multiplayer][tac] native entry: every peer built the battle locally — no save " +
+                MpLog.Log("[Multiplayer][tac] native entry: every peer built the battle locally — no save " +
                           "transfer. (Flip NativeTacticalEntry.Enabled to false to restore the save path.)");
                 yield break;
             }
@@ -227,7 +227,7 @@ namespace Multiplayer.Tactical
             string guid = __instance?.TacticalFactionDef?.Guid;
             if (string.IsNullOrEmpty(guid))
             {
-                Debug.LogError("[Multiplayer][tac] client end-turn DROPPED — faction has no def guid to name in the " +
+                MpLog.LogError("[Multiplayer][tac] client end-turn DROPPED — faction has no def guid to name in the " +
                                "intent, so the host cannot arbitrate it. The turn stays open.");
                 return false;
             }
@@ -256,7 +256,7 @@ namespace Multiplayer.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
-            Debug.LogWarning("[Multiplayer][tac] client AI turn SUPPRESSED — enemy actions are host-only; holding " +
+            MpLog.LogWarning("[Multiplayer][tac] client AI turn SUPPRESSED — enemy actions are host-only; holding " +
                              "until the host hands the turn on.");
             __result = HoldUntilHostHandsOn(__instance);
             return false;
@@ -294,7 +294,7 @@ namespace Multiplayer.Tactical
             {
                 if (++frames >= HoldCeilingFrames)
                 {
-                    Debug.LogError("[Multiplayer][tac] turn hold CEILING reached in '" + name + "'s turn after " +
+                    MpLog.LogError("[Multiplayer][tac] turn hold CEILING reached in '" + name + "'s turn after " +
                                    (frames / 60) + "s — the host has announced no handoff. Releasing rather " +
                                    "than waiting forever (law L91): this peer moves to the next faction, where " +
                                    "the same hold re-engages, so it advances no further than the host's last " +
@@ -302,7 +302,7 @@ namespace Multiplayer.Tactical
                     yield break;
                 }
                 if (frames % HoldWarnFrames == 0)
-                    Debug.LogWarning("[Multiplayer][tac] still holding in '" + name + "'s turn after " +
+                    MpLog.LogWarning("[Multiplayer][tac] still holding in '" + name + "'s turn after " +
                                      (frames / 60) + "s — the host has announced no handoff yet.");
                 yield return NextUpdate.NextFrame;
             }
@@ -341,7 +341,7 @@ namespace Multiplayer.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
-            Debug.LogWarning("[Multiplayer][tac] client AI EVALUATION suppressed — reached outside the turn " +
+            MpLog.LogWarning("[Multiplayer][tac] client AI EVALUATION suppressed — reached outside the turn " +
                              "coroutine (ExecuteQueuedAbilitiesEffect → ExecuteQueuedAbilitiesSequence), which " +
                              "ClientAiGate does not cover. An AI decision is the host's; its result arrives on " +
                              "0x82 like every other action.");
@@ -384,7 +384,7 @@ namespace Multiplayer.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
-            Debug.LogError("[Multiplayer][tac] client AI evaluation BACKSTOP caught '" +
+            MpLog.LogError("[Multiplayer][tac] client AI evaluation BACKSTOP caught '" +
                            (__instance?.TacticalActor?.name ?? "<unknown actor>") + "' — AIEvaluationAbility." +
                            "Activate was reached by a caller NO gate covers, so name it and close it: the " +
                            "known door (ExecuteAIEvaluationAbilities) is suppressed upstream by " +

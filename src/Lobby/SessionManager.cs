@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using Multiplayer.Network.MessageLayer;
 using Multiplayer.Network.Parity;
@@ -267,7 +267,7 @@ namespace Multiplayer.Network
                 {
                     _transferStallLogged = true;
                     long liveMs = LoadWindowLiveMs(_loadWindowOpenedMs, progressMs);
-                    Debug.LogWarning($"[Multiplayer] transfer/load shows no progress for " +
+                    MpLog.LogWarning($"[Multiplayer] transfer/load shows no progress for " +
                                      $"{(now - liveMs) / 1000}s (window open {(now - _loadWindowOpenedMs) / 1000}s) " +
                                      "— re-arming liveness detectors.");
                 }
@@ -318,7 +318,7 @@ namespace Multiplayer.Network
                         unjoined.Add(kvp.Key);
                 foreach (var clientId in unjoined)
                 {
-                    Debug.LogWarning($"[Multiplayer] Peer {clientId} connected {JoinHandshakeTimeoutMs / 1000}s ago " +
+                    MpLog.LogWarning($"[Multiplayer] Peer {clientId} connected {JoinHandshakeTimeoutMs / 1000}s ago " +
                                      "and its JOIN never arrived — roster row REMOVED. It reached the transport but " +
                                      "never presented an identity, so it has no name, slot or permissions, cannot " +
                                      "ready, and would sit in the lobby holding the start gate down forever.");
@@ -335,7 +335,7 @@ namespace Multiplayer.Network
             {
                 if (now - hostLast > HeartbeatTimeoutMs)
                 {
-                    Debug.LogWarning("[Multiplayer] Host heartbeat timed out — treating as host-leave.");
+                    MpLog.LogWarning("[Multiplayer] Host heartbeat timed out — treating as host-leave.");
                     HostLeaveHandler.TriggerHostLeft();
                 }
                 // FIX-2 + P2P auto-repair: HALF-OPEN detection. Even while host traffic keeps ARRIVING
@@ -350,7 +350,7 @@ namespace Multiplayer.Network
                 {
                     case HalfOpenAction.Repair:
                         _halfOpenRepairAttempted = true;
-                        Debug.LogWarning("[Multiplayer][P2PRepair] Host heartbeat-ack timed out (client->host " +
+                        MpLog.LogWarning("[Multiplayer][P2PRepair] Host heartbeat-ack timed out (client->host " +
                             "channel dead) — resetting the P2P session and re-sending JOIN (one-shot repair).");
                         _engine.RepairHostLink();
                         // Give the repaired link a fresh full window before the fatal path: reseed BOTH
@@ -360,7 +360,7 @@ namespace Multiplayer.Network
                         _lastHeartbeat[HostPeerId.Value] = now;
                         break;
                     case HalfOpenAction.Fail:
-                        Debug.LogWarning("[Multiplayer][P2PRepair] Host heartbeat-ack still timed out after repair — " +
+                        MpLog.LogWarning("[Multiplayer][P2PRepair] Host heartbeat-ack still timed out after repair — " +
                             "outbound channel dead; leaving.");
                         HostLeaveHandler.TriggerHostLeft(
                             "Connection to host lost (send channel dead — stage: heartbeat-ack timeout).");
@@ -398,7 +398,7 @@ namespace Multiplayer.Network
             if (!_clients.TryGetValue(steamId, out var client)) return;
             if (client.PlayerGuid == Guid.Empty)
             {
-                Debug.LogWarning($"[Multiplayer] Peer {steamId} dropped BEFORE its JOIN ever arrived ({reason}) — " +
+                MpLog.LogWarning($"[Multiplayer] Peer {steamId} dropped BEFORE its JOIN ever arrived ({reason}) — " +
                                  "roster row REMOVED, not paused: it carries no identity, name, slot or " +
                                  "permissions, so there is no seat to hold and nobody who could ever ready it.");
                 RemoveClient(steamId);
@@ -448,7 +448,7 @@ namespace Multiplayer.Network
             // A peer that went silent inside the deployment prep screen never runs its ExitState, so the join
             // button it published would point at a door nobody is standing in until the reload boundary.
             Multiplayer.Network.Sync.DeployPrep.OnPeerGone(steamId);
-            Debug.LogWarning($"[Multiplayer] Peer {steamId} ({client.PlayerName}) PAUSED: {reason}. " +
+            MpLog.LogWarning($"[Multiplayer] Peer {steamId} ({client.PlayerName}) PAUSED: {reason}. " +
                              "Roster row kept — it resumes its seat when it comes back.");
             if (_engine.IsHost)
             {
@@ -468,7 +468,7 @@ namespace Multiplayer.Network
         {
             if (!_clients.TryGetValue(steamId, out var client) || !client.IsPaused) return;
             client.IsPaused = false;
-            Debug.Log($"[Multiplayer] Peer {steamId} ({client.PlayerName}) RESUMED.");
+            MpLog.Log($"[Multiplayer] Peer {steamId} ({client.PlayerName}) RESUMED.");
             // The return edge closes this absence: whatever was announced about it is spent, and the
             // peer's NEXT departure has to reach everyone's screen again.
             _departureAnnounced.Rearm(steamId);
@@ -673,7 +673,7 @@ namespace Multiplayer.Network
 
             if (join == null || join.PlayerGuid == Guid.Empty)
             {
-                Debug.LogWarning($"[Multiplayer] Rejecting JOIN from {clientId}: missing/empty playerGUID.");
+                MpLog.LogWarning($"[Multiplayer] Rejecting JOIN from {clientId}: missing/empty playerGUID.");
                 var reject = new NetworkMessage(PacketType.ConnectionRejected,
                     NetworkMessage.BuildStringPayload("Invalid player identity (empty GUID)."));
                 _engine.SendToClient(clientId, reject);
@@ -688,7 +688,7 @@ namespace Multiplayer.Network
             // 2nd same-machine instance a distinct identity (auto identity-N.json, or set MULTIPLAYER_IDENTITY).
             if (SessionLifecycle.IsSelfIdentityCollision(ClientIdentity.PlayerGuid, join.PlayerGuid))
             {
-                Debug.LogError($"[Multiplayer] REJECTING JOIN from {clientId}: client playerGUID {join.PlayerGuid} " +
+                MpLog.LogError($"[Multiplayer] REJECTING JOIN from {clientId}: client playerGUID {join.PlayerGuid} " +
                                "EQUALS the host's own identity — both instances share identity.json (operational " +
                                "misconfig). Launch the 2nd instance with a distinct identity (auto identity-N.json, " +
                                "or set MULTIPLAYER_IDENTITY). Refusing to avoid collapsing the client into host slot 0.");
@@ -722,14 +722,14 @@ namespace Multiplayer.Network
                 // below exists to allow. A silent binding falls through to that prune instead.
                 if (IsPeerLive(boundSteamId))
                 {
-                    Debug.LogError($"[Multiplayer] REJECTING JOIN from {clientId}: playerGUID {join.PlayerGuid} is " +
+                    MpLog.LogError($"[Multiplayer] REJECTING JOIN from {clientId}: playerGUID {join.PlayerGuid} is " +
                                    $"already bound to connected peer {boundSteamId} — identity-takeover attempt.");
                     var reject = new NetworkMessage(PacketType.ConnectionRejected,
                         NetworkMessage.BuildStringPayload("Player identity is already in use by another player."));
                     _engine.SendToClient(clientId, reject);
                     return;
                 }
-                Debug.Log($"[Multiplayer] playerGUID {join.PlayerGuid} is bound to SILENT peer {boundSteamId} — " +
+                MpLog.Log($"[Multiplayer] playerGUID {join.PlayerGuid} is bound to SILENT peer {boundSteamId} — " +
                           $"treating JOIN from {clientId} as a returning-player rejoin, not a takeover.");
             }
 
@@ -750,7 +750,7 @@ namespace Multiplayer.Network
             // (HandlePeerList precedent).
             foreach (var staleId in SessionLifecycle.StaleRejoinPeers(GetClientIdentities(), join.PlayerGuid))
             {
-                Debug.Log($"[Multiplayer] Returning peer {join.PlayerGuid} (JOIN from {clientId}): " +
+                MpLog.Log($"[Multiplayer] Returning peer {join.PlayerGuid} (JOIN from {clientId}): " +
                           $"pruning stale peer {staleId}.");
                 _engine.Sync?.ResetIntentDedupForPeer(staleId);
                 RemoveClient(staleId);
@@ -783,7 +783,7 @@ namespace Multiplayer.Network
             var parityDiffs = ParityComparer.Compare(hostManifest, join.Manifest);
             var parityDiffText = ParityComparer.Format(parityDiffs);
             if (parityDiffs.Count > 0)
-                Debug.LogWarning($"[Multiplayer] JOIN from {clientId} has parity mismatch (soft-gate, " +
+                MpLog.LogWarning($"[Multiplayer] JOIN from {clientId} has parity mismatch (soft-gate, " +
                                  $"ready locked):\n{parityDiffText}");
 
             AddClient(clientId, $"Steam({clientId})");
@@ -851,7 +851,7 @@ namespace Multiplayer.Network
 
                 if (deferOnboard)
                 {
-                    Debug.Log($"[Multiplayer] JOIN from {clientId} accepted; save transfer DEFERRED (host is " +
+                    MpLog.Log($"[Multiplayer] JOIN from {clientId} accepted; save transfer DEFERRED (host is " +
                               "mid-battle/mid-load or already transferring) — it will be served automatically.");
                     SystemChat($"— {(string.IsNullOrEmpty(join.Nickname) ? "a player" : join.Nickname)} is waiting " +
                                "for the host to return to the Geoscape —");
@@ -881,7 +881,7 @@ namespace Multiplayer.Network
         public void HandleConnectionAccepted(NetworkMessage msg)
         {
             // Client received host confirmation
-            Debug.Log("[Multiplayer] Connection accepted by host");
+            MpLog.Log("[Multiplayer] Connection accepted by host");
 
             // Parity auto-apply (host-authoritative): the accept carries the HOST manifest. Apply the
             // host's scalar mod settings in-memory (originals snapshotted; restored at teardown), then
@@ -904,7 +904,7 @@ namespace Multiplayer.Network
                 VersionMismatchNotice = ParityComparer.VersionNoticeForClient(
                     hostManifest, ParityManifestCollector.Collect());
                 if (!string.IsNullOrEmpty(VersionMismatchNotice))
-                    Debug.LogWarning("[Multiplayer] " + VersionMismatchNotice.Replace("\n", " "));
+                    MpLog.LogWarning("[Multiplayer] " + VersionMismatchNotice.Replace("\n", " "));
 
                 if (ParityConfigSync.ApplyHostSettings(hostManifest))
                 {
@@ -913,7 +913,7 @@ namespace Multiplayer.Network
                         MessageSerializer.SerializeParityManifest(fresh)));
                 }
             }
-            catch (Exception e) { Debug.LogError("[Multiplayer] parity auto-apply on accept failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] parity auto-apply on accept failed: " + e.Message); }
         }
 
         /// <summary>
@@ -932,17 +932,17 @@ namespace Multiplayer.Network
                     ParityComparer.Compare(ParityManifestCollector.Collect(), manifest));
                 if (string.Equals(diffs, client.ParityDiffs, StringComparison.Ordinal)) return;
                 client.ParityDiffs = diffs;
-                Debug.Log($"[Multiplayer] parity update from {msg.SenderSteamId}: " +
+                MpLog.Log($"[Multiplayer] parity update from {msg.SenderSteamId}: " +
                           (diffs.Length == 0 ? "parity OK — READY unlocked." : $"still mismatched:\n{diffs}"));
                 BroadcastPeerList();
             }
-            catch (Exception e) { Debug.LogError("[Multiplayer] parity update failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] parity update failed: " + e.Message); }
         }
 
         public void HandleConnectionRejected(NetworkMessage msg)
         {
             var reason = NetworkMessage.ParseStringPayload(msg.Payload);
-            Debug.LogError($"[Multiplayer] Connection rejected: {reason}");
+            MpLog.LogError($"[Multiplayer] Connection rejected: {reason}");
             // Never-silent: surface the rejection to the joining player (was log-only, so the user saw
             // nothing). Routes through the existing connection-failure path (dialog + lobby teardown /
             // return-to-menu), covering ALL rejection reasons — empty GUID, identity collision,
@@ -1088,7 +1088,7 @@ namespace Multiplayer.Network
                 // gate while a real client is still un-ready.
                 if (!_clients.ContainsKey(steamId))
                 {
-                    Debug.LogWarning($"[Multiplayer] Ignoring READY/UNREADY from {steamId}: not on the roster.");
+                    MpLog.LogWarning($"[Multiplayer] Ignoring READY/UNREADY from {steamId}: not on the roster.");
                     return;
                 }
                 // Parity soft-gate (host-authoritative — never trust the client's locked button): a
@@ -1097,7 +1097,7 @@ namespace Multiplayer.Network
                 if (ready && _clients.TryGetValue(steamId, out var pc)
                           && !ParityComparer.ReadyAllowed(pc.ParityDiffs))
                 {
-                    Debug.LogWarning($"[Multiplayer] Ignoring READY from {steamId}: parity mismatch " +
+                    MpLog.LogWarning($"[Multiplayer] Ignoring READY from {steamId}: parity mismatch " +
                                      $"(soft-gate):\n{pc.ParityDiffs}");
                     return;
                 }
@@ -1148,7 +1148,7 @@ namespace Multiplayer.Network
             if (!_engine.IsHost) return;
             if (ready && string.IsNullOrEmpty(ChosenSaveName))
             {
-                Debug.LogWarning("[Multiplayer] Ignoring host READY: no save is chosen yet. The countdown " +
+                MpLog.LogWarning("[Multiplayer] Ignoring host READY: no save is chosen yet. The countdown " +
                                  "starts the session, and there is nothing to start it into.");
                 return;
             }
@@ -1284,11 +1284,11 @@ namespace Multiplayer.Network
                 unreachable.Add(id);
                 unreachableNames.Add(id.ToString());
             }
-            Debug.Log($"[Multiplayer] PEER_LIST fan-out: {roster.Count} row(s) → {recipients.Count} peer(s) " +
+            MpLog.Log($"[Multiplayer] PEER_LIST fan-out: {roster.Count} row(s) → {recipients.Count} peer(s) " +
                       $"[{string.Join(",", recipients.ToArray())}]");
             if (unreachable.Count > 0)
             {
-                Debug.LogError($"[Multiplayer] PEER_LIST fan-out MISSES {unreachable.Count} roster peer(s) " +
+                MpLog.LogError($"[Multiplayer] PEER_LIST fan-out MISSES {unreachable.Count} roster peer(s) " +
                                $"[{string.Join(",", unreachableNames.ToArray())}] — the " +
                                $"transport will not broadcast to them, so they never get the roster and stay stuck " +
                                $"on \"Connecting…\". Routing each into NotePeerLoss now rather than waiting out " +
@@ -1533,11 +1533,11 @@ namespace Multiplayer.Network
         {
             if (!_departureAnnounced.TryAnnounce(peerId))
             {
-                Debug.Log("[Multiplayer] departure notice SUPPRESSED (peer " + peerId + " already announced " +
+                MpLog.Log("[Multiplayer] departure notice SUPPRESSED (peer " + peerId + " already announced " +
                           "this absence) from " + producer + ": " + text);
                 return;
             }
-            Debug.Log("[Multiplayer] departure notice from " + producer + " for peer " + peerId + ": " + text);
+            MpLog.Log("[Multiplayer] departure notice from " + producer + " for peer " + peerId + ": " + text);
             SystemNotice(text);
         }
 
@@ -1626,7 +1626,7 @@ namespace Multiplayer.Network
                 // duplicate that vanishes without a trace is how this one survived a whole session.
                 if (chat.Seq != 0 && !_seenChatSeq.Add(chat.Seq))
                 {
-                    Debug.Log("[Multiplayer] chat DUPLICATE dropped (seq " + chat.Seq + ", from " +
+                    MpLog.Log("[Multiplayer] chat DUPLICATE dropped (seq " + chat.Seq + ", from " +
                               (string.IsNullOrEmpty(chat.SenderNick) ? "system" : chat.SenderNick) +
                               ") — already rendered; this is the join-window live+replay overlap.");
                     return;
@@ -1664,7 +1664,7 @@ namespace Multiplayer.Network
 
         public void HandleHostDisconnected(NetworkMessage msg)
         {
-            Debug.LogWarning("[Multiplayer] Host disconnected — session ended");
+            MpLog.LogWarning("[Multiplayer] Host disconnected — session ended");
             OnHostDisconnected?.Invoke();
         }
     }

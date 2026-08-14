@@ -257,14 +257,14 @@ namespace Multiplayer.Tactical
                 try { comp.UnapplyStatus(live[i]); }
                 catch (Exception ex)
                 {
-                    Debug.LogError("[Multiplayer][tac] could not remove status " + localKeys[i] + " from " +
+                    MpLog.LogError("[Multiplayer][tac] could not remove status " + localKeys[i] + " from " +
                                    actor.name + ", which the host does not have — that status stays on this " +
                                    "peer only: " + ex);
                 }
             }
             foreach (var k in apply) ApplyOne(actor, comp, tlc, k);
 
-            Debug.LogWarning("[Multiplayer][tac] status set of " + actor.name + " reconciled at " + when +
+            MpLog.LogWarning("[Multiplayer][tac] status set of " + actor.name + " reconciled at " + when +
                              " — applied [" + string.Join(", ", apply.ToArray()) + "] removed [" +
                              string.Join(", ", unapply.ToArray()) + "]. Anything in those lists is a status " +
                              "this peer disagreed with the host about; a MountedStatus in them is a passenger " +
@@ -280,7 +280,7 @@ namespace Multiplayer.Tactical
         private static void RefusedOnce(string id, string message)
         {
             if (!_said.Add(id)) return;
-            Debug.LogError(message);
+            MpLog.LogError(message);
         }
 
         /// <summary>Per-battle: the next mission's first refusal has to be heard again.</summary>
@@ -323,7 +323,7 @@ namespace Multiplayer.Tactical
                 {
                     var source = ResolveAnyDef(sourceName);
                     if (source == null)
-                        Debug.LogWarning("[Multiplayer][tac] the host's status '" + defName + "' on " + actor.name +
+                        MpLog.LogWarning("[Multiplayer][tac] the host's status '" + defName + "' on " + actor.name +
                                          " was applied from def '" + sourceName + "', which does not exist on this " +
                                          "peer. It is applied without one — a status that reads its source " +
                                          "(OverwatchStatus.GetWeapon) will throw and leave its visuals behind.");
@@ -349,7 +349,7 @@ namespace Multiplayer.Tactical
                 if (status is ActorBridgeStatus &&
                     PhoenixPoint.Tactical.TacUtil.GetSourceOfType<TacticalActorBase>(status.Source) == null)
                 {
-                    Debug.LogWarning("[Multiplayer][tac] the host's status '" + defName + "' on " + actor.name +
+                    MpLog.LogWarning("[Multiplayer][tac] the host's status '" + defName + "' on " + actor.name +
                                      " is one half of an ACTOR BRIDGE (escort/convince), whose other half is " +
                                      "addressed through the actor that applied it — an address this rail does " +
                                      "not carry. It is NOT applied here: it would throw inside AfterApply and " +
@@ -361,7 +361,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac] applying the host's status '" + defName + "' to " +
+                MpLog.LogError("[Multiplayer][tac] applying the host's status '" + defName + "' to " +
                                actor.name + " threw — that actor's state stays different on this peer: " + ex);
             }
         }
@@ -467,7 +467,7 @@ namespace Multiplayer.Tactical
             if (receiver != null) return "r:" + (TacticalActorKey.SlotOf(receiver) ?? "");
             string type = t.GetType().Name;
             if (_said.Add("target-" + type))
-                Debug.LogWarning("[Multiplayer][tac] a status is targeted at a " + type + ", which is neither a slot " +
+                MpLog.LogWarning("[Multiplayer][tac] a status is targeted at a " + type + ", which is neither a slot " +
                                  "name nor an IDamageReceiver and so has no shared address. It rides with NO target, " +
                                  "and any status whose OnApply reads one will behave differently on every other peer.");
             return "";
@@ -637,7 +637,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[Multiplayer][tac] a status change could not be settled: " + ex.Message +
+                MpLog.LogWarning("[Multiplayer][tac] a status change could not be settled: " + ex.Message +
                                  ". Every other peer keeps the status set it already had until the next " +
                                  "turn-edge sweep — a visual the host has just torn down stays on their screen.");
             }

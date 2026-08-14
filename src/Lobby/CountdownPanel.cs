@@ -138,7 +138,7 @@ namespace Multiplayer.UI
             if (barCanvas == null) return;
             if (barCanvas.GetComponent<GraphicRaycaster>() != null) return;
             barCanvas.gameObject.AddComponent<GraphicRaycaster>();
-            Debug.Log("[Multiplayer] deployment-countdown panel added the missing GraphicRaycaster to the mod " +
+            MpLog.Log("[Multiplayer] deployment-countdown panel added the missing GraphicRaycaster to the mod " +
                       "overlay canvas — without it no click on this canvas reaches any handler at all, which " +
                       "is why the CANCEL press produced no log line on any peer.");
         }
@@ -153,7 +153,7 @@ namespace Multiplayer.UI
             // starts, so in practice they are disjoint and this is a tie-break that never fires.
             if (DeployCountdown.DisplaySecondsLeft() > 0)
             {
-                Debug.Log("[MP][deploy] CANCEL pressed on this peer at " +
+                MpLog.Log("[MP][deploy] CANCEL pressed on this peer at " +
                           (string.IsNullOrEmpty(DeployCountdown.State.SiteRef) ? "S#?" : DeployCountdown.State.SiteRef) +
                           " with " + DeployCountdown.DisplaySecondsLeft() + " s left — one peer's veto stops the drop " +
                           "for everyone (no vote, nobody else has to agree).");
@@ -162,14 +162,14 @@ namespace Multiplayer.UI
             }
             if (Multiplayer.Tactical.ReturnCountdown.DisplaySecondsLeft() > 0)
             {
-                Debug.Log("[MP][return] CANCEL pressed on this peer with " +
+                MpLog.Log("[MP][return] CANCEL pressed on this peer with " +
                           Multiplayer.Tactical.ReturnCountdown.DisplaySecondsLeft() +
                           " s left — this stops the shared five seconds on every peer; Continue can be " +
                           "pressed again by anybody. It does not keep any other peer in the battle.");
                 Multiplayer.Tactical.ReturnCountdown.RequestCancel();
                 return;
             }
-            Debug.Log("[MP][lobby] CANCEL pressed on this peer with " + LobbyCountdown.DisplaySecondsLeft() +
+            MpLog.Log("[MP][lobby] CANCEL pressed on this peer with " + LobbyCountdown.DisplaySecondsLeft() +
                       " s left on the " + LobbyCountdown.Subject + " countdown — one peer's veto stops the " +
                       "start for everyone. On the SAVE route it also clears THAT peer's own READY, without " +
                       "which the gate would still be open and the countdown would re-arm on the very next " +
@@ -240,7 +240,7 @@ namespace Multiplayer.UI
                 if (_root != null) _root.SetActive(false);
                 if (_loggedFailure) return;
                 _loggedFailure = true;
-                Debug.LogError("[Multiplayer] deployment-countdown panel FAILED and is hidden for the rest of " +
+                MpLog.LogError("[Multiplayer] deployment-countdown panel FAILED and is hidden for the rest of " +
                                "this run. The drop still happens on the host's own clock; what is lost is this " +
                                "peer's cancel button: " + e);
             }
@@ -323,7 +323,7 @@ namespace Multiplayer.UI
                 if (_cue == null || !_cue.IsValid())
                 {
                     _cue = null;
-                    Debug.LogWarning("[Multiplayer] countdown tick is SILENT for the rest of this run — " +
+                    MpLog.LogWarning("[Multiplayer] countdown tick is SILENT for the rest of this run — " +
                                      "InterceptionGameSoundDef.EquipmentClick is not a valid Wwise event in " +
                                      "this build. The countdown itself is unaffected; only the sound is gone.");
                 }

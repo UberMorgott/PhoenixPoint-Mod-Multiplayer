@@ -191,7 +191,7 @@ namespace Multiplayer.Network.Sync
             catch { }
             string msg = (allow ? "ALLOW(apply) " : "BLOCK ") + (__instance?.Def != null ? __instance.Def.name : "?") +
                          " fid=" + (__instance != null ? __instance.FacilityId : 0) + " powered=" + powered + " from=" + caller;
-            if (_logged.Add(msg)) Debug.Log("[MP][diag] SetPowered " + msg);
+            if (_logged.Add(msg)) MpLog.Log("[MP][diag] SetPowered " + msg);
             return allow;
         }
     }
@@ -256,7 +256,7 @@ namespace Multiplayer.Network.Sync
             // Never silent (the dominant bug class): say whose arrival outcome was refused and why.
             // Log-once per root — arrival is per route leg, not per frame.
             if (_logged.Add(root))
-                Debug.Log("[MP][diag] VehicleArrivalGate BLOCK " + root + " — arrival outcome is host-only; " +
+                MpLog.Log("[MP][diag] VehicleArrivalGate BLOCK " + root + " — arrival outcome is host-only; " +
                           "the client flew the leg itself and takes CurrentSite/DestinationSites/CanRedirect from the rail");
             return false;
         }
@@ -300,7 +300,7 @@ namespace Multiplayer.Network.Sync
             // Never silent (the dominant bug class): say whose exploration outcome was refused and why.
             // Log-once per root — exploration is a per-site event, not a per-frame one.
             if (_logged.Add(root))
-                Debug.Log("[MP][diag] SiteExploredOutcomeGate BLOCK " + root + " — the exploration RESULT is host-only; " +
+                MpLog.Log("[MP][diag] SiteExploredOutcomeGate BLOCK " + root + " — the exploration RESULT is host-only; " +
                           "the client derived the progress bar itself and takes the site's inspected state from the rail");
             return false;
         }
@@ -342,7 +342,7 @@ namespace Multiplayer.Network.Sync
             if (SyncApplyScope.Active) return true;                                      // an apply may legitimately reach it
             string id = (eventData as PhoenixPoint.Geoscape.Events.Eventus.GeoscapeEventData)?.EventID ?? "?";
             if (_logged.Add(id))
-                Debug.Log("[MP][events] client-local raise of '" + id + "' BLOCKED — the host's record arrives via the rail");
+                MpLog.Log("[MP][events] client-local raise of '" + id + "' BLOCKED — the host's record arrives via the rail");
             return false;
         }
     }
@@ -397,7 +397,7 @@ namespace Multiplayer.Network.Sync
             string who = (__originalMethod == null ? "?" : __originalMethod.Name) + " " +
                          (IdentityResolver.RootRef(__instance) ?? "V#?");
             if (_logged.Add(who))
-                Debug.Log("[MP][vehicle] CLIENT gesture " + who + " BLOCKED — it writes rail-covered aircraft/site " +
+                MpLog.Log("[MP][vehicle] CLIENT gesture " + who + " BLOCKED — it writes rail-covered aircraft/site " +
                           "state the host owns; the host's own result arrives as a delta");
             return false;
         }
@@ -445,7 +445,7 @@ namespace Multiplayer.Network.Sync
             string who = (__originalMethod == null ? "?" : __originalMethod.Name) + " " +
                          (__instance?.Def == null ? "?" : __instance.Def.name);
             if (_logged.Add(who))
-                Debug.Log("[MP][faction] CLIENT gesture " + who + " BLOCKED — it SPAWNS a geoscape actor, and a " +
+                MpLog.Log("[MP][faction] CLIENT gesture " + who + " BLOCKED — it SPAWNS a geoscape actor, and a " +
                           "root only this peer has is one the host-now-vs-host-before diff can never mention " +
                           "again; the host's own runs the same spawn and it arrives as a structural create");
             return false;
@@ -485,7 +485,7 @@ namespace Multiplayer.Network.Sync
             // Log-once per faction — the funnel fires per vehicle registered or unregistered.
             string who = __instance?.Def == null ? "?" : __instance.Def.name;
             if (_logged.Add(who))
-                Debug.Log("[MP][diag] AutomanufactureGate BLOCK " + who +
+                MpLog.Log("[MP][diag] AutomanufactureGate BLOCK " + who +
                           " — the client never derives a manufacturing queue; the host's queue arrives via the rail");
             return false;
         }

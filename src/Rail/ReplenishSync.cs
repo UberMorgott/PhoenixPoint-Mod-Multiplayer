@@ -175,12 +175,12 @@ namespace Multiplayer.Network.Sync
                     if (engine == null || !engine.IsActiveSession || engine.IsHost) return;
                     int carried = EventPopup.RequeueUnanswered();
                     if (carried > 0)
-                        Debug.Log("[MP][windows] carried " + carried + " unread window(s) across the mission — " +
+                        MpLog.Log("[MP][windows] carried " + carried + " unread window(s) across the mission — " +
                                   "this peer's queue came back as the HOST's, so its own unanswered raises are " +
                                   "re-held for replay");
                 }
                 catch (Exception ex)
-                { Debug.LogError("[MP][windows] carrying unread windows across the mission failed: " + ex); }
+                { MpLog.LogError("[MP][windows] carrying unread windows across the mission failed: " + ex); }
             }
         }
 
@@ -254,12 +254,12 @@ namespace Multiplayer.Network.Sync
             {
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.GeoPostMissionCommit, SyncKind.StateDelta, new byte[0])));
-                Debug.Log("[MP][replenish] post-mission writes committed and shipped — 0x" +
+                MpLog.Log("[MP][replenish] post-mission writes committed and shipped — 0x" +
                           SurfaceIds.GeoPostMissionCommit.ToString("X2") + " broadcast behind the batch that " +
                           "carries them, so every client can ask GetMissingItems() on a squad that is finally its own");
             }
             catch (Exception ex)
-            { Debug.LogError("[MP][replenish] broadcasting the post-mission commit edge failed — clients fall " +
+            { MpLog.LogError("[MP][replenish] broadcasting the post-mission commit edge failed — clients fall " +
                              "back to the re-ask ceiling: " + ex); }
         }
 
@@ -274,7 +274,7 @@ namespace Multiplayer.Network.Sync
                 if (engine != null && engine.IsActiveSession && !engine.IsHost) OnPostMissionWritesCommitted();
             }
             catch (Exception ex)
-            { Debug.LogError("[MP][replenish] the post-mission commit edge threw — this peer falls back to the " +
+            { MpLog.LogError("[MP][replenish] the post-mission commit edge threw — this peer falls back to the " +
                              "re-ask ceiling: " + ex); }
             return true;
         }
@@ -310,13 +310,13 @@ namespace Multiplayer.Network.Sync
                 var geo = GenericApplier.GeoLevel();
                 if (!(geo?.ViewerFaction is GeoPhoenixFaction px))
                 {
-                    Debug.Log("[MP][replenish] VERDICT DEFERRED (" + because + "): this peer's geoscape is not " +
+                    MpLog.Log("[MP][replenish] VERDICT DEFERRED (" + because + "): this peer's geoscape is not " +
                               "up yet, so there is nobody to ask GetMissingItems(). The answer is latched and " +
                               "reported when this peer arrives.");
                     return;
                 }
                 int shortCount = px.GetMissingItems().Count;
-                Debug.Log("[MP][replenish] VERDICT (" + because + "): " + shortCount + " soldier(s) short of " +
+                MpLog.Log("[MP][replenish] VERDICT (" + because + "): " + shortCount + " soldier(s) short of " +
                           "their preferred loadout — " +
                           (ReplenishQueued()
                               ? "the resupply window IS queued on this peer."
@@ -329,7 +329,7 @@ namespace Multiplayer.Network.Sync
                                 "A non-zero count with no window is the bug shape; 0 is not."));
             }
             catch (Exception ex)
-            { Debug.LogError("[MP][replenish] reporting the resupply verdict failed: " + ex); }
+            { MpLog.LogError("[MP][replenish] reporting the resupply verdict failed: " + ex); }
         }
 
         /// <summary>The game's own gate and the game's own raiser, in one place so the edge, the arrival and
@@ -343,7 +343,7 @@ namespace Multiplayer.Network.Sync
             if (ReplenishQueued()) return true;
             if (!phoenix.GetMissingItems().Any()) return false;
             view.QueueReplenishState();   // the game's own raiser, at the game's own priority + our rank
-            Debug.Log("[MP][replenish] queued the game's own UIStateReplenish on " + because +
+            MpLog.Log("[MP][replenish] queued the game's own UIStateReplenish on " + because +
                       " — UIStateInitial:127 could not, because this peer's geoscape was still the " +
                       "pre-battle save when it asked");
             return true;
@@ -404,7 +404,7 @@ namespace Multiplayer.Network.Sync
                     if (engine == null || !engine.IsActiveSession) return;
                     if (ParamsField == null)
                     {
-                        Debug.LogError("[MP][replenish] UIStateInitial._params did not resolve — this peer " +
+                        MpLog.LogError("[MP][replenish] UIStateInitial._params did not resolve — this peer " +
                                        "cannot tell a post-mission arrival from any other, so the resupply " +
                                        "screen is left to the one gate that already misses it.");
                         return;
@@ -449,7 +449,7 @@ namespace Multiplayer.Network.Sync
                     // somewhere else entirely. Costs one walk, once per mission arrival.
                     int shortNow = geo.ViewerFaction is GeoPhoenixFaction px
                                        ? px.GetMissingItems().Count : 0;
-                    Debug.Log("[MP][replenish] post-mission arrival: the game's own gate saw " + shortNow +
+                    MpLog.Log("[MP][replenish] post-mission arrival: the game's own gate saw " + shortNow +
                               " short soldier(s) at UIStateInitial:125" +
                               (shortNow == 0 ? " — i.e. nothing missing YET, because this peer's returning squad " +
                                                "is still the host's pre-battle save" : " — the native raise " +
@@ -458,7 +458,7 @@ namespace Multiplayer.Network.Sync
                               " frames.");
                 }
                 catch (Exception ex)
-                { Debug.LogError("[MP][replenish] arming the post-mission resupply re-ask failed: " + ex); }
+                { MpLog.LogError("[MP][replenish] arming the post-mission resupply re-ask failed: " + ex); }
             }
         }
 
@@ -494,7 +494,7 @@ namespace Multiplayer.Network.Sync
                 if (lastFrame)
                 {
                     LogVerdict("the re-ask ceiling, before the host's commit edge arrived");
-                    Debug.Log("[MP][replenish] post-mission re-ask expired with nothing missing and no commit " +
+                    MpLog.Log("[MP][replenish] post-mission re-ask expired with nothing missing and no commit " +
                               "edge — either this squad really did come back whole, or 0x" +
                               SurfaceIds.GeoPostMissionCommit.ToString("X2") + " never arrived. Any window " +
                               "this was holding can go through now.");
@@ -503,7 +503,7 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex)
             {
                 _recheckFrames = 0;
-                Debug.LogError("[MP][replenish] post-mission re-ask failed — this peer gets no resupply " +
+                MpLog.LogError("[MP][replenish] post-mission re-ask failed — this peer gets no resupply " +
                                "screen for this mission: " + ex);
             }
         }
@@ -525,7 +525,7 @@ namespace Multiplayer.Network.Sync
                 string guid = item?.ItemDef?.Guid;
                 if (__instance == null || string.IsNullOrEmpty(guid))
                 {
-                    Debug.LogWarning("[MP][replenish] client repair DROPPED — no character or no item def to " +
+                    MpLog.LogWarning("[MP][replenish] client repair DROPPED — no character or no item def to " +
                                      "name in the intent; nothing was written locally either.");
                     return false;
                 }
@@ -580,7 +580,7 @@ namespace Multiplayer.Network.Sync
                 string guid = geoItem?.ItemDef?.Guid;
                 if (character == null || string.IsNullOrEmpty(guid))
                 {
-                    Debug.LogWarning("[MP][replenish] client reload DROPPED — this item names no character on " +
+                    MpLog.LogWarning("[MP][replenish] client reload DROPPED — this item names no character on " +
                                      "the open resupply screen or has no item def, so no peer could address it; " +
                                      "nothing was written locally either.");
                     return false;
@@ -643,7 +643,7 @@ namespace Multiplayer.Network.Sync
             int charId = (int)character.Id;
             if (!character.RepairItem(new GeoItem(def), payCost: true))
             { Reject(peer, charId, "repair refused by the game — item already whole, or the wallet cannot pay"); return; }
-            Debug.Log("[MP][replenish] HOST repaired " + def.name + " on U#" + charId +
+            MpLog.Log("[MP][replenish] HOST repaired " + def.name + " on U#" + charId +
                       " for peer=" + peer + " nonce=" + nonce);
         }
 
@@ -680,7 +680,7 @@ namespace Multiplayer.Network.Sync
             faction.Wallet.Take(cost, OperationReason.Purchase);
             geoItem.CommonItemData.ModifyCharges(geoItem.ItemDef.ChargesMax - geoItem.CommonItemData.CurrentCharges,
                                                  canCreateMagazines: true);
-            Debug.Log("[MP][replenish] HOST reloaded " + def.name + " on U#" + charId +
+            MpLog.Log("[MP][replenish] HOST reloaded " + def.name + " on U#" + charId +
                       " for peer=" + peer + " nonce=" + nonce);
         }
 

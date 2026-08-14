@@ -52,7 +52,7 @@ namespace RailCheck
             var forget = de.GetMethod("ForgetIncidentCounts", All, null, System.Type.EmptyTypes, null);
             var incident = de.GetMethod("Incident", All);
             var reset = de.GetMethod("Reset", All, null, System.Type.EmptyTypes, null);
-            var logError = typeof(UnityEngine.Debug).GetMethod("LogError", All, null,
+            var logError = typeof(Multiplayer.MpLog).GetMethod("LogError", All, null,
                                new[] { typeof(object) }, null);
             int threshold = DiffEngine.PermanentAfterWalks;
 
@@ -60,7 +60,7 @@ namespace RailCheck
                 logError == null || threshold < 2)
             {
                 yield return "L188 premise-changed: DiffEngine.EscalateAt / NoteIncidentWalk / " +
-                             "ForgetIncidentCounts / Incident / Reset or UnityEngine.Debug.LogError no longer " +
+                             "ForgetIncidentCounts / Incident / Reset or MpLog.LogError no longer " +
                              "resolves, or PermanentAfterWalks has collapsed below 2 (" + threshold + "). " +
                              "Incident is the ONE channel every walk-time exclusion is funnelled into — a " +
                              "version of it that cannot separate a one-off from a dead field is the " +

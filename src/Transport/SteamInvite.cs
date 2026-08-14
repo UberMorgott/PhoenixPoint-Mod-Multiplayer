@@ -83,8 +83,8 @@ namespace Multiplayer.Transport
 
         private static void Stage(string msg, bool isError = false)
         {
-            if (isError) Debug.LogError("[Multiplayer][steam-invite] " + msg);
-            else Debug.Log("[Multiplayer][steam-invite] " + msg);
+            if (isError) MpLog.LogError("[Multiplayer][steam-invite] " + msg);
+            else MpLog.Log("[Multiplayer][steam-invite] " + msg);
             try { Report?.Invoke(msg, isError); } catch { }
         }
 
@@ -622,7 +622,7 @@ namespace Multiplayer.Transport
         {
             if (_unavailable) return;   // a missing assembly does not come back — say it once
             _unavailable = true;
-            Debug.LogWarning("[Multiplayer] no Steam runtime in this process (" + e.GetType().Name +
+            MpLog.LogWarning("[Multiplayer] no Steam runtime in this process (" + e.GetType().Name +
                              ") — Steam invites and the friends list stay off for the rest of the run.");
         }
     }

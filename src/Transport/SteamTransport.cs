@@ -208,17 +208,17 @@ namespace Multiplayer.Transport
                     try
                     {
                         _allowRelayMethod.Invoke(null, new object[] { true });
-                        UnityEngine.Debug.Log("[Multiplayer] SteamTransport: AllowP2PPacketRelay(true) applied — " +
+                        MpLog.Log("[Multiplayer] SteamTransport: AllowP2PPacketRelay(true) applied — " +
                                               "relay fallback ON (one-way NAT / VPN resilience).");
                     }
                     catch (Exception ex)
                     {
-                        UnityEngine.Debug.LogWarning("[Multiplayer] SteamTransport: AllowP2PPacketRelay(true) threw: " + ex.Message);
+                        MpLog.LogWarning("[Multiplayer] SteamTransport: AllowP2PPacketRelay(true) threw: " + ex.Message);
                     }
                 }
                 else
                 {
-                    UnityEngine.Debug.LogWarning("[Multiplayer] SteamTransport: AllowP2PPacketRelay NOT FOUND in the shipped " +
+                    MpLog.LogWarning("[Multiplayer] SteamTransport: AllowP2PPacketRelay NOT FOUND in the shipped " +
                                                  "Facepunch build — cannot force relay fallback; one-way NAT / VPN sessions may fail.");
                 }
 
@@ -253,19 +253,19 @@ namespace Multiplayer.Transport
                         var failHandler = BuildConnectFailDelegate();
                         _installedConnectFailHandler = failHandler;
                         _onP2PConnectionFailedField.SetValue(null, failHandler);
-                        UnityEngine.Debug.Log("[Multiplayer] SteamTransport: OnP2PConnectionFailed hook armed " +
+                        MpLog.Log("[Multiplayer] SteamTransport: OnP2PConnectionFailed hook armed " +
                                               "(instant peer-loss detection).");
                     }
                     catch (Exception ex)
                     {
-                        UnityEngine.Debug.LogError("[Multiplayer] SteamTransport: OnP2PConnectionFailed hook FAILED " +
+                        MpLog.LogError("[Multiplayer] SteamTransport: OnP2PConnectionFailed hook FAILED " +
                                                    $"to build/install ({ex.Message}) — peer loss falls back to the " +
                                                    "heartbeat timeout.");
                     }
                 }
                 else
                 {
-                    UnityEngine.Debug.LogWarning("[Multiplayer] SteamTransport: OnP2PConnectionFailed field NOT FOUND " +
+                    MpLog.LogWarning("[Multiplayer] SteamTransport: OnP2PConnectionFailed field NOT FOUND " +
                                                  "in the shipped Facepunch build — peer loss falls back to the " +
                                                  "heartbeat timeout.");
                 }
@@ -533,7 +533,7 @@ namespace Multiplayer.Transport
                     // FlushPeerList collapses to one roster per frame) cannot double-fire.
                     if (_connectedPeers.Add(steamId))
                     {
-                        UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport: packet from UNREGISTERED peer " +
+                        MpLog.LogWarning($"[Multiplayer] SteamTransport: packet from UNREGISTERED peer " +
                                                      $"{steamId} — no P2P session-request fired for it (stale " +
                                                      $"process-global Steam session, typical on a retry). " +
                                                      $"Registering it now so Broadcast reaches it too.");
@@ -555,7 +555,7 @@ namespace Multiplayer.Transport
                     // the hazard _deferredCloses' grace window exists for. The 23:06:37 join did not fail on a
                     // stale session: the host received this packet, so the inbound path was open — it never
                     // received a ConnectionRequest at all, and no local close makes a packet arrive.
-                    UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport: packet from {steamId} did not " +
+                    MpLog.LogWarning($"[Multiplayer] SteamTransport: packet from {steamId} did not " +
                                                  $"register it as a peer — " +
                                                  (IsHost ? "host, and the packet is not a ConnectionRequest "
                                                          + "(stale process-global Steam session)"
@@ -643,13 +643,13 @@ namespace Multiplayer.Transport
             count++;
             _consecutiveSendFailures[peerId] = count;
             if (count == 1)
-                UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport: send to {peerId} failed (1st): {reason}");
+                MpLog.LogWarning($"[Multiplayer] SteamTransport: send to {peerId} failed (1st): {reason}");
             if (count < SendFailureThreshold) return;
 
             _consecutiveSendFailures[peerId] = 0; // reset so we do not re-raise on every subsequent send
             if (IsHost)
             {
-                UnityEngine.Debug.LogError($"[Multiplayer] SteamTransport(host): send to client {peerId} failed " +
+                MpLog.LogError($"[Multiplayer] SteamTransport(host): send to client {peerId} failed " +
                                            $"{SendFailureThreshold}x ({reason}) — treating the client as disconnected.");
                 // Remove NOW (stops further sends to the dead id) but raise the disconnect from
                 // Update(): this runs inside SendPacket, possibly mid-Broadcast — raising inline
@@ -660,7 +660,7 @@ namespace Multiplayer.Transport
             }
             else
             {
-                UnityEngine.Debug.LogError($"[Multiplayer] SteamTransport(client): send to host {peerId} failed " +
+                MpLog.LogError($"[Multiplayer] SteamTransport(client): send to host {peerId} failed " +
                                            $"{SendFailureThreshold}x ({reason}) — surfacing as transport failure.");
                 LocalEndpoint = $"Steam P2P send channel dead to host: {reason} ({SendFailureThreshold}x)";
                 State = ConnectionState.Failed;
@@ -684,7 +684,7 @@ namespace Multiplayer.Transport
                 if (!_packetAvailabilityFailureWarned)
                 {
                     _packetAvailabilityFailureWarned = true;
-                    UnityEngine.Debug.LogError("[Multiplayer] SteamTransport: packet availability probe failed: " +
+                    MpLog.LogError("[Multiplayer] SteamTransport: packet availability probe failed: " +
                                                ex.GetBaseException().Message);
                 }
             }
@@ -712,7 +712,7 @@ namespace Multiplayer.Transport
                 if (!_packetReadFailureWarned)
                 {
                     _packetReadFailureWarned = true;
-                    UnityEngine.Debug.LogError("[Multiplayer] SteamTransport: packet read failed: " +
+                    MpLog.LogError("[Multiplayer] SteamTransport: packet read failed: " +
                                                ex.GetBaseException().Message);
                 }
             }
@@ -728,7 +728,7 @@ namespace Multiplayer.Transport
         private void OnP2PConnectFail(ulong remoteSteamId, int error)
         {
             if (!_connectedPeers.Remove(remoteSteamId)) return;
-            UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport: P2P session to {remoteSteamId} failed " +
+            MpLog.LogWarning($"[Multiplayer] SteamTransport: P2P session to {remoteSteamId} failed " +
                                          $"(P2PSessionError={error}) — dropping peer.");
             _consecutiveSendFailures.Remove(remoteSteamId);
             OnPeerDisconnected?.Invoke(remoteSteamId, $"Steam({remoteSteamId})");
@@ -744,7 +744,7 @@ namespace Multiplayer.Transport
             // OnPeerConnected would re-point the host link to it (SetHostPeer + JOIN).
             if (!IsHost && remoteSteamId != _dialedHost)
             {
-                UnityEngine.Debug.LogWarning($"[Multiplayer] SteamTransport(client): ignoring inbound P2P " +
+                MpLog.LogWarning($"[Multiplayer] SteamTransport(client): ignoring inbound P2P " +
                                              $"session from {remoteSteamId} — not the dialed host ({_dialedHost}).");
                 CloseSession(remoteSteamId);
                 return;
@@ -760,7 +760,7 @@ namespace Multiplayer.Transport
                 // "invite lobby joinable" straight to a `Peer 1 (Unknown) PAUSED` half a minute later, with
                 // the row's creation nowhere in between. It is also the one line that separates "the joiner
                 // never reached us" from "it reached us and its JOIN did not".
-                UnityEngine.Debug.Log($"[Multiplayer] SteamTransport: P2P session accepted from {remoteSteamId}" +
+                MpLog.Log($"[Multiplayer] SteamTransport: P2P session accepted from {remoteSteamId}" +
                                       (IsHost ? " — roster row minted; its JOIN is what gives it an identity."
                                               : " — the dialed host's reply leg."));
                 OnPeerConnected?.Invoke(remoteSteamId, $"Steam({remoteSteamId})");

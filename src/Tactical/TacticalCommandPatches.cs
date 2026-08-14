@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -87,7 +87,7 @@ namespace Multiplayer.Tactical
         private static bool Prepare()
         {
             if (Seam != null) return true;
-            Debug.LogError("[Multiplayer][tac] ECHO SEAM NOT BOUND — TacticalViewState.ActivateAbility" +
+            MpLog.LogError("[Multiplayer][tac] ECHO SEAM NOT BOUND — TacticalViewState.ActivateAbility" +
                            "(TacticalAbility, TacticalAbilityTarget, StateStackAction, Func<TacticalAbility,bool>) " +
                            "did not resolve, so every clicked order will play LOCALLY at the click again and " +
                            "attack animations will start at a different moment on every peer (law L230).");
@@ -222,7 +222,7 @@ namespace Multiplayer.Tactical
                 _check = AccessTools.Method(typeof(TacticalAbility), "FumbleActionCheck", new Type[0]);
                 if (_check == null)
                 {
-                    Debug.LogError("[Multiplayer][tac] TacticalAbility.FumbleActionCheck did not resolve — the " +
+                    MpLog.LogError("[Multiplayer][tac] TacticalAbility.FumbleActionCheck did not resolve — the " +
                                    "fumble cannot be pre-rolled, so it will not ride with the order and every " +
                                    "peer will roll its own. Shots will differ between screens.");
                     return false;
@@ -232,7 +232,7 @@ namespace Multiplayer.Tactical
             try { rolled = (bool)_check.Invoke(ability, null); }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac] fumble pre-roll THREW — the order ships 'not fumbled' and the " +
+                MpLog.LogError("[Multiplayer][tac] fumble pre-roll THREW — the order ships 'not fumbled' and the " +
                                "host may still fumble: " + ex);
                 return false;
             }
@@ -428,7 +428,7 @@ namespace Multiplayer.Tactical
                 return true;
             }
             if (_withheld.Add(actor))
-                Debug.Log("[Multiplayer][tac] move-range sweep WITHHELD for " + SafeName(actor) +
+                MpLog.Log("[Multiplayer][tac] move-range sweep WITHHELD for " + SafeName(actor) +
                           " while another peer's order drives him — the game's own GetTargetsData says it " +
                           "must not run now (it invalidates the situation cache and turns the static " +
                           "NavigationSettings.PathRequestPostProcess off mid-navigation), and it says so " +
@@ -491,7 +491,7 @@ namespace Multiplayer.Tactical
             }
             __result = Empty;
             if (_fed.Add(actor))
-                Debug.Log("[Multiplayer][tac] move overlay fed an EMPTY sweep for " + SafeName(actor) +
+                MpLog.Log("[Multiplayer][tac] move overlay fed an EMPTY sweep for " + SafeName(actor) +
                           " instead of the null the game answers while his move ability is disabled — the " +
                           "withheld sweep is what disables it (MoveAbility:26 -> TacticalAbility:465-468), and " +
                           "MoveAbilitySceneViewElement.UpdateMoveAreas re-reads ValidMoves after its yields " +

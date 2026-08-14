@@ -89,7 +89,7 @@ namespace RailCheck
 
             // ── (b) IT MUST SAY SO ───────────────────────────────────────────────────────────────────
             bool speaks = CalleesBetween(post, catcher.HandlerOffset, catcher.HandlerOffset + catcher.HandlerLength)
-                .Any(m => m.DeclaringType == typeof(UnityEngine.Debug) &&
+                .Any(m => m.DeclaringType == typeof(Multiplayer.MpLog) &&
                           (m.Name == "LogError" || m.Name == "LogWarning" || m.Name == "LogException" || m.Name == "Log"));
             if (!speaks)
                 yield return "L346 containment-is-silent: the postfix's catch swallows without logging. The " +

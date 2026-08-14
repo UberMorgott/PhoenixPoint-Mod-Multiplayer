@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
@@ -202,7 +202,7 @@ namespace Multiplayer.Tactical
                     // BOTH are dropped, not just the newcomer: a hash collision means the number names two
                     // objects, so answering with EITHER is a wrong hit. The key is refused instead, which is
                     // what makes every later record naming it print a cause rather than reach a lookalike.
-                    Debug.LogError("[Multiplayer][tac] two battle-start actors hash to the SAME derived key " +
+                    MpLog.LogError("[Multiplayer][tac] two battle-start actors hash to the SAME derived key " +
                                    key + " — neither one may answer for it, so the key is REFUSED here and " +
                                    "every command, hit and settle naming it says so instead of reaching " +
                                    "whichever the map hands back first.");
@@ -218,7 +218,7 @@ namespace Multiplayer.Tactical
                 keyed++;
             }
             _built = true;
-            Debug.Log("[Multiplayer][tac] derived battle keys for " + keyed + " actor(s) the geoscape never " +
+            MpLog.Log("[Multiplayer][tac] derived battle keys for " + keyed + " actor(s) the geoscape never " +
                       "named (scene guid where the actor is placed, name+position where it was spawned into " +
                       "the shared entry save — never an ordinal over the roster).");
             // THE ORDERING SEAM IS THIS FLAG, AND THE FLUSH READS IT FROM THE TICK — NOT FROM HERE.
@@ -268,7 +268,7 @@ namespace Multiplayer.Tactical
                 // scans, once per battle, at a turn edge. Cache per scene only if a profile ever names it.
                 var id = SceneObjectIdsComponent.GetIdInScene(go, go.scene, true);
                 if (id.IsValid) return ContentKey("scene:" + id.GuidString);
-                Debug.LogWarning("[Multiplayer][tac] " + SafeName(a) + " is placed in the scene and has NO scene " +
+                MpLog.LogWarning("[Multiplayer][tac] " + SafeName(a) + " is placed in the scene and has NO scene " +
                                  "id — the shape ActorComponent:329-331 calls an error on every save. It is keyed " +
                                  "by name+position instead, which is still independent of what any peer counted " +
                                  "but moves if this actor moves before the other peer builds its keys.");
@@ -313,7 +313,7 @@ namespace Multiplayer.Tactical
             if (_derived.TryGetValue(actor, out existing)) return existing;
             int key = _nextDerived--;
             if (key <= -ContentKeyBase)
-                Debug.LogError("[Multiplayer][tac] the host has now assigned " + ContentKeyBase + " mid-battle " +
+                MpLog.LogError("[Multiplayer][tac] the host has now assigned " + ContentKeyBase + " mid-battle " +
                                "spawn keys and has run into the CONTENT-KEY range — key " + key + " may already " +
                                "belong to a battle-start actor, and both would answer to it.");
             _derived[actor] = key;
@@ -330,7 +330,7 @@ namespace Multiplayer.Tactical
             if (ReferenceEquals(actor, null) || key >= 0) return;   // 0 = no identity, positive = its own GeoUnitId
             TacticalActorBase other;
             if (_byDerived.TryGetValue(key, out other) && !ReferenceEquals(other, actor))
-                Debug.LogError("[Multiplayer][tac] the host's spawn key " + key + " is ALREADY taken on this peer by " +
+                MpLog.LogError("[Multiplayer][tac] the host's spawn key " + key + " is ALREADY taken on this peer by " +
                                SafeName(other) + " — the peers disagree about this battle's starting roster, so two " +
                                "actors now answer to one key and every command or result naming it reaches the " +
                                "wrong one.");

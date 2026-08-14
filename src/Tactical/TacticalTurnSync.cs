@@ -160,7 +160,7 @@ namespace Multiplayer.Tactical
             string guid = Guid(next);
             if (string.IsNullOrEmpty(guid))
             {
-                Debug.LogError("[Multiplayer][tac] turn broadcast SKIPPED — faction '" + Name(next) + "' has no def " +
+                MpLog.LogError("[Multiplayer][tac] turn broadcast SKIPPED — faction '" + Name(next) + "' has no def " +
                                "guid, so no client can recognise this handoff and every one of them stays frozen in " +
                                "its current turn.");
                 return;
@@ -237,7 +237,7 @@ namespace Multiplayer.Tactical
 
             var player = tlc?.Factions?.FirstOrDefault(f => f.ParticipantKind == TacMissionParticipant.Player);
             if (player == null)
-                Debug.LogError("[Multiplayer][tac] mission-end broadcast has NO player faction to read the outcome " +
+                MpLog.LogError("[Multiplayer][tac] mission-end broadcast has NO player faction to read the outcome " +
                                "from — clients will still be torn down, but their battle summary will show a loss.");
             // THE LAST BOARD EVERY PEER SCORES MUST BE THE HOST'S (law L329). Every peer computes its own
             // objectives and its own XP off its own actors — RescueSoldiersFactionObjective.EvaluateObjective
@@ -325,13 +325,13 @@ namespace Multiplayer.Tactical
                 }
                 var env = SyncProtocol.EncodeEnvelope(surfaceId, SyncKind.StateDelta, inner);
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
-                Debug.Log("[Multiplayer][tac] HOST " + what + " seq=" + seq);
+                MpLog.Log("[Multiplayer][tac] HOST " + what + " seq=" + seq);
             }
             catch (Exception ex)
             {
                 // A dropped turn message parks every client in its current turn; a dropped mission end
                 // STRANDS them in a battle that no longer exists. Never silent.
-                Debug.LogError("[Multiplayer][tac] HOST " + what + " broadcast FAILED — clients will not follow " +
+                MpLog.LogError("[Multiplayer][tac] HOST " + what + " broadcast FAILED — clients will not follow " +
                                "this handoff: " + ex);
             }
         }
@@ -358,7 +358,7 @@ namespace Multiplayer.Tactical
                     // 0x80 message dropped here is a peer stranded in a battle nobody can end for it.
                     uint cursor = Seq.LastApplied(SurfaceIds.TacTurn);
                     if (SurfaceSeq.IsStreamRestart(seq, cursor))
-                        Debug.LogWarning("[Multiplayer][tac] host turn stream RESTARTED at seq=1 while this " +
+                        MpLog.LogWarning("[Multiplayer][tac] host turn stream RESTARTED at seq=1 while this " +
                                          "peer's cursor was " + cursor + " — a trailing message of the previous " +
                                          "battle re-armed it after the teardown reset. Rewinding and applying; " +
                                          "without this every turn edge, mission end and leave of THIS battle is " +
@@ -370,7 +370,7 @@ namespace Multiplayer.Tactical
                         // battle — turn edges, the mission end, the leave — so logging every refusal costs
                         // nothing, and the alternative is what happened on 2026-08-07: a whole battle in
                         // which not one of them applied, with nothing in any log to say so.
-                        Debug.LogWarning("[Multiplayer][tac] host turn/end/leave message seq=" + seq + " op=" + op +
+                        MpLog.LogWarning("[Multiplayer][tac] host turn/end/leave message seq=" + seq + " op=" + op +
                                          " REFUSED as stale (cursor " + cursor + "). If this repeats for a whole " +
                                          "battle this peer will never be told the mission ended or that the host " +
                                          "left, and the host will wait on a reveal barrier it can never open.");
@@ -386,7 +386,7 @@ namespace Multiplayer.Tactical
                         TacticalReadySync.ApplyTally(r.ReadInt32(), r.ReadInt32());
                     else
                     {
-                        Debug.LogError("[Multiplayer][tac] unknown host→all tactical op " + op + " (seq=" + seq +
+                        MpLog.LogError("[Multiplayer][tac] unknown host→all tactical op " + op + " (seq=" + seq +
                                        ") — this peer cannot follow the battle any further.");
                         return true;
                     }
@@ -395,7 +395,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac] turn/end inbound FAILED — this peer may now be stranded in " +
+                MpLog.LogError("[Multiplayer][tac] turn/end inbound FAILED — this peer may now be stranded in " +
                                "tactical: " + ex);
             }
             return true;
@@ -410,7 +410,7 @@ namespace Multiplayer.Tactical
         {
             HostFactionGuid = factionGuid;
             HostTurnNumber = turnNumber;
-            Debug.Log("[Multiplayer][tac] CLIENT host cursor → faction " + factionGuid + " turn " + (turnNumber + 1));
+            MpLog.Log("[Multiplayer][tac] CLIENT host cursor → faction " + factionGuid + " turn " + (turnNumber + 1));
         }
 
         private static void ApplyEnd(TacFactionState playerState)
@@ -419,7 +419,7 @@ namespace Multiplayer.Tactical
             var tlc = Tlc();
             if (tlc == null)
             {
-                Debug.LogError("[Multiplayer][tac] host mission END arrived with no live tactical level on this " +
+                MpLog.LogError("[Multiplayer][tac] host mission END arrived with no live tactical level on this " +
                                "peer — nothing to tear down (already left the battle?).");
                 return;
             }
@@ -427,7 +427,7 @@ namespace Multiplayer.Tactical
 
             var player = tlc.Factions?.FirstOrDefault(f => f.ParticipantKind == TacMissionParticipant.Player);
             if (player == null)
-                Debug.LogError("[Multiplayer][tac] host mission END: this peer has no Player-participant faction, " +
+                MpLog.LogError("[Multiplayer][tac] host mission END: this peer has no Player-participant faction, " +
                                "so the authoritative outcome cannot be stamped — the summary will show a loss.");
             else
                 player.State = playerState; // the ONE authoritative outcome bit; the client computes none of it
@@ -436,7 +436,7 @@ namespace Multiplayer.Tactical
             // broadcast postfix stays host-only (law 8). From here the game's own machinery runs: GameOverEvent
             // → TacticalView.OnGameOver → battle summary → GoToGeoscape → FinishLevel → LoadCurrentGeoscape.
             using (SyncApplyScope.Enter()) tlc.GameOver();
-            Debug.Log("[Multiplayer][tac] CLIENT applied host mission END outcome=" + playerState +
+            MpLog.Log("[Multiplayer][tac] CLIENT applied host mission END outcome=" + playerState +
                       " — native teardown → battle summary → geoscape.");
         }
 
@@ -461,13 +461,13 @@ namespace Multiplayer.Tactical
             {
                 RestartTrace.Note("...and there is NO live level/PhoenixGame here, so nothing reloads on this " +
                                   "peer. From here on it is in a different level from the host.");
-                Debug.LogError("[Multiplayer][tac] host mission RESTART arrived with no live level on this peer " +
+                MpLog.LogError("[Multiplayer][tac] host mission RESTART arrived with no live level on this peer " +
                                "— nothing to reload here, so this peer and the host are now in different levels " +
                                "and every actor key they exchange names a different board.");
                 return;
             }
             using (SyncApplyScope.Enter()) game.FinishLevel(new RestartGameResult(level.LevelParams));
-            Debug.Log("[Multiplayer][tac] CLIENT applied host mission RESTART — reloading this level through " +
+            MpLog.Log("[Multiplayer][tac] CLIENT applied host mission RESTART — reloading this level through " +
                       "the game's own restart loop; the curtain stays down until every peer is back in.");
         }
 
@@ -495,13 +495,13 @@ namespace Multiplayer.Tactical
             var tlc = Tlc();
             if (tlc == null || LeftBattle)
             {
-                Debug.Log("[Multiplayer][tac] CLIENT host-left-battle: nothing to do — this peer " +
+                MpLog.Log("[Multiplayer][tac] CLIENT host-left-battle: nothing to do — this peer " +
                           (LeftBattle ? "already left on its own click" : "holds no tactical level"));
                 return;
             }
             if (GoToGeoscapeMethod == null)
             {
-                Debug.LogError("[Multiplayer][tac] CLIENT host-left-battle CANNOT run — TacticalView.GoToGeoscape " +
+                MpLog.LogError("[Multiplayer][tac] CLIENT host-left-battle CANNOT run — TacticalView.GoToGeoscape " +
                                "did not resolve, so this peer stays stranded on its battle summary while every " +
                                "other peer is back on the geoscape.");
                 return;
@@ -514,7 +514,7 @@ namespace Multiplayer.Tactical
             // a leave ask straight back to the host. No latch rollback is needed: a peer being carried out
             // has broadcast nothing to retract and its own Continue still works.
             using (SyncApplyScope.Enter()) GoToGeoscapeMethod.Invoke(tlc.View, null);
-            Debug.Log("[Multiplayer][tac] CLIENT host-left-battle APPLIED — running this peer's own " +
+            MpLog.Log("[Multiplayer][tac] CLIENT host-left-battle APPLIED — running this peer's own " +
                       "GoToGeoscape → FinishLevel → geoscape.");
         }
 
@@ -526,13 +526,13 @@ namespace Multiplayer.Tactical
             string guid = Guid(next);
             if (guid != HostFactionGuid)
             {
-                Debug.LogWarning("[Multiplayer][tac] client entered '" + Name(next) + "'s turn while the host is on " +
+                MpLog.LogWarning("[Multiplayer][tac] client entered '" + Name(next) + "'s turn while the host is on " +
                                  HostFactionGuid + " — catching up (a faction the host skipped); the same hold " +
                                  "releases it again this frame.");
                 return;
             }
             if (next.TurnNumber != HostTurnNumber)
-                Debug.LogError("[Multiplayer][tac] TURN DRIFT: this peer is starting turn " + (next.TurnNumber + 1) +
+                MpLog.LogError("[Multiplayer][tac] TURN DRIFT: this peer is starting turn " + (next.TurnNumber + 1) +
                                " for '" + Name(next) + "' but the host announced turn " + (HostTurnNumber + 1) +
                                " — the peers are no longer on the same turn.");
         }
@@ -621,7 +621,7 @@ namespace Multiplayer.Tactical
                 return;
             }
             cur.RequestEndTurn(); // the same native call the host's own end-turn button makes
-            Debug.Log("[Multiplayer][tac] HOST end-turn intent from peer=" + senderPeerId + " ACCEPTED for '" +
+            MpLog.Log("[Multiplayer][tac] HOST end-turn intent from peer=" + senderPeerId + " ACCEPTED for '" +
                       Name(cur) + "' turn " + cur.TurnNumber);
         }
 
@@ -658,12 +658,12 @@ namespace Multiplayer.Tactical
                 // NOT AN ERROR — mid-handoff or an AI faction's turn simply is not ours to end. Logged
                 // because a convenience that silently does nothing is this repo's dominant bug shape, and
                 // "everyone was ready and the turn did not end" needs a witness other than a player's memory.
-                Debug.Log("[Multiplayer][tac] auto end-turn on all-ready SKIPPED — " + why +
+                MpLog.Log("[Multiplayer][tac] auto end-turn on all-ready SKIPPED — " + why +
                           ". Nothing is blocked: End Turn is pressable by anyone at any moment.");
                 return;
             }
             cur.RequestEndTurn();
-            Debug.Log("[Multiplayer][tac] auto end-turn: every seated peer is ready, so the HOST ended '" +
+            MpLog.Log("[Multiplayer][tac] auto end-turn: every seated peer is ready, so the HOST ended '" +
                       Name(cur) + "' turn " + cur.TurnNumber + " (setting AutoEndTurnWhenAllReady). " +
                       "Convenience only — the button was never gated on this.");
         }
@@ -712,7 +712,7 @@ namespace Multiplayer.Tactical
             catch
             {
                 LeftBattle = false;
-                Debug.LogError("[Multiplayer][tac] the native GoToGeoscape THREW after this peer had already " +
+                MpLog.LogError("[Multiplayer][tac] the native GoToGeoscape THREW after this peer had already " +
                                "latched the leave — dropping the latch so a retry is possible. If this is the " +
                                "host, the leave announcement is already out and every other peer is on its way " +
                                "to the geoscape while this one is still in the battle: press Continue again.");
@@ -760,13 +760,13 @@ namespace Multiplayer.Tactical
                 // and the only remaining arm here is exactly that one (the ordinary races log instead).
                 if (tlc != null && !over)
                     IntentRail.Reject(SurfaceIds.TacTurnIntent, senderPeerId, why, notify: true);
-                else Debug.Log("[Multiplayer][tac] leave-battle from peer=" + senderPeerId + " nonce=" + nonce +
+                else MpLog.Log("[Multiplayer][tac] leave-battle from peer=" + senderPeerId + " nonce=" + nonce +
                                " did NOT apply — " + why);
                 return;
             }
             if (GoToGeoscapeMethod == null)
             {
-                Debug.LogError("[Multiplayer][tac] leave-battle from peer=" + senderPeerId + " CANNOT run — " +
+                MpLog.LogError("[Multiplayer][tac] leave-battle from peer=" + senderPeerId + " CANNOT run — " +
                                "TacticalView.GoToGeoscape did not resolve, so an idle host still holds every peer " +
                                "in a finished battle and the whole session's rail stays silent.");
                 return;
@@ -776,7 +776,7 @@ namespace Multiplayer.Tactical
             // carries it into GeoMission.Complete. The client contributed the ask, nothing else — its own
             // local Complete is still blocked by ClientMissionResultGate.
             InvokeNativeLeave(tlc.View);
-            Debug.Log("[Multiplayer][tac] HOST leave-battle intent from peer=" + senderPeerId + " nonce=" + nonce +
+            MpLog.Log("[Multiplayer][tac] HOST leave-battle intent from peer=" + senderPeerId + " nonce=" + nonce +
                       " ACCEPTED — running the host's own GoToGeoscape → FinishLevel → geoscape.");
         }
 
@@ -839,7 +839,7 @@ namespace Multiplayer.Tactical
                 return;
             }
             GameUtl.GameComponent<PhoenixGame>().FinishLevel(new RestartGameResult(GameUtl.CurrentLevel().LevelParams));
-            Debug.Log("[Multiplayer][tac] HOST restart-mission intent from peer=" + senderPeerId + " nonce=" + nonce +
+            MpLog.Log("[Multiplayer][tac] HOST restart-mission intent from peer=" + senderPeerId + " nonce=" + nonce +
                       " ACCEPTED — running the host's own restart; its FinishLevel carries every peer with it.");
         }
 
@@ -861,7 +861,7 @@ namespace Multiplayer.Tactical
                                   "becomes an ask on the tactical intent surface and NOTHING is torn down " +
                                   "here. The trace stays open and continues when the host's answer arrives.");
                 IntentRail.Send(SurfaceIds.TacTurnIntent, OpRestartMission, "restart mission");
-                Debug.Log("[Multiplayer][tac] LOCAL mission restart BLOCKED on this client and sent to the host " +
+                MpLog.Log("[Multiplayer][tac] LOCAL mission restart BLOCKED on this client and sent to the host " +
                           "as an ask — a peer that reloads the map on its own is fighting a different battle " +
                           "from everyone else. This screen stays in the mission until the host restarts it.");
                 return false;
@@ -1011,14 +1011,14 @@ namespace Multiplayer.Tactical
             {
                 string diverged = TacticalActorKey.HostSideRefusals();
                 if (diverged != null)
-                    Debug.LogError("[Multiplayer][tac] ROSTER DIVERGENCE at the turn edge — this peer is fighting a " +
+                    MpLog.LogError("[Multiplayer][tac] ROSTER DIVERGENCE at the turn edge — this peer is fighting a " +
                                    "SMALLER battle than the host. Actor(s) alive on the host will never appear here: " +
                                    diverged + ". Every command, hit and settle naming them is refused for the rest of " +
                                    "the mission. This is not a lost packet — the spawn record arrived and could not be " +
                                    "rebuilt from what it carried.");
                 string clashed = TacticalActorKey.LocalKeyClashes();
                 if (clashed != null)
-                    Debug.LogError("[Multiplayer][tac] DERIVED KEY COLLISION at the turn edge — this peer's own " +
+                    MpLog.LogError("[Multiplayer][tac] DERIVED KEY COLLISION at the turn edge — this peer's own " +
                                    "battle-start actors are not all distinguishable: " + clashed + ". The roster is " +
                                    "NOT smaller and nothing was lost in transit; the key names two local actors, so " +
                                    "both were dropped from it and every command, hit and settle naming it is refused " +
@@ -1048,7 +1048,7 @@ namespace Multiplayer.Tactical
         private static bool Prefix()
         {
             if (IntentRail.ShouldRunNative()) return true;
-            Debug.LogWarning("[Multiplayer][tac] client-local GameOver BLOCKED — mission end is the host's call and " +
+            MpLog.LogWarning("[Multiplayer][tac] client-local GameOver BLOCKED — mission end is the host's call and " +
                              "arrives on the turn surface; a client deciding it alone would end the battle on state " +
                              "the host never reached.");
             return false;
@@ -1111,7 +1111,7 @@ namespace Multiplayer.Tactical
         private static bool Prefix(PhoenixPoint.Geoscape.Entities.GeoMission __instance)
         {
             if (IntentRail.ShouldRunNative()) return true;
-            Debug.LogWarning("[Multiplayer][tac] client-local GeoMission.Complete BLOCKED — the mission outcome is " +
+            MpLog.LogWarning("[Multiplayer][tac] client-local GeoMission.Complete BLOCKED — the mission outcome is " +
                              "the host's, and its geoscape consequences arrive on the value rail as ordinary state.");
             MissionOutcomeMirror.StampMirroredOutcome(__instance);
             return false;
@@ -1199,7 +1199,7 @@ namespace Multiplayer.Tactical
             // hints are about what was SEEN, not about who saw it.
             if (ActorSeen == null)
             {
-                Debug.LogError("[Multiplayer][tac] mission-start hints SKIPPED — TacContextHelpManager.OnActorSeen " +
+                MpLog.LogError("[Multiplayer][tac] mission-start hints SKIPPED — TacContextHelpManager.OnActorSeen " +
                                "did not resolve, so this peer gets no elite/mission intro at all.");
                 return;
             }
@@ -1214,7 +1214,7 @@ namespace Multiplayer.Tactical
                 ActorSeen.Invoke(__instance, new object[] { viewer, actor });
                 ++seen;
             }
-            Debug.Log("[Multiplayer][tac] mission-start context hints replayed for this client over " + seen +
+            MpLog.Log("[Multiplayer][tac] mission-start context hints replayed for this client over " + seen +
                       " already-visible actor(s) — the host got them at its own turn-1 edge, which a battle " +
                       "resumed from the host's save is always past.");
         }
@@ -1291,7 +1291,7 @@ namespace Multiplayer.Tactical
             var gangerReady = AccessTools.Method(humanEnemies, "GetGangerReady");
             if (implement == null || generateName == null || gangerReady == null)
             {
-                Debug.LogError("[Multiplayer][tac] TFTV is loaded but its human-enemy hint builder did not " +
+                MpLog.LogError("[Multiplayer][tac] TFTV is loaded but its human-enemy hint builder did not " +
                                "resolve (ImplementHumanEnemies/GenerateGangName/GetGangerReady renamed?) — this " +
                                "peer gets no gang/elite intro panel at all.");
                 return;
@@ -1311,13 +1311,13 @@ namespace Multiplayer.Tactical
                               prefix: new HarmonyMethod(AccessTools.Method(typeof(TftvMissionHints),
                                                                           nameof(SkipMutatingHalf))));
                 implement.Invoke(null, new object[] { tlc });
-                Debug.Log("[Multiplayer][tac] TFTV mission hint def(s) rebuilt on this client from the host's " +
+                MpLog.Log("[Multiplayer][tac] TFTV mission hint def(s) rebuilt on this client from the host's " +
                           "transferred gang/tactic data (" + carried + " gang name(s) carried) — the intro " +
                           "panel the host got is now registrable here.");
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer][tac] TFTV mission hint rebuild FAILED — no gang/elite intro on " +
+                MpLog.LogError("[Multiplayer][tac] TFTV mission hint rebuild FAILED — no gang/elite intro on " +
                                "this peer: " + e);
             }
             finally

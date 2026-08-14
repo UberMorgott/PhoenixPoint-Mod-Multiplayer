@@ -103,14 +103,14 @@ namespace Multiplayer.Network
                     // nothing whatsoever in Player.log, so "why did I get two boxes" could only be
                     // guessed at. One cheap line per prompt (they are rare — session events only) and
                     // the next occurrence names itself.
-                    Debug.Log("[Multiplayer] native prompt: " + message);
+                    MpLog.Log("[Multiplayer] native prompt: " + message);
                     GameUtl.GetMessageBox()?.ShowSimplePrompt(
                         message, MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
                 }
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] SessionNotifier toast failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] SessionNotifier toast failed: " + e.Message);
             }
         }
     }

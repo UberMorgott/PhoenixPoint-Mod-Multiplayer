@@ -113,7 +113,7 @@ namespace Multiplayer.Network.Sync
             int forcedLate = Router.ReleaseHeld();
             if (forcedLate > 0)
             {
-                UnityEngine.Debug.LogError("[Multiplayer][tac] turn-epoch hold CEILING reached — " + forcedLate +
+                MpLog.LogError("[Multiplayer][tac] turn-epoch hold CEILING reached — " + forcedLate +
                                            " record(s) applied late, after " + SurfaceRouter.HeldFrameCeiling +
                                            " frames, because this peer never crossed the faction-turn edge the " +
                                            "host announced. Applying beats dropping, but the local turn machine " +

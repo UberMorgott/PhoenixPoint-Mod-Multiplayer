@@ -46,10 +46,10 @@ namespace Multiplayer.Harmony
                 var coord = engine.SaveTransfer;
                 if (coord == null || !coord.SessionStarted) return true;   // non-co-op: native lift as normal
                 if (coord.Revealed) return true;                            // already revealed: let it lift
-                Debug.Log("[Multiplayer] curtain Loaded→Playing: SUPPRESS auto-lift (co-op hold)");
+                MpLog.Log("[Multiplayer] curtain Loaded→Playing: SUPPRESS auto-lift (co-op hold)");
                 return false; // skip native LiftCurtain; deferred lift happens on RevealAll
             }
-            catch (Exception e) { Debug.LogError("[Multiplayer] CurtainShowPatch.Prefix failed: " + e.Message); return true; }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] CurtainShowPatch.Prefix failed: " + e.Message); return true; }
         }
 
         // Signature: OnLevelStateChanged(Level level, Level.State prevState, Level.State newState).
@@ -96,7 +96,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] CurtainShowPatch.Postfix failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] CurtainShowPatch.Postfix failed: " + e.Message);
             }
         }
     }
@@ -145,13 +145,13 @@ namespace Multiplayer.Harmony
         {
             if (Hold())
             {
-                Debug.Log("[Multiplayer] curtain lift PARKED — holding for all-players reveal");
+                MpLog.Log("[Multiplayer] curtain lift PARKED — holding for all-players reveal");
                 while (Hold())
                 {
                     _lastParkedFrame = UnityEngine.Time.frameCount;
                     yield return NextUpdate.NextFrame;
                 }
-                Debug.Log("[Multiplayer] curtain lift RELEASED — reveal/teardown opened the gate");
+                MpLog.Log("[Multiplayer] curtain lift RELEASED — reveal/teardown opened the gate");
             }
             else
             {
@@ -159,7 +159,7 @@ namespace Multiplayer.Harmony
                 // and a lift that never happened at all produced the SAME log — nothing. PARKED/RELEASED
                 // appear zero times across all three captured runs, so five successive fixes were written
                 // blind. One line, at the one place the decision is made, naming the three inputs.
-                Debug.Log("[Multiplayer] curtain lift PASSED gate unheld — " + CurtainTakedownGate.State());
+                MpLog.Log("[Multiplayer] curtain lift PASSED gate unheld — " + CurtainTakedownGate.State());
             }
             while (original.MoveNext()) yield return original.Current;
         }

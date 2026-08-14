@@ -99,7 +99,7 @@ namespace Multiplayer.Network.Sync
             DumpStack(view);
             // Already parked by the game's own path (host tactical launch) — re-pushing would only churn.
             if (view.CurrentViewState is UIStateLoading) return;
-            Debug.Log("[MP][teardown] parking the geoscape view state before FinishLevel (was " +
+            MpLog.Log("[MP][teardown] parking the geoscape view state before FinishLevel (was " +
                       (view.CurrentViewState?.GetType().Name ?? "<none>") + ") — every sub-screen exits " +
                       "NOW, while GameUtl.CurrentLevel() is still the geoscape.");
             view.ToLoadingState();
@@ -123,12 +123,12 @@ namespace Multiplayer.Network.Sync
                 var names = states == null
                     ? new List<string>()
                     : states.Cast<object>().Select(s => s?.GetType().Name ?? "<null>").ToList();
-                Debug.Log("[MP][teardown] view-state stack at FinishLevel (top first, " + names.Count +
+                MpLog.Log("[MP][teardown] view-state stack at FinishLevel (top first, " + names.Count +
                           "): " + (names.Count == 0 ? "<empty>" : string.Join(" / ", names)));
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[MP][teardown] could not read the view-state stack: " + e.Message);
+                MpLog.LogWarning("[MP][teardown] could not read the view-state stack: " + e.Message);
             }
         }
     }
@@ -144,7 +144,7 @@ namespace Multiplayer.Network.Sync
             // Solo keeps vanilla behaviour byte-for-byte: rethrow untouched.
             if (engine == null || !engine.IsActiveSession) return __exception;
 
-            Debug.LogError("[MP][teardown] " + (__instance?.GetType().Name ?? "<unknown state>") +
+            MpLog.LogError("[MP][teardown] " + (__instance?.GetType().Name ?? "<unknown state>") +
                            ".ExitState THREW during a view-state exit (" + __exception.GetType().Name + ": " +
                            __exception.Message + ") — SWALLOWED so StateStack.Clear finishes tearing the " +
                            "rest of the stack down. Escaping here kills the level-switch coroutine outright " +

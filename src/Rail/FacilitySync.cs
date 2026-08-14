@@ -91,7 +91,7 @@ namespace Multiplayer.Network.Sync
                         { w.Write(siteId); w.Write(facilityDef.Guid); w.Write(pos.x); w.Write(pos.y); });
                     __instance.HideBuildMenu();
                 }
-                catch (Exception ex) { Debug.LogError("[MP][base] build capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][base] build capture failed: " + ex); }
                 return false;
             }
         }
@@ -113,7 +113,7 @@ namespace Multiplayer.Network.Sync
                             "demolish " + facility.Def.name + " fid=" + facility.FacilityId, w =>
                             { w.Write(__instance.Site.SiteId); w.Write(facility.FacilityId); });
                 }
-                catch (Exception ex) { Debug.LogError("[MP][base] demolish capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][base] demolish capture failed: " + ex); }
                 return false;
             }
         }
@@ -132,7 +132,7 @@ namespace Multiplayer.Network.Sync
                             "repair " + facility.Def.name + " fid=" + facility.FacilityId, w =>
                             { w.Write(__instance.Site.SiteId); w.Write(facility.FacilityId); });
                 }
-                catch (Exception ex) { Debug.LogError("[MP][base] repair capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][base] repair capture failed: " + ex); }
                 return false;
             }
         }
@@ -157,7 +157,7 @@ namespace Multiplayer.Network.Sync
                             "power " + facility.Def.name + " fid=" + facility.FacilityId, w =>
                             { w.Write(px.Site.SiteId); w.Write(facility.FacilityId); });
                 }
-                catch (Exception ex) { Debug.LogError("[MP][base] power capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][base] power capture failed: " + ex); }
                 return false;
             }
         }
@@ -194,7 +194,7 @@ namespace Multiplayer.Network.Sync
                         "rename site=" + __instance.Site.SiteId + " -> " + name, w =>
                         { w.Write(__instance.Site.SiteId); w.Write(name); });
                 }
-                catch (Exception ex) { Debug.LogError("[MP][base] rename capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][base] rename capture failed: " + ex); }
                 return false;
             }
         }
@@ -224,7 +224,7 @@ namespace Multiplayer.Network.Sync
                 if (!px.CanBuildFacility(def) || !px.Layout.CanPlaceFacility(def, pos))
                 { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "build refused (funds/limit/slot) " + def.name + " @" + pos, "S#" + siteId); return; }
                 px.ConstructFacility(def, pos);
-                Debug.Log("[MP][base] HOST built " + def.name + " @" + pos + " site=" + siteId +
+                MpLog.Log("[MP][base] HOST built " + def.name + " @" + pos + " site=" + siteId +
                           " nonce=" + nonce + " peer=" + senderPeerId);
                 return;
             }
@@ -239,7 +239,7 @@ namespace Multiplayer.Network.Sync
                 if (string.IsNullOrWhiteSpace(newName))
                 { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "empty base name", "S#" + siteId); return; }
                 px.RenameBase(newName);
-                Debug.Log("[MP][base] HOST renamed site=" + siteId + " -> '" + newName +
+                MpLog.Log("[MP][base] HOST renamed site=" + siteId + " -> '" + newName +
                           "' nonce=" + nonce + " peer=" + senderPeerId);
                 return;
             }
@@ -271,7 +271,7 @@ namespace Multiplayer.Network.Sync
                 { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "repair refused " + fac.Def.name, "S#" + siteId); return; }
                 px.RepairFacility(fac);
             }
-            Debug.Log("[MP][base] HOST op=" + op + " " + fac.Def.name + " fid=" + facilityId +
+            MpLog.Log("[MP][base] HOST op=" + op + " " + fac.Def.name + " fid=" + facilityId +
                       " site=" + siteId + " nonce=" + nonce + " peer=" + senderPeerId);
         }
     }

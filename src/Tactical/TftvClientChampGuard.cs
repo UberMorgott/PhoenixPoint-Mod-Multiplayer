@@ -87,7 +87,7 @@ namespace Multiplayer.Tactical
                 // owning code actually tests, not by the parameter type Harmony happens to hand you.
                 var baseDef = actor == null ? null : actor.BaseDef;
                 if (!TftvWouldRoll(baseDef == null ? null : baseDef.name)) return true;
-                Debug.Log("[Multiplayer][tac] TFTV rank/name roll SUPPRESSED on this client for " +
+                MpLog.Log("[Multiplayer][tac] TFTV rank/name roll SUPPRESSED on this client for " +
                           (actor == null ? "<null>" : actor.name) + " — the champ, its rank and its name are the " +
                           "host's roll. Running it here would mint a different elite on this screen than the one " +
                           "fighting on the host's, and would throw on the mirrored actor's null LevelProgression.");
@@ -96,7 +96,7 @@ namespace Multiplayer.Tactical
             catch (Exception e)
             {
                 // Never let the guard itself decide a TFTV call by throwing — fall through to native.
-                Debug.LogError("[Multiplayer][tac] TFTV champ guard faulted; letting TFTV run (this peer may now " +
+                MpLog.LogError("[Multiplayer][tac] TFTV champ guard faulted; letting TFTV run (this peer may now " +
                                "disagree with the host about which enemy is the champ): " + e);
                 return true;
             }

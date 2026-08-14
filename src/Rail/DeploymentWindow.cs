@@ -155,7 +155,7 @@ namespace Multiplayer.Network.Sync
                 {
                     if (_bindLogged) return;
                     _bindLogged = true;
-                    Debug.LogError("[MP][deploy] UIStateRosterDeployment fields did not bind — the squad screen " +
+                    MpLog.LogError("[MP][deploy] UIStateRosterDeployment fields did not bind — the squad screen " +
                                    "keeps the roster it snapshotted when it was QUEUED, so a peer that opens it " +
                                    "after another peer's state arrived can find the START MISSION button dead " +
                                    "over an empty roster and no way to enrol anybody");
@@ -194,7 +194,7 @@ namespace Multiplayer.Network.Sync
                 selected.AddRange(live);
 
                 int cap = mission.MissionDef == null ? 0 : mission.MissionDef.MaxPlayerUnits;
-                Debug.Log("[MP][deploy] squad screen opening for " +
+                MpLog.Log("[MP][deploy] squad screen opening for " +
                           (IdentityResolver.RootRef(mission.Site) ?? "S#?") + " — the game's own sources say " +
                           sources.Count + " container(s), " + pool.Count + " soldier(s), default squad " +
                           live.Count + " of max " + cap + "; the snapshot taken when this screen was QUEUED " +
@@ -208,7 +208,7 @@ namespace Multiplayer.Network.Sync
             {
                 // Presentation seam (P4c/L158): never block, never throw into game code. Failing here leaves
                 // the screen exactly as vanilla built it, which is the pre-fix behaviour and not a worse one.
-                Debug.LogError("[MP][deploy] squad-screen re-ask failed — the screen keeps its queue-time " +
+                MpLog.LogError("[MP][deploy] squad-screen re-ask failed — the screen keeps its queue-time " +
                                "roster snapshot: " + ex);
             }
         }
@@ -240,7 +240,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][deploy] servability check threw — the squad screen stays open as it was " +
+                MpLog.LogError("[MP][deploy] servability check threw — the squad screen stays open as it was " +
                                "built, which is the pre-fix behaviour: " + ex);
             }
         }
@@ -446,7 +446,7 @@ namespace Multiplayer.Network.Sync
         {
             var view = View();
             if (view == null) return;
-            Debug.Log("[MP][deploy] closing the current window — " + why);
+            MpLog.Log("[MP][deploy] closing the current window — " + why);
             // A MODAL closes with FinishQueriedState alone — that is its own OnCancel:96-99. The squad SCREEN
             // additionally needs ResetViewState, which is what ToPreviousScreen:259-261 does and the only
             // writer that clears SetUiInDeploymentMode (GeoscapeView.cs:414-416).
@@ -495,7 +495,7 @@ namespace Multiplayer.Network.Sync
             {
                 var mission = MissionBehind(pending[i]?.State);
                 if (mission == null || Servable(mission)) continue;
-                Debug.Log("[MP][deploy] DROPPED the queued " + pending[i].State.GetType().Name + " for " +
+                MpLog.Log("[MP][deploy] DROPPED the queued " + pending[i].State.GetType().Name + " for " +
                           (IdentityResolver.RootRef(mission.Site) ?? "S#?") + " — this peer has no container " +
                           "left to deploy from (the aircraft left the site while the window waited in the " +
                           "queue), so serving it later would open an empty screen with a dead START MISSION " +
@@ -630,7 +630,7 @@ namespace Multiplayer.Network.Sync
             if (DeploymentWindowClose.TryDeferCurrentPreparation(out __state.Occurrence, out __state.Member,
                     out __state.DeferredRevision))
             { __state.Committed = true; return true; }
-            Debug.LogError("[MP][inbox] deployment Back was held because its Deferred lifecycle could not " +
+            MpLog.LogError("[MP][inbox] deployment Back was held because its Deferred lifecycle could not " +
                            "be committed before native navigation; the shared mission was not cancelled");
             try { SessionNotifier.ShowToast("Could not close mission preparation safely; please retry.",
                     modalFallback: true); }
@@ -643,7 +643,7 @@ namespace Multiplayer.Network.Sync
             if (__exception != null && __state != null && __state.Committed &&
                 !DeploymentWindowClose.RestoreFailedBack(__state.Occurrence, __state.Member,
                     __state.DeferredRevision))
-                Debug.LogError("[MP][inbox] native deployment Back threw after Deferred committed and the " +
+                MpLog.LogError("[MP][inbox] native deployment Back threw after Deferred committed and the " +
                                "exact lifecycle revision could not be restored to Open; retaining the " +
                                "exception and durable state for reconciliation");
             return __exception;
@@ -826,7 +826,7 @@ namespace Multiplayer.Network.Sync
                 // launch that happened is not shared state — the battle itself is.
                 if (ReferenceEquals(mission, _launched))
                 {
-                    Debug.LogWarning("[MP][deploy] launch REFUSED for " +
+                    MpLog.LogWarning("[MP][deploy] launch REFUSED for " +
                                      (IdentityResolver.RootRef(mission?.Site) ?? "S#?") + " — this mission has " +
                                      "ALREADY been launched by a countdown that reached zero. Arming a second " +
                                      "one on it is what threw in GeoMission.Launch on 2026-08-08 (twice): the " +
@@ -838,7 +838,7 @@ namespace Multiplayer.Network.Sync
                 {
                     // NEVER SILENT (P1): seven refusals rode this line unlogged in the reported session while
                     // MissionSync printed "HOST intent APPLIED" for every one of them.
-                    Debug.Log("[MP][deploy] launch of " + (IdentityResolver.RootRef(mission?.Site) ?? "S#?") +
+                    MpLog.Log("[MP][deploy] launch of " + (IdentityResolver.RootRef(mission?.Site) ?? "S#?") +
                               " HELD BEHIND the countdown already running for " +
                               (string.IsNullOrEmpty(State.SiteRef) ? "S#?" : State.SiteRef) + " — a second " +
                               "press does not stack a second drop and does not queue one either. Nothing was " +
@@ -857,7 +857,7 @@ namespace Multiplayer.Network.Sync
                 // The host's own arm rides no rail batch, so nothing would re-run CheckForDeployment here and
                 // the host's START MISSION button would stay live through its own countdown.
                 OpenUiRepaint.MarkDirty();
-                Debug.Log("[MP][deploy] launch HELD for " + CountdownSeconds + " s at " +
+                MpLog.Log("[MP][deploy] launch HELD for " + CountdownSeconds + " s at " +
                           (string.IsNullOrEmpty(State.SiteRef) ? "S#?" : State.SiteRef) + " — every peer is " +
                           "shown the countdown and ANY ONE of them may cancel it for everyone. Nobody has to " +
                           "press anything for it to complete (no quorum, P13): it is a clock.");
@@ -865,7 +865,7 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex)
             {
                 // A countdown that cannot arm must never eat the launch: fall through to the native call.
-                Debug.LogError("[MP][deploy] countdown could not arm — launching immediately, as before: " + ex);
+                MpLog.LogError("[MP][deploy] countdown could not arm — launching immediately, as before: " + ex);
                 ClearPending();
                 _committed = true;
                 return true;
@@ -900,7 +900,7 @@ namespace Multiplayer.Network.Sync
                 {
                     // Never silent: five seconds is long enough for another peer's arbitration to take the
                     // mission, and a launch that quietly evaporates is this repo's dominant bug shape.
-                    Debug.LogWarning("[MP][deploy] countdown expired but the mission is no longer runnable — " +
+                    MpLog.LogWarning("[MP][deploy] countdown expired but the mission is no longer runnable — " +
                                      "nothing launched. Another peer cancelled it, or it expired while the " +
                                      "countdown ran; the deployment screen is still closable by its Back button.");
                     return;
@@ -908,7 +908,7 @@ namespace Multiplayer.Network.Sync
 
                 _committed = true;
                 _launched = mission;   // the latch the 109 ms re-arm window needs (see ArmsFor)
-                Debug.Log("[MP][deploy] countdown reached zero — launching " +
+                MpLog.Log("[MP][deploy] countdown reached zero — launching " +
                           (IdentityResolver.RootRef(mission.Site) ?? "S#?") + " natively; every peer joins " +
                           "through the save transfer as it always did");
                 mission.Launch(squad);
@@ -916,7 +916,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][deploy] countdown tick failed — clearing it so no peer is left staring at " +
+                MpLog.LogError("[MP][deploy] countdown tick failed — clearing it so no peer is left staring at " +
                                "a frozen number; the mission can be launched again from the deployment screen: " + ex);
                 ClearPending();
                 _committed = false;
@@ -932,11 +932,11 @@ namespace Multiplayer.Network.Sync
                 // NEVER SILENT (P1, and the bug class that hid the dead click for a whole session): a veto
                 // that lands on nothing still says so, because "the click did nothing" and "the click never
                 // arrived" are the same symptom and only a log tells them apart.
-                Debug.Log("[MP][deploy] cancel from " + who + " arrived with NO countdown running — nothing to " +
+                MpLog.Log("[MP][deploy] cancel from " + who + " arrived with NO countdown running — nothing to " +
                           "stop. Either it had already reached zero, or another peer's veto got here first.");
                 return;
             }
-            Debug.Log("[MP][deploy] countdown CANCELLED by " + who + " at " +
+            MpLog.Log("[MP][deploy] countdown CANCELLED by " + who + " at " +
                       (string.IsNullOrEmpty(State.SiteRef) ? "S#?" : State.SiteRef) +
                       " — the mission is NOT cancelled, only the drop: the deployment screen is still there " +
                       "and Deploy can be pressed again");
@@ -950,13 +950,13 @@ namespace Multiplayer.Network.Sync
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession)
             {
-                Debug.LogWarning("[MP][deploy] CANCEL pressed with no active co-op session — the veto goes " +
+                MpLog.LogWarning("[MP][deploy] CANCEL pressed with no active co-op session — the veto goes " +
                                  "nowhere. The panel should not have been on screen at all (SyncCore gates on " +
                                  "IsActiveSession), so this is a stale overlay rather than a lost cancel.");
                 return;
             }
             if (engine.IsHost) { Cancel("this host"); return; }
-            Debug.Log("[MP][deploy] CANCEL leaving this client as op " + MissionSync.OpCancelLaunch + " on 0x" +
+            MpLog.Log("[MP][deploy] CANCEL leaving this client as op " + MissionSync.OpCancelLaunch + " on 0x" +
                       SurfaceIds.GeoMissionIntent.ToString("X2") + " — the host owns the countdown, so the veto " +
                       "takes one round trip and then clears the overlay on every peer through the rail.");
             IntentRail.Send(SurfaceIds.GeoMissionIntent, MissionSync.OpCancelLaunch, "cancel the deployment countdown");
@@ -1037,7 +1037,7 @@ namespace Multiplayer.Network.Sync
             {
                 // Presentation seam (P4c): a failure here leaves the button as the game painted it, which is
                 // the pre-fix behaviour — the host-side latch still refuses the second launch.
-                Debug.LogError("[MP][deploy] could not grey START MISSION for the running countdown: " + ex);
+                MpLog.LogError("[MP][deploy] could not grey START MISSION for the running countdown: " + ex);
             }
         }
     }

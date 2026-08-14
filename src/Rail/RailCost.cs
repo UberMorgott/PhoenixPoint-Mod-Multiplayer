@@ -59,7 +59,7 @@ namespace Multiplayer.Network.Sync
             if (_nextAt == 0f) { _nextAt = now + ReportInterval; return; }
             if (now < _nextAt) return;
             _nextAt = now + ReportInterval;
-            Debug.Log("[Multiplayer][rail] cost/" + ReportInterval + "s: frames=" + _frames +
+            MpLog.Log("[Multiplayer][rail] cost/" + ReportInterval + "s: frames=" + _frames +
                       " tickMax=" + _tickMaxMs.ToString("F1") + "ms frameMax=" + _frameMaxMs.ToString("F1") +
                       "ms worst=" + _worstStep + " " + _worstStepMs.ToString("F1") + "ms");
             _frames = 0; _tickMaxMs = 0; _frameMaxMs = 0; _worstStepMs = 0; _worstStep = "-";

@@ -128,7 +128,7 @@ namespace Multiplayer.Harmony
                 var stackField = AccessTools.Field(typeof(HomeScreenView), "_statesStack");
                 if (stackField == null)
                 {
-                    Debug.LogError("[Multiplayer] PushHomeScreenState: HomeScreenView._statesStack field not found.");
+                    MpLog.LogError("[Multiplayer] PushHomeScreenState: HomeScreenView._statesStack field not found.");
                     return false;
                 }
 
@@ -144,7 +144,7 @@ namespace Multiplayer.Harmony
                 }
                 if (stack == null)
                 {
-                    Debug.LogError("[Multiplayer] PushHomeScreenState: no live HomeScreenView with an initialized state stack.");
+                    MpLog.LogError("[Multiplayer] PushHomeScreenState: no live HomeScreenView with an initialized state stack.");
                     return false;
                 }
 
@@ -153,7 +153,7 @@ namespace Multiplayer.Harmony
                 var switchToState = AccessTools.Method(stack.GetType(), "SwitchToState");
                 if (switchToState == null)
                 {
-                    Debug.LogError("[Multiplayer] PushHomeScreenState: StateStack.SwitchToState not found.");
+                    MpLog.LogError("[Multiplayer] PushHomeScreenState: StateStack.SwitchToState not found.");
                     return false;
                 }
 
@@ -162,7 +162,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] PushHomeScreenState failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] PushHomeScreenState failed: " + e.Message);
                 return false;
             }
         }
@@ -210,7 +210,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] lobby-pick gate failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] lobby-pick gate failed: " + e.Message);
             }
 
             if (!_armed) return true; // normal single-player load
@@ -240,7 +240,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] OnLoadGamePressed intercept failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] OnLoadGamePressed intercept failed: " + e.Message);
             }
 
             return false; // skip SaveManager.LoadGame — we only wanted the metadata
@@ -261,7 +261,7 @@ namespace Multiplayer.Harmony
             if (_armed && _deliverInPrefix && _pickedMeta == null)
             {
                 Disarm();
-                Debug.Log("[Multiplayer] F2: in-game load submenu cancelled — intercept disarmed.");
+                MpLog.Log("[Multiplayer] F2: in-game load submenu cancelled — intercept disarmed.");
             }
         }
 
@@ -286,7 +286,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] LoadScreen exit handling failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] LoadScreen exit handling failed: " + e.Message);
             }
         }
     }
@@ -325,7 +325,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] InGameLoadArm postfix failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] InGameLoadArm postfix failed: " + e.Message);
             }
         }
     }
@@ -397,7 +397,7 @@ namespace Multiplayer.Harmony
                 if (SessionLifecycle.ShouldCaptureAsLobbyPick(isHost, lobbyActive, sessionStarted))
                 {
                     if (picked != null) MultiplayerUI.Instance?.OnLobbyLoadPickCaptured(picked);
-                    Debug.Log("[Multiplayer] CONTINUE/Quickload at lobby captured as lobby save pick (no solo load).");
+                    MpLog.Log("[Multiplayer] CONTINUE/Quickload at lobby captured as lobby save pick (no solo load).");
                     return false; // skip SaveManager.LoadGame
                 }
 
@@ -411,7 +411,7 @@ namespace Multiplayer.Harmony
                     // itself >=1-client gated, so a lone host would otherwise be locked out of loading.
                     if (SessionLifecycle.HostInSessionHasNoClients(isHost, lobbyActive, sessionStarted, connectedClients))
                     {
-                        Debug.Log("[Multiplayer] Host mid-session load with no connected clients — allowing vanilla solo load.");
+                        MpLog.Log("[Multiplayer] Host mid-session load with no connected clients — allowing vanilla solo load.");
                         return true; // run SaveManager.LoadGame (no peers to desync)
                     }
 
@@ -426,7 +426,7 @@ namespace Multiplayer.Harmony
                     {
                         // Reroute into the proven F2 host-authoritative reload (chunked transfer + barrier):
                         // every client reloads into the chosen save. OnInGameLoadPicked re-validates the guard.
-                        Debug.Log("[Multiplayer] Host mid-session CONTINUE/Quickload rerouted to co-op in-session reload.");
+                        MpLog.Log("[Multiplayer] Host mid-session CONTINUE/Quickload rerouted to co-op in-session reload.");
                         MultiplayerUI.Instance?.OnInGameLoadPicked(picked);
                     }
                     else
@@ -435,7 +435,7 @@ namespace Multiplayer.Harmony
                         // running, or null meta): block the solo load rather than desync the clients. The
                         // host should use the in-game co-op reload (pause-menu LOAD) instead. (The zero-
                         // client case was already handled above by allowing the vanilla solo load.)
-                        Debug.LogWarning("[Multiplayer] Host mid-session CONTINUE/Quickload BLOCKED — would desync clients. " +
+                        MpLog.LogWarning("[Multiplayer] Host mid-session CONTINUE/Quickload BLOCKED — would desync clients. " +
                             "Use the in-game co-op reload (pause-menu LOAD) instead.");
                     }
                     return false; // skip SaveManager.LoadGame either way (never solo-load mid-session)
@@ -448,7 +448,7 @@ namespace Multiplayer.Harmony
                 // gated and passes through below.)
                 if (SessionLifecycle.ShouldBlockClientLoad(isHost, lobbyActive))
                 {
-                    Debug.LogWarning("[Multiplayer] Client CONTINUE/LOAD/Quickload BLOCKED — only the host can load in co-op.");
+                    MpLog.LogWarning("[Multiplayer] Client CONTINUE/LOAD/Quickload BLOCKED — only the host can load in co-op.");
                     GameUtl.GetMessageBox()?.ShowSimplePrompt(
                         "Only the host can load the game in co-op.",
                         MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
@@ -457,7 +457,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] LoadGame convergence gate failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] LoadGame convergence gate failed: " + e.Message);
             }
 
             return true; // not host / no active session → vanilla single-player load

@@ -702,7 +702,7 @@ namespace Multiplayer.UI
                 try { _inviteBtnSetInteractable.Invoke(_inviteBtnCtrl, new object[] { on }); }
                 catch (System.Exception e)
                 {
-                    UnityEngine.Debug.LogError("[Multiplayer] Invite button repaint failed: " + e.Message);
+                    MpLog.LogError("[Multiplayer] Invite button repaint failed: " + e.Message);
                 }
             }
             else if (_inviteBtnLabel != null)
@@ -1795,7 +1795,7 @@ namespace Multiplayer.UI
                         try { _newCampaignSetInteractable.Invoke(_newCampaignCtrl, new object[] { ncReady }); }
                         catch (System.Exception e)
                         {
-                            UnityEngine.Debug.LogError("[Multiplayer] New-campaign button repaint failed: " + e.Message);
+                            MpLog.LogError("[Multiplayer] New-campaign button repaint failed: " + e.Message);
                         }
                     }
                 }
@@ -1821,7 +1821,7 @@ namespace Multiplayer.UI
         {
             if (_parityLocked || _needsSave)
             {
-                UnityEngine.Debug.Log("[Multiplayer] READY declined locally — " +
+                MpLog.Log("[Multiplayer] READY declined locally — " +
                     (_parityLocked ? "this peer's mod set does not match the host's (the roster row's \"!\" " +
                                      "badge lists the diffs)"
                                    : "no campaign is queued yet; choose a save or start a new campaign") +

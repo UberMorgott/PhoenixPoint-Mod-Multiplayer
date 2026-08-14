@@ -304,7 +304,7 @@ namespace Multiplayer.Tactical
                     // going stale quietly, and the attempt is rate-limited to one per ceiling by the reset.
                     int navBeat = FailureBeat("navsettle");
                     if (navBeat > 0)
-                        Debug.LogError("[Multiplayer][tac] the navmesh has been rebuilding for " +
+                        MpLog.LogError("[Multiplayer][tac] the navmesh has been rebuilding for " +
                                        (_navWaitFrames / 60) + "s with a repaint of " +
                                        __instance.GetType().Name + " still waiting on it (failure #" +
                                        navBeat + ") — attempting it anyway rather than deferring forever. " +
@@ -321,7 +321,7 @@ namespace Multiplayer.Tactical
                     // and the next real change repaints normally — this only refuses to Exit+Enter a state
                     // whose actor cannot answer, and it refuses OUT LOUD.
                     if (FailureBeat("busy:" + __instance.GetType().Name) > 0)
-                        Debug.LogError("[Multiplayer][tac] repaint of " + __instance.GetType().Name +
+                        MpLog.LogError("[Multiplayer][tac] repaint of " + __instance.GetType().Name +
                                        " SKIPPED — " + (actor == null ? "<none>" : actor.name) + " has been " +
                                        "executing an ability for " + (_busyFrames / 60) + "s, so this screen " +
                                        "is not stale, it is STUCK: an Exit+Enter re-reads the model and " +
@@ -432,7 +432,7 @@ namespace Multiplayer.Tactical
             {
                 int beat = FailureBeat("squadbar");
                 if (beat > 0)
-                    Debug.LogWarning("[Multiplayer][tac] squad-bar repaint threw — the AP/WP under the " +
+                    MpLog.LogWarning("[Multiplayer][tac] squad-bar repaint threw — the AP/WP under the " +
                                      "portraits may be stale (failure #" + beat + " this battle): " + ex);
             }
         }
@@ -510,7 +510,7 @@ namespace Multiplayer.Tactical
 
                 GameUtl.GetMessageBox()?.ForceCloseAllPrompts();
                 CurrentPromptField.SetValue(prompts, null);
-                Debug.Log("[Multiplayer][tac] tactical prompt closed at the turn edge — the turn ended for " +
+                MpLog.Log("[Multiplayer][tac] tactical prompt closed at the turn edge — the turn ended for " +
                           "every peer, so a prompt still asking about it is stale on this one.");
             }
         }
@@ -574,7 +574,7 @@ namespace Multiplayer.Tactical
                 // MoveAbility.HasValidTargets:26 reaches TacticalPathRequest.Calculate exactly the same way.
                 int beat = NoteRepaintFailure("modules");
                 if (beat > 0)
-                    Debug.LogWarning("[Multiplayer][tac] module repaint threw — bottom bar may be stale, mark " +
+                    MpLog.LogWarning("[Multiplayer][tac] module repaint threw — bottom bar may be stale, mark " +
                                      "RE-ARMED for the next frame (failure #" + beat + " in a row): " + ex);
             }
         }
@@ -678,7 +678,7 @@ namespace Multiplayer.Tactical
                     // ALWAYS AUDIBLE, the same posture InventoryCommitSeam takes and for the same reason: a
                     // repaint that succeeds in silence is indistinguishable from one that never ran, and
                     // "the other peer sees nothing" was reported twice with no way to tell those two apart.
-                    Debug.Log("[Multiplayer][tac] rebuilt the open inventory panels for " + primary.name +
+                    MpLog.Log("[Multiplayer][tac] rebuilt the open inventory panels for " + primary.name +
                               (secondary == null ? " (no second soldier on screen)" : " and " + secondary.name));
                     _failureCounts.Remove("containers");   // consecutive, not cumulative — see Repaint
                 }
@@ -690,7 +690,7 @@ namespace Multiplayer.Tactical
                 // the same RE-ARM, so a panel that threw once is not stale until the player reopens it.
                 int beat = NoteRepaintFailure("containers");
                 if (beat > 0)
-                    Debug.LogWarning("[Multiplayer][tac] container-view repaint threw — an open inventory panel " +
+                    MpLog.LogWarning("[Multiplayer][tac] container-view repaint threw — an open inventory panel " +
                                      "may be stale, mark RE-ARMED for the next frame (failure #" + beat +
                                      " in a row): " + ex);
             }
@@ -765,7 +765,7 @@ namespace Multiplayer.Tactical
                         // AddUnique re-subscribes idempotently.
                         int exitBeat = FailureBeat(state.GetType().Name + ":Exit");
                         if (exitBeat > 0)
-                            Debug.LogWarning("[Multiplayer][tac] repaint Exit for " + state.GetType().Name +
+                            MpLog.LogWarning("[Multiplayer][tac] repaint Exit for " + state.GetType().Name +
                                              " threw — entering anyway (failure #" + exitBeat + "): " + exitEx);
                     }
                     state.Enter(stack);
@@ -783,7 +783,7 @@ namespace Multiplayer.Tactical
                 // UIStateCharacterSelected stale for the rest of the battle behind a single WARN.
                 int beat = NoteRepaintFailure(state.GetType().Name);
                 if (beat > 0)
-                    Debug.LogWarning("[Multiplayer][tac] repaint of " + state.GetType().Name +
+                    MpLog.LogWarning("[Multiplayer][tac] repaint of " + state.GetType().Name +
                                      " threw — screen kept and the mark RE-ARMED, so this repaints again next " +
                                      "frame (failure #" + beat + " in a row; past " + RepaintRetryCeiling +
                                      " consecutive the mark is dropped and said so): " + ex);

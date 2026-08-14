@@ -111,7 +111,7 @@ namespace RailCheck
                              "resolve. An unfalsifiable carry is an unverified one.";
             // CalleeSequence, not Callees: UnityEngine.Debug is a THIRD assembly, and Callees filters to one.
             if (!Program.CalleeSequence(announce).Any(c => (c.Name == "Log" || c.Name == "LogWarning") &&
-                                                          c.DeclaringType != null && c.DeclaringType.Name == "Debug"))
+                                                          c.DeclaringType == typeof(Multiplayer.MpLog)))
                 yield return "L325 announcement-says-nothing: TftvChampIdentity.Announce reaches no " +
                              "Debug.Log/LogWarning, so the host-side line this law exists to guarantee is not " +
                              "actually emitted.";

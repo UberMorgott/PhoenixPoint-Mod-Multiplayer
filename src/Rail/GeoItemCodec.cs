@@ -113,7 +113,7 @@ namespace Multiplayer.Network.Sync
             // (a magazine def has no CompatibleAmmunition, so SetOwnerItem never builds it an
             // AmmoManager) — if it ever appears, say so instead of dropping it quietly.
             if (cid.Ammo != null && cid.Ammo.LoadedMagazines != null && cid.Ammo.LoadedMagazines.Count > 0)
-                Debug.LogError("[Multiplayer][rail] value-record " + it.ItemDef?.name + " carries " +
+                MpLog.LogError("[Multiplayer][rail] value-record " + it.ItemDef?.name + " carries " +
                                cid.Ammo.LoadedMagazines.Count + " NESTED magazines — the record cannot ship them");
             return new ItemRec
             {
@@ -148,7 +148,7 @@ namespace Multiplayer.Network.Sync
             var def = ResolveDef(rec.Guid);
             if (def == null)
             {
-                Debug.LogError("[Multiplayer][rail] value-record: unknown ItemDef guid '" + rec.Guid +
+                MpLog.LogError("[Multiplayer][rail] value-record: unknown ItemDef guid '" + rec.Guid +
                                "' — element DROPPED (mod parity broken?)");
                 return null;
             }

@@ -84,7 +84,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[Multiplayer][rail] accessor codegen failed for " + owner.Name + "." + m.Name +
+                MpLog.LogWarning("[Multiplayer][rail] accessor codegen failed for " + owner.Name + "." + m.Name +
                                  " (" + ex.Message + ") — falling back to reflection");
                 var fi = f.Fi; var pi = f.Pi;
                 return fi != null ? (Func<object, object>)(o => fi.GetValue(o)) : o => pi.GetValue(o, null);
@@ -375,7 +375,7 @@ namespace Multiplayer.Network.Sync
                     if (mwa.MemberInfo != null) result.Add(mwa.MemberInfo);
                 }
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] SerializedMembers(" + t.Name + ") failed: " + ex.Message); }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] SerializedMembers(" + t.Name + ") failed: " + ex.Message); }
             return result;
         }
 
@@ -434,7 +434,7 @@ namespace Multiplayer.Network.Sync
             {
                 var rec = HarmonyLib.AccessTools.Method(t, "RecordInstanceData", new Type[0])?.ReturnType;
                 if (rec != null)
-                    Debug.LogWarning("[Multiplayer][rail] FindBridge(" + t.FullName + "): no *InstanceData sibling/nested, and RecordInstanceData() returns " +
+                    MpLog.LogWarning("[Multiplayer][rail] FindBridge(" + t.FullName + "): no *InstanceData sibling/nested, and RecordInstanceData() returns " +
                                      rec.FullName + " which is not IInstanceData — this type classifies with 0 persistent members");
             }
             return null;
@@ -1079,7 +1079,7 @@ namespace Multiplayer.Network.Sync
                          "LocalizationKey — it ships as an EMPTY bind and the client's text for it WILL be " +
                          "blank. That member is the one to look at on screen.");
             else
-                Debug.Log("[Multiplayer][rail] EncodeLeaf: " + where + " is a keyless LocalizedTextBind, and " +
+                MpLog.Log("[Multiplayer][rail] EncodeLeaf: " + where + " is a keyless LocalizedTextBind, and " +
                           "the host renders nothing for it either — carried faithfully, not diagnosed again.");
         }
 
@@ -1176,7 +1176,7 @@ namespace Multiplayer.Network.Sync
             }
             if (f.Unordered) items.Sort(CompareBytes); // canonical: HashSet iteration order is nondeterministic
             if (items.Count > ushort.MaxValue && _loggedTruncations.Add(f.Name))
-                Debug.LogWarning("[Multiplayer][rail] EncodeList: '" + f.Name + "' has " + items.Count +
+                MpLog.LogWarning("[Multiplayer][rail] EncodeList: '" + f.Name + "' has " + items.Count +
                                  " elements — wire caps at " + ushort.MaxValue + "; tail dropped (this field will desync)");
             w.Write((ushort)Math.Min(items.Count, ushort.MaxValue));
             for (int i = 0; i < items.Count && i < ushort.MaxValue; i++) w.Write(items[i]);
@@ -1417,7 +1417,7 @@ namespace Multiplayer.Network.Sync
                 t.Reported = t.Count;
             }
             if (sb == null) return;
-            Debug.LogWarning("[Multiplayer][rail] mirror-gap digest (" + why + "): " + families +
+            MpLog.LogWarning("[Multiplayer][rail] mirror-gap digest (" + why + "): " + families +
                              " family(ies) repeated, " + repeats + " suppressed line(s):" + sb);
         }
 
@@ -1428,7 +1428,7 @@ namespace Multiplayer.Network.Sync
         private static void WarnOnce(string msg)
         {
             var line = "[Multiplayer][rail] " + msg;
-            if (CountMiss(line)) Debug.LogWarning(line);
+            if (CountMiss(line)) MpLog.LogWarning(line);
         }
 
         /// <summary>Custom-create contract of a type per the game's serializer, or null when it has none.
@@ -2523,7 +2523,7 @@ namespace Multiplayer.Network.Sync
                         if (dict == null)
                         {
                             if (dn > 0)
-                                Debug.LogError("[Multiplayer][rail] blob leaf-dict " + t.Name + "." + f.Name +
+                                MpLog.LogError("[Multiplayer][rail] blob leaf-dict " + t.Name + "." + f.Name +
                                                ": no live dictionary — " + dn + " decoded entries DROPPED");
                         }
                         else dict.Clear();
@@ -2730,7 +2730,7 @@ namespace Multiplayer.Network.Sync
                 foreach (var mwa in ser.GetSerializedMembers(t))
                     if (mwa.MemberInfo != null && !refused.Contains(mwa.MemberInfo.Name)) carried.Add(mwa.MemberInfo.Name);
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] HuskMembers(" + t.Name + ") failed: " + ex.Message); }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] HuskMembers(" + t.Name + ") failed: " + ex.Message); }
 
             // …but a create param is matched to its FIELD by name nowhere: the create method assigns it, and
             // the field it fills is routinely named differently (GeoItem.cs:14,20,31 — create param `ItemDef`
@@ -2843,7 +2843,7 @@ namespace Multiplayer.Network.Sync
             if (vt.IsInterface) vt = ConcreteCollection(vt) ?? vt;
             if (!field.IsWritable() || vt.IsAbstract || vt.IsInterface)
             {
-                Debug.LogError("[Multiplayer][rail] container " + owner.GetType().Name + "." + field.Name +
+                MpLog.LogError("[Multiplayer][rail] container " + owner.GetType().Name + "." + field.Name +
                                " (" + vt.Name + ") is null and cannot be materialized (not writable / not concrete) — entries would be dropped");
                 return null;
             }
@@ -2851,7 +2851,7 @@ namespace Multiplayer.Network.Sync
             try { made = Activator.CreateInstance(vt, true); }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][rail] container " + owner.GetType().Name + "." + field.Name +
+                MpLog.LogError("[Multiplayer][rail] container " + owner.GetType().Name + "." + field.Name +
                                " (" + vt.Name + ") is null and has no usable parameterless ctor: " + ex.Message + " — entries would be dropped");
                 return null;
             }
@@ -2860,7 +2860,7 @@ namespace Multiplayer.Network.Sync
             // no-op, and returning the detached instance would be the same silent drop one level down.
             var back = field.GetValue(owner);
             if (back == null)
-                Debug.LogError("[Multiplayer][rail] container " + owner.GetType().Name + "." + field.Name +
+                MpLog.LogError("[Multiplayer][rail] container " + owner.GetType().Name + "." + field.Name +
                                " did not attach after materialization — entries would be dropped");
             return back;
         }
@@ -2889,7 +2889,7 @@ namespace Multiplayer.Network.Sync
                 if ((v is IList bl && !bl.IsReadOnly && !bl.IsFixedSize) || (v is IDictionary bd && !bd.IsReadOnly)) return v;
             }
             var what = (owner == null ? "?" : owner.GetType().Name) + "." + (field == null ? "?" : field.Name);
-            Debug.LogError("[Multiplayer][rail] " + what + " is a READ-ONLY collection façade (" +
+            MpLog.LogError("[Multiplayer][rail] " + what + " is a READ-ONLY collection façade (" +
                            current.GetType().Name + ") with no mutable backing collection behind it — nothing " +
                            "can be applied through it and this field is stale on this peer");
             throw new InvalidOperationException("read-only collection façade " + current.GetType().Name + " on " + what);

@@ -113,7 +113,7 @@ namespace Multiplayer.Network
         public static void SuppressForCampaignEnd()
         {
             if (_latch.TryHandle())
-                Debug.Log("[Multiplayer] campaign end: F3 host-leave latch pre-consumed — the host's "
+                MpLog.Log("[Multiplayer] campaign end: F3 host-leave latch pre-consumed — the host's "
                           + "post-outro teardown will not interrupt this client's ending.");
         }
 
@@ -132,7 +132,7 @@ namespace Multiplayer.Network
         {
             if (!_latch.TryHandle()) return; // already handled this session
             var notice = reason ?? SessionLifecycle.HostEndedSession;
-            Debug.LogWarning("[Multiplayer] F3: host left the session — returning client to its own lobby. " + notice);
+            MpLog.LogWarning("[Multiplayer] F3: host left the session — returning client to its own lobby. " + notice);
             // Arm BEFORE Begin: FinishLevelAndGoToLobby is asynchronous but the flag is read much later
             // (next OnMenuReady), and arming first means an early/synchronous menu rebuild cannot beat us.
             // Rides the same one-shot latch above, so the graceful packet + the transport drop + the

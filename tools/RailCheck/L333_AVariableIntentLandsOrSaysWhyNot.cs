@@ -100,8 +100,8 @@ namespace RailCheck
                              "The decision is extracted precisely so it can be executed above; a handler that " +
                              "inlines it again is one where the corners this law checks are checked on nothing.";
 
-            int logs = Program.Callees(handler, typeof(Debug).Assembly)
-                              .Count(m => m.DeclaringType == typeof(Debug) && m.Name == "Log");
+            int logs = Program.CalleeSequence(handler)
+                              .Count(m => m.DeclaringType == typeof(Multiplayer.MpLog) && m.Name == "Log");
             if (logs < 2)
                 yield return "L333 noop-is-silent: EventSync.HandleSetVariable reaches " + logs + " Debug.Log " +
                              "site(s); it needs one for the apply and one for the refusal. A no-op that returns " +

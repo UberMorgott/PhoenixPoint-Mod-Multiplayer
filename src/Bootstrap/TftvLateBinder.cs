@@ -61,14 +61,14 @@ namespace Multiplayer.Harmony
             {
                 _done = true;
                 BoundSummary = "bound by PatchAll (TFTV was already loaded), " + _patchClasses.Length + " class(es)";
-                Debug.Log("[Multiplayer] TFTV already loaded at PatchAll; guard patches bound by PatchAll (no defer).");
+                MpLog.Log("[Multiplayer] TFTV already loaded at PatchAll; guard patches bound by PatchAll (no defer).");
                 Multiplayer.Tactical.MirrorApplyGuard.Install(harmony);
                 return;
             }
 
             _handler = (s, a) => OnAssemblyLoad();
             AppDomain.CurrentDomain.AssemblyLoad += _handler;
-            Debug.Log("[Multiplayer] deferred TFTV guard-patch binder armed (" + _patchClasses.Length
+            MpLog.Log("[Multiplayer] deferred TFTV guard-patch binder armed (" + _patchClasses.Length
                 + " classes); waiting for TFTV assembly load (bind deferred one frame past load).");
         }
 
@@ -91,7 +91,7 @@ namespace Multiplayer.Harmony
             if (_armedFrame < 0)
             {
                 _armedFrame = Time.frameCount; // wait one more frame so TFTV.OnModEnabled (same frame) finished
-                Debug.Log("[Multiplayer] TFTV guard bind deferred to next frame");
+                MpLog.Log("[Multiplayer] TFTV guard bind deferred to next frame");
                 return;
             }
             if (Time.frameCount <= _armedFrame) return; // still the same frame — hold
@@ -117,19 +117,19 @@ namespace Multiplayer.Harmony
                     if (bound != null && bound.Count > 0)
                     {
                         summary.Append(t.Name).Append("=").Append(bound.Count).Append(" ");
-                        Debug.Log("[Multiplayer] TFTV patch BOUND (late): " + t.Name + " (" + bound.Count + " method)");
+                        MpLog.Log("[Multiplayer] TFTV patch BOUND (late): " + t.Name + " (" + bound.Count + " method)");
                     }
                     else
                     {
                         summary.Append(t.Name).Append("=NOTARGET ");
-                        Debug.LogWarning("[Multiplayer] TFTV patch late-bind NO target: " + t.Name
+                        MpLog.LogWarning("[Multiplayer] TFTV patch late-bind NO target: " + t.Name
                             + " (Prepare false / method unresolved — TFTV renamed?)");
                     }
                 }
                 catch (Exception e)
                 {
                     summary.Append(t.Name).Append("=FAILED ");
-                    Debug.LogWarning("[Multiplayer] TFTV patch late-bind FAILED: " + t.Name + " — " + e.Message);
+                    MpLog.LogWarning("[Multiplayer] TFTV patch late-bind FAILED: " + t.Name + " — " + e.Message);
                 }
             }
             BoundSummary = summary.ToString().TrimEnd();
@@ -140,7 +140,7 @@ namespace Multiplayer.Harmony
             try { Multiplayer.Tactical.MirrorApplyGuard.Install(_harmony); }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] mirror-apply guard late-install FAILED — foreign ref-DamageResult " +
+                MpLog.LogError("[Multiplayer] mirror-apply guard late-install FAILED — foreign ref-DamageResult " +
                                "patches will mutate the host's already-resolved damage a second time on every " +
                                "client: " + e.Message);
             }

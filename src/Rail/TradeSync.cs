@@ -78,7 +78,7 @@ namespace Multiplayer.Network.Sync
                 {
                     // Never silent, and never a local fallback: a haven this peer cannot address is a
                     // haven the host cannot re-derive, and trading here would move the SHARED wallet.
-                    Debug.LogWarning("[MP][trade] client trade DROPPED — the haven has no site id, so nothing " +
+                    MpLog.LogWarning("[MP][trade] client trade DROPPED — the haven has no site id, so nothing " +
                                      "can name it on the wire; nothing was exchanged locally either");
                     return false;
                 }
@@ -136,7 +136,7 @@ namespace Multiplayer.Network.Sync
                                    "elsewhere while this trade was in flight"); return; }
 
             haven.TradeResource(faction, entry, amount);
-            Debug.Log("[MP][trade] HOST traded " + gives + " " + offers + " for " + costs + " " + wants +
+            MpLog.Log("[MP][trade] HOST traded " + gives + " " + offers + " for " + costs + " " + wants +
                       " at S#" + siteId + " on behalf of peer=" + peer + " nonce=" + nonce);
             // The haven's stock and the wallet ride the value rail to every peer; the host applies no
             // delta to itself, so its OWN open trade screen is marked here (law 11).

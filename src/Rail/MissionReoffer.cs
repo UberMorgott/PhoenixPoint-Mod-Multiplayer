@@ -114,7 +114,7 @@ namespace Multiplayer.Network.Sync
             if (IntentRail.ShouldRunNative()) return false;
             if (string.IsNullOrEmpty(siteRef))
             {
-                Debug.LogWarning("[MP][mission] re-offer gesture at an unaddressable site was dropped — the host " +
+                MpLog.LogWarning("[MP][mission] re-offer gesture at an unaddressable site was dropped — the host " +
                                  "cannot be told which site to re-offer; the player can still reach the mission " +
                                  "from the aircraft once another peer opens it");
                 return false;

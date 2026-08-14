@@ -175,7 +175,7 @@ namespace Multiplayer.Tactical
             if (value == null || !_saidDropped.Add(field)) return;
             string why;
             Dropped.TryGetValue(field, out why);
-            Debug.LogWarning("[Multiplayer][tac] an activation carried TacticalAbilityTarget." + field +
+            MpLog.LogWarning("[Multiplayer][tac] an activation carried TacticalAbilityTarget." + field +
                              ", which this codec DROPS (" + (why ?? "no declared reason") + "). The order still " +
                              "crosses, but every other peer replays it without that field — first occurrence only.");
         }
@@ -304,7 +304,7 @@ namespace Multiplayer.Tactical
                        "is what a body part looks like. The order still crosses; the receiving peer re-derives " +
                        "that field from the DamageReceiver slot, and falls back to its own aim point only if " +
                        "that yields nothing.";
-            if (RailMeta.CountMiss(line)) Debug.LogWarning(line);
+            if (RailMeta.CountMiss(line)) MpLog.LogWarning(line);
         }
 
         internal static void Write(BinaryWriter w, TacticalAbilityTarget t)

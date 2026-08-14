@@ -61,7 +61,7 @@ namespace Multiplayer.Network
                         {
                             // Never-silent: the key stays a manifest diff (badge + lock persist), and the
                             // log names why it could not converge automatically.
-                            Debug.LogWarning($"[Multiplayer] parity auto-apply: {hs.ModId}.{f.ID} " +
+                            MpLog.LogWarning($"[Multiplayer] parity auto-apply: {hs.ModId}.{f.ID} " +
                                              $"(type {f.FieldType?.Name}) is not auto-appliable — stays a mismatch.");
                             continue;
                         }
@@ -70,7 +70,7 @@ namespace Multiplayer.Network
                         try { f.SetValue(parsed); modChanged = true; }
                         catch (Exception e)
                         {
-                            Debug.LogWarning($"[Multiplayer] parity auto-apply: set {hs.ModId}.{f.ID} failed: {e.Message}");
+                            MpLog.LogWarning($"[Multiplayer] parity auto-apply: set {hs.ModId}.{f.ID} failed: {e.Message}");
                         }
                     }
 
@@ -81,13 +81,13 @@ namespace Multiplayer.Network
                         try { mm.OnConfigChanged(mod); }
                         catch (Exception e)
                         {
-                            Debug.LogWarning($"[Multiplayer] parity auto-apply: OnConfigChanged('{hs.ModId}') failed: {e.Message}");
+                            MpLog.LogWarning($"[Multiplayer] parity auto-apply: OnConfigChanged('{hs.ModId}') failed: {e.Message}");
                         }
-                        Debug.Log($"[Multiplayer] parity auto-apply: host settings applied to '{hs.ModId}' (in-memory, session-only).");
+                        MpLog.Log($"[Multiplayer] parity auto-apply: host settings applied to '{hs.ModId}' (in-memory, session-only).");
                     }
                 }
             }
-            catch (Exception e) { Debug.LogError("[Multiplayer] parity auto-apply failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] parity auto-apply failed: " + e.Message); }
             return changedAny;
         }
 
@@ -122,7 +122,7 @@ namespace Multiplayer.Network
                     }
             }
             catch { }
-            Debug.Log($"[Multiplayer] parity auto-apply: restored original settings of {changedMods.Count} mod(s) on session end.");
+            MpLog.Log($"[Multiplayer] parity auto-apply: restored original settings of {changedMods.Count} mod(s) on session end.");
         }
     }
 }

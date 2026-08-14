@@ -116,10 +116,10 @@ namespace Multiplayer.Network.Sync
                 _bindChecked = true;
                 if (FCharacter == null || FBoughtSlot == null || FBoughtAbility == null ||
                     FBoughtSource == null || FBoughtLevel == null || FFactionPool == null)
-                    Debug.LogError("[MP][personnel] FIELD BIND FAILED on UIModuleCharacterProgression — " +
+                    MpLog.LogError("[MP][personnel] FIELD BIND FAILED on UIModuleCharacterProgression — " +
                                    "stat/ability intents CANNOT be captured; client edits will not sync.");
                 else
-                    Debug.Log("[MP][personnel] view-model fields bound");
+                    MpLog.Log("[MP][personnel] view-model fields bound");
             }
             // All-or-nothing: a partial bind must read as NOT bound.
             return FCharacter != null && FBoughtSlot != null && FBoughtAbility != null &&
@@ -213,7 +213,7 @@ namespace Multiplayer.Network.Sync
                     if (ApplyStats(0, character, dStr, dWill, dSpeed, toShared)) DiffEngine.FlushOnHostGesture();
                     else OpenUiRepaint.MarkDirty();
                 }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] stat click seam failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][personnel] stat click seam failed: " + ex); }
             }
         }
 
@@ -314,7 +314,7 @@ namespace Multiplayer.Network.Sync
             {
                 // A throwing gate must not eat the player's purchase — native still runs, and the client
                 // leg's Charge stays the backstop for every OTHER peer's spend.
-                Debug.LogError("[MP][personnel] host ability gate failed: " + ex);
+                MpLog.LogError("[MP][personnel] host ability gate failed: " + ex);
                 return true;
             }
         }
@@ -332,7 +332,7 @@ namespace Multiplayer.Network.Sync
             if (progression == null) return true;
             if (!CanAfford(character, cost))
             {
-                Debug.Log("[MP][personnel] HOST spend REFUSED U#" + (int)character.Id + " — cannot afford " +
+                MpLog.Log("[MP][personnel] HOST spend REFUSED U#" + (int)character.Id + " — cannot afford " +
                           what + " (cost " + cost + ", personal " + progression.SkillPoints +
                           " + shared " + SharedPool(character) +
                           ") — another peer spent the points while this confirmation was open");
@@ -387,7 +387,7 @@ namespace Multiplayer.Network.Sync
                     int slotLevel = track == null ? 0 : track.GetAbilityLevel(slot); // 0 = not in this track
                     if (slotLevel <= 0)
                     {
-                        Debug.LogWarning("[MP][personnel] CLIENT ability buy dropped — slot not on track " + source);
+                        MpLog.LogWarning("[MP][personnel] CLIENT ability buy dropped — slot not on track " + source);
                         return false;
                     }
 
@@ -405,7 +405,7 @@ namespace Multiplayer.Network.Sync
                     // re-bought. Public, view-only — it nulls _boughtAbilitySlot and refreshes the widgets.
                     __instance.ClearBoughtAbility();
                 }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] ability capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][personnel] ability capture failed: " + ex); }
                 return false;
             }
         }
@@ -440,7 +440,7 @@ namespace Multiplayer.Network.Sync
                         "secondSpec U#" + (int)character.Id + " spec=" + specialization.Guid,
                         w => { w.Write((int)character.Id); w.Write(specialization.Guid); });
                 }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] second-spec capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][personnel] second-spec capture failed: " + ex); }
                 return false;
             }
         }
@@ -528,7 +528,7 @@ namespace Multiplayer.Network.Sync
                 var dstRef = IdentityResolver.RootRef(destination);
                 if (character == null || dstRef == null)
                 {
-                    Debug.LogWarning("[MP][personnel] CLIENT membership add DROPPED — unaddressable char=" +
+                    MpLog.LogWarning("[MP][personnel] CLIENT membership add DROPPED — unaddressable char=" +
                                      (character == null ? "null" : "U#" + (int)character.Id) +
                                      " dst=" + (dstRef ?? (destination == null ? "null" : destination.GetType().Name)));
                     OpenUiRepaint.MarkDirty(); // heal the roster tail's optimistic slot move
@@ -542,7 +542,7 @@ namespace Multiplayer.Network.Sync
                 var geo = GenericApplier.GeoLevel();
                 if (geo == null || FindCharacterContainer(geo, character) == null)
                 {
-                    Debug.LogWarning("[MP][personnel] CLIENT membership add DROPPED — U#" + (int)character.Id +
+                    MpLog.LogWarning("[MP][personnel] CLIENT membership add DROPPED — U#" + (int)character.Id +
                                      " -> " + dstRef + " not in any local container (creation flow, not a transfer)");
                     OpenUiRepaint.MarkDirty(); // heal the roster tail's optimistic slot move
                     return false;
@@ -557,7 +557,7 @@ namespace Multiplayer.Network.Sync
                             DurablePreparationEditContext.Write(w, preparation);
                     });
             }
-            catch (Exception ex) { Debug.LogError("[MP][personnel] reassign capture failed: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[MP][personnel] reassign capture failed: " + ex); }
             return false;
         }
 
@@ -567,7 +567,7 @@ namespace Multiplayer.Network.Sync
         private static bool CaptureMembershipRemove(IGeoCharacterContainer source, GeoCharacter character)
         {
             if (IntentRail.ShouldRunNative()) return true;
-            Debug.Log("[MP][personnel] CLIENT membership remove blocked (paired Add carries the move) char=" +
+            MpLog.Log("[MP][personnel] CLIENT membership remove blocked (paired Add carries the move) char=" +
                       (character == null ? "null" : "U#" + (int)character.Id) +
                       " src=" + (IdentityResolver.RootRef(source) ?? "?"));
             return false;
@@ -595,7 +595,7 @@ namespace Multiplayer.Network.Sync
                         "hire " + siteRef + " via " + vehicleRef,
                         w => { w.Write(siteRef); w.Write(vehicleRef); });
                 }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] hire capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][personnel] hire capture failed: " + ex); }
                 return false;
             }
         }
@@ -634,7 +634,7 @@ namespace Multiplayer.Network.Sync
                 if (IntentRail.ShouldRunNative()) return true;
                 if (reason != CharacterDeathReason.Dismissed)
                 {
-                    Debug.Log("[MP][personnel] CLIENT KillCharacter blocked (reason=" + reason +
+                    MpLog.Log("[MP][personnel] CLIENT KillCharacter blocked (reason=" + reason +
                               ") — host outcome mirrors via the rail");
                     return false;
                 }
@@ -644,7 +644,7 @@ namespace Multiplayer.Network.Sync
                         IntentRail.Send(SurfaceIds.GeoPersonnelIntent, OpFire,
                             "fire U#" + (int)unit.Id, w => w.Write((int)unit.Id));
                 }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] fire capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][personnel] fire capture failed: " + ex); }
                 return false;
             }
         }
@@ -677,7 +677,7 @@ namespace Multiplayer.Network.Sync
                         "hireNaked '" + name + "' lvl=" + level + " -> " + siteRef,
                         w => { w.Write(name); w.Write(templateGuid); w.Write(level); w.Write(siteRef); });
                 }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] naked-hire capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][personnel] naked-hire capture failed: " + ex); }
                 return false;
             }
         }
@@ -724,7 +724,7 @@ namespace Multiplayer.Network.Sync
                         "tftvRedeploy U#" + (int)character.Id + " -> " + siteRef,
                         w => { w.Write((int)character.Id); w.Write(siteRef); });
                 }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] TFTV redeploy capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][personnel] TFTV redeploy capture failed: " + ex); }
                 return false;
             }
         }
@@ -751,7 +751,7 @@ namespace Multiplayer.Network.Sync
                         "tftvTrainDeploy U#" + (int)character.Id + " early=" + early,
                         w => { w.Write((int)character.Id); w.Write(early); });
                 }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] TFTV train-deploy capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][personnel] TFTV train-deploy capture failed: " + ex); }
                 return false;
             }
         }
@@ -788,7 +788,7 @@ namespace Multiplayer.Network.Sync
                     var geo = GenericApplier.GeoLevel();
                     if (geo == null || FindCharacterContainer(geo, character) == null)
                     {
-                        Debug.LogWarning("[MP][personnel] CLIENT TFTV promote DROPPED — U#" + (int)character.Id +
+                        MpLog.LogWarning("[MP][personnel] CLIENT TFTV promote DROPPED — U#" + (int)character.Id +
                                          " not in any local container (client-allocated id must never ship)");
                         OpenUiRepaint.MarkDirty();
                         return false;
@@ -797,7 +797,7 @@ namespace Multiplayer.Network.Sync
                         "tftvPromote U#" + (int)character.Id + " -> " + siteRef + " spec=" + mainClass.Guid,
                         w => { w.Write((int)character.Id); w.Write(siteRef); w.Write(mainClass.Guid); });
                 }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] TFTV promote capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][personnel] TFTV promote capture failed: " + ex); }
                 return false;
             }
         }
@@ -898,7 +898,7 @@ namespace Multiplayer.Network.Sync
                     if (promoteSpec != null) AccessTools.Field(row.GetType(), "TrainingSpec")?.SetValue(row, promoteSpec);
                     AccessTools.Method(personnel, "RemovePersonnel")?.Invoke(null, new object[] { geo.PhoenixFaction, row });
                 }
-                Debug.Log("[MP][personnel] HOST intent APPLIED op=" + op + " (TFTV move) char=U#" + charId +
+                MpLog.Log("[MP][personnel] HOST intent APPLIED op=" + op + " (TFTV move) char=U#" + charId +
                           " nonce=" + nonce + " peer=" + senderPeerId);
                 OpenUiRepaint.MarkDirty();
             }
@@ -957,7 +957,7 @@ namespace Multiplayer.Network.Sync
                                         if (preparationSource != null) touched.Add(preparationSource);
                                         if (preparationDestination != null) touched.Add(preparationDestination);
                                         try { MissionSync.BroadcastPreparationEdit(delta); }
-                                        catch (Exception ex) { Debug.LogError("[MP][inbox] preparation-edit broadcast failed after durable commit: " + ex); }
+                                        catch (Exception ex) { MpLog.LogError("[MP][inbox] preparation-edit broadcast failed after durable commit: " + ex); }
                                         UiEventMap.FirePreparationEdit(touched, geo, delta.Occurrence, delta.PreparationRevision);
                                     });
                                 string refusal;
@@ -990,7 +990,7 @@ namespace Multiplayer.Network.Sync
                 }
                 if (ok)
                 {
-                    Debug.Log("[MP][personnel] HOST intent APPLIED op=" + op + " char=U#" + charId +
+                    MpLog.Log("[MP][personnel] HOST intent APPLIED op=" + op + " char=U#" + charId +
                               " nonce=" + nonce + " peer=" + senderPeerId);
                     // Law 11 (host side): we ran the native model methods DIRECTLY, not through the
                     // host's own progression module, so its open screen still shows pre-intent numbers.
@@ -1039,7 +1039,7 @@ namespace Multiplayer.Network.Sync
                 { RejectHire(senderPeerId, siteRef, "capacity or resources short"); return; }
 
                 haven.TakeRecruit(vehicle); // the native buy: charge, spawn, reward container, RemoveRecruit
-                Debug.Log("[MP][personnel] HOST intent APPLIED op=hire " + siteRef + " nonce=" + nonce + " peer=" + senderPeerId);
+                MpLog.Log("[MP][personnel] HOST intent APPLIED op=hire " + siteRef + " nonce=" + nonce + " peer=" + senderPeerId);
                 OpenUiRepaint.MarkDirty();
             }
             catch (Exception ex) { RejectHire(senderPeerId, siteRef, "(throw) " + ex.Message); }
@@ -1067,7 +1067,7 @@ namespace Multiplayer.Network.Sync
 
                 geo.PhoenixFaction.KillCharacter(character, CharacterDeathReason.Dismissed); // strip equipment :1625, container removal, DestroyTacUnit
                 GiveVehicleScrap(geo, character);
-                Debug.Log("[MP][personnel] HOST intent APPLIED op=fire char=U#" + charId + " nonce=" + nonce + " peer=" + senderPeerId);
+                MpLog.Log("[MP][personnel] HOST intent APPLIED op=fire char=U#" + charId + " nonce=" + nonce + " peer=" + senderPeerId);
                 OpenUiRepaint.MarkDirty();
             }
             catch (Exception ex) { Reject(senderPeerId, charId, "(throw) " + ex.Message); }
@@ -1124,7 +1124,7 @@ namespace Multiplayer.Network.Sync
 
                 phoenix.Wallet.Take(cost, OperationReason.Purchase); // native UI half (:300)
                 phoenix.HireNakedRecruit(recruit, site);             // native model half (:662)
-                Debug.Log("[MP][personnel] HOST intent APPLIED op=hireNaked '" + name + "' nonce=" + nonce + " peer=" + senderPeerId);
+                MpLog.Log("[MP][personnel] HOST intent APPLIED op=hireNaked '" + name + "' nonce=" + nonce + " peer=" + senderPeerId);
                 OpenUiRepaint.MarkDirty();
             }
             catch (Exception ex) { RejectNaked(senderPeerId, name, "(throw) " + ex.Message); }
@@ -1223,7 +1223,7 @@ namespace Multiplayer.Network.Sync
                         "skillReset U#" + (int)__instance.Id,
                         w => w.Write((int)__instance.Id));
                 }
-                catch (Exception ex) { Debug.LogError("[MP][personnel] skill-reset capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][personnel] skill-reset capture failed: " + ex); }
                 return false;
             }
         }
@@ -1361,7 +1361,7 @@ namespace Multiplayer.Network.Sync
             // The game's OWN derived-cache rebuild (GeoCharacter.cs:568) — same call the customization
             // screen makes. Re-enters the capture postfix below and is silenced there by the isHost arm.
             character.RefreshTags();
-            Debug.Log("[MP][personnel] customize U#" + (int)character.Id + " leaves=" + applied +
+            MpLog.Log("[MP][personnel] customize U#" + (int)character.Id + " leaves=" + applied +
                       " name=" + (identity.Name ?? "?"));
             return true;
         }
@@ -1401,7 +1401,7 @@ namespace Multiplayer.Network.Sync
             _lastCustomizeSent.Clear();
             var stale = _customizePending.Drain();
             if (stale != null)
-                Debug.Log("[MP][personnel] customize U#" + stale.Id + " (" + stale.Why + ") dropped after " +
+                MpLog.Log("[MP][personnel] customize U#" + stale.Id + " (" + stale.Why + ") dropped after " +
                           stale.Captures + " capture(s) — it was held for the previous session's host");
         }
 
@@ -1441,7 +1441,7 @@ namespace Multiplayer.Network.Sync
                 var superseded = _customizePending.Capture(id, body, why, Time.realtimeSinceStartup);
                 if (superseded != null) SendCustomize(superseded);
             }
-            catch (Exception ex) { Debug.LogError("[MP][personnel] customize capture failed: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[MP][personnel] customize capture failed: " + ex); }
         }
 
         /// <summary>Per-frame, from SyncEngine.Tick: put the held appearance edit on the wire once the
@@ -1461,7 +1461,7 @@ namespace Multiplayer.Network.Sync
                                       engine != null && engine.IsHost,
                                       SyncApplyScope.Active) != CustomizeAction.Ship)
             {
-                Debug.LogWarning("[MP][personnel] customize U#" + held.Id + " (" + held.Why + ") NOT sent after " +
+                MpLog.LogWarning("[MP][personnel] customize U#" + held.Id + " (" + held.Why + ") NOT sent after " +
                                  held.Captures + " capture(s) — this peer is no longer a client with a live " +
                                  "session to send it to");
                 return;
@@ -1524,7 +1524,7 @@ namespace Multiplayer.Network.Sync
             if (shared > 0) phoenix.Skillpoints += shared;
             character.Progression.SkillPoints += amount - shared;
             // The line whose absence made this silent: the split was chosen with nothing on record.
-            Debug.Log("[MP][personnel] stat refund U#" + (int)character.Id + " " + amount +
+            MpLog.Log("[MP][personnel] stat refund U#" + (int)character.Id + " " + amount +
                       "SP → shared=" + shared + " personal=" + (amount - shared));
         }
 

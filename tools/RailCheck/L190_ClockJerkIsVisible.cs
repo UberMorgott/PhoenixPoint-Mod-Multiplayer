@@ -145,7 +145,7 @@ namespace RailCheck
             {
                 MethodBase c = null;
                 try { c = m.Module.ResolveMethod(tok); } catch { }
-                if (c != null && c.DeclaringType == typeof(UnityEngine.Debug) &&
+                if (c != null && c.DeclaringType == typeof(Multiplayer.MpLog) &&
                     c.Name.StartsWith("Log", StringComparison.Ordinal)) return true;
             }
             return false;

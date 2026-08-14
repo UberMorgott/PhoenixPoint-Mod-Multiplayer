@@ -5,14 +5,8 @@ using UnityEngine;
 namespace Multiplayer.Util
 {
     /// <summary>
-    /// Dedicated, mod-only log file. A passive SINK that subscribes to
-    /// <see cref="Application.logMessageReceived"/> and mirrors every entry whose message
-    /// contains the "[Multiplayer]" prefix into a clean file, so debugging no longer means
-    /// scrolling the shared (huge, engine-spammy) Player.log.
-    ///
-    /// It does NOT change how lines are emitted — existing Logger.Log* / Debug.Log* calls are
-    /// untouched. It captures everything they already write (plus mod-thrown exception
-    /// stacktraces), past and future, with zero migration of call sites.
+    /// Dedicated, mod-only rotating log file. <see cref="MpLog"/> writes here directly, independently
+    /// of Player.log, so the two destinations can be enabled separately in the mod settings.
     ///
     /// File: &lt;Application.persistentDataPath&gt;/Multiplayer/multiplayer.log
     /// (same "Multiplayer" dir used by ClientIdentity). On each launch the previous runs are shifted
@@ -24,12 +18,6 @@ namespace Multiplayer.Util
     /// </summary>
     public static class MultiplayerLog
     {
-        /// <summary>Every prefix the mod's own <c>Debug.Log</c> call sites actually use. The original
-        /// single <c>"[Multiplayer]"</c> literal matched the bootstrap/lobby banner only, so the WHOLE
-        /// rail — every <c>[MP][events]</c>, <c>[MP][rail]</c>, <c>[MP][vehicle]</c> line — was filtered
-        /// OUT of multiplayer*.log and existed solely in Unity's Player.log. Diagnosis then needed two
-        /// files, and the one the mod ships was the one missing the evidence.</summary>
-        private static readonly string[] Prefixes = { "[MP]", "[Multiplayer]" };
         private const string DirName = "Multiplayer";
         private const string LogName = "multiplayer.log";
         // Same-machine instance cap for the suffixed-file fallback (multiplayer-2.log … -N.log) when
@@ -124,12 +112,11 @@ namespace Multiplayer.Util
                 catch (Exception e)
                 {
                     // Never let logging setup take down the mod; report once via the engine log.
-                    Debug.LogWarning("[Multiplayer] MultiplayerLog.Init failed: " + e.Message);
+                    try { Debug.LogWarning("[MP][logging] dedicated log initialization failed: " + e.Message); }
+                    catch { /* Unity ECalls are unavailable in the headless RailCheck host. */ }
                     _writer = null;
                 }
 
-                // Subscribe regardless: even if the file failed, Handler is a safe no-op then.
-                Application.logMessageReceived += Handler;
             }
         }
 
@@ -176,8 +163,6 @@ namespace Multiplayer.Util
         {
             lock (Gate)
             {
-                Application.logMessageReceived -= Handler;
-
                 if (_writer != null)
                 {
                     try
@@ -196,23 +181,9 @@ namespace Multiplayer.Util
             }
         }
 
-        // Explicit loop, not Array.Exists: this runs on EVERY Unity log line in the game, and a
-        // closure capturing `condition` would allocate once per line.
-        private static bool IsOurs(string condition)
+        /// <summary>Writes one already-normalized entry. Logging failures never escape into gameplay.</summary>
+        internal static void Write(string condition, LogType type)
         {
-            if (string.IsNullOrEmpty(condition)) return false;
-            for (int i = 0; i < Prefixes.Length; i++)
-                if (condition.IndexOf(Prefixes[i], StringComparison.Ordinal) >= 0) return true;
-            return false;
-        }
-
-        // logMessageReceived can fire off the main thread; everything here is under Gate and
-        // wrapped so a logging fault can never throw back into the engine.
-        private static void Handler(string condition, string stackTrace, LogType type)
-        {
-            if (!IsOurs(condition))
-                return;
-
             lock (Gate)
             {
                 if (_writer == null)
@@ -223,11 +194,6 @@ namespace Multiplayer.Util
                     var ts = DateTime.Now.ToString("HH:mm:ss.fff");
                     _writer.WriteLine(ts + " " + type + " " + condition);
 
-                    if ((type == LogType.Error || type == LogType.Exception || type == LogType.Assert) &&
-                        !string.IsNullOrEmpty(stackTrace))
-                    {
-                        _writer.WriteLine(stackTrace);
-                    }
                 }
                 catch
                 {

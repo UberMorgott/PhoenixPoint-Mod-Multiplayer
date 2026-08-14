@@ -97,7 +97,7 @@ namespace Multiplayer.UI
                 }
                 catch (Exception e)
                 {
-                    Debug.LogError("[Multiplayer] CaptureFromMainMenu (menu font) failed: " + e.Message);
+                    MpLog.LogError("[Multiplayer] CaptureFromMainMenu (menu font) failed: " + e.Message);
                 }
             }
         }
@@ -156,7 +156,7 @@ namespace Multiplayer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] HideMenuChrome (root-canvas sweep) failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] HideMenuChrome (root-canvas sweep) failed: " + e.Message);
             }
 
             _chromeHidden = true;
@@ -266,10 +266,10 @@ namespace Multiplayer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] CaptureLiveProgressBar failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] CaptureLiveProgressBar failed: " + e.Message);
                 result = null;
             }
-            Debug.Log("[Multiplayer] live progress bar " + (result != null ? "captured" : "NOT found"));
+            MpLog.Log("[Multiplayer] live progress bar " + (result != null ? "captured" : "NOT found"));
             return result;
         }
 
@@ -292,7 +292,7 @@ namespace Multiplayer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] CurtainCanvasOrder failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] CurtainCanvasOrder failed: " + e.Message);
                 return null;
             }
         }
@@ -368,7 +368,7 @@ namespace Multiplayer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] BeginDownloadBar failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] BeginDownloadBar failed: " + e.Message);
                 return false;
             }
         }
@@ -393,7 +393,7 @@ namespace Multiplayer.UI
             var fill = GetProgressFill(CaptureLiveProgressBar());
             if (fill == null)
             {
-                Debug.LogWarning("[Multiplayer] ResetBarFill: no live ProgressFill — the bar keeps the " +
+                MpLog.LogWarning("[Multiplayer] ResetBarFill: no live ProgressFill — the bar keeps the " +
                                  "previous phase's fill (native controller never lowers it).");
                 return;
             }
@@ -452,7 +452,7 @@ namespace Multiplayer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] RestoreBarSource failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] RestoreBarSource failed: " + e.Message);
             }
             _barOwner = null;
             _barSourceBefore = null;
@@ -472,7 +472,7 @@ namespace Multiplayer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] GetSceneLoadingText failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] GetSceneLoadingText failed: " + e.Message);
                 return null;
             }
         }
@@ -489,7 +489,7 @@ namespace Multiplayer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] TryGetPanelBackgroundSprite failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] TryGetPanelBackgroundSprite failed: " + e.Message);
                 return null;
             }
         }

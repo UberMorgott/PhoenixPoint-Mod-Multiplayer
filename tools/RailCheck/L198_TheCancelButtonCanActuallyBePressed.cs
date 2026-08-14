@@ -248,8 +248,8 @@ namespace RailCheck
         /// with "Log". A bail that logs a warning is as good as one that logs info; a bail that says nothing
         /// is the defect.</summary>
         private static bool Logs(MethodBase m) =>
-            Program.Callees(m, typeof(UnityEngine.Debug).Assembly)
-                   .Any(c => c.DeclaringType == typeof(UnityEngine.Debug) && c.Name.StartsWith("Log", StringComparison.Ordinal));
+            Program.CalleeSequence(m)
+                   .Any(c => c.DeclaringType == typeof(Multiplayer.MpLog) && c.Name.StartsWith("Log", StringComparison.Ordinal));
 
         /// <summary>Every generic method call in <paramref name="m"/>, as (method name, single type arg) —
         /// the only way to see which component `AddComponent&lt;T&gt;()` actually asks for.</summary>

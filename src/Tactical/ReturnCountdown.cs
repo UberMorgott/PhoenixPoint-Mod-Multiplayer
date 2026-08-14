@@ -124,13 +124,13 @@ namespace Multiplayer.Tactical
                 // still sitting on its own summary screen. A host that is out of the battle owns nothing here
                 // and says nothing about a peer that is not: the asking peer counts its own five seconds and
                 // its accepted OpLeaveBattle carries the rest (live 2026-08-12, the loop this refusal ends).
-                Debug.Log("[MP][return] a peer asked for the return strip, but this host is no longer in the " +
+                MpLog.Log("[MP][return] a peer asked for the return strip, but this host is no longer in the " +
                           "battle — arming nothing and broadcasting nothing. That peer releases its own hold " +
                           "on its own clock; nothing here may cancel it.");
                 return;
             }
             _zeroAt = Time.realtimeSinceStartup + CountdownSeconds;
-            Debug.Log("[MP][return] host arming the return countdown for ALL peers — " + CountdownSeconds +
+            MpLog.Log("[MP][return] host arming the return countdown for ALL peers — " + CountdownSeconds +
                       " s. Any peer can cancel; nobody needs to press anything for it to expire.");
             engine.BroadcastToAll(new NetworkMessage(PacketType.ReturnCountdown,
                                                      new byte[] { (byte)CountdownSeconds }));
@@ -144,10 +144,10 @@ namespace Multiplayer.Tactical
             if (engine == null || !engine.IsHost) return;
             if (_zeroAt <= 0f)
             {
-                Debug.Log("[MP][return] cancel from " + who + " arrived with NO countdown running — nothing to stop.");
+                MpLog.Log("[MP][return] cancel from " + who + " arrived with NO countdown running — nothing to stop.");
                 return;
             }
-            Debug.Log("[MP][return] countdown CANCELLED by " + who +
+            MpLog.Log("[MP][return] countdown CANCELLED by " + who +
                       " — the return is NOT cancelled, only the countdown: the summary screen is still there " +
                       "and Continue can be pressed again.");
             ClearLocal();
@@ -165,11 +165,11 @@ namespace Multiplayer.Tactical
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession)
             {
-                Debug.LogWarning("[MP][return] CANCEL pressed with no active co-op session — this peer's " +
+                MpLog.LogWarning("[MP][return] CANCEL pressed with no active co-op session — this peer's " +
                                  "countdown is stopped and its Continue button still works.");
                 return;
             }
-            Debug.Log("[MP][return] CANCEL pressed — the countdown is stopped on every peer" +
+            MpLog.Log("[MP][return] CANCEL pressed — the countdown is stopped on every peer" +
                       (had ? "" : " (there was none running here)") + ". The return is NOT cancelled: every " +
                       "summary screen is still there and Continue can be pressed again by anybody.");
             if (engine.IsHost)
@@ -190,13 +190,13 @@ namespace Multiplayer.Tactical
                 // — including when this peer's own Continue was swallowed into the strip. A hold kept here
                 // ran on invisibly and pulled every peer to the geoscape with no countdown (2026-08-13).
                 ClearLocal();
-                Debug.Log("[MP][return] countdown CANCELLED — this peer is back where it was before the arm, " +
+                MpLog.Log("[MP][return] countdown CANCELLED — this peer is back where it was before the arm, " +
                           "summary screen and all. Any peer pressing Continue starts a fresh countdown.");
                 return;
             }
             if (_zeroAt > 0f) return;                        // never restart a hold that is already running
             _zeroAt = Time.realtimeSinceStartup + seconds;
-            Debug.Log("[MP][return] countdown ARMED by the host for " + seconds +
+            MpLog.Log("[MP][return] countdown ARMED by the host for " + seconds +
                       " s — this peer counts its own display down from here. CANCEL stops THIS peer's " +
                       "countdown only; every other peer keeps its own.");
         }
@@ -259,7 +259,7 @@ namespace Multiplayer.Tactical
                     if (engine == null || !engine.IsActiveSession) return true;
                     if (GoToGeoscapeMethod == null)
                     {
-                        Debug.LogError("[MP][return] TacticalView.GoToGeoscape did not resolve — no countdown " +
+                        MpLog.LogError("[MP][return] TacticalView.GoToGeoscape did not resolve — no countdown " +
                                        "strip for this return; going back to the geoscape immediately.");
                         return true;
                     }
@@ -287,7 +287,7 @@ namespace Multiplayer.Tactical
                         // session while the host loaded the geoscape). Every peer now holds its own click and
                         // releases it itself in Tick; nobody waits for anybody to press anything.
                         _zeroAt = Time.realtimeSinceStartup + CountdownSeconds;
-                        Debug.Log("[MP][return] this client clicked Continue — holding its own return for " +
+                        MpLog.Log("[MP][return] this client clicked Continue — holding its own return for " +
                                   CountdownSeconds + " s and asking the host to arm the same strip for all peers.");
                         // The arm request rides the cancel's reverse: a byte payload with the seconds.
                         // The host handler for 0x4B-as-intent treats a non-zero payload from a client as
@@ -300,7 +300,7 @@ namespace Multiplayer.Tactical
                 catch (Exception ex)
                 {
                     Reset();
-                    Debug.LogError("[MP][return] arming the pre-geoscape countdown failed — returning now: " + ex);
+                    MpLog.LogError("[MP][return] arming the pre-geoscape countdown failed — returning now: " + ex);
                     return true;
                 }
             }
@@ -326,7 +326,7 @@ namespace Multiplayer.Tactical
                     // LOCAL ONLY, on purpose. This peer losing its level says nothing about anybody else's,
                     // and the host announcing it here cancelled countdowns on peers that were still standing
                     // on their own summary screens.
-                    Debug.Log("[MP][return] the held return has nothing left to run on this peer — dropping the " +
+                    MpLog.Log("[MP][return] the held return has nothing left to run on this peer — dropping the " +
                               "strip. It has already left the battle, or holds no level any more; its Continue " +
                               "button still works. No other peer is told: their holds are theirs.");
                     ClearLocal();
@@ -339,7 +339,7 @@ namespace Multiplayer.Tactical
                 // NOTHING IS BROADCAST AT ZERO. Every peer's own clock expires within milliseconds of this
                 // one and clears its own strip; the CLEAR that used to go out here was indistinguishable from
                 // a cancel and killed the hold a peer had armed for its own swallowed click.
-                Debug.Log("[MP][return] " + (sessionGone
+                MpLog.Log("[MP][return] " + (sessionGone
                               ? "the session ended while the return was held — going back to the geoscape now"
                               : "countdown reached zero") + " — running the game's own TacticalView.GoToGeoscape " +
                           "(PhoenixGame.FinishLevel) exactly as the summary screen would have.");
@@ -348,7 +348,7 @@ namespace Multiplayer.Tactical
             catch (Exception ex)
             {
                 Reset();
-                Debug.LogError("[MP][return] releasing the pre-geoscape countdown failed — this peer is still " +
+                MpLog.LogError("[MP][return] releasing the pre-geoscape countdown failed — this peer is still " +
                                "on the summary screen and its Continue button still works: " + ex);
             }
         }

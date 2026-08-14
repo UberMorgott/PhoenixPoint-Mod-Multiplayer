@@ -106,10 +106,10 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex)
             {
                 _retryAt = Time.realtimeSinceStartup + 30f; // one retry per cooldown — also rate-limits this log
-                Debug.LogError("[Multiplayer][rail] DefOwnership build failed (retry in 30s, law fails OPEN meanwhile): " + ex);
+                MpLog.LogError("[Multiplayer][rail] DefOwnership build failed (retry in 30s, law fails OPEN meanwhile): " + ex);
                 return null; // a half-built set would silently license clobbers
             }
-            Debug.Log("[Multiplayer][rail] DefOwnership: identity set built — defs=" + defs +
+            MpLog.Log("[Multiplayer][rail] DefOwnership: identity set built — defs=" + defs +
                       " ownedObjects=" + set.Count + " in " + sw.ElapsedMilliseconds + "ms");
             return set;
         }

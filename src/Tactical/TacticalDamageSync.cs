@@ -428,7 +428,7 @@ namespace Multiplayer.Tactical
 
         internal static void SayOnce(string key, string message)
         {
-            if (_said.Add(key)) Debug.LogError(message);
+            if (_said.Add(key)) MpLog.LogError(message);
         }
 
         internal static TacticalLevelController Tlc()
@@ -463,7 +463,7 @@ namespace Multiplayer.Tactical
             var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
             if (now - _lastDeadSessionWarnMs < 5000) return;
             _lastDeadSessionWarnMs = now;
-            Debug.LogError("[Multiplayer][tac] tactical sync is DEAD on this peer: a co-op session is active " +
+            MpLog.LogError("[Multiplayer][tac] tactical sync is DEAD on this peer: a co-op session is active " +
                            "but SaveTransferCoordinator.SessionStarted is false (no SessionBegin was ever " +
                            "received/broadcast for this level), so every command, shot and kill captured here " +
                            "is being DROPPED before it reaches the rail. Host: check that Begin() broadcast " +
@@ -697,11 +697,11 @@ namespace Multiplayer.Tactical
                 }
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.TacResult, SyncKind.StateDelta, inner)));
-                Debug.Log("[Multiplayer][tac] HOST " + what + " seq=" + seq);
+                MpLog.Log("[Multiplayer][tac] HOST " + what + " seq=" + seq);
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac] HOST " + what + " FAILED to reach the wire — every other peer " +
+                MpLog.LogError("[Multiplayer][tac] HOST " + what + " FAILED to reach the wire — every other peer " +
                                "now has a different battlefield, and this surface has no re-emit to heal it: " + ex);
             }
         }
@@ -723,7 +723,7 @@ namespace Multiplayer.Tactical
             var actors = new List<TacticalActorBase>();
             foreach (var a in tlc.Map.GetActors<TacticalActorBase>())
                 if (TacticalActorKey.Of(a) != 0) actors.Add(a);
-            Debug.LogWarning("[Multiplayer][tac] HOST resnapshotting " + actors.Count + " actor(s) for peer=" +
+            MpLog.LogWarning("[Multiplayer][tac] HOST resnapshotting " + actors.Count + " actor(s) for peer=" +
                              senderPeerId + " — that peer lost at least one resolved-attack record.");
             Send(OpResnap, "resnap " + actors.Count + " actor(s)", w =>
             {
@@ -802,7 +802,7 @@ namespace Multiplayer.Tactical
                     else if (op == OpObjective) TacticalObjectiveSync.ApplyObjective(r);
                     else
                     {
-                        Debug.LogError("[Multiplayer][tac] unknown host→all result op " + op + " (seq=" + seq +
+                        MpLog.LogError("[Multiplayer][tac] unknown host→all result op " + op + " (seq=" + seq +
                                        ") — this peer can no longer follow the shared battle.");
                         return true;
                     }
@@ -818,7 +818,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac] result inbound FAILED — this peer's battle has diverged from " +
+                MpLog.LogError("[Multiplayer][tac] result inbound FAILED — this peer's battle has diverged from " +
                                "the host's: " + ex);
                 RequestResnap(0);
             }
@@ -840,7 +840,7 @@ namespace Multiplayer.Tactical
         /// hole.</summary>
         private static void RequestResnap(uint seq)
         {
-            Debug.LogError("[Multiplayer][tac] GAP in the resolved-attack stream (expected seq " +
+            MpLog.LogError("[Multiplayer][tac] GAP in the resolved-attack stream (expected seq " +
                            (_lastContiguous + 1) + ", got " + seq + ") — at least one resolved hit never " +
                            "arrived and this surface has no re-emit, so somebody's health is wrong here. " +
                            "Requesting a full actor resnapshot from the host.");
@@ -871,7 +871,7 @@ namespace Multiplayer.Tactical
             if (!_resnapRequested || ++_resnapWaited < ResnapWaitTicks) return;
             _resnapWaited = 0;
             _resnapRequested = false;
-            Debug.LogError("[Multiplayer][tac] no resnapshot arrived within " + ResnapWaitTicks + " ticks of asking " +
+            MpLog.LogError("[Multiplayer][tac] no resnapshot arrived within " + ResnapWaitTicks + " ticks of asking " +
                            "for one — the request was lost or the host refused it. Re-arming, so the NEXT gap in " +
                            "the resolved-attack stream can still ask; until one lands, somebody's health here is " +
                            "still wrong.");
@@ -901,7 +901,7 @@ namespace Multiplayer.Tactical
             var actor = TacticalActorKey.Resolve(tlc, key, out why);
             if (actor == null)
             {
-                Debug.LogError("[Multiplayer][tac] resolved damage for actor " + key + " CANNOT be applied — " +
+                MpLog.LogError("[Multiplayer][tac] resolved damage for actor " + key + " CANNOT be applied — " +
                                why + ". That actor's health is now wrong on this screen for good.");
                 RequestResnap(0);
                 return;
@@ -914,14 +914,14 @@ namespace Multiplayer.Tactical
                 : ResolveItem(actor, slot, itemGuid, out why);
             if (receiver == null)
             {
-                Debug.LogError("[Multiplayer][tac] resolved damage for " + actor.name +
+                MpLog.LogError("[Multiplayer][tac] resolved damage for " + actor.name +
                                (itemGuid.Length == 0 ? " body part '" + slot + "'" : " item in slot '" + slot + "'") +
                                " CANNOT be applied — " + why + ".");
                 RequestResnap(0);
                 return;
             }
             if (notes.Count > 0)
-                Debug.LogWarning("[Multiplayer][tac] resolved damage for " + actor.name + " arrived with parts this " +
+                MpLog.LogWarning("[Multiplayer][tac] resolved damage for " + actor.name + " arrived with parts this " +
                                  "peer could not rebuild: " + string.Join("; ", notes.ToArray()));
 
             // A4: the corpse manifest is DECLARED BEFORE the hit, never after — the death this ApplyDamage is
@@ -949,7 +949,7 @@ namespace Multiplayer.Tactical
             // peers disagreeing about who is standing.
             if (dead && !actor.IsDead) TacticalActorLifecycle.ForceDeath(actor, "the host's resolved hit");
             else if (!dead && actor.IsDead)
-                Debug.LogError("[Multiplayer][tac] " + actor.name + " is DEAD here but ALIVE on the host after the " +
+                MpLog.LogError("[Multiplayer][tac] " + actor.name + " is DEAD here but ALIVE on the host after the " +
                                "same hit — this peer killed something the host did not, which nothing can undo. " +
                                "The damage neuter (law L66a) is supposed to make this unreachable.");
             // L105: the native death this peer just replayed moved the KILLER's will points and every
@@ -966,7 +966,7 @@ namespace Multiplayer.Tactical
             float mine = stat;
             if (Mathf.Abs(mine - authoritative) < 0.005f) return;
             stat.Set(authoritative);
-            Debug.LogWarning("[Multiplayer][tac] corrected " + what + " " + mine.ToString("0.##") + " → " +
+            MpLog.LogWarning("[Multiplayer][tac] corrected " + what + " " + mine.ToString("0.##") + " → " +
                              authoritative.ToString("0.##") + " from the host — a difference here means this peer " +
                              "recomputed something the host had already resolved.");
         }
@@ -1070,11 +1070,11 @@ namespace Multiplayer.Tactical
                 }
             _resnapRequested = false;
             _resnapWaited = 0;
-            Debug.LogWarning("[Multiplayer][tac] CLIENT applied the host's resnapshot: " + fixedUp + " actor(s) " +
+            MpLog.LogWarning("[Multiplayer][tac] CLIENT applied the host's resnapshot: " + fixedUp + " actor(s) " +
                              "reconciled, " + lost + " unresolvable, " + rewound + " left alone as older than a " +
                              "settle already applied here.");
             if (itemsLost > 0)
-                Debug.LogError("[Multiplayer][tac] the host's resnapshot named " + itemsLost + " damaged item(s) " +
+                MpLog.LogError("[Multiplayer][tac] the host's resnapshot named " + itemsLost + " damaged item(s) " +
                                "this peer could not resolve (first: " + firstItemWhy + ") — every one of them stays " +
                                "at whatever health it has here, which is the divergence the resnapshot was asked " +
                                "for. This used to be a silent `continue`.");
@@ -1108,7 +1108,7 @@ namespace Multiplayer.Tactical
             if (!_declared.TryGetValue(def.Guid, out turns)) return;
             _declared.Remove(def.Guid);
             if (def.DurationTurns == turns) return;
-            Debug.Log("[Multiplayer][tac] cooldown status '" + def.name + "' rolled " + def.DurationTurns +
+            MpLog.Log("[Multiplayer][tac] cooldown status '" + def.name + "' rolled " + def.DurationTurns +
                       " turns here; forcing the host's " + turns + ".");
             def.DurationTurns = turns;
         }
@@ -1277,7 +1277,7 @@ namespace Multiplayer.Tactical
         private static bool Prefix()
         {
             if (!MirrorApplyScope.Active) return true;
-            Debug.Log("[Multiplayer][tac] return-melee suppressed inside a mirror apply — the host already " +
+            MpLog.Log("[Multiplayer][tac] return-melee suppressed inside a mirror apply — the host already " +
                       "resolved it and shipped it as its own record.");
             return false;
         }
@@ -1373,7 +1373,7 @@ namespace Multiplayer.Tactical
             _harmony = harmony;
             var entries = Entries();
             if (entries.Count < 4)
-                Debug.LogError("[Multiplayer][tac] the mirror-apply guard could not resolve all four vanilla damage " +
+                MpLog.LogError("[Multiplayer][tac] the mirror-apply guard could not resolve all four vanilla damage " +
                                "entries (" + entries.Count + "/4) — a foreign patch on the missing one will mutate " +
                                "the host's already-resolved damage a second time on every client.");
 
@@ -1392,21 +1392,21 @@ namespace Multiplayer.Tactical
                             returnsBool ? AccessTools.Method(typeof(MirrorApplyGuard), nameof(SkipBool))
                                         : AccessTools.Method(typeof(MirrorApplyGuard), nameof(SkipVoid))));
                         newly++;
-                        Debug.Log("[Multiplayer][tac] mirror-apply guard armed on " + p.owner + " → " +
+                        MpLog.Log("[Multiplayer][tac] mirror-apply guard armed on " + p.owner + " → " +
                                   p.PatchMethod.DeclaringType?.Name + "." + p.PatchMethod.Name +
                                   (returnsBool ? " (bool prefix)" : ""));
                     }
                     catch (Exception ex)
                     {
                         _guarded.Remove(p.PatchMethod);
-                        Debug.LogError("[Multiplayer][tac] mirror-apply guard FAILED on " + p.owner + " → " +
+                        MpLog.LogError("[Multiplayer][tac] mirror-apply guard FAILED on " + p.owner + " → " +
                                        p.PatchMethod.Name + " — that patch will run again on every mirrored hit " +
                                        "and mutate damage the host already resolved: " + ex.Message);
                     }
                 }
             }
             if (newly > 0)
-                Debug.Log("[Multiplayer][tac] mirror-apply guard covering " + _guarded.Count + " foreign damage patch(es).");
+                MpLog.Log("[Multiplayer][tac] mirror-apply guard covering " + _guarded.Count + " foreign damage patch(es).");
         }
 
         private static void Add(List<MethodBase> list, MethodBase m) { if (m != null) list.Add(m); }

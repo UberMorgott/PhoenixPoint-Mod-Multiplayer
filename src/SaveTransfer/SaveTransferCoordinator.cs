@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Base.Core;
@@ -394,7 +394,7 @@ namespace Multiplayer.Network
             if (level == null && _lastReportedLoadPct >= 0 && (InPhase2 || HostEntryLoad))
             {
                 if (InPhase2) ReportLoadProgress(100); else PublishHostEntryLoad(100);
-                Debug.Log("[Multiplayer] phase-2 pump: curtain handed off at pct=" + _lastReportedLoadPct +
+                MpLog.Log("[Multiplayer] phase-2 pump: curtain handed off at pct=" + _lastReportedLoadPct +
                           " → published 100 (window closing), awaiting Playing");
                 _lastReportedLoadPct = -1;
             }
@@ -500,13 +500,13 @@ namespace Multiplayer.Network
         {
             if (!_engine.IsHost)
             {
-                Debug.LogWarning("[Multiplayer] HostStartSession called on a non-host peer; ignored.");
+                MpLog.LogWarning("[Multiplayer] HostStartSession called on a non-host peer; ignored.");
                 return false;
             }
 
             if (chosen == null)
             {
-                Debug.LogError("[Multiplayer] HostStartSession called with no chosen save; aborting.");
+                MpLog.LogError("[Multiplayer] HostStartSession called with no chosen save; aborting.");
                 return false;
             }
 
@@ -518,7 +518,7 @@ namespace Multiplayer.Network
             int clientCount = _engine.Session?.ClientCount ?? 0;
             if (clientCount < 1)
             {
-                Debug.LogWarning("[Multiplayer] HostStartSession blocked: host is alone " +
+                MpLog.LogWarning("[Multiplayer] HostStartSession blocked: host is alone " +
                     $"(clients={clientCount}); ignoring start.");
                 return false;
             }
@@ -537,13 +537,13 @@ namespace Multiplayer.Network
         {
             if (!_engine.IsHost)
             {
-                Debug.LogWarning("[Multiplayer] HostStartSessionInGame called on a non-host peer; ignored.");
+                MpLog.LogWarning("[Multiplayer] HostStartSessionInGame called on a non-host peer; ignored.");
                 return false;
             }
 
             if (chosen == null)
             {
-                Debug.LogError("[Multiplayer] HostStartSessionInGame called with no chosen save; aborting.");
+                MpLog.LogError("[Multiplayer] HostStartSessionInGame called with no chosen save; aborting.");
                 return false;
             }
 
@@ -555,7 +555,7 @@ namespace Multiplayer.Network
                 transferActive: TransferActive);
             if (!gateOpen)
             {
-                Debug.LogWarning("[Multiplayer] HostStartSessionInGame blocked: in-game load guard closed " +
+                MpLog.LogWarning("[Multiplayer] HostStartSessionInGame blocked: in-game load guard closed " +
                     $"(clients={_engine.Session?.ClientCount ?? 0}, started={SessionStarted}, " +
                     $"transferActive={TransferActive}); ignoring load.");
                 return false;
@@ -613,7 +613,7 @@ namespace Multiplayer.Network
         /// because only there is the blob an autosave OF THE WORLD THE HOST IS STANDING IN.</param>
         private bool LaunchTransfer(SavegameMetaData chosen, bool hostHoldsThisWorld = false)
         {
-            Debug.Log($"[Multiplayer] LaunchTransfer: transport={_engine.Transport?.TransportType} save={chosen?.Name}");
+            MpLog.Log($"[Multiplayer] LaunchTransfer: transport={_engine.Transport?.TransportType} save={chosen?.Name}");
 
             // Honest-scope limitation: reliable save-transfer is supported on Steam (reliable P2P) and
             // DirectIP (length-prefixed TCP). The Stun/WAN path sends raw UDP with no sequencing/ACK/
@@ -621,7 +621,7 @@ namespace Multiplayer.Network
             // transfer. Warn once at start; do not change Steam/Direct behaviour.
             if (_engine.Transport != null && _engine.Transport.TransportType == TransportType.StunUDP)
             {
-                Debug.LogWarning("[Multiplayer] Save transfer over the Stun/WAN (UDP) transport is " +
+                MpLog.LogWarning("[Multiplayer] Save transfer over the Stun/WAN (UDP) transport is " +
                                  "BEST-EFFORT only: chunks fragment over UDP with no retransmit, so the " +
                                  "transfer may fail on packet loss. Reliable transfer is supported on " +
                                  "Steam and DirectIP.");
@@ -659,7 +659,7 @@ namespace Multiplayer.Network
                 _undoTransferFlags?.Invoke();
                 _undoTransferFlags = null;
                 BroadcastLoadBoundaryAbort("the save produced no bytes");
-                Debug.LogError("[Multiplayer] Save serialization produced no bytes; aborting transfer.");
+                MpLog.LogError("[Multiplayer] Save serialization produced no bytes; aborting transfer.");
                 yield break;
             }
 
@@ -736,7 +736,7 @@ namespace Multiplayer.Network
             _blobInFlight.Clear();
             foreach (var peer in _engine.Session.GetConnectedClients()) _blobPending.Enqueue(peer);
             _blob = blob; _blobExt = ext; _blobCrc = crc; _blobTransferId = _transferId;
-            Debug.Log($"[Multiplayer] SendBlob: bytes={blob.Length} chunks={chunkCount} crc=0x{crc:X8} " +
+            MpLog.Log($"[Multiplayer] SendBlob: bytes={blob.Length} chunks={chunkCount} crc=0x{crc:X8} " +
                       $"peers={_blobPending.Count} concurrency={MaxConcurrentBlobPeers}");
             PumpBlobQueue();
         }
@@ -768,12 +768,12 @@ namespace Multiplayer.Network
                 SendBlobCore(_blob, _blobExt, _blobTransferId, _blobCrc, onDemandJoin: false,
                              m => _engine.SendToClient(peer, m));
                 _blobInFlight.Add(peer);
-                Debug.Log($"[Multiplayer] SendBlob: blob queued for peer={peer} " +
+                MpLog.Log($"[Multiplayer] SendBlob: blob queued for peer={peer} " +
                           $"(inFlight={_blobInFlight.Count} pending={_blobPending.Count})");
             }
             if (_blobPending.Count == 0 && _blobInFlight.Count == 0)
             {
-                Debug.Log("[Multiplayer] SendBlob: every peer served — releasing the blob.");
+                MpLog.Log("[Multiplayer] SendBlob: every peer served — releasing the blob.");
                 _blob = null; _blobExt = null; // the bytes are the biggest thing this class holds
             }
         }
@@ -851,7 +851,7 @@ namespace Multiplayer.Network
             // reveal-hold armed at launch would otherwise park every peer forever.
             if (!_engine.IsHost || !SessionStarted || TransferActive || !saveManager.IsTactical)
             {
-                Debug.LogWarning($"[Multiplayer] HostBeginTacticalEntryTransfer blocked: host={_engine.IsHost} " +
+                MpLog.LogWarning($"[Multiplayer] HostBeginTacticalEntryTransfer blocked: host={_engine.IsHost} " +
                                  $"sessionStarted={SessionStarted} transferActive={TransferActive} " +
                                  $"tactical={saveManager.IsTactical}");
                 return false;
@@ -898,12 +898,12 @@ namespace Multiplayer.Network
             var blob = bytes.Value;
             if (blob == null || blob.Length == 0)
             {
-                Debug.LogError("[Multiplayer] tac-entry: no mid-tactical save bytes produced; aborting entry transfer.");
+                MpLog.LogError("[Multiplayer] tac-entry: no mid-tactical save bytes produced; aborting entry transfer.");
                 // Release the reveal-hold + tell clients — otherwise every peer wedges (live 2026-07-13).
                 AbortTacticalEntryTransfer("no save bytes (mid-tactical save write failed)");
                 yield break;
             }
-            Debug.Log($"[Multiplayer] tac-entry: host mid-tactical save written bytes={blob.Length} ms={NowMs() - t0}");
+            MpLog.Log($"[Multiplayer] tac-entry: host mid-tactical save written bytes={blob.Length} ms={NowMs() - t0}");
 
             SendBlob(blob, SerializationComponent.DefaultExtension);
 
@@ -916,7 +916,7 @@ namespace Multiplayer.Network
             // bar stuck at 0% forever. Publish the terminal value once (OpenBarrier just cleared the aggregate);
             // every ≤20 Hz snapshot then ships it and clients render the host row COMPLETE.
             _slotProgress[_engine.Session.LocalSlotIndex] = (1, 100);
-            Debug.Log("[Multiplayer] tac-entry: blob sent, LOADED barrier open, host marked loaded/done " +
+            MpLog.Log("[Multiplayer] tac-entry: blob sent, LOADED barrier open, host marked loaded/done " +
                       "(reveal-hold armed at launch, no self-enter)");
         }
 
@@ -933,13 +933,13 @@ namespace Multiplayer.Network
         public void AbortTacticalEntryTransfer(string reason)
         {
             if (!_engine.IsHost) return;
-            Debug.LogError("[Multiplayer] tac-entry transfer ABORT (" + reason + ") — self-reveal + notify clients");
+            MpLog.LogError("[Multiplayer] tac-entry transfer ABORT (" + reason + ") — self-reveal + notify clients");
             try
             {
                 _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferAbort,
                     MessageSerializer.SerializeEntryTransferAbort(reason)));
             }
-            catch (Exception e) { Debug.LogError("[Multiplayer] EntryTransferAbort broadcast failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] EntryTransferAbort broadcast failed: " + e.Message); }
             // Close the barrier this entry opened (HostBeginTacticalEntryTransfer opens it synchronously,
             // BEFORE the save write that can fail into here). Leaving it open would pin TransferActive true
             // and make every LATER mission refuse to start — the abort must not outlive itself.
@@ -962,7 +962,7 @@ namespace Multiplayer.Network
             if (_engine.IsHost) return;
             string reason = "";
             try { reason = MessageSerializer.DeserializeEntryTransferAbort(msg.Payload); } catch { /* reason is diagnostics-only */ }
-            Debug.LogError("[Multiplayer] tac-entry transfer aborted by host (" + reason + ") — lifting curtain");
+            MpLog.LogError("[Multiplayer] tac-entry transfer aborted by host (" + reason + ") — lifting curtain");
             // No deploy stash to drop (A1 ships no snapshot surface — the save transfer IS the entry). What
             // MUST be undone is the curtain this client dropped on the first chunk: no native level-load is
             // coming to lift it, and OnSaveChunk also cleared _revealed, so the curtain GATE would park
@@ -1007,7 +1007,7 @@ namespace Multiplayer.Network
                 saveManager.SaveGame(meta, SerializationComponent.DefaultExtension, written, showCurtain: false), ex);
             if (ex.Value != null || !written.Value)
             {
-                Debug.LogError("[Multiplayer] tac-entry: mid-tactical save write failed: " +
+                MpLog.LogError("[Multiplayer] tac-entry: mid-tactical save write failed: " +
                                (ex.Value != null ? ex.Value.Message : "written=false"));
                 yield break;
             }
@@ -1019,7 +1019,7 @@ namespace Multiplayer.Network
             var readEx = new ByRef<Exception>();
             yield return Timing.Current.CallSafe(saveManager.Serializer.ReadSavegameBinary(meta, result), readEx);
             if (readEx.Value != null)
-                Debug.LogError("[Multiplayer] tac-entry: save read-back failed: " + readEx.Value.Message);
+                MpLog.LogError("[Multiplayer] tac-entry: save read-back failed: " + readEx.Value.Message);
             else
                 outBytes.Value = result.Value;
 
@@ -1028,7 +1028,7 @@ namespace Multiplayer.Network
             var delEx = new ByRef<Exception>();
             yield return Timing.Current.CallSafe(saveManager.DeleteSaveGame(meta), delEx);
             if (delEx.Value != null)
-                Debug.LogWarning("[Multiplayer] tac-entry: transient save delete failed: " + delEx.Value.Message);
+                MpLog.LogWarning("[Multiplayer] tac-entry: transient save delete failed: " + delEx.Value.Message);
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -1067,7 +1067,7 @@ namespace Multiplayer.Network
             var peer = _deferredJoins[0];
             _deferredJoins.RemoveAt(0);
             if (!_engine.Session.Clients.ContainsKey(peer)) return; // left while waiting
-            Debug.Log($"[Multiplayer] Deferred join: host is back on the Geoscape → onboarding peer={peer} " +
+            MpLog.Log($"[Multiplayer] Deferred join: host is back on the Geoscape → onboarding peer={peer} " +
                       $"({_deferredJoins.Count} still waiting).");
             HostOnDemandJoin(peer);
         }
@@ -1081,7 +1081,7 @@ namespace Multiplayer.Network
                     geoscapeActive: geoscape,
                     transferActive: TransferActive))
             {
-                Debug.LogWarning($"[Multiplayer] HostOnDemandJoin({peerId}) blocked: guard closed " +
+                MpLog.LogWarning($"[Multiplayer] HostOnDemandJoin({peerId}) blocked: guard closed " +
                     $"(host={_engine.IsHost}, started={SessionStarted}, geoscape={geoscape}, " +
                     $"transferActive={TransferActive}); the peer is not onboarded.");
                 return false;
@@ -1093,7 +1093,7 @@ namespace Multiplayer.Network
             var timing = GetTiming();
             if (timing == null) return false;
 
-            Debug.Log($"[Multiplayer] HostOnDemandJoin({peerId}): capturing current state → per-peer transfer.");
+            MpLog.Log($"[Multiplayer] HostOnDemandJoin({peerId}): capturing current state → per-peer transfer.");
             timing.Start(HostOnDemandJoinCrt(peerId, saveManager));
             return true;
         }
@@ -1111,14 +1111,14 @@ namespace Multiplayer.Network
             yield return Timing.Current.CallSafe(saveManager.AutosaveGame(), ex);
             if (ex.Value != null)
             {
-                Debug.LogError("[Multiplayer] HostOnDemandJoin: autosave capture failed: " + ex.Value.Message);
+                MpLog.LogError("[Multiplayer] HostOnDemandJoin: autosave capture failed: " + ex.Value.Message);
                 yield break;
             }
 
             var meta = saveManager.AutoSave;
             if (!SessionLifecycle.FreshAutosaveCaptured(oldAutoSave, meta))
             {
-                Debug.LogError("[Multiplayer] HostOnDemandJoin: no fresh autosave captured (ironman mode or a " +
+                MpLog.LogError("[Multiplayer] HostOnDemandJoin: no fresh autosave captured (ironman mode or a " +
                                "write failure) — cannot onboard the mid-session joiner; it must rejoin from a manual save.");
                 yield break;
             }
@@ -1128,7 +1128,7 @@ namespace Multiplayer.Network
             var blob = result.Value;
             if (blob == null || blob.Length == 0)
             {
-                Debug.LogError("[Multiplayer] HostOnDemandJoin: captured save produced no bytes; aborting join transfer.");
+                MpLog.LogError("[Multiplayer] HostOnDemandJoin: captured save produced no bytes; aborting join transfer.");
                 yield break;
             }
 
@@ -1137,7 +1137,7 @@ namespace Multiplayer.Network
 
             var joinTransferId = Guid.NewGuid();
             SendBlobTo(peerId, blob, ext, joinTransferId, onDemandJoin: true);
-            Debug.Log($"[Multiplayer] HostOnDemandJoin({peerId}): unicast current-state blob sent (bytes={blob.Length}).");
+            MpLog.Log($"[Multiplayer] HostOnDemandJoin({peerId}): unicast current-state blob sent (bytes={blob.Length}).");
         }
 
         // Per-peer UNICAST variant of SendBlob (P1): split the blob into SaveChunk messages + a SaveDone,
@@ -1148,10 +1148,10 @@ namespace Multiplayer.Network
         {
             var crc = Crc32(blob);
             var chunkCount = (int)((blob.Length + ChunkSize - 1) / ChunkSize);
-            Debug.Log($"[Multiplayer] SendBlobTo peer={peerId}: bytes={blob.Length} chunks={chunkCount} " +
+            MpLog.Log($"[Multiplayer] SendBlobTo peer={peerId}: bytes={blob.Length} chunks={chunkCount} " +
                       $"crc=0x{crc:X8} join={onDemandJoin}");
             SendBlobCore(blob, ext, transferId, crc, onDemandJoin, m => _engine.SendToClient(peerId, m));
-            Debug.Log($"[Multiplayer] SendBlobTo peer={peerId}: all chunks + SaveDone unicast sent");
+            MpLog.Log($"[Multiplayer] SendBlobTo peer={peerId}: all chunks + SaveDone unicast sent");
         }
 
         /// <summary>
@@ -1163,7 +1163,7 @@ namespace Multiplayer.Network
         public void OnJoinReady(NetworkMessage msg)
         {
             if (!_engine.IsHost) return;
-            Debug.Log($"[Multiplayer] OnJoinReady from {msg.SenderSteamId} → re-seed wallet + channels.");
+            MpLog.Log($"[Multiplayer] OnJoinReady from {msg.SenderSteamId} → re-seed wallet + channels.");
             // Rejoin belt (rca-3 audit b): the joiner's Steam id is STABLE, but its fresh engine restarts the
             // intent nonce counter at 1 — drop ITS old (peer, surface, nonce) dedup window so its first
             // post-join intents aren't eaten as "duplicates". Per-peer: every other client's window (and its
@@ -1210,7 +1210,7 @@ namespace Multiplayer.Network
                 BroadcastLoadBoundaryBegin("new-campaign");
             }
             _newCampaign.Arm();
-            Debug.Log("[Multiplayer] New-campaign co-op bootstrap ARMED — native campaign creation " +
+            MpLog.Log("[Multiplayer] New-campaign co-op bootstrap ARMED — native campaign creation " +
                       "runs on the host; transfer fires at the first playable geoscape frame.");
         }
 
@@ -1226,7 +1226,7 @@ namespace Multiplayer.Network
             // The arm curtained every client; the disarm must un-curtain them, or a host that backs out of the
             // native new-game settings leaves two peers on a loading screen for a campaign nobody is creating.
             BroadcastLoadBoundaryAbort("host left the new-campaign flow");
-            Debug.Log("[Multiplayer] New-campaign co-op bootstrap disarmed.");
+            MpLog.Log("[Multiplayer] New-campaign co-op bootstrap disarmed.");
         }
 
         /// <summary>The lobby system-chat line clients see when the bootstrap could not be completed.</summary>
@@ -1251,7 +1251,7 @@ namespace Multiplayer.Network
             if (!_newCampaign.Armed || _newCampaign.Firing) return;
             if (!Sync.GeoRuntime.Instance.IsGeoscapeActive) return;
             _newCampaign.NoteGeoscapeEntered(NowMs());
-            Debug.Log("[Multiplayer] New-campaign bootstrap: geoscape playable — waiting for the geoscape-ready " +
+            MpLog.Log("[Multiplayer] New-campaign bootstrap: geoscape playable — waiting for the geoscape-ready " +
                       "seam (ModManager.OnGeoscapeStart), deadline " + NewCampaignBootstrap.ReadyTimeoutMs + " ms.");
         }
 
@@ -1279,7 +1279,7 @@ namespace Multiplayer.Network
             if (!_newCampaign.TryFire(_engine.IsHost, _engine.IsActiveSession, geoscape, TransferActive))
             {
                 if (geoscape && !_newCampaign.Firing)
-                    Debug.LogWarning("[Multiplayer] New-campaign bootstrap reached the READY seam but the " +
+                    MpLog.LogWarning("[Multiplayer] New-campaign bootstrap reached the READY seam but the " +
                                      "fire guard is closed (transfer in flight or session gone) — still armed; " +
                                      "the liveness deadline releases everyone if it never opens.");
                 return;
@@ -1295,7 +1295,7 @@ namespace Multiplayer.Network
                 return;
             }
 
-            Debug.Log("[Multiplayer] New-campaign bootstrap: geoscape READY → autosave + transfer.");
+            MpLog.Log("[Multiplayer] New-campaign bootstrap: geoscape READY → autosave + transfer.");
             timing.Start(NewCampaignAutosaveAndTransferCrt(saveManager, reseedAfterReveal: wasStarted));
         }
 
@@ -1324,7 +1324,7 @@ namespace Multiplayer.Network
             _newCampaign.Conclude();
             if (failure == null)
             {
-                Debug.Log("[Multiplayer] New-campaign bootstrap concluded: transfer launched.");
+                MpLog.Log("[Multiplayer] New-campaign bootstrap concluded: transfer launched.");
                 return;
             }
             // THE ARM CURTAINED EVERY PEER; A FAILURE MUST TAKE THAT CURTAIN BACK DOWN. Only the BACK
@@ -1334,7 +1334,7 @@ namespace Multiplayer.Network
             // named where the waiting happens. It also clears _loadBoundaryAnnounced, which the host's own
             // CurtainHoldArmed now reads: without this the host would strand itself the same way.
             BroadcastLoadBoundaryAbort("new-campaign bootstrap failed");
-            Debug.LogError("[Multiplayer] New-campaign co-op bootstrap FAILED: " + failure +
+            MpLog.LogError("[Multiplayer] New-campaign co-op bootstrap FAILED: " + failure +
                            " — no transfer was launched. Host continues solo (curtain gate: " +
                            Multiplayer.Harmony.CurtainTakedownGate.State() + "); clients told over system chat.");
             _engine.Session?.SystemChat(NewCampaignFailedNotice);
@@ -1422,7 +1422,7 @@ namespace Multiplayer.Network
             _revealed = false;
             _revealAllSent = false;
             _lastBarrierWaitLogMs = 0;
-            Debug.Log($"[Multiplayer] LOADED barrier open, host self-added id={_engine.LocalSteamId}.");
+            MpLog.Log($"[Multiplayer] LOADED barrier open, host self-added id={_engine.LocalSteamId}.");
         }
 
         /// <summary>
@@ -1473,7 +1473,7 @@ namespace Multiplayer.Network
             // door. Its lifetime is exactly this barrier's, so the barrier owns both ends of it (armed here,
             // expired in PerformDeferredLift).
             Multiplayer.Tactical.TacLaunchGate.ArmSessionEntry();
-            Debug.Log($"[Multiplayer] host reveal-hold armed (tac-entry): sessionStarted={SessionStarted} " +
+            MpLog.Log($"[Multiplayer] host reveal-hold armed (tac-entry): sessionStarted={SessionStarted} " +
                       $"revealed={_revealed} — host holds its loading screen until all clients load-complete.");
 
             // Law L71 — THE CURTAIN IS EVERYONE'S, and it falls when the LOAD starts, not when this peer's
@@ -1488,7 +1488,7 @@ namespace Multiplayer.Network
             // (Program.cs:9222) asserts this seam by DIRECT callee (`Reaches` walks CalleeSequence, not the
             // transitive graph), so hiding the send behind a helper would take that law down with it. Same
             // packet, same instant, same meaning as the helper — L143 asserts the three seams together.
-            Debug.Log("[Multiplayer] load boundary (tac-entry): broadcasting EntryTransferBegin — every peer curtains NOW.");
+            MpLog.Log("[Multiplayer] load boundary (tac-entry): broadcasting EntryTransferBegin — every peer curtains NOW.");
             _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferBegin));
         }
 
@@ -1514,7 +1514,7 @@ namespace Multiplayer.Network
             // Law L71 — THE CURTAIN IS EVERYONE'S, and it falls when the LOAD starts, not when this peer's own
             // bytes start arriving. A peer that can still click while another peer loads is not merely a UX
             // complaint — it is how a peer ends up INSIDE a sub-screen when its level is torn down (law L70).
-            Debug.Log("[Multiplayer] load boundary (" + seam +
+            MpLog.Log("[Multiplayer] load boundary (" + seam +
                       "): broadcasting EntryTransferBegin — every peer curtains NOW.");
             // THE ANNOUNCEMENT AND THE PUBLISH WINDOW ARE THE SAME EVENT. Telling every peer to curtain and
             // then saying nothing for the next 14 s is what put them on an empty bar; from here the phase-2
@@ -1529,7 +1529,7 @@ namespace Multiplayer.Network
             _lastSnapshotMs = -1;
             _lastReportedLoadPct = -1;
             try { _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferBegin)); }
-            catch (Exception e) { Debug.LogError("[Multiplayer] EntryTransferBegin broadcast failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] EntryTransferBegin broadcast failed: " + e.Message); }
         }
 
         /// <summary>
@@ -1545,7 +1545,7 @@ namespace Multiplayer.Network
         public void BroadcastLoadBoundaryAbort(string reason)
         {
             if (!_engine.IsHost) return;
-            Debug.LogWarning("[Multiplayer] load boundary ABORT (" + reason + ") — every peer un-curtains.");
+            MpLog.LogWarning("[Multiplayer] load boundary ABORT (" + reason + ") — every peer un-curtains.");
             // The announced load will never happen, so the publish window it opened closes with it.
             _loadBoundaryAnnounced = false;
             try
@@ -1553,7 +1553,7 @@ namespace Multiplayer.Network
                 _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferAbort,
                     MessageSerializer.SerializeEntryTransferAbort(reason)));
             }
-            catch (Exception e) { Debug.LogError("[Multiplayer] EntryTransferAbort broadcast failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] EntryTransferAbort broadcast failed: " + e.Message); }
         }
 
         /// <summary>
@@ -1575,7 +1575,7 @@ namespace Multiplayer.Network
         {
             if (_engine.IsHost) return;   // the host ignores its own broadcast (0x47 does the same)
             if (_downloadCurtain) return; // already curtained (duplicate delivery / a transfer in flight)
-            Debug.Log("[Multiplayer] load boundary BEGUN on the host — dropping the curtain now (no bytes yet).");
+            MpLog.Log("[Multiplayer] load boundary BEGUN on the host — dropping the curtain now (no bytes yet).");
             _downloadCurtain = true;
             _rxStarted = false;   // (a): the curtain is up and NOT one byte has been sent yet
             // The client half of the host's reset above: our tracker still carries the LAST load's
@@ -1638,7 +1638,7 @@ namespace Multiplayer.Network
             _loadPhaseActive = true;
             _lastBarrierWaitLogMs = 0;
             _revealAllSent = false;
-            Debug.Log($"[Multiplayer] self-load barrier armed ({why}): host={_engine.IsHost} — " +
+            MpLog.Log($"[Multiplayer] self-load barrier armed ({why}): host={_engine.IsHost} — " +
                       "holding reveal until every roster slot reports load-complete.");
         }
 
@@ -1657,7 +1657,7 @@ namespace Multiplayer.Network
             // wipe _begun/buffers mid-new-download. _completedTransferId is the last finished id.
             if (_completedTransferId != Guid.Empty && chunk.TransferId == _completedTransferId)
             {
-                Debug.Log($"[Multiplayer] OnSaveChunk: ignoring stale chunk from completed transfer {chunk.TransferId}.");
+                MpLog.Log($"[Multiplayer] OnSaveChunk: ignoring stale chunk from completed transfer {chunk.TransferId}.");
                 return;
             }
 
@@ -1672,7 +1672,7 @@ namespace Multiplayer.Network
                 // suspension forever. Abort like the incomplete/CRC branches in OnSaveDone.
                 if (chunk.TotalBytes <= 0 || chunk.TotalBytes > MaxTransferBytes)
                 {
-                    Debug.LogError($"[Multiplayer] OnSaveChunk: rejecting transfer {chunk.TransferId} — " +
+                    MpLog.LogError($"[Multiplayer] OnSaveChunk: rejecting transfer {chunk.TransferId} — " +
                                    $"declared TotalBytes={chunk.TotalBytes} out of bounds (0, {MaxTransferBytes}].");
                     ResetRx();
                     AbortDownloadCurtain("invalid transfer size");
@@ -1724,7 +1724,7 @@ namespace Multiplayer.Network
                 var chunkCount = (int)((chunk.TotalBytes + ChunkSize - 1) / ChunkSize);
                 _rxChunkSeen = new bool[chunkCount];
                 _rxChunksRemaining = chunkCount;
-                Debug.Log($"[Multiplayer] OnSaveChunk FIRST: transfer={chunk.TransferId} total={chunk.TotalBytes} chunks={chunkCount}");
+                MpLog.Log($"[Multiplayer] OnSaveChunk FIRST: transfer={chunk.TransferId} total={chunk.TotalBytes} chunks={chunkCount}");
             }
 
             // Fix #4: validate the chunk maps to a clean grid index BEFORE indexing _rxChunkSeen.
@@ -1746,12 +1746,12 @@ namespace Multiplayer.Network
                     ReportDownloadProgress();
                     // Throttled progress trace: every 64 chunks (and at completion). Not per-chunk.
                     if (_rxChunksRemaining == 0 || (_rxChunksRemaining % 64) == 0)
-                        Debug.Log($"[Multiplayer] OnSaveChunk: received={_rxReceived}/{_rxTotalBytes} remaining={_rxChunksRemaining}");
+                        MpLog.Log($"[Multiplayer] OnSaveChunk: received={_rxReceived}/{_rxTotalBytes} remaining={_rxChunksRemaining}");
                 }
             }
             else if (chunk.Chunk != null)
             {
-                Debug.LogWarning($"[Multiplayer] OnSaveChunk: rejecting malformed chunk " +
+                MpLog.LogWarning($"[Multiplayer] OnSaveChunk: rejecting malformed chunk " +
                                  $"(offset={chunk.Offset} len={chunk.Chunk.Length} total={_rxBuffer.Length} " +
                                  $"chunkSize={ChunkSize}) — not on the ChunkSize grid or out of bounds.");
             }
@@ -1763,11 +1763,11 @@ namespace Multiplayer.Network
             NoteProgress(); // transfer completing = progress
             var (transferId, totalBytes, ext, crc32, onDemandJoin) = MessageSerializer.DeserializeSaveDone(msg.Payload);
 
-            Debug.Log($"[Multiplayer] OnSaveDone: transfer={transferId} total={totalBytes} remaining={_rxChunksRemaining}");
+            MpLog.Log($"[Multiplayer] OnSaveDone: transfer={transferId} total={totalBytes} remaining={_rxChunksRemaining}");
 
             if (_rxBuffer == null || transferId != _rxTransferId)
             {
-                Debug.LogError("[Multiplayer] SaveDone for an unknown transfer; ignoring.");
+                MpLog.LogError("[Multiplayer] SaveDone for an unknown transfer; ignoring.");
                 SendPrepared(transferId, false);
                 // Match the incomplete/CRC branches below: a faulting-alloc transfer left _rxBuffer
                 // null with _rxTotalBytes>0 — without ResetRx TransferActive/IsDownloading stay true
@@ -1780,7 +1780,7 @@ namespace Multiplayer.Network
             // must be present. A redelivered chunk does not inflate this (see OnSaveChunk).
             if (totalBytes != _rxBuffer.Length || _rxChunksRemaining != 0)
             {
-                Debug.LogError($"[Multiplayer] Save transfer incomplete: got {_rxReceived}/{totalBytes} bytes, " +
+                MpLog.LogError($"[Multiplayer] Save transfer incomplete: got {_rxReceived}/{totalBytes} bytes, " +
                                $"{_rxChunksRemaining} chunk(s) still missing.");
                 SendPrepared(transferId, false);
                 ResetRx();
@@ -1791,7 +1791,7 @@ namespace Multiplayer.Network
             var actualCrc = Crc32(_rxBuffer);
             if (actualCrc != crc32)
             {
-                Debug.LogError($"[Multiplayer] Save transfer crc mismatch: 0x{actualCrc:X8} != 0x{crc32:X8}.");
+                MpLog.LogError($"[Multiplayer] Save transfer crc mismatch: 0x{actualCrc:X8} != 0x{crc32:X8}.");
                 SendPrepared(transferId, false);
                 ResetRx();
                 AbortDownloadCurtain("checksum mismatch");
@@ -1812,13 +1812,13 @@ namespace Multiplayer.Network
 
             var timing = GetTiming();
             if (timing == null) { SendPrepared(transferId, false); return; }
-            Debug.Log($"[Multiplayer] OnSaveDone: verified OK → ClientLoadCrt (onDemandJoin={onDemandJoin})");
+            MpLog.Log($"[Multiplayer] OnSaveDone: verified OK → ClientLoadCrt (onDemandJoin={onDemandJoin})");
             timing.Start(ClientLoadCrt(game, blob, loadExt, transferId, onDemandJoin));
         }
 
         private IEnumerator<NextUpdate> ClientLoadCrt(PhoenixGame game, byte[] blob, string ext, Guid transferId, bool onDemandJoin)
         {
-            Debug.Log($"[Multiplayer] ClientLoadCrt: preparing entry (onDemandJoin={onDemandJoin})");
+            MpLog.Log($"[Multiplayer] ClientLoadCrt: preparing entry (onDemandJoin={onDemandJoin})");
             yield return Timing.Current.Call(PrepareEntryFromBlobCrt(game, blob, ext));
 
             var ok = _pendingResult != null;
@@ -1831,24 +1831,24 @@ namespace Multiplayer.Network
             if (onDemandJoin)
             {
                 _onDemandJoiner = true;
-                Debug.Log($"[Multiplayer] ClientLoadCrt: on-demand join prepared ok={ok} → EnterLevel (no barrier)");
+                MpLog.Log($"[Multiplayer] ClientLoadCrt: on-demand join prepared ok={ok} → EnterLevel (no barrier)");
                 if (ok) EnterLevel();
                 else
                 {
-                    Debug.LogError("[Multiplayer] on-demand join: entry prepare FAILED; joiner cannot enter the level.");
+                    MpLog.LogError("[Multiplayer] on-demand join: entry prepare FAILED; joiner cannot enter the level.");
                     AbortDownloadCurtain("prepare");
                 }
                 yield break;
             }
 
-            Debug.Log($"[Multiplayer] ClientLoadCrt: prepared ok={ok} → SendPrepared");
+            MpLog.Log($"[Multiplayer] ClientLoadCrt: prepared ok={ok} → SendPrepared");
             // Ack the barrier AFTER the load is prepared but BEFORE FinishLevel.
             SendPrepared(transferId, ok);
             // Prepare failed: nothing will get our LOADED(true). Don't strand us on the curtain.
             if (!ok) { AbortDownloadCurtain("prepare"); yield break; }
             // The host no longer waits for us, so its BEGIN may already have come and gone (see
             // EnterLevel's latch). Enter now rather than waiting for a broadcast that will not repeat.
-            if (_beginPending) { Debug.Log("[Multiplayer] ClientLoadCrt: latched BEGIN → EnterLevel"); EnterLevel(); }
+            if (_beginPending) { MpLog.Log("[Multiplayer] ClientLoadCrt: latched BEGIN → EnterLevel"); EnterLevel(); }
         }
 
         // ══════════════════════════════════════════════════════════════════
@@ -1858,7 +1858,7 @@ namespace Multiplayer.Network
 
         private IEnumerator<NextUpdate> PrepareEntryFromBlobCrt(PhoenixGame game, byte[] blob, string ext)
         {
-            Debug.Log("[Multiplayer] PrepareEntryFromBlobCrt: start");
+            MpLog.Log("[Multiplayer] PrepareEntryFromBlobCrt: start");
 
             // Save-load / co-op save-transfer boundary: this coroutine is the SHARED host+client reload-entry
             // hook (host: HostSerializeAndSendCrt, client: ClientLoadCrt incl. the on-demand join path), and
@@ -1884,7 +1884,7 @@ namespace Multiplayer.Network
             var meta = metaRef.Value;
             if (meta == null || meta.LevelScene == null)
             {
-                Debug.LogError("[Multiplayer] Transferred save metadata could not be read.");
+                MpLog.LogError("[Multiplayer] Transferred save metadata could not be read.");
                 yield break;
             }
 
@@ -1925,7 +1925,7 @@ namespace Multiplayer.Network
                     ?.GetValue(game.SaveManager) as SavegameContentSection;
                 if (geoSection == null)
                 {
-                    Debug.LogError("[Multiplayer] co-op load: _currentGeoscapeSection not reachable via " +
+                    MpLog.LogError("[Multiplayer] co-op load: _currentGeoscapeSection not reachable via " +
                                    "reflection (PP/TFTV version mismatch?) — post-mission geoscape return will fail.");
                 }
                 else
@@ -1939,7 +1939,7 @@ namespace Multiplayer.Network
                     restoreSection = geoSection;
                     restoreObjects = geoSection.ContentObjects;
                     geoSection.ContentObjects = geoObjects.Value;
-                    Debug.Log("[Multiplayer] co-op load: geoscape return snapshot " +
+                    MpLog.Log("[Multiplayer] co-op load: geoscape return snapshot " +
                               (geoObjects.Value != null ? "captured from transfer blob"
                                                         : "MISSING in transfer blob — post-mission return will fail"));
                 }
@@ -1958,7 +1958,7 @@ namespace Multiplayer.Network
 
             _pendingResult = new LoadLevelGameResult(binding);
             prepared = true;
-            Debug.Log("[Multiplayer] PrepareEntryFromBlobCrt: _pendingResult ready");
+            MpLog.Log("[Multiplayer] PrepareEntryFromBlobCrt: _pendingResult ready");
 
             }
             finally
@@ -1967,7 +1967,7 @@ namespace Multiplayer.Network
                 {
                     if (restoreSection != null) restoreSection.ContentObjects = restoreObjects;
                     undoIdentity?.Invoke();
-                    Debug.LogError("[Multiplayer] PrepareEntryFromBlobCrt: prepare did NOT complete — restored this " +
+                    MpLog.LogError("[Multiplayer] PrepareEntryFromBlobCrt: prepare did NOT complete — restored this " +
                                    "peer's own SaveManager identity (LatestLoad/GameId/Difficulty/Ironman/DLC) and the " +
                                    "geoscape return section, so its next save is written under its OWN campaign.");
                 }
@@ -1990,7 +1990,7 @@ namespace Multiplayer.Network
         /// </summary>
         private void SendPrepared(Guid transferId, bool ok)
         {
-            Debug.Log($"[Multiplayer] SendPrepared (barrier ack — prepared, NOT yet loaded): " +
+            MpLog.Log($"[Multiplayer] SendPrepared (barrier ack — prepared, NOT yet loaded): " +
                       $"transfer={transferId} ok={ok} → host");
             var payload = MessageSerializer.SerializeClientLoaded(_engine.LocalSteamId, transferId, ok);
             _engine.SendToHost(new NetworkMessage(PacketType.ClientLoaded, payload));
@@ -2002,13 +2002,13 @@ namespace Multiplayer.Network
             NoteProgress(); // a client acked LOADED = live transfer (host-side clock)
             var (steamId, transferId, ok) = MessageSerializer.DeserializeClientLoaded(msg.Payload);
 
-            Debug.Log($"[Multiplayer] LOADED ack rx: sender={msg.SenderSteamId} payloadId={steamId} " +
+            MpLog.Log($"[Multiplayer] LOADED ack rx: sender={msg.SenderSteamId} payloadId={steamId} " +
                       $"transferId={transferId} (current {_transferId}) ok={ok}.");
 
             // Ignore a stale ack from a prior transfer: it must match the current transfer id.
             if (transferId != _transferId)
             {
-                Debug.LogWarning($"[Multiplayer] LOADED REJECTED (stale transfer): sender={msg.SenderSteamId} " +
+                MpLog.LogWarning($"[Multiplayer] LOADED REJECTED (stale transfer): sender={msg.SenderSteamId} " +
                                  $"transfer {transferId} (current {_transferId}); ignoring.");
                 return;
             }
@@ -2020,12 +2020,12 @@ namespace Multiplayer.Network
                 // LocalSteamId collision on DirectIP / the local 2-instance test rig. The payload
                 // steamId can collide across peers and stall release at Count=1.
                 _loadedPeers.Add(msg.SenderSteamId);
-                Debug.Log($"[Multiplayer] LOADED ACCEPTED: added sender={msg.SenderSteamId} to barrier set.");
+                MpLog.Log($"[Multiplayer] LOADED ACCEPTED: added sender={msg.SenderSteamId} to barrier set.");
                 TryReleaseBarrier();
             }
             else
             {
-                Debug.LogWarning($"[Multiplayer] LOADED REJECTED (ok=false): sender={msg.SenderSteamId} " +
+                MpLog.LogWarning($"[Multiplayer] LOADED REJECTED (ok=false): sender={msg.SenderSteamId} " +
                                  $"failed to load the transferred save.");
             }
         }
@@ -2037,7 +2037,7 @@ namespace Multiplayer.Network
         {
             if (!_engine.IsHost || !_barrierOpen) return;
             if (!BarrierReleased(_hostLoaded)) return;
-            Debug.Log($"[Multiplayer] TryReleaseBarrier: hostLoaded={_hostLoaded} " +
+            MpLog.Log($"[Multiplayer] TryReleaseBarrier: hostLoaded={_hostLoaded} " +
                       $"(loadedClients={_loadedPeers.Count}, no quorum) → begin.");
             Begin();
         }
@@ -2088,7 +2088,7 @@ namespace Multiplayer.Network
             // loaded (runtime defs minted) and the curtain/overlay still up — so the ~0.3-1.5 s
             // full-def-graph walk never fires lazily inside a mid-play walk/apply slice.
             Sync.DefOwnership.Warm();
-            Debug.Log("[Multiplayer] SendLoadComplete fired slot=" + _engine.Session.LocalSlotIndex +
+            MpLog.Log("[Multiplayer] SendLoadComplete fired slot=" + _engine.Session.LocalSlotIndex +
                       " (frame boundary past Playing — this peer can actually render now)");
             var slot = _engine.Session.LocalSlotIndex;
             _tracker.MarkDone(slot); // local self-done
@@ -2119,14 +2119,14 @@ namespace Multiplayer.Network
             // (JoinReady) so it re-seeds our wallet + channels onto the now-live geoscape.
             if (_onDemandJoiner)
             {
-                Debug.Log($"[Multiplayer] OnReachedPlaying slot={_engine.Session.LocalSlotIndex} (on-demand join) " +
+                MpLog.Log($"[Multiplayer] OnReachedPlaying slot={_engine.Session.LocalSlotIndex} (on-demand join) " +
                           "→ reveal now + JoinReady");
                 PerformDeferredLift();
                 _engine.SendToHost(new NetworkMessage(PacketType.JoinReady));
                 return;
             }
 
-            Debug.Log($"[Multiplayer] OnReachedPlaying slot={_engine.Session.LocalSlotIndex} " +
+            MpLog.Log($"[Multiplayer] OnReachedPlaying slot={_engine.Session.LocalSlotIndex} " +
                       $"→ hold + SendLoadComplete");
             // This peer is done but HELD (curtain gate parks every native lift until Revealed).
             // Label the held native loading screen so the wait reads as intentional. Update() re-writes
@@ -2142,7 +2142,7 @@ namespace Multiplayer.Network
         /// <summary>All peers: host says everyone is loaded → lift the held overlay now.</summary>
         public void OnRevealAll(NetworkMessage msg)
         {
-            Debug.Log("[Multiplayer] OnRevealAll received → PerformDeferredLift");
+            MpLog.Log("[Multiplayer] OnRevealAll received → PerformDeferredLift");
             PerformDeferredLift();
         }
 
@@ -2176,11 +2176,11 @@ namespace Multiplayer.Network
             // screen comes down while the other two still load. The arm's lifetime is its OWN entry, which
             // this reveal is the end of.
             _onDemandJoiner = false;
-            Debug.Log("[Multiplayer] PerformDeferredLift → reveal (native LiftCurtain + hide overlay)");
+            MpLog.Log("[Multiplayer] PerformDeferredLift → reveal (native LiftCurtain + hide overlay)");
             // Restore the native loading label ("Waiting for players…" → original) before the lift runs.
             // Setting _revealed above already opened the curtain gate, so any PARKED lift resumes now.
             try { Multiplayer.UI.NativeWidgetFactory.RestoreCurtainLabel(); }
-            catch (Exception e) { Debug.LogError("[Multiplayer] RestoreCurtainLabel failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] RestoreCurtainLabel failed: " + e.Message); }
             // Lift the native curtain we suppressed (animated alpha→0, unpauses rendering, fires
             // OnCurtainLifted → GeoscapeView unlocks input + enables sound). Reflection: mod can't ref the type.
             // ROOT FIX (input-lock latch): when CurtainLiftGatePatch holds a PARKED native lift, opening
@@ -2192,7 +2192,7 @@ namespace Multiplayer.Network
             {
                 if (Multiplayer.Harmony.CurtainLiftGatePatch.ParkedLiftLive)
                 {
-                    Debug.Log("[Multiplayer] PerformDeferredLift: parked native lift resuming — " +
+                    MpLog.Log("[Multiplayer] PerformDeferredLift: parked native lift resuming — " +
                               "skipping direct LiftCurtain (single tail).");
                 }
                 else
@@ -2209,10 +2209,10 @@ namespace Multiplayer.Network
                     }
                 }
             }
-            catch (Exception e) { Debug.LogError("[Multiplayer] native LiftCurtain failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] native LiftCurtain failed: " + e.Message); }
             // Hide the mod overlay roster.
             try { MultiplayerUI.Instance?.HideLoadOverlay(); }
-            catch (Exception e) { Debug.LogError("[Multiplayer] HideLoadOverlay failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] HideLoadOverlay failed: " + e.Message); }
 
             // The reveal IS the end of the load window on every peer (_revealed is set here for all of
             // them), so it is where the throttled progress lines pay their debt: exact final values plus
@@ -2244,14 +2244,14 @@ namespace Multiplayer.Network
                 // tail is about to do a frame later).
                 var sinceRevealMs = NowMs() - _revealedAtMs;
                 if (sinceRevealMs > 2000)
-                    Debug.LogWarning($"[Multiplayer] reveal input-lock repair fired {sinceRevealMs}ms after " +
+                    MpLog.LogWarning($"[Multiplayer] reveal input-lock repair fired {sinceRevealMs}ms after " +
                                      "reveal — curtain lift tail LOST (should be rare→never after the " +
                                      "parked-lift root fix); investigate.");
                 else
-                    Debug.Log("[Multiplayer] reveal input-lock repair: cleared LoadingScreenInputSet " +
+                    MpLog.Log("[Multiplayer] reveal input-lock repair: cleared LoadingScreenInputSet " +
                               "(early clear during lift fade — benign)");
             }
-            catch (Exception e) { Debug.LogError("[Multiplayer] RepairRevealInputLock failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] RepairRevealInputLock failed: " + e.Message); }
         }
 
         /// <summary>Host: a client reported its load complete (RELIABLE, event-driven done).</summary>
@@ -2310,7 +2310,7 @@ namespace Multiplayer.Network
         private static void CloseProgressWindow(ProgressGate gate, string what)
         {
             if (gate.Seen == 0) return;
-            Debug.Log($"[Multiplayer] {what} window closed — {gate.Seen} sample(s), last [{gate.Last}]");
+            MpLog.Log($"[Multiplayer] {what} window closed — {gate.Seen} sample(s), last [{gate.Last}]");
             gate.Band = null;
             gate.AtMs = 0;
             gate.Seen = 0;
@@ -2328,7 +2328,7 @@ namespace Multiplayer.Network
             var recvDetail = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent}"));
             var recvBand = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent / ProgressBandPct}"));
             if (ProgressDue(_recvGate, recvBand, recvDetail))
-                Debug.Log($"[Multiplayer] RosterProgress RECV [{recvDetail}]");
+                MpLog.Log($"[Multiplayer] RosterProgress RECV [{recvDetail}]");
             foreach (var r in rows) _tracker.Merge(r.SlotIndex, r.Phase, r.Percent);
         }
 
@@ -2360,7 +2360,7 @@ namespace Multiplayer.Network
             // force-revealed mid-load — it is waited out. Restart every slot's grace window here.
             _lastBarrierWaitLogMs = 0;
 
-            Debug.Log("[Multiplayer] BEGIN broadcast.");
+            MpLog.Log("[Multiplayer] BEGIN broadcast.");
             var startTicks = DateTime.UtcNow.Ticks;
             var payload = MessageSerializer.SerializeSessionBegin(startTicks);
             _engine.BroadcastToAll(new NetworkMessage(PacketType.SessionBegin, payload));
@@ -2386,7 +2386,7 @@ namespace Multiplayer.Network
                 // moment its prepare lands. This is what "nobody is kicked, a slow peer catches up"
                 // actually costs: one bool.
                 _beginPending = true;
-                Debug.Log("[Multiplayer] BEGIN received before this peer's save was prepared — latched; " +
+                MpLog.Log("[Multiplayer] BEGIN received before this peer's save was prepared — latched; " +
                           "entering as soon as the prepare finishes.");
                 return;
             }
@@ -2400,11 +2400,11 @@ namespace Multiplayer.Network
 
             // Single convergence point for both load paths (PhoenixGame.cs:263). The FinishLevel
             // Harmony gate (SaveLoadPatches) holds any vanilla-initiated call until this fires.
-            Debug.Log("[Multiplayer] EnterLevel → FinishLevel.");
+            MpLog.Log("[Multiplayer] EnterLevel → FinishLevel.");
             game.FinishLevel(_pendingResult);
             // Confirm PrepareLoadGame state was applied (was 0 → empty geoscape; expect >0 now).
             var dlcLen = sm.EnabledDlc != null ? sm.EnabledDlc.Length : 0;
-            Debug.Log($"[Multiplayer] co-op load: SaveManager.EnabledDlc.Length={dlcLen}");
+            MpLog.Log($"[Multiplayer] co-op load: SaveManager.EnabledDlc.Length={dlcLen}");
             _pendingResult = null;
             // NOTE: FinishLevel is fire-and-return (PhoenixGame.cs:263-267 pulses a monitor; the
             // game coroutine loads the world on LATER frames). Do NOT hide the overlay here — the
@@ -2525,7 +2525,7 @@ namespace Multiplayer.Network
             }
             if (waiting == null) return;   // everyone loaded → the AllDone release owns it
             _lastBarrierWaitLogMs = now;
-            Debug.Log("[Multiplayer] reveal barrier holding for " + string.Join(", ", waiting) +
+            MpLog.Log("[Multiplayer] reveal barrier holding for " + string.Join(", ", waiting) +
                       " — everyone waits until the last peer is in; there is no deadline on this wait.");
         }
 
@@ -2633,7 +2633,7 @@ namespace Multiplayer.Network
                         var pumpDetail = $"slot={_engine.Session.LocalSlotIndex} pct={pct} " +
                                          $"(src={(_liveProgressBar != null ? "nativeBar" : "levelProgress")})";
                         if (ProgressDue(_pumpGate, (pct / ProgressBandPct).ToString(), pumpDetail))
-                            Debug.Log($"[Multiplayer] phase-2 pump: {pumpDetail}");
+                            MpLog.Log($"[Multiplayer] phase-2 pump: {pumpDetail}");
                         if (InPhase2) ReportLoadProgress(pct);
                         else PublishHostEntryLoad(pct);
                     }
@@ -2692,16 +2692,16 @@ namespace Multiplayer.Network
             {
                 BroadcastSnapshot();
                 _loadPhaseActive = false;
-                Debug.Log("[Multiplayer] co-op load: roster all-done — stopping phase-2 snapshots.");
+                MpLog.Log("[Multiplayer] co-op load: roster all-done — stopping phase-2 snapshots.");
 
                 // Second barrier satisfied: every peer is loaded → reveal the world simultaneously.
                 if (_engine.IsHost && !_revealAllSent)
                 {
                     _revealAllSent = true;
-                    Debug.Log("[Multiplayer] AllDone → broadcast RevealAll");
+                    MpLog.Log("[Multiplayer] AllDone → broadcast RevealAll");
                     _engine.BroadcastToAll(new NetworkMessage( // reliable
                         PacketType.RevealAll, MessageSerializer.SerializeRevealAll(DateTime.UtcNow.Ticks)));
-                    Debug.Log($"[Multiplayer] host reveal released: AllDone — every roster slot load-complete " +
+                    MpLog.Log($"[Multiplayer] host reveal released: AllDone — every roster slot load-complete " +
                               $"(loadedClients={_loadedPeers.Count}).");
                     PerformDeferredLift(); // host reveals at the same instant
                     HostReseedAfterReveal(); // rca-4: every peer entered the loaded level → re-seed now
@@ -2735,7 +2735,7 @@ namespace Multiplayer.Network
         private void HostReseedAfterReveal()
         {
             if (!_engine.IsHost || !_reseedGate.TryConsume()) return;
-            Debug.Log("[Multiplayer] post-reload re-seed → full wallet + all channels + time re-anchor (+ tactical seed if tactical)");
+            MpLog.Log("[Multiplayer] post-reload re-seed → full wallet + all channels + time re-anchor (+ tactical seed if tactical)");
             _engine.Sync?.BroadcastFullWallet();
             _engine.Sync?.BroadcastAllChannels();
         }
@@ -2781,7 +2781,7 @@ namespace Multiplayer.Network
             var sendDetail = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent}"));
             var sendBand = string.Join(",", rows.Select(r => $"s{r.SlotIndex}:{r.Phase}/{r.Percent / ProgressBandPct}"));
             if (ProgressDue(_sendGate, sendBand, sendDetail))
-                Debug.Log($"[Multiplayer] RosterProgress SEND [{sendDetail}]");
+                MpLog.Log($"[Multiplayer] RosterProgress SEND [{sendDetail}]");
             var payload = MessageSerializer.SerializeRosterProgress(rows);
             _engine.BroadcastUnreliable(new NetworkMessage(PacketType.RosterProgress, payload));
         }
@@ -2818,7 +2818,7 @@ namespace Multiplayer.Network
                 var pp = meta as PPSavegameMetaData;
                 if (pp == null)
                 {
-                    Debug.LogError("[Multiplayer] co-op load: metadata is not PPSavegameMetaData; " +
+                    MpLog.LogError("[Multiplayer] co-op load: metadata is not PPSavegameMetaData; " +
                                    "cannot apply PrepareLoadGame state (EnabledDlc/GameId/Difficulty).");
                     return null;
                 }
@@ -2833,16 +2833,16 @@ namespace Multiplayer.Network
                 // Reflection can return null if PP/TFTV renames a member; warn specifically (instead of
                 // letting .SetValue NRE into the generic catch → silent empty geoscape) and apply the rest.
                 if (latestLoadProp == null)
-                    Debug.LogWarning("[Multiplayer] co-op load: PrepareLoadGame property 'LatestLoad' not found " +
+                    MpLog.LogWarning("[Multiplayer] co-op load: PrepareLoadGame property 'LatestLoad' not found " +
                                      "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
                 if (currentGameIdField == null)
-                    Debug.LogWarning("[Multiplayer] co-op load: PrepareLoadGame field '_currentGameId' not found " +
+                    MpLog.LogWarning("[Multiplayer] co-op load: PrepareLoadGame field '_currentGameId' not found " +
                                      "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
                 if (currentDifficultyField == null)
-                    Debug.LogWarning("[Multiplayer] co-op load: PrepareLoadGame field '_currentDifficulty' not found " +
+                    MpLog.LogWarning("[Multiplayer] co-op load: PrepareLoadGame field '_currentDifficulty' not found " +
                                      "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
                 if (enabledDlcField == null)
-                    Debug.LogWarning("[Multiplayer] co-op load: PrepareLoadGame field '_enabledDlc' not found " +
+                    MpLog.LogWarning("[Multiplayer] co-op load: PrepareLoadGame field '_enabledDlc' not found " +
                                      "via reflection (PP/TFTV version mismatch?) — geoscape state may not apply.");
 
                 // Snapshot BEFORE the write — these four fields plus IsIronmanMode ARE the identity of the
@@ -2873,13 +2873,13 @@ namespace Multiplayer.Network
                     }
                     catch (Exception e)
                     {
-                        Debug.LogError("[Multiplayer] co-op load: failed to RESTORE PrepareLoadGame state: " + e);
+                        MpLog.LogError("[Multiplayer] co-op load: failed to RESTORE PrepareLoadGame state: " + e);
                     }
                 };
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] co-op load: failed to apply PrepareLoadGame state: " + e);
+                MpLog.LogError("[Multiplayer] co-op load: failed to apply PrepareLoadGame state: " + e);
             }
             return null;
         }
@@ -2894,14 +2894,14 @@ namespace Multiplayer.Network
                 saveManager = game?.SaveManager;
                 if (game == null || saveManager == null || saveManager.Serializer == null)
                 {
-                    Debug.LogError("[Multiplayer] PhoenixGame/SaveManager not available.");
+                    MpLog.LogError("[Multiplayer] PhoenixGame/SaveManager not available.");
                     return false;
                 }
                 return true;
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] Failed to resolve PhoenixGame: " + e.Message);
+                MpLog.LogError("[Multiplayer] Failed to resolve PhoenixGame: " + e.Message);
                 return false;
             }
         }
@@ -2915,7 +2915,7 @@ namespace Multiplayer.Network
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] Failed to resolve Timing: " + e.Message);
+                MpLog.LogError("[Multiplayer] Failed to resolve Timing: " + e.Message);
                 return null;
             }
         }

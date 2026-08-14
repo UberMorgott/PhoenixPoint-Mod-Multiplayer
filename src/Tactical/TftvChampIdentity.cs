@@ -117,7 +117,7 @@ namespace Multiplayer.Tactical
             int key = TacticalActorKey.Of(actor);
             string tags = string.Join(", ", id.Tags.ToArray());
             if (!_announced.Add(AnnounceKey(key, id))) return;
-            Debug.Log("[Multiplayer][tac] HOST champ identity for key " + key + " — " + id.Name + " (" + tags +
+            MpLog.Log("[Multiplayer][tac] HOST champ identity for key " + key + " — " + id.Name + " (" + tags +
                       "). TFTV rolled this off a Stopwatch-seeded generator, so it rides every spawn record and " +
                       "every settle naming that key and the clients adopt it instead of rolling their own.");
         }
@@ -164,7 +164,7 @@ namespace Multiplayer.Tactical
                 }
                 if (!changed) return false;
                 Repaint(actor);
-                Debug.Log("[Multiplayer][tac] " + was + " is the host's " + id.Name + " (" +
+                MpLog.Log("[Multiplayer][tac] " + was + " is the host's " + id.Name + " (" +
                           string.Join(", ", (id.Tags ?? new List<string>()).ToArray()) + "), applied at " + when +
                           ". TFTV rolls a human enemy's rank and name off a Stopwatch-seeded generator, so this " +
                           "is the host's answer being adopted rather than a second roll.");
@@ -172,7 +172,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac] could not adopt the host's champ identity for " +
+                MpLog.LogError("[Multiplayer][tac] could not adopt the host's champ identity for " +
                                TacticalActorLifecycle.SafeName(actor) + " — this enemy keeps a different name " +
                                "and rank on this screen than it has on the host's: " + ex);
                 return false;
@@ -210,7 +210,7 @@ namespace Multiplayer.Tactical
                 var def = ResolveTag(n);
                 if (def == null)
                 {
-                    Debug.LogError("[Multiplayer][tac] the host's human enemy carries game tag '" + n + "' and no " +
+                    MpLog.LogError("[Multiplayer][tac] the host's human enemy carries game tag '" + n + "' and no " +
                                    "def of that name exists on this peer — mod parity should have made that " +
                                    "impossible (law 10). This enemy's rank stays different here.");
                     continue;
@@ -259,7 +259,7 @@ namespace Multiplayer.Tactical
             try { setter.Invoke(null, new object[] { icon, actor }); }
             catch (Exception ex)
             {
-                Debug.LogWarning("[Multiplayer][tac] TFTV's healthbar icon setter threw for " +
+                MpLog.LogWarning("[Multiplayer][tac] TFTV's healthbar icon setter threw for " +
                                  TacticalActorLifecycle.SafeName(actor) + "; the name is right and the rank ICON " +
                                  "stays whatever it was until that healthbar is rebuilt: " + ex.Message);
             }
@@ -289,7 +289,7 @@ namespace Multiplayer.Tactical
             _iconSetter = AccessTools.Method(type, "ChangeHealthBarIcon",
                                              new[] { typeof(ActorClassIconElement), typeof(TacticalActorBase) });
             if (_iconSetter == null)
-                Debug.LogWarning("[Multiplayer][tac] TFTV is loaded but TargetIcons.ChangeHealthBarIcon" +
+                MpLog.LogWarning("[Multiplayer][tac] TFTV is loaded but TargetIcons.ChangeHealthBarIcon" +
                                  "(ActorClassIconElement, TacticalActorBase) did not resolve — the host's rank " +
                                  "still crosses, but its healthbar icon is only repainted when that healthbar is " +
                                  "next rebuilt.");

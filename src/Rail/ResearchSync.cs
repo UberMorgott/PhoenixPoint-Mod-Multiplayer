@@ -223,7 +223,7 @@ namespace Multiplayer.Network.Sync
                     break;
             }
             if (ok)
-                Debug.Log("[Multiplayer][rail] ResearchSync HOST intent APPLIED op=" + op + " research=" +
+                MpLog.Log("[Multiplayer][rail] ResearchSync HOST intent APPLIED op=" + op + " research=" +
                           researchId + " peer=" + senderPeerId);
             else
                 IntentRail.Reject(SurfaceIds.GeoResearchIntent, senderPeerId,
@@ -234,12 +234,12 @@ namespace Multiplayer.Network.Sync
         {
             research = null;
             var geo = GenericApplier.GeoLevel();
-            if (geo == null) { Debug.LogWarning("[Multiplayer][rail] ResearchSync: no geoscape level — dropping apply"); return null; }
+            if (geo == null) { MpLog.LogWarning("[Multiplayer][rail] ResearchSync: no geoscape level — dropping apply"); return null; }
             var faction = geo.Factions.FirstOrDefault(f => f.Def != null && f.Def.Guid == factionGuid);
             research = faction?.Research;
             var live = research?.AllResearchesArray?.FirstOrDefault(r => r.ResearchID == researchId);
             if (live == null)
-                Debug.LogWarning("[Multiplayer][rail] ResearchSync: live element not found faction=" + factionGuid + " research=" + researchId);
+                MpLog.LogWarning("[Multiplayer][rail] ResearchSync: live element not found faction=" + factionGuid + " research=" + researchId);
             return live;
         }
 
@@ -282,8 +282,8 @@ namespace Multiplayer.Network.Sync
                 if (seeded && head != null)
                 {
                     try { (OnResearchStartedField?.GetValue(research) as Delegate)?.DynamicInvoke(head); }
-                    catch (Exception ex) { Debug.LogError("[Multiplayer][rail] ResearchSync: OnResearchStarted raise failed: " + ex); }
-                    Debug.Log("[Multiplayer][rail] ResearchSync CLIENT presented start " + headId);
+                    catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] ResearchSync: OnResearchStarted raise failed: " + ex); }
+                    MpLog.Log("[Multiplayer][rail] ResearchSync CLIENT presented start " + headId);
                 }
             }
         }
@@ -314,7 +314,7 @@ namespace Multiplayer.Network.Sync
             {
                 if (_deferralAnnounced) return;
                 _deferralAnnounced = true;
-                Debug.Log("[Multiplayer][rail] ResearchSync CLIENT deferred " + _deferredCompleted.Count +
+                MpLog.Log("[Multiplayer][rail] ResearchSync CLIENT deferred " + _deferredCompleted.Count +
                           " completed research window(s) — this peer is not on a geoscape map surface. " +
                           "Nothing is lost and nobody is waiting on it: it opens the moment this peer is " +
                           "back on the map.");
@@ -334,14 +334,14 @@ namespace Multiplayer.Network.Sync
                     if (geo.View != null && el.Faction != null)
                         ViewResearchCompletedMethod?.Invoke(geo.View, new object[] { el.Faction, el });
                 }
-                catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] ResearchSync: completed modal failed: " + ex.Message); }
+                catch (Exception ex) { MpLog.LogWarning("[Multiplayer][rail] ResearchSync: completed modal failed: " + ex.Message); }
                 try
                 {
                     if (geo.Log != null && el.Faction != null)
                         LogResearchCompletedMethod?.Invoke(geo.Log, new object[] { el.Faction, el });
                 }
-                catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] ResearchSync: completed log failed: " + ex.Message); }
-                Debug.Log("[Multiplayer][rail] ResearchSync CLIENT presented complete " + id);
+                catch (Exception ex) { MpLog.LogWarning("[Multiplayer][rail] ResearchSync: completed log failed: " + ex.Message); }
+                MpLog.Log("[Multiplayer][rail] ResearchSync CLIENT presented complete " + id);
             }
         }
 
@@ -390,7 +390,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[Multiplayer][rail] ResearchSync: research screen rebuild failed: " + ex.Message);
+                MpLog.LogWarning("[Multiplayer][rail] ResearchSync: research screen rebuild failed: " + ex.Message);
                 return true; // screen was open — a tracker nudge would not help here
             }
         }
@@ -437,7 +437,7 @@ namespace Multiplayer.Network.Sync
                 if (!_selectedFilterBindLogged)
                 {
                     _selectedFilterBindLogged = true;
-                    Debug.LogError("[Multiplayer][rail] UIModuleResearch._selectedButton did not bind — the " +
+                    MpLog.LogError("[Multiplayer][rail] UIModuleResearch._selectedButton did not bind — the " +
                                    "mirror repaint cannot tell which research filter tab the player is on, so " +
                                    "it keeps re-pressing Available on every rail batch (the tab will jump)");
                 }

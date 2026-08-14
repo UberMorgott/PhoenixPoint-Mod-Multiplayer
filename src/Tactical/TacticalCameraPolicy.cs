@@ -106,7 +106,7 @@ namespace Multiplayer.Tactical
             // Never silent: an unexplained camera that DOESN'T move is as confusing as one that does, and a
             // swallow with no log line is this repo's dominant bug class. One line per suppressed cinematic
             // (~tens per battle), so it is not gated behind MpDiag.
-            Debug.Log("[Multiplayer][tac] camera hint suppressed — " + hint + " for '" + actor.DisplayName +
+            MpLog.Log("[Multiplayer][tac] camera hint suppressed — " + hint + " for '" + actor.DisplayName +
                       "', this peer is watching '" + (ReferenceEquals(selected, null) ? "<nothing>" : selected.DisplayName) +
                       "'. Player turn: the cinematic belongs to the peers holding that soldier.");
             return false;

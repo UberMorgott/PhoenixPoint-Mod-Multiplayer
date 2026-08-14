@@ -151,10 +151,10 @@ namespace Multiplayer.Network.Sync
             {
                 _bindChecked = true;
                 if (FTiming == null || FUpdateSpeedState == null)
-                    Debug.LogError("[MP][time] FIELD BIND FAILED on UIModuleTimeControl — " +
+                    MpLog.LogError("[MP][time] FIELD BIND FAILED on UIModuleTimeControl — " +
                                    "client time gestures CANNOT be captured; clocks will desync.");
                 else
-                    Debug.Log("[MP][time] module fields bound");
+                    MpLog.Log("[MP][time] module fields bound");
             }
             return FTiming != null;
         }
@@ -297,7 +297,7 @@ namespace Multiplayer.Network.Sync
                     .Cast<MethodBase>().ToList();
                 if (targets.Count == 0)
                 {
-                    Debug.LogError("[MP][pause] SECTION-BAR SCOPE UNBOUND — no UIModuleGeoSectionBar." +
+                    MpLog.LogError("[MP][pause] SECTION-BAR SCOPE UNBOUND — no UIModuleGeoSectionBar." +
                                    "Activate*Content() found, so a peer opening a tab from the map will stop " +
                                    "the clock for EVERY peer (vanilla behaviour, the 2026-08-11 bug).");
                     // Harmony throws on an EMPTY target list and one throwing class aborts PatchAll, taking
@@ -306,7 +306,7 @@ namespace Multiplayer.Network.Sync
                                                    nameof(UIModuleGeoSectionBar.Init)));
                 }
                 else
-                    Debug.Log("[MP][pause] section-bar scope bound to " + targets.Count + " tab openers");
+                    MpLog.Log("[MP][pause] section-bar scope bound to " + targets.Count + " tab openers");
                 return targets;
             }
 
@@ -331,7 +331,7 @@ namespace Multiplayer.Network.Sync
         private static bool HonourTabPause(ulong peer)
         {
             bool own = AircraftDispatch.HasAircraftInFlight(peer);
-            Debug.Log("[MP][pause] peer=" + peer + " opened a tab → " + (own
+            MpLog.Log("[MP][pause] peer=" + peer + " opened a tab → " + (own
                 ? "PAUSED — this peer dispatched an aircraft that is still in the air, so its own departure "
                   + "stops the clock exactly like single player"
                 : "NOT paused — nothing this peer sent is still flying, and another peer may be steering on "
@@ -350,7 +350,7 @@ namespace Multiplayer.Network.Sync
             if (engine == null || !engine.IsActiveSession) return true;   // solo: vanilla, untouched
             if (engine.IsHost) return HonourTabPause(AircraftDispatch.HostPeer);
             Send(OpPause, PauseValTab, "pause (tab)");
-            Debug.Log("[MP][pause] this peer opened a tab — asking the host whether its own aircraft is " +
+            MpLog.Log("[MP][pause] this peer opened a tab — asking the host whether its own aircraft is " +
                       "still in the air; the map keeps running for everyone until the host says otherwise");
             return false;
         }
@@ -376,7 +376,7 @@ namespace Multiplayer.Network.Sync
                     if (geo != null && geo.Timing.Paused != pause)
                         Send(OpPause, pause ? (byte)1 : (byte)0, pause ? "pause" : "resume");
                 }
-                catch (Exception ex) { Debug.LogError("[MP][time] pause capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][time] pause capture failed: " + ex); }
                 return PausesLocally(pause);
             }
         }
@@ -398,7 +398,7 @@ namespace Multiplayer.Network.Sync
                     Send(OpSpeed, (byte)__instance.SelectedPresetTime, "speed preset=" + __instance.SelectedPresetTime);
                     FUpdateSpeedState?.SetValue(__instance, true);
                 }
-                catch (Exception ex) { Debug.LogError("[MP][time] speed capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][time] speed capture failed: " + ex); }
                 return false;
             }
         }
@@ -450,7 +450,7 @@ namespace Multiplayer.Network.Sync
                         Send(OpPause, paused ? (byte)1 : (byte)0, paused ? "pause (screen)" : "resume (screen)");
                     return PausesLocally(paused);
                 }
-                catch (Exception ex) { Debug.LogError("[MP][time] screen-pause capture failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[MP][time] screen-pause capture failed: " + ex); }
                 return false;
             }
         }
@@ -484,7 +484,7 @@ namespace Multiplayer.Network.Sync
                     else geo.Timing.Paused = paused;   // view mid-init: same write, same events
                 }
                 finally { _replayingRemotePause = false; }
-                Debug.Log("[MP][pause] peer=" + senderPeerId + " → paused=" + paused + " nonce=" + nonce);
+                MpLog.Log("[MP][pause] peer=" + senderPeerId + " → paused=" + paused + " nonce=" + nonce);
                 return;
             }
 
@@ -496,7 +496,7 @@ namespace Multiplayer.Network.Sync
             // Native funnel: clamps the index, writes Timing.Scale through the property
             // setter (events → anchor latch + flush) and keeps the host's label honest.
             module.SelectTimePreset(val);
-            Debug.Log("[MP][time] HOST intent APPLIED op=" + op + " val=" + val +
+            MpLog.Log("[MP][time] HOST intent APPLIED op=" + op + " val=" + val +
                       " nonce=" + nonce + " peer=" + senderPeerId);
         }
 

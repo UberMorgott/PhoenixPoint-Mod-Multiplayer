@@ -395,6 +395,7 @@ namespace RailCheck
             Add(laws, () => L429_ThePublishLagIsPricedAtThePreLatchRate.Check());
             Add(laws, () => L430_ASwallowedClickAlwaysHasAnExit.Check());
             Add(laws, () => L431_AnItemsAddressIsReadBeforeTheHitNotAfter.Check());
+            Add(laws, () => L432_EveryLogUsesTheOneDoor.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
             laws.Sort(StringComparer.Ordinal);
 
@@ -9778,7 +9779,7 @@ namespace RailCheck
                 yield return "L70 belt-not-a-finalizer: ViewStateExitLoudGate has no Finalizer — only a finalizer " +
                              "can see the exception a view-state exit threw. Without one the throw escapes into the " +
                              "level-switch coroutine again and the load hangs with no line naming the state";
-            else if (!Reaches(fin, "Debug", "LogError"))
+            else if (!Reaches(fin, "MpLog", "LogError"))
                 yield return "L70 belt-mute: the Exit finalizer does not log an ERROR. Swallowing the exception " +
                              "WITHOUT naming the state that threw is the silent-swallow class this project keeps " +
                              "paying for — the teardown would complete and the real bug would be invisible";

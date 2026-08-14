@@ -359,7 +359,7 @@ namespace Multiplayer.Tactical
             var target = parameter as TacticalAbilityTarget;
             if (!IsAutonomous(target)) return false;
             if (_saidUncovered.Add("block:" + target.AttackType))
-                Debug.Log("[Multiplayer][tac] a local " + target.AttackType + " reaction was BLOCKED here — " +
+                MpLog.Log("[Multiplayer][tac] a local " + target.AttackType + " reaction was BLOCKED here — " +
                           "reactions are the host's and arrive on 0x82 like every other action (law L83). " +
                           "Raising this peer's own would be a second shot from the same actor.");
             return true;
@@ -667,7 +667,7 @@ namespace Multiplayer.Tactical
             if (TacticalTurnSync.BattleAlreadyScored)
             {
                 if (_saidKeyless.Add("scored"))
-                    Debug.Log("[Multiplayer][tac] this mission is already scored — commands are no longer " +
+                    MpLog.Log("[Multiplayer][tac] this mission is already scored — commands are no longer " +
                               "relayed from this peer (law L334). Whatever is still being pressed here runs " +
                               "locally on a battle every peer has finished counting.");
                 return;
@@ -688,7 +688,7 @@ namespace Multiplayer.Tactical
                 // it — a raiser that bypasses both Execute wrappers. Loud: the host is mirroring its own copy,
                 // so this peer is about to show the same actor shooting twice.
                 if (_saidUncovered.Add("auto:" + name))
-                    Debug.LogError("[Multiplayer][tac] this CLIENT raised its own " + target.AttackType +
+                    MpLog.LogError("[Multiplayer][tac] this CLIENT raised its own " + target.AttackType +
                                    " with '" + name + "' on " + actor.name + " — reactions are the host's and " +
                                    "arrive on 0x82 (law L83), so this actor will shoot TWICE here. The raiser " +
                                    "reached Activate without passing TacticalAbility.Execute/ExecuteAndWait, " +
@@ -698,7 +698,7 @@ namespace Multiplayer.Tactical
             if (relay == RelayLocalDeclared)
             {
                 if (_saidUncovered.Add(name))
-                    Debug.Log("[Multiplayer][tac] '" + name + "' is DECLARED LOCAL — " + LocalReason(ability) +
+                    MpLog.Log("[Multiplayer][tac] '" + name + "' is DECLARED LOCAL — " + LocalReason(ability) +
                               ". It ran on this peer only, by design.");
                 return;
             }
@@ -707,7 +707,7 @@ namespace Multiplayer.Tactical
                 // Law L68a's runtime detector. ClientAiGate holds the whole AI turn, so a client reaching here
                 // with an AI faction's ORDERED ability means it decided something the host never did.
                 if (_saidKeyless.Add("ai:" + name))
-                    Debug.LogError("[Multiplayer][tac] this CLIENT activated '" + name + "' on " + actor.name +
+                    MpLog.LogError("[Multiplayer][tac] this CLIENT activated '" + name + "' on " + actor.name +
                                    ", whose faction is AI-controlled — the client ran enemy AI of its own. Enemy " +
                                    "actions are the host's and arrive on 0x82; a locally-decided one picks a " +
                                    "DIFFERENT target (the AI draws from UnityEngine.Random before it activates " +
@@ -729,7 +729,7 @@ namespace Multiplayer.Tactical
             {
                 string who = actor.name + " / " + name;
                 if (_saidKeyless.Add(who))
-                    Debug.LogError("[Multiplayer][tac] command NOT relayed for " + who + " — " +
+                    MpLog.LogError("[Multiplayer][tac] command NOT relayed for " + who + " — " +
                                    (key == 0 ? "the commanded actor has no shared key (no GeoTacUnitId and no derived battle key)"
                                     : string.IsNullOrEmpty(guid) ? "the ability def has no guid"
                                     : "the payload's " + unkeyable + " has no shared key, so no peer could tell " +
@@ -884,7 +884,7 @@ namespace Multiplayer.Tactical
             string refusal = TacticalActorDrive.RefuseLocalCommand(ability);
             if (refusal != null)
             {
-                Debug.Log("[Multiplayer][tac] this peer's command was REFUSED locally — " + refusal +
+                MpLog.Log("[Multiplayer][tac] this peer's command was REFUSED locally — " + refusal +
                           ". First-to-act-wins: that soldier is released the moment its own action ends, which " +
                           "no human has to do (postulate 2). Every other soldier stays commandable.");
                 SessionNotifier.ShowToast(refusal, modalFallback: true);
@@ -907,7 +907,7 @@ namespace Multiplayer.Tactical
                 // standing still forever waiting for an echo of an order nobody could send. Said out loud —
                 // the same sentence OnAbilityActivated would have printed one layer down.
                 if (_saidKeyless.Add("echo:" + actor.name + "/" + name))
-                    Debug.LogError("[Multiplayer][tac] ECHO bypass for " + actor.name + " / " + name + " — " +
+                    MpLog.LogError("[Multiplayer][tac] ECHO bypass for " + actor.name + " / " + name + " — " +
                                    (key == 0 ? "the commanded actor has no shared key"
                                     : string.IsNullOrEmpty(guid) ? "the ability def has no guid"
                                     : "the payload's " + unkeyable + " has no shared key") +
@@ -928,7 +928,7 @@ namespace Multiplayer.Tactical
                     WriteCommand(w, key, guid, target);
                     body = ms.ToArray();
                 }
-                Debug.Log("[Multiplayer][tac] ECHO host " + actor.name + " " + name + " " + Where(target) +
+                MpLog.Log("[Multiplayer][tac] ECHO host " + actor.name + " " + name + " " + Where(target) +
                           " — published and played from that record, through the same arbitration a peer's " +
                           "order takes (no Validate bypass).");
                 using (var ms = new MemoryStream(body))
@@ -956,7 +956,7 @@ namespace Multiplayer.Tactical
                 // Releasing the hold puts the screen back where the game itself puts it when an activation
                 // does not happen, which reads as "not yet" instead of as a dead button.
                 if (_saidUncovered.Add("echo2:" + key + "/" + name))
-                    Debug.LogWarning("[Multiplayer][tac] ECHO busy — " + actor.name + " already has an order " +
+                    MpLog.LogWarning("[Multiplayer][tac] ECHO busy — " + actor.name + " already has an order " +
                                      "waiting for the host's mirror, so this " + name + " click was REFUSED " +
                                      "rather than sent twice, and this peer's UI is released so the refusal is " +
                                      "visible. It is bounded: the wait gives up after " +
@@ -969,7 +969,7 @@ namespace Multiplayer.Tactical
                             "command " + actor.name + " " + name + " " + Where(target),
                             w => WriteCommand(w, key, guid, target));
             _awaitingEcho[key] = 0;
-            Debug.Log("[Multiplayer][tac] ECHO wait " + actor.name + " " + name + " " + Where(target) +
+            MpLog.Log("[Multiplayer][tac] ECHO wait " + actor.name + " " + name + " " + Where(target) +
                       " — this peer plays NOTHING now; its animation starts when the host's mirror lands, " +
                       "from the same record every other peer plays from.");
             return true;
@@ -1001,7 +1001,7 @@ namespace Multiplayer.Tactical
                 _awaitingEcho.Remove(key);
                 string why;
                 var actor = TacticalActorKey.ResolveActor(Tlc(), key, out why);
-                Debug.LogError("[Multiplayer][tac] ECHO LOST for " + (actor == null ? "actor " + key : actor.name) +
+                MpLog.LogError("[Multiplayer][tac] ECHO LOST for " + (actor == null ? "actor " + key : actor.name) +
                                " — an order was published " + (EchoCeilingFrames / 60) + "s ago and the host " +
                                "never mirrored it back, so that soldier never played the action every other " +
                                "peer may already have played. The wait is RELEASED here (the soldier is " +
@@ -1052,7 +1052,7 @@ namespace Multiplayer.Tactical
                 // entering play would give the peers two different ordinal sets.
                 if (!TacticalActorKey.Built) { _pendedSelections.Add(component); return; }
                 if (_saidKeyless.Add("sel:" + SafeActorName(actor)))
-                    Debug.LogWarning("[Multiplayer][tac] a weapon switch on " + SafeActorName(actor) + " cannot be " +
+                    MpLog.LogWarning("[Multiplayer][tac] a weapon switch on " + SafeActorName(actor) + " cannot be " +
                                      "relayed — that actor has no shared key at all, and the battle key map IS " +
                                      "built, so this is not the mission-entry window: it entered play on this peer " +
                                      "alone. The host's own answer for this actor rides every settle, so the peers " +
@@ -1108,13 +1108,13 @@ namespace Multiplayer.Tactical
                 if (key == 0)
                 {
                     if (_saidKeyless.Add("pendsel:" + SafeActorName(actor)))
-                        Debug.LogWarning("[Multiplayer][tac] " + SafeActorName(actor) + "'s weapon selection was " +
+                        MpLog.LogWarning("[Multiplayer][tac] " + SafeActorName(actor) + "'s weapon selection was " +
                                          "held for the battle key map and that map has now been built WITHOUT " +
                                          "keying it — this actor is on this peer alone, so the selection is " +
                                          "dropped here rather than held forever.");
                     continue;
                 }
-                Debug.Log("[Multiplayer][tac] relaying " + SafeActorName(actor) + "'s enter-play weapon selection " +
+                MpLog.Log("[Multiplayer][tac] relaying " + SafeActorName(actor) + "'s enter-play weapon selection " +
                           "now that the battle key map exists — it was raised before this peer could name it.");
                 RelaySelection(engine, actor, key, comp.SelectedEquipment);
             }
@@ -1175,7 +1175,7 @@ namespace Multiplayer.Tactical
             _replayOriginPeer = senderPeerId;
             try { comp.SetSelectedEquipment(eq); }
             finally { _replayOriginPeer = 0; }
-            Debug.Log("[Multiplayer][tac] HOST weapon switch from peer=" + senderPeerId + " ACCEPTED — " +
+            MpLog.Log("[Multiplayer][tac] HOST weapon switch from peer=" + senderPeerId + " ACCEPTED — " +
                       actor.name + " -> " + EqName(eq) + " nonce=" + nonce);
         }
 
@@ -1191,7 +1191,7 @@ namespace Multiplayer.Tactical
             if (!ResolveEquipment(actor, guid, out comp, out eq, out why))
             {
                 if (_saidKeyless.Add("resel:" + SafeActorName(actor) + ":" + guid))
-                    Debug.LogError("[Multiplayer][tac] the host's settle says " + SafeActorName(actor) + " is holding " +
+                    MpLog.LogError("[Multiplayer][tac] the host's settle says " + SafeActorName(actor) + " is holding " +
                                    "an item this peer cannot resolve — " + why + ". That soldier keeps the weapon " +
                                    "this screen shows, and any ability sourced from the host's one is refused here.");
                 return;
@@ -1200,7 +1200,7 @@ namespace Multiplayer.Tactical
             string had = EqName(comp.SelectedEquipment);
             comp.SetSelectedEquipment(eq);
             TacticalUiRepaint.MarkDirty();
-            Debug.LogWarning("[Multiplayer][tac] weapon selection RECONCILED at the host's settle — " + actor.name +
+            MpLog.LogWarning("[Multiplayer][tac] weapon selection RECONCILED at the host's settle — " + actor.name +
                              " was holding " + had + " and the host has " + EqName(eq) + ". A switch was lost on the " +
                              "wire in one direction or the other (both peers drop one at mission entry, before the " +
                              "battle key map exists), and this settle is what repairs it.");
@@ -1212,7 +1212,7 @@ namespace Multiplayer.Tactical
             var actor = TacticalActorKey.ResolveActor(Tlc(), key, out why);
             if (actor == null)
             {
-                Debug.LogWarning("[Multiplayer][tac] the host's weapon switch for actor " + key + " cannot be " +
+                MpLog.LogWarning("[Multiplayer][tac] the host's weapon switch for actor " + key + " cannot be " +
                                  "applied here — " + why + ". That soldier keeps the weapon this screen shows until " +
                                  "the host's next settle for it, which carries the selection and repairs this.");
                 return;
@@ -1220,7 +1220,7 @@ namespace Multiplayer.Tactical
             EquipmentComponent comp; Equipment eq;
             if (!ResolveEquipment(actor, guid, out comp, out eq, out why))
             {
-                Debug.LogError("[Multiplayer][tac] the host's weapon switch cannot be applied — " + why);
+                MpLog.LogError("[Multiplayer][tac] the host's weapon switch cannot be applied — " + why);
                 return;
             }
             using (SyncApplyScope.Enter()) comp.SetSelectedEquipment(eq);
@@ -1229,7 +1229,7 @@ namespace Multiplayer.Tactical
             // one, which reads exactly like "the switch never crossed" (law 11). MarkDirty only sets a flag;
             // the flush is TacticalUiRepaint's own Update postfix, so this is safe inside the apply scope.
             TacticalUiRepaint.MarkDirty();
-            Debug.Log("[Multiplayer][tac] CLIENT weapon switch applied — " + actor.name + " -> " +
+            MpLog.Log("[Multiplayer][tac] CLIENT weapon switch applied — " + actor.name + " -> " +
                       EqName(eq));
         }
 
@@ -1309,7 +1309,7 @@ namespace Multiplayer.Tactical
                 HostSettle(actor);
                 settled++;
             }
-            Debug.Log("[Multiplayer][tac] turn-edge settle sweep at " + when + " — " + settled +
+            MpLog.Log("[Multiplayer][tac] turn-edge settle sweep at " + when + " — " + settled +
                       " keyed live actor(s). Every peer's copy of an actor the host is not animating is " +
                       "corrected here; nothing else corrects it at all.");
         }
@@ -1334,7 +1334,7 @@ namespace Multiplayer.Tactical
             // rewritten after the fact.
             if (TacticalTurnSync.MissionEndSent)
             {
-                Debug.Log("[Multiplayer][tac] settle for " + SafeActorName(actor) + " WITHHELD — this mission " +
+                MpLog.Log("[Multiplayer][tac] settle for " + SafeActorName(actor) + " WITHHELD — this mission " +
                           "is already scored. The mission-end sweep was the host's last word about this board " +
                           "(law L334); anything after it would overwrite a result every peer has already " +
                           "counted" + (forced ? " (this one was FORCED, i.e. a reject rollback)" : "") + ".");
@@ -1485,7 +1485,7 @@ namespace Multiplayer.Tactical
                 // Law 11 / postulate 1: CanUseThisTurn is what greys the ability bar, and nothing native
                 // repaints it for a model change this peer did not click.
                 TacticalUiRepaint.MarkDirty();
-                Debug.LogWarning("[Multiplayer][tac] per-turn uses of " + ab.AbilityDef.name + " on " + actor.name +
+                MpLog.LogWarning("[Multiplayer][tac] per-turn uses of " + ab.AbilityDef.name + " on " + actor.name +
                                  " reconciled at the host's settle — " + have + " -> " + want + ". The counter is " +
                                  "keyed by DEF (TacticalActor:113), so a use this peer spent on an order the host " +
                                  "refused blocked that ability on EVERY weapon until the turn edge, and no weapon " +
@@ -1522,7 +1522,7 @@ namespace Multiplayer.Tactical
             // not see a trait, so a settle that only hands a soldier back would leave him greyed out on the
             // very screen that is watching him.
             TacticalUiRepaint.MarkDirty();
-            Debug.LogWarning("[Multiplayer][tac] ability traits of " + actor.name + " reconciled at the host's " +
+            MpLog.LogWarning("[Multiplayer][tac] ability traits of " + actor.name + " reconciled at the host's " +
                              "settle — [" + was + "] -> [" + string.Join(",", host.ToArray()) + "]. 'terminal' " +
                              "in either list IS that soldier's turn (TacticalActor:198 HasEndedTurn), so a " +
                              "difference here was a soldier one peer could still move and another could not.");
@@ -1555,14 +1555,14 @@ namespace Multiplayer.Tactical
                                              SyncProtocol.EncodeEnvelope(SurfaceIds.TacCommand, SyncKind.StateDelta, inner));
                 if (excludePeer == 0) engine.BroadcastToAll(msg);
                 else engine.BroadcastExcept(excludePeer, msg);
-                Debug.Log("[Multiplayer][tac] HOST " + what + " seq=" + seq +
+                MpLog.Log("[Multiplayer][tac] HOST " + what + " seq=" + seq +
                           (excludePeer == 0 ? "" : " (skipping the peer that played it)"));
             }
             catch (Exception ex)
             {
                 // A dropped mirror leaves the other peers watching a soldier that never moves; a dropped
                 // settle leaves them permanently diverged. Never silent.
-                Debug.LogError("[Multiplayer][tac] HOST " + what + " FAILED to reach the wire — the peers are now " +
+                MpLog.LogError("[Multiplayer][tac] HOST " + what + " FAILED to reach the wire — the peers are now " +
                                "showing different battles: " + ex);
             }
         }
@@ -1699,7 +1699,7 @@ namespace Multiplayer.Tactical
             var fell = SourceOf(any);
             if (fell != null && !ReferenceEquals(fell, selected) &&
                 _saidUncovered.Add("resolve:" + TacticalActorKey.Of(actor) + "/" + guid + "/" + EqName(fell)))
-                Debug.LogWarning("[Multiplayer][tac] ability guid " + guid + " on " + SafeActorName(actor) +
+                MpLog.LogWarning("[Multiplayer][tac] ability guid " + guid + " on " + SafeActorName(actor) +
                                  " resolved to the instance sourced from " + EqName(fell) + ", but he has " +
                                  EqName(selected) + " selected. No instance of that def belongs to the selected " +
                                  "weapon, so this is first-match-by-guid — the answer (offered, refused, " +
@@ -1744,7 +1744,7 @@ namespace Multiplayer.Tactical
             // Validate anyway, and a refused intent must leave no trace on host state (law 3).
             if (actor.TacticalFaction == null || !actor.TacticalFaction.IsControlledByPlayer) return;
             comp.SetSelectedEquipment(eq);
-            Debug.Log("[Multiplayer][tac] HOST pre-selected " + EqName(eq) + " on " + SafeActorName(actor) +
+            MpLog.Log("[Multiplayer][tac] HOST pre-selected " + EqName(eq) + " on " + SafeActorName(actor) +
                       " before validating its order — the game's own Activate:1087-1090 was about to do the " +
                       "same, and GetDisabledState would otherwise have refused with EquipmentNotSelected. " +
                       "Seeing this often means a peer's weapon switch is not reaching the host.");
@@ -1781,7 +1781,7 @@ namespace Multiplayer.Tactical
             if (own != null && own.GameObject != null) { target.GameObject = own.GameObject; return; }
             var aim = target.DamageReceiver == null ? null : target.DamageReceiver.GetAimPoint();
             target.GameObject = aim == null ? target.Actor.gameObject : aim.gameObject;
-            Debug.Log("[Multiplayer][tac] " + SafeActorName(target.Actor) + " could not be re-targeted locally for " +
+            MpLog.Log("[Multiplayer][tac] " + SafeActorName(target.Actor) + " could not be re-targeted locally for " +
                       "a mirrored " + (ability.AbilityDef == null ? "attack" : ability.AbilityDef.name) +
                       " — falling back to its own scene object so the replay cannot throw and strand the actor.");
         }
@@ -1856,7 +1856,7 @@ namespace Multiplayer.Tactical
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError("[Multiplayer][tac] could not enumerate the targets of " +
+                    MpLog.LogError("[Multiplayer][tac] could not enumerate the targets of " +
                                    (ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name) +
                                    " to check the one a peer picked — the order is ACCEPTED on the game's own gate " +
                                    "alone: " + ex);
@@ -2108,7 +2108,7 @@ namespace Multiplayer.Tactical
             FillLiveTargetObject(ability, target);
             try { ability.Activate(target); }
             finally { _replayOriginPeer = 0; }
-            Debug.Log("[Multiplayer][tac] HOST command from peer=" + senderPeerId + " ACCEPTED — " + actor.name +
+            MpLog.Log("[Multiplayer][tac] HOST command from peer=" + senderPeerId + " ACCEPTED — " + actor.name +
                       " " + (ability.AbilityDef == null ? "?" : ability.AbilityDef.name) + " → " +
                       Where(target) + " nonce=" + nonce);
         }
@@ -2149,7 +2149,7 @@ namespace Multiplayer.Tactical
                     _deferred.RemoveAt(i);
                     // A hold nobody can see is this repo's dominant bug class. Say it, refuse it, and let the
                     // reject nudge snap that peer's speculative play back.
-                    Debug.LogError("[Multiplayer][tac] a held order for actor " + d.Key + " from peer=" + d.Peer +
+                    MpLog.LogError("[Multiplayer][tac] a held order for actor " + d.Key + " from peer=" + d.Peer +
                                    " gave up after " + DeferCeilingSeconds + "s — that soldier never finished the " +
                                    "SAME peer's previous order, so an ability is stuck on the host, not merely slow.");
                     // NOTIFY, and it is on L123's arm-(g) allowlist for it. The hold this gives up on exists
@@ -2182,7 +2182,7 @@ namespace Multiplayer.Tactical
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError("[Multiplayer][tac] a held order for actor " + d.Key + " from peer=" + d.Peer +
+                    MpLog.LogError("[Multiplayer][tac] a held order for actor " + d.Key + " from peer=" + d.Peer +
                                    " threw when it was released: " + ex);
                 }
             }
@@ -2268,7 +2268,7 @@ namespace Multiplayer.Tactical
             if (!_saidHeldOverflow)
             {
                 _saidHeldOverflow = true;
-                Debug.LogError("[Multiplayer][tac] " + HeldRecordCeiling + " battle records are waiting for a " +
+                MpLog.LogError("[Multiplayer][tac] " + HeldRecordCeiling + " battle records are waiting for a " +
                                "battle this peer can name actors in — the hold is FULL, and every record from " +
                                "here on is applied immediately, which for an actor-keyed op means refused. This " +
                                "peer has not joined the host's battle.");
@@ -2286,7 +2286,7 @@ namespace Multiplayer.Tactical
             if (BattleNotReadyHere())
             {
                 if (++_heldFrames < HoldCeilingFrames) return;
-                Debug.LogError("[Multiplayer][tac] " + _heldRecords.Count + " battle record(s) have been held for " +
+                MpLog.LogError("[Multiplayer][tac] " + _heldRecords.Count + " battle record(s) have been held for " +
                                (_heldFrames / 60) + "s waiting for a battle this peer can name actors in, and are " +
                                "being applied ANYWAY. Whatever cannot resolve is refused with its own sentence " +
                                "from here — the hold is a head start, never a place a record disappears into.");
@@ -2295,7 +2295,7 @@ namespace Multiplayer.Tactical
             _heldRecords.Clear();
             _saidHeldOverflow = false;
             _heldFrames = 0;
-            Debug.Log("[Multiplayer][tac] replaying " + batch.Length + " battle record(s) held while this peer " +
+            MpLog.Log("[Multiplayer][tac] replaying " + batch.Length + " battle record(s) held while this peer " +
                       "could not name an actor — the host broadcasts from the moment IT enters play, which on " +
                       "2026-08-08 was before a joining peer's save transfer had even finished.");
             foreach (var p in batch) ApplyInbound(p);
@@ -2331,7 +2331,7 @@ namespace Multiplayer.Tactical
                     else if (op == OpSelectEquipment) ApplySelectEquipment(r.ReadInt32(), WireString.ReadKey(r));
                     else
                     {
-                        Debug.LogError("[Multiplayer][tac] unknown host→all command op " + op + " (seq=" + seq +
+                        MpLog.LogError("[Multiplayer][tac] unknown host→all command op " + op + " (seq=" + seq +
                                        ") — this peer can no longer follow the shared battle.");
                         return;
                     }
@@ -2340,7 +2340,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac] command inbound FAILED — this peer's battle has diverged from " +
+                MpLog.LogError("[Multiplayer][tac] command inbound FAILED — this peer's battle has diverged from " +
                                "the host's: " + ex);
             }
         }
@@ -2363,7 +2363,7 @@ namespace Multiplayer.Tactical
         private static void NoteCatchUpBurst()
         {
             if (!CatchUpBurst(Time.frameCount, ref _burstFrame, ref _burstCount)) return;
-            Debug.LogWarning("[Multiplayer][tac] CATCH-UP BURST — more than one host order arrived in the same " +
+            MpLog.LogWarning("[Multiplayer][tac] CATCH-UP BURST — more than one host order arrived in the same " +
                              "frame, so this peer had fallen behind and is replaying what it missed. The game's " +
                              "own action channel collapses each soldier to its newest order and the settle/damage " +
                              "records are already at NOW; what you SEE is one stale animation per soldier (law L104).");
@@ -2679,13 +2679,13 @@ namespace Multiplayer.Tactical
                     foreach (var hint in TargetingCameraHints) director.RemoveHint(hint);
                 RestoreHealthbars(tlc);
                 if (ReferenceEquals(before, view.CurrentState)) return;   // already neutral — nothing to report
-                Debug.Log("[Multiplayer][tac] released this peer's UI from " + SafeActorName(actor) + " (" + why +
+                MpLog.Log("[Multiplayer][tac] released this peer's UI from " + SafeActorName(actor) + " (" + why +
                           ") — it was held in " + (before == null ? "<none>" : before.GetType().Name) +
                           ", the state the game's own activation path leaves before an ability runs.");
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[Multiplayer][tac] could not release this peer's UI from " +
+                MpLog.LogWarning("[Multiplayer][tac] could not release this peer's UI from " +
                                  SafeActorName(actor) + " (" + why + "): " + ex.Message + ". The order still " +
                                  "plays; a local aim HUD may keep drawing over an actor the engine now owns.");
             }
@@ -2761,10 +2761,10 @@ namespace Multiplayer.Tactical
             if (CommandMustBeRefused(actor != null, unresolved == null ? 0 : unresolved.Count))
             {
                 if (actor == null)
-                    Debug.LogError("[Multiplayer][tac] host command for actor " + key + " cannot be played here — " +
+                    MpLog.LogError("[Multiplayer][tac] host command for actor " + key + " cannot be played here — " +
                                    why + ". That soldier will stand still on this screen while it acts on the host's.");
                 else
-                    Debug.LogError("[Multiplayer][tac] host command for " + actor.name + " NOT played here — " +
+                    MpLog.LogError("[Multiplayer][tac] host command for " + actor.name + " NOT played here — " +
                                    string.Join("; ", unresolved.ToArray()) + ". The host's damage still applies; " +
                                    "only the animation is missing on this screen.");
                 // AND THE CLICKING PEER GETS ITS SCREEN BACK (law L231). Since A9 the native activation —
@@ -2781,7 +2781,7 @@ namespace Multiplayer.Tactical
             var ability = ResolveAbility(actor, guid);
             if (ability == null)
             {
-                Debug.LogError("[Multiplayer][tac] " + actor.name + " has no ability with guid " + guid +
+                MpLog.LogError("[Multiplayer][tac] " + actor.name + " has no ability with guid " + guid +
                                " in his own ability list on this peer — nothing here asked whether the def " +
                                "exists, so this is an ABILITY-SET difference on this actor and says nothing " +
                                "about mod parity. The order is dropped and this peer's battle has diverged.");
@@ -2790,7 +2790,7 @@ namespace Multiplayer.Tactical
             }
             if (!IsRider(ability))
             {
-                Debug.LogError("[Multiplayer][tac] the host mirrored '" + ability.AbilityDef.name + "', which is " +
+                MpLog.LogError("[Multiplayer][tac] the host mirrored '" + ability.AbilityDef.name + "', which is " +
                                "not a declared rider — the two peers disagree about what this arc carries.");
                 ReleaseLocalUiHolding(actor, "a mirrored order this peer does not treat as a rider");
                 return;
@@ -2898,7 +2898,7 @@ namespace Multiplayer.Tactical
                 if (!q.Ability.IsEnqueued)
                 {
                     _queuedMirrors.RemoveAt(i);
-                    Debug.LogError("[Multiplayer][tac] a mirrored " + q.Name + " on " + q.Actor.name + " was " +
+                    MpLog.LogError("[Multiplayer][tac] a mirrored " + q.Name + " on " + q.Actor.name + " was " +
                                    "DROPPED before it played — it left this actor's action channel without " +
                                    "ever executing, which ActionComponent.PlayActionAfterCurrent:80-91 does " +
                                    "when a later solo enqueue on the same soldier cancels everything behind " +
@@ -2910,7 +2910,7 @@ namespace Multiplayer.Tactical
                 }
                 if (++q.WaitedFrames < QueuedMirrorCeilingFrames) { _queuedMirrors[i] = q; continue; }
                 _queuedMirrors.RemoveAt(i);
-                Debug.LogError("[Multiplayer][tac] a mirrored " + q.Name + " on " + q.Actor.name + " NEVER " +
+                MpLog.LogError("[Multiplayer][tac] a mirrored " + q.Name + " on " + q.Actor.name + " NEVER " +
                                "STARTED — it is STILL enqueued after " + (q.WaitedFrames / 60) + "s, behind " +
                                (q.Actor.ExecutingAbilities.Count == 0
                                     ? "<nothing, so nothing is going to end and release it>"
@@ -2956,7 +2956,7 @@ namespace Multiplayer.Tactical
                 string key = "tel:" + name + "/" + (view == null ? "?" : view.ShownMode.ToString()) + "/" +
                              (faction != null && faction.IsControlledByAI) + "/" + ability.TrackWithCamera;
                 if (!_saidUncovered.Add(key)) return;
-                Debug.Log("[Multiplayer][tac] MIRROR play " + actor.name + " " + name +
+                MpLog.Log("[Multiplayer][tac] MIRROR play " + actor.name + " " + name +
                           " shownMode=" + (view == null ? "<no view>" : view.ShownMode.ToString()) +
                           " currentFaction=" + (faction == null || faction.TacticalFactionDef == null
                                                 ? "<none>" : faction.TacticalFactionDef.name) +
@@ -2966,7 +2966,7 @@ namespace Multiplayer.Tactical
                           " cameraChasing=" + (director != null && director.Chasing) +
                           " arrival+" + ((Time.realtimeSinceStartup - _recordArrived) * 1000f).ToString("0.#") + "ms");
             }
-            catch (Exception ex) { Debug.LogWarning("[Multiplayer][tac] mirror telemetry failed: " + ex.Message); }
+            catch (Exception ex) { MpLog.LogWarning("[Multiplayer][tac] mirror telemetry failed: " + ex.Message); }
         }
 
         /// <summary>THE WHOLE HOLD DECISION, PURE — and it is the rail's only guarantee that a MIRRORED
@@ -3046,7 +3046,7 @@ namespace Multiplayer.Tactical
                 var actor = TacticalActorKey.ResolveActor(tlc, kv.Key, out why);
                 if (actor == null)
                 {
-                    Debug.LogError("[Multiplayer][tac] settle for actor " + kv.Key + " DROPPED — " + why +
+                    MpLog.LogError("[Multiplayer][tac] settle for actor " + kv.Key + " DROPPED — " + why +
                                    ". That actor keeps whatever position and AP this peer computed for itself.");
                     (lost ?? (lost = new List<int>())).Add(kv.Key);
                     continue;
@@ -3062,7 +3062,7 @@ namespace Multiplayer.Tactical
                         // refused throw, a stranded coroutine — turned this hold into a correction that was
                         // swallowed with nothing but a repeating warning to show for it.
                         held.Forced = true;
-                        Debug.LogError("[Multiplayer][tac] the settle for " + actor.name + " waited " +
+                        MpLog.LogError("[Multiplayer][tac] the settle for " + actor.name + " waited " +
                                        (held.WaitedFrames / 60) + "s for it to stop executing an ability and is " +
                                        "being applied ANYWAY. That ability is stuck on this peer; the host's " +
                                        "position and AP win.");
@@ -3071,14 +3071,14 @@ namespace Multiplayer.Tactical
                     if (!held.Forced)
                     {
                         if (held.WaitedFrames % SettleWarnFrames == 0)
-                            Debug.LogWarning("[Multiplayer][tac] holding the settle for " + actor.name + " — it has " +
+                            MpLog.LogWarning("[Multiplayer][tac] holding the settle for " + actor.name + " — it has " +
                                              "been executing an ability for " + (held.WaitedFrames / 60) + "s. The " +
                                              "correction is still pending, not lost.");
                         continue;
                     }
                 }
                 if (kv.Value.Forced && actor.HasExecutingAbility())
-                    Debug.LogWarning("[Multiplayer][tac] applying a FORCED settle to " + actor.name + " while it is " +
+                    MpLog.LogWarning("[Multiplayer][tac] applying a FORCED settle to " + actor.name + " while it is " +
                                      "still executing an ability — the host refused that order, so this peer's " +
                                      "speculative play is being overruled mid-flight.");
                 // ONE ACTOR'S FAILURE MAY NOT WEDGE THE QUEUE (2026-08-04 RCA). A throw out of ApplySettle
@@ -3093,7 +3093,7 @@ namespace Multiplayer.Tactical
                 try { ApplySettle(kv.Key, actor, kv.Value); }
                 catch (Exception ex)
                 {
-                    Debug.LogError("[Multiplayer][tac] the settle for " + actor.name + " THREW and is being " +
+                    MpLog.LogError("[Multiplayer][tac] the settle for " + actor.name + " THREW and is being " +
                                    "dropped — that actor keeps this peer's own position and AP until the next " +
                                    "resnapshot. Every other actor's settle still applies: " + ex);
                 }
@@ -3188,7 +3188,7 @@ namespace Multiplayer.Tactical
                     // writing them rewinds a kill bonus every peer granted itself. Position is never stale —
                     // no death moves an actor — and still applies.
                     if (TacticalDamageSync.StatsAreStale(s.Epoch))
-                        Debug.LogWarning("[Multiplayer][tac] the settle for " + actor.name + " is OLDER than a " +
+                        MpLog.LogWarning("[Multiplayer][tac] the settle for " + actor.name + " is OLDER than a " +
                                          "death this peer already replayed — its ap=" + s.Ap.ToString("0.##") +
                                          " wp=" + s.Wp.ToString("0.##") + " predate that kill's own will-point " +
                                          "grant, so only its position is applied. The host's next settle for " +
@@ -3240,7 +3240,7 @@ namespace Multiplayer.Tactical
                 // the authoritative write has to be the one that lands after both.
                 ApplyVision(actor, s.Vision);
             }
-            Debug.Log("[Multiplayer][tac] CLIENT settled " + actor.name + " @ " + Fmt(s.Pos) +
+            MpLog.Log("[Multiplayer][tac] CLIENT settled " + actor.name + " @ " + Fmt(s.Pos) +
                       " ap=" + s.Ap.ToString("0.##") + " wp=" + s.Wp.ToString("0.##"));
         }
 
@@ -3296,7 +3296,7 @@ namespace Multiplayer.Tactical
                 string guid = faction.TacticalFactionDef == null ? null : faction.TacticalFactionDef.Guid;
                 if (string.IsNullOrEmpty(guid))
                 {
-                    Debug.LogWarning("[Multiplayer][tac] the host holds known-state for " + SafeActorName(actor) +
+                    MpLog.LogWarning("[Multiplayer][tac] the host holds known-state for " + SafeActorName(actor) +
                                      " (located=" + located + " revealed=" + revealed + ") under a faction with " +
                                      "NO TacticalFactionDef guid, so that faction cannot be named on the wire — " +
                                      "every client keeps whatever it decided for itself about that one faction, " +
@@ -3391,7 +3391,7 @@ namespace Multiplayer.Tactical
             var tlc = actor == null ? null : actor.TacticalLevel;
             if (tlc == null || tlc.Factions == null)
             {
-                Debug.LogWarning("[Multiplayer][tac] the host's known-state for " + SafeActorName(actor) +
+                MpLog.LogWarning("[Multiplayer][tac] the host's known-state for " + SafeActorName(actor) +
                                  " cannot be applied — that actor has no TacticalLevel on this peer, so there " +
                                  "is no faction whose vision could be written. It keeps whatever this peer " +
                                  "decided for itself and stays divergent until the next settle.");
@@ -3399,7 +3399,7 @@ namespace Multiplayer.Tactical
             }
             if (rows == null)
             {
-                Debug.LogWarning("[Multiplayer][tac] the settle for " + SafeActorName(actor) + " carried NO " +
+                MpLog.LogWarning("[Multiplayer][tac] the settle for " + SafeActorName(actor) + " carried NO " +
                                  "vision block at all. That is a host older than this build or a truncated " +
                                  "payload; this peer keeps its own answer about who can see that actor, which " +
                                  "is the pre-2026-08-08 behaviour and is not host-authoritative.");
@@ -3439,14 +3439,14 @@ namespace Multiplayer.Tactical
                         string.Equals(faction.TacticalFactionDef.Guid, row.FactionGuid, StringComparison.Ordinal))
                     { known = true; break; }
                 if (!known)
-                    Debug.LogWarning("[Multiplayer][tac] the host's settle for " + SafeActorName(actor) +
+                    MpLog.LogWarning("[Multiplayer][tac] the host's settle for " + SafeActorName(actor) +
                                      " says the faction with guid '" + row.FactionGuid + "' knows it (located=" +
                                      row.Located + " revealed=" + row.Revealed + ") and THIS PEER HAS NO SUCH " +
                                      "FACTION. That reveal cannot be mirrored here in any form — the two peers " +
                                      "are not holding the same set of factions.");
             }
             if (changed != null)
-                Debug.Log("[Multiplayer][tac] vision for " + SafeActorName(actor) + " set to the HOST's: " +
+                MpLog.Log("[Multiplayer][tac] vision for " + SafeActorName(actor) + " set to the HOST's: " +
                           changed + " (located,revealed per looking faction). A pair that went DOWN is a " +
                           "reveal this peer held and the host does not — the direction a local re-run of this " +
                           "peer's own line of sight could never reach, because the counters only ever rise.");

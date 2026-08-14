@@ -87,7 +87,7 @@ namespace Multiplayer.UI
                 if (_button != null) _button.gameObject.SetActive(false);
                 if (_loggedFailure) return;
                 _loggedFailure = true;
-                Debug.LogError("[Multiplayer] deployment-prep join button FAILED and is hidden for the rest of " +
+                MpLog.LogError("[Multiplayer] deployment-prep join button FAILED and is hidden for the rest of " +
                                "this run. Every peer's own deployment screen and every launch are unaffected: " + e);
             }
         }

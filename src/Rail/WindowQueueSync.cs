@@ -609,7 +609,7 @@ namespace Multiplayer.Network.Sync
             if (view == null || query == null)
             {
                 // Not a reject: the host is mid-load or in a battle, nothing on either peer ran ahead.
-                Debug.Log("[MP][windows] advance of '" + wantIdentity + "' from peer=" + senderPeerId +
+                MpLog.Log("[MP][windows] advance of '" + wantIdentity + "' from peer=" + senderPeerId +
                           " ignored — this host has no live geoscape window queue right now");
                 return;
             }
@@ -625,7 +625,7 @@ namespace Multiplayer.Network.Sync
                 // LOGGED, never rejected — see the class doc. A reject's forced re-emit exists to pull back a
                 // client whose screen ran ahead of host state; a peer closing its own window ran ahead of
                 // nothing, and rejecting the ordinary case would fire a full-graph resend at click rate.
-                Debug.Log("[MP][windows] advance from peer=" + senderPeerId + " nonce=" + nonce +
+                MpLog.Log("[MP][windows] advance from peer=" + senderPeerId + " nonce=" + nonce +
                           " did NOT apply — " + why);
                 return;
             }
@@ -634,7 +634,7 @@ namespace Multiplayer.Network.Sync
             // the queue slot and then invokes it — native, host-side, off host objects, on the very window
             // the host itself raised to the answering peer. The client contributed one byte.
             modal.FinishDialog((ModalResult)result);
-            Debug.Log("[MP][windows] HOST advanced '" + haveIdentity + "' with " + (ModalResult)result +
+            MpLog.Log("[MP][windows] HOST advanced '" + haveIdentity + "' with " + (ModalResult)result +
                       " for peer=" + senderPeerId + " nonce=" + nonce);
         }
 
@@ -678,7 +678,7 @@ namespace Multiplayer.Network.Sync
                 pending.RemoveAt(i);
                 var cb = DialogHandlerField.GetValue(modal) as DialogCallback;
                 DialogHandlerField.SetValue(modal, null);
-                Debug.Log("[MP][windows] HOST advanced QUEUED '" + wantIdentity + "' with " + (ModalResult)result +
+                MpLog.Log("[MP][windows] HOST advanced QUEUED '" + wantIdentity + "' with " + (ModalResult)result +
                           " for peer=" + senderPeerId + " nonce=" + nonce + " — this peer is inside a screen of " +
                           "its own, so the window it was raised was still in _viewStateSwitchRequests and never " +
                           "became _currentStateSwitchRequest. Its own DialogCallback runs here; nothing on " +
@@ -688,7 +688,7 @@ namespace Multiplayer.Network.Sync
                 {
                     // NEVER silent, and never fatal to the intent pump: the window is already out of the
                     // queue, so a throw here loses the CONSEQUENCE of the answer, not the answer.
-                    Debug.LogError("[MP][windows] the host's own callback for '" + wantIdentity + "' threw — " +
+                    MpLog.LogError("[MP][windows] the host's own callback for '" + wantIdentity + "' threw — " +
                                    "the window is answered and gone, but whatever it was going to do (a mission " +
                                    "brief's LaunchMission, a reward's Apply) did NOT happen: " + ex);
                 }
@@ -712,7 +712,7 @@ namespace Multiplayer.Network.Sync
             var query = SwitchQueryField?.GetValue(geo?.View) as GeoscapeViewSwitchQuery;
             if (geo == null || query == null)
             {
-                Debug.Log("[MP][windows] deploy of '" + wantIdentity + "' from peer=" + senderPeerId +
+                MpLog.Log("[MP][windows] deploy of '" + wantIdentity + "' from peer=" + senderPeerId +
                           " ignored — this host has no live geoscape window queue right now");
                 return;
             }
@@ -724,7 +724,7 @@ namespace Multiplayer.Network.Sync
             string why = ValidateIdentity(haveIdentity, wantIdentity);
             if (why != null)
             {
-                Debug.Log("[MP][windows] deploy from peer=" + senderPeerId + " nonce=" + nonce +
+                MpLog.Log("[MP][windows] deploy from peer=" + senderPeerId + " nonce=" + nonce +
                           " did NOT apply — " + why);
                 return;
             }
@@ -734,7 +734,7 @@ namespace Multiplayer.Network.Sync
             {
                 // LOUD, not a quiet return: the answering peer's own copy is already closed, so a swallow here
                 // leaves the asset undeployed AND the host's prompt up — the exact wedge this arm ends.
-                Debug.LogError("[MP][windows] deploy from peer=" + senderPeerId + " NOT applied — '" + siteRef +
+                MpLog.LogError("[MP][windows] deploy from peer=" + senderPeerId + " NOT applied — '" + siteRef +
                                "' " + (site == null ? "resolves to no site on this host"
                                                     : "is not one of the sites this prompt offers") +
                                ". The host's asset-deployment prompt stays up and the asset is undeployed");
@@ -742,7 +742,7 @@ namespace Multiplayer.Network.Sync
             }
 
             deploy.DeployAtSite(site);
-            Debug.Log("[MP][windows] HOST deployed '" + haveIdentity + "' at " + siteRef +
+            MpLog.Log("[MP][windows] HOST deployed '" + haveIdentity + "' at " + siteRef +
                       " for peer=" + senderPeerId + " nonce=" + nonce);
         }
 
@@ -786,7 +786,7 @@ namespace Multiplayer.Network.Sync
                 if (GeoWindowCoverage.IsPerPeerAnswer(modal.ModalType, modal.ModalData))
                 {
                     if (_perPeerLogged.Add(modal.ModalType.ToString()))
-                        Debug.Log("[MP][windows] '" + modal.ModalType + "' answered LOCALLY — no 0x" +
+                        MpLog.Log("[MP][windows] '" + modal.ModalType + "' answered LOCALLY — no 0x" +
                                   SurfaceIds.GeoWindowIntent.ToString("X2") +
                                   " advance crosses for a mission brief/outcome, because every peer answers " +
                                   "this window for itself and one peer's decline must not cancel the mission " +
@@ -812,7 +812,7 @@ namespace Multiplayer.Network.Sync
             {
                 // The host's copy of this window stays up and its clock stays paused for everyone — the exact
                 // failure this family exists to end, so it is never swallowed.
-                Debug.LogError("[MP][windows] CLIENT advance capture failed — the host's window queue was NOT " +
+                MpLog.LogError("[MP][windows] CLIENT advance capture failed — the host's window queue was NOT " +
                                "advanced and stays blocked: " + ex);
             }
         }
@@ -847,7 +847,7 @@ namespace Multiplayer.Network.Sync
                         UntrackDurableNativeCarrier(request, occurrence);
                     });
                 _pendingResult = ResultNone;
-                if (!accepted) Debug.LogWarning("[MP][inbox] durable mission offer answer retained for retry: " +
+                if (!accepted) MpLog.LogWarning("[MP][inbox] durable mission offer answer retained for retry: " +
                     occurrence.TriggerId + " result=" + res);
                 return false;
             }
@@ -888,7 +888,7 @@ namespace Multiplayer.Network.Sync
                     {
                         // Never fall through to native: that would deploy on this peer alone. The prompt stays
                         // up here so the player can retry, and the reason is on the log.
-                        Debug.LogError("[MP][windows] asset-deploy click DROPPED — " +
+                        MpLog.LogError("[MP][windows] asset-deploy click DROPPED — " +
                                        (identity == null ? "this peer's prompt has no shared identity, so the host " +
                                                            "could not tell which window is being answered"
                                                          : "the chosen site has no rail root ref") +
@@ -902,7 +902,7 @@ namespace Multiplayer.Network.Sync
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError("[MP][windows] asset-deploy capture failed — the asset was NOT deployed on any " +
+                    MpLog.LogError("[MP][windows] asset-deploy capture failed — the asset was NOT deployed on any " +
                                    "peer and this prompt stays open: " + ex);
                 }
                 return false;
@@ -1006,7 +1006,7 @@ namespace Multiplayer.Network.Sync
                         data.RemoveAt(i);
                         deadSubject++;
                         // Never silent: a window the player expected back and did not get must say why.
-                        Debug.Log("[MP][windows] restore DROPS a stacked window whose mission '" +
+                        MpLog.Log("[MP][windows] restore DROPS a stacked window whose mission '" +
                                   (mission.MissionDef == null ? "?" : mission.MissionDef.name) + "' has already " +
                                   "resolved (completed=" + mission.IsCompleted + ") — the offer it carried is dead. " +
                                   "The post-mission reward window is not affected: it is raised fresh by " +
@@ -1022,7 +1022,7 @@ namespace Multiplayer.Network.Sync
             {
                 // A filter that throws must not cost the player their whole window history — the native
                 // restore below still runs on the untouched remainder.
-                Debug.LogError("[MP][windows] filtering the restored window queue failed — the queue is " +
+                MpLog.LogError("[MP][windows] filtering the restored window queue failed — the queue is " +
                                "restored unfiltered: " + ex);
             }
             // ONE line per restore, always, drops or none: the duplicate this filter closes left ZERO log
@@ -1051,7 +1051,7 @@ namespace Multiplayer.Network.Sync
                 if (data.Count > 0) kept += ".";
             }
             catch (Exception ex) { kept = " Kept: <naming failed: " + ex.Message + ">"; }
-            Debug.Log("[MP][windows] window-queue restore: " + seen + " entries in the save, " + data.Count +
+            MpLog.Log("[MP][windows] window-queue restore: " + seen + " entries in the save, " + data.Count +
                       " kept — " + deadSubject + " dropped (subject already resolved), " + notMine +
                       " dropped (Mirrored kind, produced by another peer" +
                       (foreign ? "" : "; not applicable — this peer authored this save") + ")." +

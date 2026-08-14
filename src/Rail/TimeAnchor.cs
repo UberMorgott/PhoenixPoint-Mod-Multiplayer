@@ -211,7 +211,7 @@ namespace Multiplayer.Network.Sync
             if (driftLatch) _latchesSinceLog++;
             if (Time.realtimeSinceStartup < _nextChurnLogAt) return;
             if (_nextChurnLogAt > 0f && _latchesSinceLog > ChurnThreshold)
-                Debug.LogError("[Multiplayer][rail] TimeAnchor: " + _latchesSinceLog + " DRIFT re-latches in " +
+                MpLog.LogError("[Multiplayer][rail] TimeAnchor: " + _latchesSinceLog + " DRIFT re-latches in " +
                                (Time.realtimeSinceStartup - (_nextChurnLogAt - ChurnWindowSeconds))
                                    .ToString("F1", CultureInfo.InvariantCulture) +
                                " s (threshold " + ChurnThreshold + " per " + ChurnWindowSeconds + " s) — the drift " +
@@ -316,7 +316,7 @@ namespace Multiplayer.Network.Sync
             double rate = ClientRate(t);
             double jump = _clientDto.StartTime.TimeSpan.TotalSeconds - t.Now.TimeSpan.TotalSeconds;
             var inv = CultureInfo.InvariantCulture;
-            Debug.Log("[Multiplayer][rail] TimeAnchor: anchor apply moved this peer's level clock by " +
+            MpLog.Log("[Multiplayer][rail] TimeAnchor: anchor apply moved this peer's level clock by " +
                       jump.ToString("F1", inv) + " s of game time (" +
                       (rate > 0.0 ? (jump / rate).ToString("F3", inv) + " s real" : "paused") +
                       ", rate=" + rate.ToString("F2", inv) + ", sinceLastApply=" +
@@ -366,7 +366,7 @@ namespace Multiplayer.Network.Sync
             double rate = ClientRate(t);
             double derived = _clientDto.StartTime.TimeSpan.TotalSeconds + rate * (Time.realtimeSinceStartup - _appliedAt);
             if (Math.Abs(t.Now.TimeSpan.TotalSeconds - derived) <= Math.Max(5.0, rate * 0.5)) return;
-            Debug.LogWarning("[Multiplayer][rail] TimeAnchor: client clock drifted from anchor derivation (now=" +
+            MpLog.LogWarning("[Multiplayer][rail] TimeAnchor: client clock drifted from anchor derivation (now=" +
                              t.Now.TimeSpan.TotalSeconds.ToString("F0") + "s derived=" + derived.ToString("F0") +
                              "s) — re-asserting");
             t.Paused = _clientDto.Paused;

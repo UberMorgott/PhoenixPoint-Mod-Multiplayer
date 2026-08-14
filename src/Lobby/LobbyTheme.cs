@@ -162,7 +162,7 @@ namespace Multiplayer.UI
             try { return f != null && f.HasCharacter(c); }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] LobbyTheme glyph probe failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] LobbyTheme glyph probe failed: " + e.Message);
                 return false;
             }
         }
@@ -192,7 +192,7 @@ namespace Multiplayer.UI
                 {
                     _panelSpriteResolved = true;
                     try { _panelSprite = NativeWidgetFactory.TryGetPanelBackgroundSprite(); }
-                    catch (Exception e) { Debug.LogError("[Multiplayer] LobbyTheme panel sprite capture failed: " + e.Message); }
+                    catch (Exception e) { MpLog.LogError("[Multiplayer] LobbyTheme panel sprite capture failed: " + e.Message); }
                 }
                 return _panelSprite;
             }
@@ -222,7 +222,7 @@ namespace Multiplayer.UI
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] LobbyTheme color capture failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] LobbyTheme color capture failed: " + e.Message);
             }
         }
 

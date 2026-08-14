@@ -93,7 +93,7 @@ namespace Multiplayer.Network.Sync
             catch (Exception ex)
             {
                 // Never gated: a diagnostic that fails silently is the bug class this file exists for.
-                Debug.LogError("[MP][clockphase] HOST probe FAILED — the phase error stays unmeasured: " + ex);
+                MpLog.LogError("[MP][clockphase] HOST probe FAILED — the phase error stays unmeasured: " + ex);
             }
         }
 
@@ -115,10 +115,10 @@ namespace Multiplayer.Network.Sync
                 }
                 var geo = GenericApplier.GeoLevel();
                 if (geo == null || geo.Timing == null) return true;   // in a battle / mid-load: nothing to compare
-                Debug.Log(PhaseLine(hostNow, geo.Timing.Now.TimeSpan.TotalSeconds, hostScale,
+                MpLog.Log(PhaseLine(hostNow, geo.Timing.Now.TimeSpan.TotalSeconds, hostScale,
                                     TimeAnchor.ClientAnchorAgeSeconds, hostLatchAge));
             }
-            catch (Exception ex) { Debug.LogError("[MP][clockphase] inbound probe FAILED: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[MP][clockphase] inbound probe FAILED: " + ex); }
             return true;
         }
 

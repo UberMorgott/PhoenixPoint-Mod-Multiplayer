@@ -195,7 +195,7 @@ namespace RailCheck
                              "hold, because a host legitimately queuing this peer's order behind that same " +
                              "peer's previous one gives up first and answers with a reject + forced settle, " +
                              "which is what clears the wait through QueueSettle.";
-            if (!Reaches(tick, "Debug", "LogError"))
+            if (!Reaches(tick, "MpLog", "LogError"))
                 yield return "L230 echo-wait-unbounded: " + label + " must reach Debug.LogError when the wait " +
                              "gives up. An echo that never arrives means this peer never played an action " +
                              "every other peer did — releasing the soldier quietly leaves a divergence with " +

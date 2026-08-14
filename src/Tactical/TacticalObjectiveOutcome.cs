@@ -165,26 +165,26 @@ namespace Multiplayer.Tactical
                 if (changed)
                 {
                     corrected++;
-                    Debug.Log("[Multiplayer][tac] mission-end objective CORRECTED from the host: " + key +
+                    MpLog.Log("[Multiplayer][tac] mission-end objective CORRECTED from the host: " + key +
                               " state=" + state + " exp=" + exp + " sp=" + sp + ".");
                 }
             }
             if (player == null)
-                Debug.LogError("[Multiplayer][tac] the host's mission-end objective board arrived with no " +
+                MpLog.LogError("[Multiplayer][tac] the host's mission-end objective board arrived with no " +
                                "Player-participant faction on this peer — this peer will score its own board " +
                                "and its XP and summary may differ from the host's.");
             else if (missing > 0)
-                Debug.LogWarning("[Multiplayer][tac] " + missing + " of the host's " + count + " mission-end " +
+                MpLog.LogWarning("[Multiplayer][tac] " + missing + " of the host's " + count + " mission-end " +
                                  "objectives do not exist on this peer (a NextOnSuccess chain the host " +
                                  "advanced and this peer did not) — their reward cannot be paid here.");
             if (regressible > 0)
-                Debug.LogWarning("[Multiplayer][tac] " + regressible + " of the host's " + count + " mission-end " +
+                MpLog.LogWarning("[Multiplayer][tac] " + regressible + " of the host's " + count + " mission-end " +
                                  "objectives declare CanRegress, so this peer keeps its OWN state AND its own " +
                                  "reward for them: the game re-evaluates a regressible objective whatever is " +
                                  "stamped on it, and a pinned reward over a re-counted state is a board that " +
                                  "disagrees with itself. Its numbers may differ from the host's.");
             if (corrected > 0)
-                Debug.Log("[Multiplayer][tac] mission-end objective board: " + corrected + " of " + count +
+                MpLog.Log("[Multiplayer][tac] mission-end objective board: " + corrected + " of " + count +
                           " corrected to the host's before this peer's own GameOver runs.");
         }
 
@@ -196,7 +196,7 @@ namespace Multiplayer.Tactical
             var setter = AccessTools.PropertySetter(typeof(FactionObjective), nameof(FactionObjective.State));
             if (setter == null)
             {
-                Debug.LogError("[Multiplayer][tac] FactionObjective.State has no setter to reflect on — this " +
+                MpLog.LogError("[Multiplayer][tac] FactionObjective.State has no setter to reflect on — this " +
                                "peer's objectives stay as it counted them and its mission XP will differ.");
                 return;
             }

@@ -175,7 +175,7 @@ namespace RailCheck
             // ── (e) NO EXIT WITHOUT A REASON ─────────────────────────────────────────
             int reasons = Program.CalleeSequence(postfix)
                                  .Count(m => m.DeclaringType != null &&
-                                             m.DeclaringType.Name == "Debug" &&
+                                             m.DeclaringType == typeof(Multiplayer.MpLog) &&
                                              (m.Name == "Log" || m.Name == "LogWarning" || m.Name == "LogError"));
             if (reasons < ExplicitOutcomes)
                 yield return "L197 exit-without-a-reason: MissionEncounterNav.Postfix carries only " + reasons +

@@ -178,13 +178,13 @@ namespace Multiplayer.Network.Sync
                                          engine != null && engine.IsHost, Revealed(engine))) return false;
             if (_hostCurtained.Count >= MaxHeld)
             {
-                Debug.LogError("[MP][events] HOST raise of '" + ev.EventID + "' queued BEHIND ITS OWN CURTAIN — " +
+                MpLog.LogError("[MP][events] HOST raise of '" + ev.EventID + "' queued BEHIND ITS OWN CURTAIN — " +
                                MaxHeld + " are already parked, so this host is not 'loading', and holding more " +
                                "would trade a window-order defect for a lost window. It keeps the host's order.");
                 return false;
             }
             _hostCurtained.Add(ev);
-            Debug.LogWarning("[MP][events] HOST raise of '" + ev.EventID + "' PARKED — this host has not revealed " +
+            MpLog.LogWarning("[MP][events] HOST raise of '" + ev.EventID + "' PARKED — this host has not revealed " +
                              "yet, and a window queued behind its own curtain is served before the cutscene every " +
                              "client queues at ITS reveal (" + _hostCurtained.Count + " parked)");
             return true;
@@ -205,13 +205,13 @@ namespace Multiplayer.Network.Sync
             _hostCurtained.RemoveAt(0);
             try
             {
-                Debug.Log("[MP][events] replaying PARKED host raise of '" + ev.EventID + "' — this host has " +
+                MpLog.Log("[MP][events] replaying PARKED host raise of '" + ev.EventID + "' — this host has " +
                           "revealed, so its window now enters the queue behind the same cutscene every client " +
                           "queued at its own reveal (" + _hostCurtained.Count + " still parked)");
                 NativeRaiseMethod.Invoke(geo.View, new object[] { ev });
             }
             catch (Exception ex)
-            { Debug.LogError("[MP][events] parked host raise replay failed for '" + ev.EventID + "': " + ex); }
+            { MpLog.LogError("[MP][events] parked host raise replay failed for '" + ev.EventID + "': " + ex); }
         }
 
         /// <summary>Raises that ARRIVED but had nowhere to go yet, oldest first. See
@@ -349,7 +349,7 @@ namespace Multiplayer.Network.Sync
                 // whose Leave the host already took (in-game leak: PROG_AN2_MISS).
                 if (IsMissionDeployEvent(data))
                 {
-                    Debug.Log("[MP][events] HOST raise of '" + ev.EventID + "' NOT mirrored — pure mission-deploy " +
+                    MpLog.Log("[MP][events] HOST raise of '" + ev.EventID + "' NOT mirrored — pure mission-deploy " +
                               "prompt (host-local arrival decision; the mission rides the tactical deploy channel)");
                     return;
                 }
@@ -391,20 +391,20 @@ namespace Multiplayer.Network.Sync
                         _missionDispatcher[p.SiteRef] = dispatchPeer;
                     if (dispatchPeer == AircraftDispatch.HostPeer)
                     {
-                        Debug.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq +
+                        MpLog.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq +
                                   " NOT mirrored — mission start confirmation for host's own vehicle " + vehicleRef);
                         MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
                         return;
                     }
                     engine.SendToClient(dispatchPeer, msg);
-                    Debug.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq +
+                    MpLog.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq +
                               " UNICAST to peer " + dispatchPeer + " — mission start confirmation, vehicle " +
                               vehicleRef + " (other peers do NOT see this window)");
                     MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
                     return;
                 }
                 engine.BroadcastToAll(msg);
-                Debug.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority +
+                MpLog.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority +
                           " site=" + (p.SiteRef == "" ? "none" : p.SiteRef) + " vehicle=" +
                           (p.VehicleRef == "" ? "none" : p.VehicleRef) + " titleLen=" + p.Title.Length +
                           " narrLen=" + p.Narrative.Length);
@@ -414,7 +414,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][events] HOST raise broadcast FAILED for '" + ev.EventID + "' — no peer will see " +
+                MpLog.LogError("[MP][events] HOST raise broadcast FAILED for '" + ev.EventID + "' — no peer will see " +
                                "this window: " + ex);
             }
         }
@@ -457,7 +457,7 @@ namespace Multiplayer.Network.Sync
                     _missionDispatcher[p.SiteRef] = targetPeer;
                 var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventRaise, SyncKind.StateDelta, Encode(seq, p));
                 engine.SendToClient(targetPeer, new NetworkMessage(PacketType.SyncEnvelope, env));
-                Debug.Log("[MP][events] mission raise UNICAST to peer " + targetPeer + " — '" + p.EventId +
+                MpLog.Log("[MP][events] mission raise UNICAST to peer " + targetPeer + " — '" + p.EventId +
                           "' seq=" + seq + " vehicle=" + (p.VehicleRef == "" ? "none" : p.VehicleRef) +
                           " site=" + (p.SiteRef == "" ? "none" : p.SiteRef) +
                           " (host's native window was suppressed)");
@@ -465,7 +465,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][events] mission raise UNICAST FAILED for '" + ev.EventID + "' to peer " +
+                MpLog.LogError("[MP][events] mission raise UNICAST FAILED for '" + ev.EventID + "' to peer " +
                                targetPeer + ": " + ex);
             }
         }
@@ -481,7 +481,7 @@ namespace Multiplayer.Network.Sync
                 RequestsField?.GetValue(q) is IEnumerable<GeoscapeViewStateSwitchRequest> pending)
                 foreach (var r in pending)
                     if (r != null && ReferenceEquals(EventOf(r.State), ev)) return r.Priority;
-            Debug.LogWarning("[MP][events] could not read the queued DISPLAY priority for '" + ev?.EventID +
+            MpLog.LogWarning("[MP][events] could not read the queued DISPLAY priority for '" + ev?.EventID +
                              "' — mirroring it at 0, so this window may sort differently on the client than " +
                              "on the host and the peers can end up looking at different events");
             return 0;
@@ -591,7 +591,7 @@ namespace Multiplayer.Network.Sync
             var key = (eventId ?? "?") + "|" + phase;
             if (_briefProbed.Count > 256) _briefProbed.Clear();
             if (!_briefProbed.Add(key)) return;
-            Debug.Log("[MP][brief] " + phase + " '" + (eventId ?? "?") + "' — " + detail);
+            MpLog.Log("[MP][brief] " + phase + " '" + (eventId ?? "?") + "' — " + detail);
         }
 
         // ─── MISSION UNICAST — site → dispatcher peer ──────────────────────────
@@ -684,7 +684,7 @@ namespace Multiplayer.Network.Sync
                 if (engine == null || engine.IsHost) return true;
                 if (!IsAuthoritativeRewardSender(engine.Session.HostPeerId, senderPeerId))
                 {
-                    Debug.LogError("[MP][events] rejected decision/reward payload from non-host peer " + senderPeerId);
+                    MpLog.LogError("[MP][events] rejected decision/reward payload from non-host peer " + senderPeerId);
                     return true;
                 }
                 try
@@ -701,7 +701,7 @@ namespace Multiplayer.Network.Sync
                             if (store == null || !store.InstallAuthoritativeDecision(decision))
                                 throw new InvalidDataException("authoritative decision could not install");
                             UiEventMap.FireDurableChoice(GeoLevel());
-                            Debug.Log("[MP][events] durable result installed for " + decision.Occurrence.TriggerId);
+                            MpLog.Log("[MP][events] durable result installed for " + decision.Occurrence.TriggerId);
                             return true;
                         }
                         if (marker == DurableRewardPayload)
@@ -720,12 +720,12 @@ namespace Multiplayer.Network.Sync
                         string eventId = WireString.ReadKey(r);
                         var wire = MissionOutcomeMirror.DecodeRaw(r);
                         _rewards[eventId] = wire;
-                        Debug.Log("[MP][events] reward for '" + eventId + "' received (rows=" + wire.Rows.Count +
+                        MpLog.Log("[MP][events] reward for '" + eventId + "' received (rows=" + wire.Rows.Count +
                                   ") — the outcome page will list what the host actually granted");
                         RestampLiveInstance(eventId, wire);
                     }
                 }
-                catch (Exception ex) { Debug.LogError("[Multiplayer][rail] EventPopup reward inbound failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] EventPopup reward inbound failed: " + ex); }
                 return true;
             }
             if (surfaceId != SurfaceIds.GeoEventRaise) return false;
@@ -738,7 +738,7 @@ namespace Multiplayer.Network.Sync
                 if (!Seq.ShouldApply(SurfaceIds.GeoEventRaise, seq)) return true;
                 if (RaiseMirrored(p, seq)) Seq.Mark(SurfaceIds.GeoEventRaise, seq);
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] EventPopup inbound failed: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] EventPopup inbound failed: " + ex); }
             return true;
         }
 
@@ -781,12 +781,12 @@ namespace Multiplayer.Network.Sync
             { _durableHeld.Remove(entry.Key); heldLease.Dispose(); }
             try
             {
-                Debug.Log("[MP][events] replaying HELD raise of '" + entry.Value.EventId + "' seq=" + entry.Key +
+                MpLog.Log("[MP][events] replaying HELD raise of '" + entry.Value.EventId + "' seq=" + entry.Key +
                           " — this peer's geoscape can carry a window again (" + _held.Count + " still waiting)");
                 RaiseMirrored(entry.Value, entry.Key);
             }
             catch (Exception ex)
-            { Debug.LogError("[MP][events] held raise replay failed for '" + entry.Value.EventId + "': " + ex); }
+            { MpLog.LogError("[MP][events] held raise replay failed for '" + entry.Value.EventId + "': " + ex); }
         }
 
         /// <summary>Push every raise this peer was given and has NOT resolved back into the held list, so the
@@ -904,14 +904,14 @@ namespace Multiplayer.Network.Sync
                 // CanCarryWindow's question, not "is there a view" — see there for the window this cost.
                 if (_held.Count >= MaxHeld)
                 {
-                    Debug.LogError("[MP][events] raise of '" + p.EventId + "' DROPPED — this peer's geoscape " +
+                    MpLog.LogError("[MP][events] raise of '" + p.EventId + "' DROPPED — this peer's geoscape " +
                                    "still cannot carry a window and " + MaxHeld + " raises are already waiting; " +
                                    "it is not loading a geoscape, so the oldest are no longer worth holding");
                     return true; // consumed: the seq must still advance or every later raise is refused
                 }
                 _held.Add(new KeyValuePair<uint, Raise>(seq, p));
                 TrackHeldCarrier(durableStore, durableOccurrence, seq);
-                Debug.LogWarning("[MP][events] raise of '" + p.EventId + "' HELD — this peer has no geoscape " +
+                MpLog.LogWarning("[MP][events] raise of '" + p.EventId + "' HELD — this peer has no geoscape " +
                                  "ready to carry a window yet (no view, or its event system is still loading); " +
                                  "it will be replayed when one is (" + _held.Count + " waiting)");
                 return true;
@@ -933,7 +933,7 @@ namespace Multiplayer.Network.Sync
             if (durableStore == null)
             {
                 if (_held.All(x => x.Key != seq)) _held.Add(new KeyValuePair<uint, Raise>(seq, p));
-                Debug.Log("[MP][events] raise of '" + p.EventId + "' HELD — this peer's durable inbox store " +
+                MpLog.Log("[MP][events] raise of '" + p.EventId + "' HELD — this peer's durable inbox store " +
                           "is not open yet (it is minted when the co-op geoscape is built); the drain " +
                           "replays it the moment it is");
                 return true;
@@ -944,7 +944,7 @@ namespace Multiplayer.Network.Sync
             var data = es?.GetEventByID(p.EventId, canFail: true)?.GeoscapeEventData;
             if (data == null)
             {
-                Debug.LogError("[MP][events] raise of '" + p.EventId + "' DROPPED — no such event def on this peer " +
+                MpLog.LogError("[MP][events] raise of '" + p.EventId + "' DROPPED — no such event def on this peer " +
                                "(mod parity break: law 10 should have blocked the join)");
                 return false;
             }
@@ -954,7 +954,7 @@ namespace Multiplayer.Network.Sync
             string refusal = ContextRefusal(p.SiteRef, site != null, p.VehicleRef, vehicle != null);
             if (refusal != null)
             {
-                Debug.LogError("[MP][events] raise of '" + p.EventId + "' REFUSED — " + refusal);
+                MpLog.LogError("[MP][events] raise of '" + p.EventId + "' REFUSED — " + refusal);
                 return false;
             }
 
@@ -985,7 +985,7 @@ namespace Multiplayer.Network.Sync
             { PauseGame = true };
             q.QueryStateSwitch(request);
             WindowOrder.BindDurable(request, durableOccurrence);
-            Debug.Log("[MP][events] raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority + " site=" +
+            MpLog.Log("[MP][events] raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority + " site=" +
                       (site == null ? "none" : site.SiteId.ToString()) +
                       " vehicle=" + (vehicle == null ? "none" : vehicle.VehicleID.ToString()) +
                       " record=" + rec.State + "#" + rec.TriggerCount +
@@ -1067,7 +1067,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[MP][events] wire-text copy failed (" + ex.Message + ") — the window renders " +
+                MpLog.LogWarning("[MP][events] wire-text copy failed (" + ex.Message + ") — the window renders " +
                                  "this peer's own def text, and the shared def stays untouched");
                 return data;
             }
@@ -1137,7 +1137,7 @@ namespace Multiplayer.Network.Sync
             {
                 if (!DurableChoiceLocked(ev) && DismissOnResolution(winner != null, winner?.Outcome != null))
                 {
-                    Debug.Log("[MP][events] closing the open picker for '" + ev.EventID + "' — the record is resolved " +
+                    MpLog.Log("[MP][events] closing the open picker for '" + ev.EventID + "' — the record is resolved " +
                               "with no choice this peer can click through (winner=" +
                               (winner == null ? "none" : "no Outcome") + "), so every button on it is dead");
                     view.FinishQueriedState();
@@ -1150,7 +1150,7 @@ namespace Multiplayer.Network.Sync
                 // HOST's wallet in EventSync.HandleAnswer and reaches this peer as an ordinary wallet delta.
                 if (ConsumeOwnAnswer(ev) && ReplayResolution(module, ev, winner))
                 {
-                    Debug.Log("[MP][events] '" + ev.EventID + "' resolved by THIS peer's own click (choice " +
+                    MpLog.Log("[MP][events] '" + ev.EventID + "' resolved by THIS peer's own click (choice " +
                               (ev.Record == null ? -1 : ev.Record.SelectedChoice) + ") — showing its result page " +
                               "directly, with no second click and no local charge");
                     return true;
@@ -1555,7 +1555,7 @@ namespace Multiplayer.Network.Sync
             var ev = LiveInstance(GeoLevel()?.View, eventId);
             if (ev == null || !ev.IsCompleted || SetChoiceReward == null) return;
             SetChoiceReward.Invoke(ev, new object[] { MissionOutcomeMirror.Build(GeoLevel(), wire, "Encounter") });
-            Debug.Log("[MP][events] reward for '" + eventId + "' arrived after this peer had already stubbed the " +
+            MpLog.Log("[MP][events] reward for '" + eventId + "' arrived after this peer had already stubbed the " +
                       "live dialog — re-stamped in place, so the outcome page draws the host's list");
         }
 
@@ -1708,7 +1708,7 @@ namespace Multiplayer.Network.Sync
             if (module == null || ev == null || DismissOnResolution(winner != null, winner?.Outcome != null)) return false;
             if (SetClosingEncounter == null)
             {
-                Debug.LogError("[MP][events] cannot replay '" + ev.EventID + "' — UIModuleSiteEncounters" +
+                MpLog.LogError("[MP][events] cannot replay '" + ev.EventID + "' — UIModuleSiteEncounters" +
                                ".SetClosingEncounter(GeoscapeEvent, GeoEventChoice, bool) did not resolve, so the " +
                                "winning choice has no result page and the window can only be closed");
                 return false;
@@ -1721,7 +1721,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][events] replay of '" + ev.EventID + "' threw while building the result page: " + ex);
+                MpLog.LogError("[MP][events] replay of '" + ev.EventID + "' threw while building the result page: " + ex);
                 return false;
             }
         }
@@ -1793,10 +1793,10 @@ namespace Multiplayer.Network.Sync
                     { r.ReadByte(); EventSync.ReadOccurrence(r); _durableRewards[occurrence] = MissionOutcomeMirror.DecodeRaw(r); }
                     else { WireString.ReadKey(r); _rewards[eventId] = MissionOutcomeMirror.DecodeRaw(r); }
                 }
-                Debug.Log("[MP][events] HOST reward for '" + eventId + "' broadcast");
+                MpLog.Log("[MP][events] HOST reward for '" + eventId + "' broadcast");
             }
             catch (Exception ex)
-            { Debug.LogError("[MP][events] reward broadcast for '" + eventId + "' failed: " + ex); }
+            { MpLog.LogError("[MP][events] reward broadcast for '" + eventId + "' failed: " + ex); }
         }
 
         internal static void HostBroadcastDurableReward(OccurrenceId occurrence, byte[] encodedReward)
@@ -1825,7 +1825,7 @@ namespace Multiplayer.Network.Sync
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventReward, SyncKind.StateDelta, body)));
             }
-            catch (Exception ex) { Debug.LogError("[MP][events] durable decision broadcast failed: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[MP][events] durable decision broadcast failed: " + ex); }
         }
 
         internal static void HostRebroadcastLockedDecisions()
@@ -1997,7 +1997,7 @@ namespace Multiplayer.Network.Sync
                 // does for a client (MissionSync.cs).
                 EventPopup.NoteReplayedClick(ev);
                 var rec = EventPopup.LiveRecord(ev.EventID, ev.Record);
-                Debug.Log("[MP][events] click on '" + ev.EventID + "' REPLAYED — the answer is not this peer's " +
+                MpLog.Log("[MP][events] click on '" + ev.EventID + "' REPLAYED — the answer is not this peer's " +
                           "(record=" + (rec == null ? "none" : rec.State.ToString()) + ", choice " +
                           (rec == null ? -1 : rec.SelectedChoice) + "); showing the winning choice's result page");
                 if (EventPopup.ReplayResolution(__instance, ev, winner)) return false;
@@ -2040,7 +2040,7 @@ namespace Multiplayer.Network.Sync
             int index = ev.EventData?.Choices == null ? -1 : ev.EventData.Choices.IndexOf(choice);
             if (choice != null && index < 0)
             {
-                Debug.LogWarning("[MP][events] click on '" + ev.EventID + "' dropped — the clicked choice is not in " +
+                MpLog.LogWarning("[MP][events] click on '" + ev.EventID + "' dropped — the clicked choice is not in " +
                                  "this peer's def (mod parity), so it cannot be keyed for the host");
                 return false;
             }
@@ -2053,11 +2053,11 @@ namespace Multiplayer.Network.Sync
             OccurrenceId occurrence;
             var store = DurableInboxSession.ActiveStore;
             if (!EventPopup.TryGetDurableOccurrence(ev, out occurrence) || store == null)
-            { Debug.LogWarning("[MP][events] answer dropped — dialog has no exact durable occurrence"); return false; }
+            { MpLog.LogWarning("[MP][events] answer dropped — dialog has no exact durable occurrence"); return false; }
             string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
             var entry = store.Ledger.AllEntries.FirstOrDefault(x => x.Occurrence.Equals(occurrence) &&
                 string.Equals(x.Membership.PlayerGuid, local, StringComparison.OrdinalIgnoreCase));
-            if (entry == null) { Debug.LogWarning("[MP][events] answer dropped — no active local entitlement"); return false; }
+            if (entry == null) { MpLog.LogWarning("[MP][events] answer dropped — no active local entitlement"); return false; }
             IntentRail.Send(SurfaceIds.GeoEventIntent, EventSync.OpAnswer, "answer '" + id + "' choice=" + index,
                             w => EventSync.WriteDurableAnswer(w, occurrence, entry.Membership,
                                 entry.LifecycleRevision, id, index));
@@ -2107,7 +2107,7 @@ namespace Multiplayer.Network.Sync
         private static bool Prefix()
         {
             if (IntentRail.ShouldRunNative()) return true;
-            Debug.Log("[MP][events] marketplace purchase BLOCKED on a client — the host owns the wallet and the " +
+            MpLog.Log("[MP][events] marketplace purchase BLOCKED on a client — the host owns the wallet and the " +
                       "reward (OnChoiceSelected:215 charges Wallet.Take before CompleteMarketplaceEvent:219); " +
                       "buying stays host-only until the offer list is replicated");
             return false;
@@ -2187,7 +2187,7 @@ namespace Multiplayer.Network.Sync
             if (__exception == null) return null;
             __result = originalText ?? "";
             if (_seen.Add(originalText ?? ""))
-                Debug.LogError("[MP][events] token deref threw " + __exception.GetType().Name + " while resolving \"" +
+                MpLog.LogError("[MP][events] token deref threw " + __exception.GetType().Name + " while resolving \"" +
                                (originalText ?? "") + "\" — this window's context has no Site/Vehicle for a token in " +
                                "its text. The raw [Token] stays visible and the window renders instead of aborting " +
                                "half-built; on a MIRRORED window this must never happen (EventPopup.ContextRefusal " +
@@ -2248,11 +2248,11 @@ namespace Multiplayer.Network.Sync
                         }
                     }
                 };
-                Debug.Log("[MP][modals] empty outcome page refilled from the event description — event='" +
+                MpLog.Log("[MP][modals] empty outcome page refilled from the event description — event='" +
                           (geoEvent?.EventID ?? "<null>") + "' fallbackLen=" + fallback.Length +
                           " (native :335 only runs under useEventTexts, and a replayed page passes false).");
             }
-            catch (Exception e) { Debug.LogWarning("[MP][modals] SetClosingEncounter refill failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogWarning("[MP][modals] SetClosingEncounter refill failed: " + e.Message); }
         }
     }
 }

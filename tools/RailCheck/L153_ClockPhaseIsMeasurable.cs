@@ -72,11 +72,11 @@ namespace RailCheck
             var inbound = diag.GetMethod("HandleInbound", AllMembers);
             var phaseLine = diag.GetMethod("PhaseLine", AllMembers);
             var engineTick = typeof(SyncEngine).GetMethod("Tick", AllMembers);
-            var onField = typeof(MpDiag).GetField("On", AllMembers);
+            var onGetter = typeof(MpDiag).GetProperty("On", AllMembers)?.GetGetMethod(true);
             var probeId = typeof(SurfaceIds).GetField("ClockPhaseProbe", AllMembers);
 
             if (hostTick == null || inbound == null || phaseLine == null || engineTick == null ||
-                onField == null || probeId == null)
+                onGetter == null || probeId == null)
             {
                 yield return "L153 premise-changed: ClockPhaseDiag.{HostTick,HandleInbound,PhaseLine} / " +
                              "SyncEngine.Tick / MpDiag.On / SurfaceIds.ClockPhaseProbe did not all resolve. The " +
@@ -98,7 +98,7 @@ namespace RailCheck
                              "chain and is dropped by SurfaceRouter as a foreign envelope, silently.";
 
             // ── arm (b): off by default, and gated where the cost is, not at the log line.
-            if (!ReadsStaticField(hostTick, onField))
+            if (!CallsMethod(hostTick, onGetter))
                 yield return "L153 diagnostic-not-gated: ClockPhaseDiag.HostTick does not read MpDiag.On. A " +
                              "per-second broadcast every session pays for is traffic inside the measurement it " +
                              "is taking, and MpDiag's own header records what an always-on trace family already " +

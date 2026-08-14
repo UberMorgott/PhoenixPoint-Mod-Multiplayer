@@ -167,7 +167,7 @@ namespace Multiplayer.Network.Sync
                     if (AlreadySent(charId, body, EncodeBody(false, canon)))
                     {
                         if (MpDiag.On)
-                            Debug.Log("[MP][equip] duplicate flush suppressed char=U#" + charId +
+                            MpLog.Log("[MP][equip] duplicate flush suppressed char=U#" + charId +
                                       " bytes=" + body.Length + " — same body, model unmoved, host echo still in flight");
                         return false;
                     }
@@ -185,7 +185,7 @@ namespace Multiplayer.Network.Sync
                 {
                     // Nothing was written and nothing was sent: no delta will ever repaint the staged
                     // widgets, so reconverge them from the (un-mutated) local model like the reject path.
-                    Debug.LogError("[MP][equip] CLIENT loadout capture failed — reconverging local UI: " + ex);
+                    MpLog.LogError("[MP][equip] CLIENT loadout capture failed — reconverging local UI: " + ex);
                     OpenUiRepaint.MarkDirty();
                 }
                 return false;
@@ -327,11 +327,11 @@ namespace Multiplayer.Network.Sync
         {
             if (AccessTools.DeclaredMethod(typeof(UIInventoryList), name) == null)
             {
-                Debug.LogError("[MP][equip] PATCH BIND FAILED: UIInventoryList." + name + " did not resolve —" +
+                MpLog.LogError("[MP][equip] PATCH BIND FAILED: UIInventoryList." + name + " did not resolve —" +
                                " value-equal inventory items WILL be corrupted on every equip gesture. Patch skipped.");
                 return false;
             }
-            Debug.Log("[MP][equip] patch bound: UIInventoryList." + name);
+            MpLog.Log("[MP][equip] patch bound: UIInventoryList." + name);
             return true;
         }
 
@@ -380,12 +380,12 @@ namespace Multiplayer.Network.Sync
             bool dup = items.Count != items.Distinct().Count();
             string key = name + (dup ? " dup" : " nodup");
             if (missing > 0)
-                Debug.LogError("[MP][equip] SELF-CHECK FAIL " + key + ": " + missing + " of " + shown +
+                MpLog.LogError("[MP][equip] SELF-CHECK FAIL " + key + ": " + missing + " of " + shown +
                                " displayed items are NOT in UnfilteredItems (list=" + items.Count + ") — the screen " +
                                "shows them but GeoCharacter.SetItems/UpdateStorage is about to drop them. " +
                                "UIInventoryList double-Remove vs GeoItem value equality is back.");
             else if (_slotCheckSeen.Add(key))
-                Debug.Log("[MP][equip] self-check OK " + key + " shown=" + shown + " list=" + items.Count);
+                MpLog.Log("[MP][equip] self-check OK " + key + " shown=" + shown + " list=" + items.Count);
         }
 
         /// <summary>Equip/edit-screen scrap chokepoint: <c>UIStateEditSoldier.ItemScrappedHandler</c> (:622)
@@ -413,7 +413,7 @@ namespace Multiplayer.Network.Sync
                 else
                 {
                     ManufactureSync.SendIntent(ManufactureSync.OpScrap, def.Guid, amount);
-                    Debug.Log("[MP][scrap] CLIENT equip-scrap intent def=" + def.Guid + " count=" + amount);
+                    MpLog.Log("[MP][scrap] CLIENT equip-scrap intent def=" + def.Guid + " count=" + amount);
                 }
                 // The follow-up flush needs no special handling any more: blocking this call leaves the
                 // count un-decremented, so the native handler's `IsEmpty()` branch never strips the widget
@@ -535,7 +535,7 @@ namespace Multiplayer.Network.Sync
             private static bool Prepare()
             {
                 if (SelectedSlot != null && CanApply != null) return true;
-                Debug.LogError("[Multiplayer][equip] AugmentSlotSwitchUnlockPatch NOT bound (" +
+                MpLog.LogError("[Multiplayer][equip] AugmentSlotSwitchUnlockPatch NOT bound (" +
                                (SelectedSlot == null ? "_selectedMutationSlot " : "") +
                                (CanApply == null ? "CanApplyAugumentation " : "") +
                                "missing) — augment body-part switching stays vanilla double-click");
@@ -716,7 +716,7 @@ namespace Multiplayer.Network.Sync
                             for (int list = 0; list < 3; list++)
                                 foreach (var item in ListValue(character, list)) if (item != null) touched.Add(item);
                             try { MissionSync.BroadcastPreparationEdit(delta); }
-                            catch (Exception ex) { Debug.LogError("[MP][inbox] preparation-edit broadcast failed after durable commit: " + ex); }
+                            catch (Exception ex) { MpLog.LogError("[MP][inbox] preparation-edit broadcast failed after durable commit: " + ex); }
                             UiEventMap.FirePreparationEdit(touched, geo, delta.Occurrence, delta.PreparationRevision);
                         });
                 }
@@ -796,8 +796,8 @@ namespace Multiplayer.Network.Sync
                 SelfCheckApplied(character, wire, charId);
 
                 try { (character.Faction as GeoPhoenixFaction)?.UpdatePreferredLoadout(character); }
-                catch (Exception ex) { Debug.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
-                Debug.Log("[MP][equip] HOST intent APPLIED char=U#" + charId + " nonce=" + nonce +
+                catch (Exception ex) { MpLog.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
+                MpLog.Log("[MP][equip] HOST intent APPLIED char=U#" + charId + " nonce=" + nonce +
                           " peer=" + senderPeerId + " took=" + took + " returned=" + pool.Count + " freeReload=" + freeReload);
                 appliedForMemo = true;
                 ReseedLocalScreenAfterRemoteMutation();
@@ -869,7 +869,7 @@ namespace Multiplayer.Network.Sync
             // storage means the pop/load path lost the gesture — the exact symptom this replay exists for.
             if (ammo.CurrentCharges == 0 &&
                 compat.Any(d => d != null && storage.Items.TryGetValue(d, out var s) && s.CommonItemData.CurrentCharges > 0))
-                Debug.LogError("[MP][equip] SELF-CHECK FAIL ammo — " + item.ItemDef.name +
+                MpLog.LogError("[MP][equip] SELF-CHECK FAIL ammo — " + item.ItemDef.name +
                                " stayed empty while storage still holds compatible ammunition");
         }
 
@@ -931,10 +931,10 @@ namespace Multiplayer.Network.Sync
                     character.SetItems(listIdx == 0 ? pool : null, listIdx == 1 ? pool : null, listIdx == 2 ? pool : null);
 
                 try { (character.Faction as GeoPhoenixFaction)?.UpdatePreferredLoadout(character); }
-                catch (Exception ex) { Debug.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
+                catch (Exception ex) { MpLog.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
                 RecordApplied(character, charId, senderPeerId);
                 ReseedLocalScreenAfterRemoteMutation();
-                Debug.Log("[MP][scrap] HOST equipped-scrap APPLIED char=U#" + charId + " def=" + guid +
+                MpLog.Log("[MP][scrap] HOST equipped-scrap APPLIED char=U#" + charId + " def=" + guid +
                           " x" + amount + " nonce=" + nonce + " peer=" + senderPeerId);
             }
             catch (Exception ex)
@@ -958,7 +958,7 @@ namespace Multiplayer.Network.Sync
                 var got = ListValue(character, i).Select(g => g.ItemDef.Guid).ToList();
                 if (want.OrderBy(g => g, StringComparer.Ordinal)
                         .SequenceEqual(got.OrderBy(g => g, StringComparer.Ordinal))) continue;
-                Debug.LogError("[MP][equip] SELF-CHECK FAIL apply char=U#" + charId + " list=" + i +
+                MpLog.LogError("[MP][equip] SELF-CHECK FAIL apply char=U#" + charId + " list=" + i +
                                " — the host's loadout is not the def layout the client asked for. requested=[" +
                                string.Join(",", want) + "] got=[" + string.Join(",", got) + "]");
             }
@@ -1038,8 +1038,8 @@ namespace Multiplayer.Network.Sync
             }
             faction.Wallet.Take(def.ManufacturePrice, OperationReason.Purchase);
             try { (faction as GeoPhoenixFaction)?.UpdatePreferredLoadout(character); }
-            catch (Exception ex) { Debug.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
-            Debug.Log("[MP][equip] HOST augment APPLIED char=U#" + charId + " def=" + defGuid +
+            catch (Exception ex) { MpLog.LogWarning("[MP][equip] UpdatePreferredLoadout: " + ex.Message); }
+            MpLog.Log("[MP][equip] HOST augment APPLIED char=U#" + charId + " def=" + defGuid +
                       " nonce=" + nonce + " peer=" + senderPeerId);
             RecordApplied(character, charId, senderPeerId);
             ReseedLocalScreenAfterRemoteMutation(); // same stale-flush hazard as OpSetItems
@@ -1080,7 +1080,7 @@ namespace Multiplayer.Network.Sync
             if (RailMeta.BytesEqual(before, after)) return; // that intent was a no-op — nothing to revert
             var now = EncodeBody(false, Slots(character));
             if (now == null || !RailMeta.BytesEqual(now, before)) return;
-            Debug.LogError("[MP][equip] HOST previous apply was REVERTED for char=U#" + charId +
+            MpLog.LogError("[MP][equip] HOST previous apply was REVERTED for char=U#" + charId +
                            " — the live loadout is back to its PRE-intent content, so a stale view→model flush " +
                            "(open-screen UpdateState) undid it. The rail can only emit what the host still holds: " +
                            "removals will silently never reach any peer.");
@@ -1137,7 +1137,7 @@ namespace Multiplayer.Network.Sync
                     _appliedBefore.Remove(charId);   // a genuine host edit — never fight the next one
                     return false;
                 default:
-                    Debug.LogWarning("[MP][equip] HOST stale screen flush BLOCKED for char=U#" + charId +
+                    MpLog.LogWarning("[MP][equip] HOST stale screen flush BLOCKED for char=U#" + charId +
                                      " — an open equip screen tried to write back the loadout as it stood BEFORE peer=" +
                                      (_appliedPeer.TryGetValue(charId, out var p) ? p.ToString() : "?") +
                                      "'s change. The write is dropped and this screen is repainted from the model.");

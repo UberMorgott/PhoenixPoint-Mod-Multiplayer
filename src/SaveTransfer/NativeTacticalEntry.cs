@@ -145,7 +145,7 @@ namespace Multiplayer.Tactical
             var plotDef = tgp?.MapPlotInstanceData?.MapPlotDef;
             if (tgp == null || site == null || plotDef == null)
             {
-                Debug.LogError("[Multiplayer][tac-native] host capture found no params/site/plot (params=" +
+                MpLog.LogError("[Multiplayer][tac-native] host capture found no params/site/plot (params=" +
                                (tgp == null ? "null" : "ok") + " site=" + (site == null ? "null" : "ok") +
                                " plot=" + (plotDef == null ? "null" : "ok") + ") — falling back to the save transfer.");
                 FallbackArmed = true;
@@ -161,7 +161,7 @@ namespace Multiplayer.Tactical
             byte[] paramBytes = SerializerRoundtrip.SerializeGraph(new object[] { tgp });
             if (paramBytes == null || paramBytes.Length == 0)
             {
-                Debug.LogError("[Multiplayer][tac-native] TacticalGameParams serialized to nothing — the native " +
+                MpLog.LogError("[Multiplayer][tac-native] TacticalGameParams serialized to nothing — the native " +
                                "entry cannot ship a battle it cannot encode. Falling back to the save transfer.");
                 FallbackArmed = true;
                 return;
@@ -184,12 +184,12 @@ namespace Multiplayer.Tactical
                 }
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.TacEntryParams, SyncKind.StateSnapshot, inner)));
-                Debug.Log("[Multiplayer][tac-native] HOST shipped entry params site=" + site.SiteId +
+                MpLog.Log("[Multiplayer][tac-native] HOST shipped entry params site=" + site.SiteId +
                           " plot=" + plotDef.name + " seed=" + _spawnSeed + " bytes=" + paramBytes.Length);
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac-native] entry params FAILED to reach the wire (" + ex.Message +
+                MpLog.LogError("[Multiplayer][tac-native] entry params FAILED to reach the wire (" + ex.Message +
                                ") — falling back to the save transfer.");
                 FallbackArmed = true;
             }
@@ -211,14 +211,14 @@ namespace Multiplayer.Tactical
                     {
                         if (!engine.IsHost) return true;
                         string reason = WireString.ReadText(r);
-                        Debug.LogWarning("[Multiplayer][tac-native] peer " + senderPeerId + " cannot build this " +
+                        MpLog.LogWarning("[Multiplayer][tac-native] peer " + senderPeerId + " cannot build this " +
                                          "battle locally (" + reason + ") — arming the save-transfer fallback.");
                         FallbackArmed = true;
                         return true;
                     }
                     if (op != OpEntry)
                     {
-                        Debug.LogError("[Multiplayer][tac-native] unknown entry op " + op + " — asking for the save.");
+                        MpLog.LogError("[Multiplayer][tac-native] unknown entry op " + op + " — asking for the save.");
                         RequestFallback("unknown op " + op);
                         return true;
                     }
@@ -240,7 +240,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac-native] entry message unreadable: " + ex);
+                MpLog.LogError("[Multiplayer][tac-native] entry message unreadable: " + ex);
                 RequestFallback("entry message unreadable");
             }
             return true;
@@ -277,7 +277,7 @@ namespace Multiplayer.Tactical
             _seedArmed = true;
 
             var binding = plotDef.LevelSceneDef.Binding.CloneAndAddLevelParams(tgp);
-            Debug.Log("[Multiplayer][tac-native] CLIENT building the battle locally: site=" + siteId +
+            MpLog.Log("[Multiplayer][tac-native] CLIENT building the battle locally: site=" + siteId +
                       " plot=" + plotDef.name + " seed=" + seed + " layout=" +
                       (mirroredLayout ? "mirrored" : "re-rolled from the site seed"));
 
@@ -288,7 +288,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac-native] CLIENT native launch threw: " + ex);
+                MpLog.LogError("[Multiplayer][tac-native] CLIENT native launch threw: " + ex);
                 RequestFallback("native launch threw");
             }
             finally { Replaying = false; }
@@ -301,7 +301,7 @@ namespace Multiplayer.Tactical
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return;
             if (engine.IsHost) { FallbackArmed = true; return; }
-            Debug.LogWarning("[Multiplayer][tac-native] asking the host for the save transfer instead (" + reason + ")");
+            MpLog.LogWarning("[Multiplayer][tac-native] asking the host for the save transfer instead (" + reason + ")");
             try
             {
                 byte[] inner;
@@ -317,7 +317,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][tac-native] the fallback request itself failed to send (" + ex.Message +
+                MpLog.LogError("[Multiplayer][tac-native] the fallback request itself failed to send (" + ex.Message +
                                ") — this peer will sit behind the curtain until the reveal deadline.");
             }
         }
@@ -335,7 +335,7 @@ namespace Multiplayer.Tactical
             UnityEngine.Random.InitState(_spawnSeed);
             if (_bracketShared != null) _bracketShared.Random = new System.Random(_spawnSeed);
             _held = true;
-            Debug.Log("[Multiplayer][tac-native] RNG bracket ENTER " + what + " seed=" + _spawnSeed);
+            MpLog.Log("[Multiplayer][tac-native] RNG bracket ENTER " + what + " seed=" + _spawnSeed);
             return true;
         }
 
@@ -349,7 +349,7 @@ namespace Multiplayer.Tactical
             if (_bracketShared != null) _bracketShared.Random = _savedShared;
             _bracketShared = null;
             _savedShared = null;
-            Debug.Log("[Multiplayer][tac-native] RNG bracket EXIT " + what + " — streams restored");
+            MpLog.Log("[Multiplayer][tac-native] RNG bracket EXIT " + what + " — streams restored");
         }
     }
 

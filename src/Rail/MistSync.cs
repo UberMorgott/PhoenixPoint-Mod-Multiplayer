@@ -150,9 +150,9 @@ namespace Multiplayer.Network.Sync
                         Epoch = epoch,
                     };
                 }
-                catch (Exception ex) { Debug.LogError("[Multiplayer][rail] MistSync encode failed: " + ex); }
+                catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] MistSync encode failed: " + ex); }
             });
-            Debug.Log("[Multiplayer][rail] MistSync: queued mist hour " + hours + " (" + raw.Length +
+            MpLog.Log("[Multiplayer][rail] MistSync: queued mist hour " + hours + " (" + raw.Length +
                       "B raw, main-thread copy " + copyMs.ToString("0.00") + " ms)");
         }
 

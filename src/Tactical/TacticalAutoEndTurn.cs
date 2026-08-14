@@ -83,7 +83,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[Multiplayer][tac] auto-end-turn premise could not be folded, leaving the " +
+                MpLog.LogWarning("[Multiplayer][tac] auto-end-turn premise could not be folded, leaving the " +
                                  "native answer alone: " + ex.Message);
                 return false;
             }
@@ -104,7 +104,7 @@ namespace Multiplayer.Tactical
                 if (!__result || !InSession()) return;
                 if (!AnyoneCanStillAct(__instance)) return;
                 __result = false;
-                Debug.Log("[Multiplayer][tac] auto-end-turn prompt WITHHELD — '" +
+                MpLog.Log("[Multiplayer][tac] auto-end-turn prompt WITHHELD — '" +
                           (__instance.TacticalFactionDef == null ? "?" : __instance.TacticalFactionDef.name) +
                           "' still holds an actor with action points. The native fold reads only the " +
                           "'terminal' ability trait, which is the one per-actor turn bit that diverges " +
@@ -125,7 +125,7 @@ namespace Multiplayer.Tactical
                 if (!AnyoneCanStillAct(faction)) return true;
                 // Never silent: a box that does nothing when clicked is this repo's dominant bug class, and
                 // the player is owed the reason his OK did not end the round.
-                Debug.LogWarning("[Multiplayer][tac] auto-end-turn prompt ANSWERED but NOT acted on — by the time " +
+                MpLog.LogWarning("[Multiplayer][tac] auto-end-turn prompt ANSWERED but NOT acted on — by the time " +
                                  "OK was pressed the shared squad held an actor with action points again. The " +
                                  "prompt asked a question that had stopped being true; ending the turn on it " +
                                  "would have started the alien turn under a player who was still moving. The " +

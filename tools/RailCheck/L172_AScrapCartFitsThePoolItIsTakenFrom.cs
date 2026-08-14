@@ -186,7 +186,7 @@ namespace RailCheck
                                      "by CommonItemData.AddItem:205-213.";
 
             // ── (d) THE SILENCE ──
-            if (!Program.Callees(resync, typeof(UnityEngine.Debug).Assembly).Any(c => c.Name == "LogError"))
+            if (!Program.CalleeSequence(resync).Any(c => c.DeclaringType == typeof(Multiplayer.MpLog) && c.Name == "LogError"))
                 yield return "L172 shortfall-silent: ResyncScrapSnapshot does not report a cart it cannot " +
                              "pay for. The engine's own complaint is a bare Debug.LogError from " +
                              "CommonItemData.Subtract:224 naming a def and nothing else — not the peer, not " +

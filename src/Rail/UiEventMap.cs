@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
@@ -183,11 +183,11 @@ namespace Multiplayer.Network.Sync
                             // screen paints, and skipping it is logged once per kind per screen.
                             OpenUiRepaint.MarkDirty(entity.GetType(), geo);
                             if (_loggedUnknown.Add(entity.GetType().Name))
-                                Debug.Log("[Multiplayer][rail] UiEventMap: " + entity.GetType().Name + " rides the universal open-screen repaint (logged once)");
+                                MpLog.Log("[Multiplayer][rail] UiEventMap: " + entity.GetType().Name + " rides the universal open-screen repaint (logged once)");
                             break;
                     }
                 }
-                catch (Exception ex) { Debug.LogWarning("[Multiplayer][rail] UiEventMap fire failed for " + entity.GetType().Name + ": " + ex.Message); }
+                catch (Exception ex) { MpLog.LogWarning("[Multiplayer][rail] UiEventMap fire failed for " + entity.GetType().Name + ": " + ex.Message); }
             }
         }
 
@@ -719,7 +719,7 @@ namespace Multiplayer.Network.Sync
                 !ReferenceEquals(owner.Progression, data.Progression)) return;
             int cost = PersonnelSync.AbilityCost(owner, data.Progression, data.AbilitySlot, data.Ability);
             if (PersonnelSync.CanAfford(owner, cost)) return;
-            Debug.Log("[MP][personnel] buy-confirm CLOSED U#" + (int)owner.Id + " — " +
+            MpLog.Log("[MP][personnel] buy-confirm CLOSED U#" + (int)owner.Id + " — " +
                       (data.Ability == null ? "the offer" : data.Ability.name) + " costs " + cost +
                       " and only " + (owner.Progression.SkillPoints + PersonnelSync.SharedPool(owner)) +
                       " is left; another peer spent the points while this window was open");
@@ -808,7 +808,7 @@ namespace Multiplayer.Network.Sync
                 if (b != null && s != null && b.FieldType == typeof(int) && s.FieldType == typeof(int))
                     pairs.Add(new StagePair { Baseline = b, Stage = s, Ceiling = ceiling });
                 else
-                    Debug.LogError("[Multiplayer][rail] stage-baseline bind FAILED on " + owner.Name + "." +
+                    MpLog.LogError("[Multiplayer][rail] stage-baseline bind FAILED on " + owner.Name + "." +
                                    names[i] + " — that screen's undo floor is unprotected against repaints");
             }
         }
@@ -945,7 +945,7 @@ namespace Multiplayer.Network.Sync
         {
             var f = AccessTools.Field(owner, name);
             if (f == null)
-                Debug.LogError("[Multiplayer][rail] augment-screen bind FAILED on " + owner.Name + "." + name +
+                MpLog.LogError("[Multiplayer][rail] augment-screen bind FAILED on " + owner.Name + "." + name +
                                " — a repaint can no longer see an armed body-part selection and will clobber it");
             return f;
         }

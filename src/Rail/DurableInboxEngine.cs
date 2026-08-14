@@ -400,7 +400,7 @@ namespace Multiplayer.Network.Sync
             if (!string.Equals(_reportedMultipleOpen, signature, StringComparison.Ordinal))
             {
                 _reportedMultipleOpen = signature;
-                UnityEngine.Debug.LogError("[MP][inbox] " + openEntries.Count + " windows are Open at once for " +
+                MpLog.LogError("[MP][inbox] " + openEntries.Count + " windows are Open at once for " +
                     "one member (" + signature + ") — only one may be. Requeueing all but the oldest; windows " +
                     "keep opening. Nothing is lost, but the state that produced this is a bug worth chasing.");
             }
@@ -1024,7 +1024,7 @@ namespace Multiplayer.Network.Sync
                 if (!_store.RollbackUncheckpointedDecision(pending))
                     throw new InvalidOperationException("shared answer failed and pending authority could " +
                         "not roll back", ex);
-                UnityEngine.Debug.LogError("[MP][events] shared answer for '" + occurrence.EventId +
+                MpLog.LogError("[MP][events] shared answer for '" + occurrence.EventId +
                     "' rolled back, the window stays answerable: " + ex);
                 return false;
             }

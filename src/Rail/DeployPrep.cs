@@ -147,7 +147,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][deploy] could not ask whether " + (siteRef ?? "S#?") + " is still " +
+                MpLog.LogError("[MP][deploy] could not ask whether " + (siteRef ?? "S#?") + " is still " +
                                "deployable — treating it as gone, so the join button hides and the next " +
                                "screen exit withdraws the announcement: " + ex);
                 return false;
@@ -200,13 +200,13 @@ namespace Multiplayer.Network.Sync
                     IntentRail.Send(SurfaceIds.GeoMissionIntent, MissionSync.OpPrepOpen,
                         "prep open " + siteRef, w => w.Write(siteRef));
                 }
-                Debug.Log("[MP][deploy] deployment PREP announced for " + siteRef + " — every other peer on " +
+                MpLog.Log("[MP][deploy] deployment PREP announced for " + siteRef + " — every other peer on " +
                           "an idle geoscape now has the join button. Nobody has to press it: it is a door, " +
                           "not a gate (P13).");
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][deploy] prep announce failed — the other peers get no join button for " +
+                MpLog.LogError("[MP][deploy] prep announce failed — the other peers get no join button for " +
                                "this deployment; nothing else is affected: " + ex);
             }
         }
@@ -225,7 +225,7 @@ namespace Multiplayer.Network.Sync
                 if (_mine == null || engine == null || !engine.IsActiveSession) { _mine = null; return; }
                 if (StillServable(_mine))
                 {
-                    Debug.Log("[MP][deploy] left the deployment prep for " + _mine + " but the drop is still " +
+                    MpLog.Log("[MP][deploy] left the deployment prep for " + _mine + " but the drop is still " +
                               "servable — the join door STAYS on every peer's geoscape, this one's included. " +
                               "Nobody is waiting on anybody: it is an offer, not a gate (P13).");
                     return;
@@ -242,7 +242,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][deploy] prep withdraw failed — the join button may linger until the next " +
+                MpLog.LogError("[MP][deploy] prep withdraw failed — the join button may linger until the next " +
                                "announcement or the reload boundary clears it: " + ex);
             }
         }
@@ -258,14 +258,14 @@ namespace Multiplayer.Network.Sync
             {
                 // NEVER SILENT: the sender IS standing in a deployment screen, so a host that cannot see the
                 // mission behind it is a rail defect, not a race the player caused.
-                Debug.LogWarning("[MP][deploy] prep-open from peer " + senderPeerId + " for " +
+                MpLog.LogWarning("[MP][deploy] prep-open from peer " + senderPeerId + " for " +
                                  (siteRef ?? "S#?") + " IGNORED — the host has no ActiveMission there. No join " +
                                  "button is published; that peer's own screen is untouched.");
                 return;
             }
             _announcer = senderPeerId;
             Publish(siteRef);
-            Debug.Log("[MP][deploy] HOST published prep " + siteRef + " nonce=" + nonce + " peer=" + senderPeerId);
+            MpLog.Log("[MP][deploy] HOST published prep " + siteRef + " nonce=" + nonce + " peer=" + senderPeerId);
         }
 
         /// <summary>THE ANNOUNCING PEER IS GONE. Its <c>ExitState</c> will never run, so without this the door
@@ -289,12 +289,12 @@ namespace Multiplayer.Network.Sync
             // The dead-button worry this hook was added for is answered by LiveSiteRef instead.
             if (StillServable(State.SiteRef))
             {
-                Debug.Log("[MP][deploy] the peer who announced the deployment prep for " + State.SiteRef +
+                MpLog.Log("[MP][deploy] the peer who announced the deployment prep for " + State.SiteRef +
                           " is gone, but the drop is still servable — the join door STAYS for everybody " +
                           "left. It hides by itself the moment the site stops being deployable.");
                 return;
             }
-            Debug.Log("[MP][deploy] the peer standing in the deployment prep for " + State.SiteRef +
+            MpLog.Log("[MP][deploy] the peer standing in the deployment prep for " + State.SiteRef +
                       " is gone — withdrawing its announcement, because it will never run ExitState itself. " +
                       "Every other peer's join button clears; nothing else changes.");
             Publish("");
@@ -305,7 +305,7 @@ namespace Multiplayer.Network.Sync
             string siteRef = WireString.ReadKey(r);
             if (!ClearsOnWithdraw(siteRef, State.SiteRef))
             {
-                Debug.Log("[MP][deploy] prep-close from peer " + senderPeerId + " for " + (siteRef ?? "S#?") +
+                MpLog.Log("[MP][deploy] prep-close from peer " + senderPeerId + " for " + (siteRef ?? "S#?") +
                           " landed on '" + State.SiteRef + "' — a newer announcement already took the slot, so " +
                           "the live door stays open.");
                 return;
@@ -342,7 +342,7 @@ namespace Multiplayer.Network.Sync
                 var mission = site?.ActiveMission;
                 if (geo?.View == null || mission == null)
                 {
-                    Debug.LogWarning("[MP][deploy] JOIN pressed for " + (State.SiteRef ?? "S#?") + " but this " +
+                    MpLog.LogWarning("[MP][deploy] JOIN pressed for " + (State.SiteRef ?? "S#?") + " but this " +
                                      "peer has no ActiveMission there — it launched, was cancelled, or the site " +
                                      "is not mirrored yet. Nothing opened, nothing was sent; the button clears " +
                                      "when the announcing peer leaves its screen.");
@@ -350,7 +350,7 @@ namespace Multiplayer.Network.Sync
                 }
                 var vehicle = site.GetPlayerVehiclesOnSite()
                                   ?.FirstOrDefault(v => v != null && v.GetCharacterCount() > 0);
-                Debug.Log("[MP][deploy] JOIN pressed — opening the deployment prep screen for " + State.SiteRef +
+                MpLog.Log("[MP][deploy] JOIN pressed — opening the deployment prep screen for " + State.SiteRef +
                           " through the game's own GeoscapeView.LaunchMission, container=" +
                           (vehicle == null ? "<site>" : vehicle.name) + ". Both info popups are skipped and no " +
                           "peer is asked for permission.");
@@ -358,7 +358,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][deploy] JOIN failed — this peer stays on the geoscape and every other peer " +
+                MpLog.LogError("[MP][deploy] JOIN failed — this peer stays on the geoscape and every other peer " +
                                "is unaffected: " + ex);
             }
         }

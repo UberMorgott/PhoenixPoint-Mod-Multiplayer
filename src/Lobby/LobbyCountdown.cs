@@ -155,7 +155,7 @@ namespace Multiplayer.Network
             // on the frame after it armed.
             if (_route == Route.Save && !startGateOpen)
             {
-                Debug.Log("[MP][lobby] countdown STOPPED — the start gate closed while it ran (somebody " +
+                MpLog.Log("[MP][lobby] countdown STOPPED — the start gate closed while it ran (somebody " +
                           "un-readied, left, or the host changed the save). Nothing was started; it re-arms " +
                           "by itself the moment every player is ready again.");
                 Clear(engine);
@@ -165,7 +165,7 @@ namespace Multiplayer.Network
             if (!FireDue(Time.realtimeSinceStartup, _fireAt)) return Route.None;
 
             var fired = _route;
-            Debug.Log("[MP][lobby] countdown reached zero — " + (fired == Route.NewCampaign
+            MpLog.Log("[MP][lobby] countdown reached zero — " + (fired == Route.NewCampaign
                           ? "re-issuing the host's native new-game CONFIRM, which was REFUSED when it armed " +
                             "this (NewCampaignInterceptPatch.CommitNewCampaign): nothing was created until now"
                           : "starting the session down the SAME path the PLAY button used " +
@@ -189,7 +189,7 @@ namespace Multiplayer.Network
             if (!ArmsForNewCampaign(true, Running))
             {
                 // NEVER SILENT (P1): a confirm that produced neither a campaign nor a countdown must say so.
-                Debug.LogWarning("[MP][lobby] NEW CAMPAIGN confirm REFUSED — a " + CaptionSubject(_route) +
+                MpLog.LogWarning("[MP][lobby] NEW CAMPAIGN confirm REFUSED — a " + CaptionSubject(_route) +
                                  " countdown is already running with " + DisplaySecondsLeft() + " s left. " +
                                  "The two never overlap in either order; cancel that one first, or let it " +
                                  "finish. Nothing was created and the settings screen is still open.");
@@ -208,7 +208,7 @@ namespace Multiplayer.Network
             _fireAt = _zeroAt;
             engine.BroadcastToAll(new NetworkMessage(PacketType.LobbyCountdown,
                                                      new byte[] { (byte)CountdownSeconds, (byte)route }));
-            Debug.Log("[MP][lobby] " + (route == Route.NewCampaign
+            MpLog.Log("[MP][lobby] " + (route == Route.NewCampaign
                           ? "the host confirmed a NEW CAMPAIGN — it is created in "
                           : "every player is ready — the session starts in ") + CountdownSeconds +
                       " s. Nobody has to press anything for it to complete (no quorum, P13): it is a clock. " +
@@ -239,7 +239,7 @@ namespace Multiplayer.Network
                 _armed = 0;
                 _route = Route.None;
                 _zeroAt = 0f;
-                Debug.Log("[MP][lobby] countdown CLEARED by the host — either it reached zero and the " +
+                MpLog.Log("[MP][lobby] countdown CLEARED by the host — either it reached zero and the " +
                           "session is starting, or somebody cancelled it.");
                 return;
             }
@@ -248,7 +248,7 @@ namespace Multiplayer.Network
             // what a one-byte arm meant before the new-campaign route existed.
             _route = msg.Payload.Length > 1 ? (Route)msg.Payload[1] : Route.Save;
             _zeroAt = Time.realtimeSinceStartup + seconds;
-            Debug.Log("[MP][lobby] " + CaptionSubject(_route) + " countdown ARMED by the host for " + seconds +
+            MpLog.Log("[MP][lobby] " + CaptionSubject(_route) + " countdown ARMED by the host for " + seconds +
                       " s — this peer counts its own display down from here; the host's clock is the one " +
                       "that decides. CANCEL stops it for everyone.");
         }
@@ -263,13 +263,13 @@ namespace Multiplayer.Network
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActive)
             {
-                Debug.LogWarning("[MP][lobby] CANCEL pressed with no active session — the veto goes nowhere. " +
+                MpLog.LogWarning("[MP][lobby] CANCEL pressed with no active session — the veto goes nowhere. " +
                                  "The panel gates on IsActiveSession, so this is a stale overlay rather than " +
                                  "a lost cancel.");
                 return;
             }
             if (engine.IsHost) { Cancel(engine, null); return; }
-            Debug.Log("[MP][lobby] CANCEL leaving this client as 0x" +
+            MpLog.Log("[MP][lobby] CANCEL leaving this client as 0x" +
                       ((byte)PacketType.LobbyCountdownCancel).ToString("X2") + " — the host owns the " +
                       "countdown, so the veto takes one round trip and then clears it on every peer.");
             engine.SendToHost(new NetworkMessage(PacketType.LobbyCountdownCancel));
@@ -314,7 +314,7 @@ namespace Multiplayer.Network
                 session.SystemChat(SessionLifecycle.FormatCountdownCancelledNotice(who));
             }
 
-            Debug.Log("[MP][lobby] " + CaptionSubject(route) + " countdown CANCELLED by " + who +
+            MpLog.Log("[MP][lobby] " + CaptionSubject(route) + " countdown CANCELLED by " + who +
                       (wasRunning ? "" : " — but nothing was running (it had already fired, or another " +
                                          "peer's veto got here first)") +
                       (clearsReady

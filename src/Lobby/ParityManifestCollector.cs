@@ -35,7 +35,7 @@ namespace Multiplayer.Network
             var gameVersion = "";
             int seen = 0;   // mods the ModManager knows about, enabled or not — see the audit line below
             try { gameVersion = Base.Build.RuntimeBuildInfo.BuildVersion ?? ""; }
-            catch (Exception e) { Debug.LogWarning("[Multiplayer] parity: game build version unreadable: " + e.Message); }
+            catch (Exception e) { MpLog.LogWarning("[Multiplayer] parity: game build version unreadable: " + e.Message); }
 
             try
             {
@@ -51,7 +51,7 @@ namespace Multiplayer.Network
                             if (e != null && ent.IsUserEntitledFor(e))
                                 dlc.Add(e.name);
                 }
-                catch (Exception e) { Debug.LogWarning("[Multiplayer] parity: DLC enumeration failed: " + e.Message); }
+                catch (Exception e) { MpLog.LogWarning("[Multiplayer] parity: DLC enumeration failed: " + e.Message); }
 
                 // Enabled mods + their settings.
                 var mm = game?.ModManager;
@@ -93,14 +93,14 @@ namespace Multiplayer.Network
                             }
                             catch (Exception e)
                             {
-                                Debug.LogWarning($"[Multiplayer] parity: settings of '{mod.ID}' failed: {e.Message}");
+                                MpLog.LogWarning($"[Multiplayer] parity: settings of '{mod.ID}' failed: {e.Message}");
                             }
                             settings.Add((mod.ID, kv));
                         }
                     }
                 }
             }
-            catch (Exception e) { Debug.LogError("[Multiplayer] parity manifest collect failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] parity manifest collect failed: " + e.Message); }
 
             // THE AUDIT LINE, on both peers. What it settles, and what nothing else could: a client machine
             // reported 41 installed mods against a host's 10 and produced ZERO mod diffs, which is either
@@ -110,7 +110,7 @@ namespace Multiplayer.Network
             // 41 ids. Sorted so the hash does not depend on ModManager's enumeration order.
             var ids = mods.ConvertAll(m => m.id);
             ids.Sort(StringComparer.Ordinal);
-            Debug.Log("[Multiplayer] parity manifest: mods=" + mods.Count + "/" + seen + " enabled dlc=" + dlc.Count +
+            MpLog.Log("[Multiplayer] parity manifest: mods=" + mods.Count + "/" + seen + " enabled dlc=" + dlc.Count +
                       " game='" + gameVersion + "' crc=" + ParityManifest.HashEntries(ids).ToString("X8", CultureInfo.InvariantCulture));
 
             return ParityManifest.Build(dlc, mods, settings, gameVersion);

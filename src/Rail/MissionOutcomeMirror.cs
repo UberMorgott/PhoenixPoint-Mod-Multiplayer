@@ -136,14 +136,14 @@ namespace Multiplayer.Network.Sync
                 }
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.GeoMissionOutcome, SyncKind.StateDelta, inner)));
-                Debug.Log("[MP][outcome] HOST mission reward seq=" + seq + " res=" + Count(result.Resources) +
+                MpLog.Log("[MP][outcome] HOST mission reward seq=" + seq + " res=" + Count(result.Resources) +
                           " items=" + Count(result.Items) + " — " + SiteLine(mission));
             }
             catch (Exception ex)
             {
                 // A dropped payload is a post-mission panel that opens EMPTY on every other peer — the exact
                 // "model fresh, view stale" shape this repo treats as its dominant bug. Never silent.
-                Debug.LogError("[MP][outcome] HOST mission reward broadcast FAILED — every other peer's " +
+                MpLog.LogError("[MP][outcome] HOST mission reward broadcast FAILED — every other peer's " +
                                "outcome panel will show nothing gained: " + ex);
             }
         }
@@ -461,7 +461,7 @@ namespace Multiplayer.Network.Sync
                 if (!handled) dropped++;
             }
             if (dropped > 0)
-                Debug.LogWarning("[MP][outcome] " + dropped + " of " + wire.Rows.Count + " reward rows did not " +
+                MpLog.LogWarning("[MP][outcome] " + dropped + " of " + wire.Rows.Count + " reward rows did not " +
                                  "resolve on this peer and were dropped — the page will list less than the host's. " +
                                  "An address that resolves nowhere is either a mod-parity break (law 10) or state " +
                                  "that has not landed yet; a fabricated stand-in would NRE inside the native renderer.");
@@ -488,13 +488,13 @@ namespace Multiplayer.Network.Sync
                     // the same resolution done one step later because this peer got back first.
                     _incoming = DecodeRaw(r);
                     Seq.Mark(SurfaceIds.GeoMissionOutcome, seq);
-                    Debug.Log("[MP][outcome] CLIENT mission reward seq=" + seq + " res=" + Count(_incoming.Resources) +
+                    MpLog.Log("[MP][outcome] CLIENT mission reward seq=" + seq + " res=" + Count(_incoming.Resources) +
                               " items=" + Count(_incoming.Items) + " rows=" + _incoming.Rows.Count +
                               " — held for this peer's own mission completion");
                 }
                 RestampLateOutcome();
             }
-            catch (Exception ex) { Debug.LogError("[MP][outcome] inbound failed: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[MP][outcome] inbound failed: " + ex); }
             return true;
         }
 
@@ -524,7 +524,7 @@ namespace Multiplayer.Network.Sync
                 // UNTIL the payload lands. Loud anyway, because the alternative reading — "this mission
                 // really granted nothing" — is one a player cannot tell apart from a lost message, and
                 // because this branch running at all means the two peers raced.
-                Debug.LogWarning("[MP][outcome] no host reward payload had arrived when this peer completed its " +
+                MpLog.LogWarning("[MP][outcome] no host reward payload had arrived when this peer completed its " +
                                  "mission — the outcome panel opens EMPTY and is filled in when the payload " +
                                  "lands (RestampLateOutcome). The 0xBB raise is sent as the host applies the " +
                                  "reward, so this means the host had not got there yet.");
@@ -532,12 +532,12 @@ namespace Multiplayer.Network.Sync
             }
             if (RewardSetter == null)
             {
-                Debug.LogError("[MP][outcome] GeoMission.Reward setter did not resolve — the outcome panel " +
+                MpLog.LogError("[MP][outcome] GeoMission.Reward setter did not resolve — the outcome panel " +
                                "renders whatever this peer's mission already held, which is nothing.");
                 return;
             }
             RewardSetter.Invoke(mission, new object[] { reward });
-            Debug.Log("[MP][outcome] CLIENT stamped mission outcome — CompleteSilently + the host's reward " +
+            MpLog.Log("[MP][outcome] CLIENT stamped mission outcome — CompleteSilently + the host's reward " +
                       "(res=" + Count(reward.Resources) + " items=" + Count(reward.Items) + "); the native " +
                       "UIStateInitial:101 branch now runs the outcome modal and the resupply screen. " +
                       SiteLine(mission) + " — this is the BEFORE picture: the retirement is the host's and " +
@@ -565,7 +565,7 @@ namespace Multiplayer.Network.Sync
             _awaitingReward = null;
             _incoming = null;
             RewardSetter.Invoke(mission, new object[] { Build(GeoLevel(), wire, "Mission") });
-            Debug.Log("[MP][outcome] host reward arrived AFTER this peer had already completed its mission — " +
+            MpLog.Log("[MP][outcome] host reward arrived AFTER this peer had already completed its mission — " +
                       "re-stamped in place, and the open outcome modal is re-populated so the list appears");
             RepopulateModal(mission);
         }
@@ -591,12 +591,12 @@ namespace Multiplayer.Network.Sync
                 {
                     if (md.Modal == null || !ReferenceEquals(md.Modal.Data, data)) continue;
                     foreach (var h in md.Modal.GetComponents<IModalHandler>()) h.ModalShowHandler(md.Modal);
-                    Debug.Log("[MP][outcome] re-populated the open '" + md.Type + "' modal in place");
+                    MpLog.Log("[MP][outcome] re-populated the open '" + md.Type + "' modal in place");
                 }
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][outcome] re-populating the open outcome modal failed, so the reward list " +
+                MpLog.LogError("[MP][outcome] re-populating the open outcome modal failed, so the reward list " +
                                "stays missing on this peer for this mission: " + ex);
             }
         }

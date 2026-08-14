@@ -210,7 +210,7 @@ namespace Multiplayer.Network.Sync
             {
                 // The generators are the whole mechanism; without them this would have to re-implement the
                 // shop's arithmetic, which is exactly what this file refuses to do.
-                Debug.LogError("[MP][market] the game's own row generators are gone (GeoMarketplace" +
+                MpLog.LogError("[MP][market] the game's own row generators are gone (GeoMarketplace" +
                                ".GenerateItemChoice/GenerateResearchChoice) — the mirrored shop cannot be " +
                                "rebuilt, so this peer keeps the rows it had");
                 return null;
@@ -259,7 +259,7 @@ namespace Multiplayer.Network.Sync
             private static bool Prefix()
             {
                 if (IntentRail.ShouldRunNative()) return true;
-                Debug.Log("[MP][market] client offer REROLL blocked — the host owns the assortment and " +
+                MpLog.Log("[MP][market] client offer REROLL blocked — the host owns the assortment and " +
                           "ships it on 0xBF; a locally rolled shop is a different shop");
                 return false;
             }
@@ -298,7 +298,7 @@ namespace Multiplayer.Network.Sync
                     var rows = choices.Select(c => new { Key = OfferKey(c), Price = PriceOf(c) })
                                       .Where(x => !string.IsNullOrEmpty(x.Key)).ToList();
                     if (rows.Count != choices.Count)
-                        Debug.LogWarning("[MP][market] " + (choices.Count - rows.Count) + " of " + choices.Count +
+                        MpLog.LogWarning("[MP][market] " + (choices.Count - rows.Count) + " of " + choices.Count +
                                          " host offers carry an outcome shape no key can name — those rows " +
                                          "cannot be shipped and the clients' shop will be shorter than the host's");
                     w.Write(rows.Count);
@@ -307,12 +307,12 @@ namespace Multiplayer.Network.Sync
                 }
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.GeoMarketplaceOffers, SyncKind.StateDelta, inner)));
-                Debug.Log("[MP][market] HOST shipped " + choices.Count + " offer(s) seq=" + seq + " (" + why + ")");
+                MpLog.Log("[MP][market] HOST shipped " + choices.Count + " offer(s) seq=" + seq + " (" + why + ")");
                 RepaintOpenMarketplace();   // the host may be standing in the shop it just changed
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][market] HOST offer broadcast FAILED — the clients keep a shop that is no " +
+                MpLog.LogError("[MP][market] HOST offer broadcast FAILED — the clients keep a shop that is no " +
                                "longer the host's: " + ex);
             }
         }
@@ -343,7 +343,7 @@ namespace Multiplayer.Network.Sync
                 if (ApplyOffers(rows)) Seq.Mark(SurfaceIds.GeoMarketplaceOffers, seq);
                 else HoldOffers(seq, rows);
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] MarketplaceSync inbound failed: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] MarketplaceSync inbound failed: " + ex); }
             return true;
         }
 
@@ -355,7 +355,7 @@ namespace Multiplayer.Network.Sync
             var market = geo?.Marketplace;
             if (market?.MarketplaceChoices == null)
             {
-                Debug.Log("[MP][market] offer list DROPPED — this peer has no live marketplace (in a battle, " +
+                MpLog.Log("[MP][market] offer list DROPPED — this peer has no live marketplace (in a battle, " +
                           "mid-load, or no Kaos Engines); HELD and re-applied when this peer's shop comes up");
                 return false;
             }
@@ -368,7 +368,7 @@ namespace Multiplayer.Network.Sync
                 rebuilt.Add(choice);
             }
             if (dropped > 0)
-                Debug.LogError("[MP][market] " + dropped + " of " + rows.Count + " offers could not be rebuilt on " +
+                MpLog.LogError("[MP][market] " + dropped + " of " + rows.Count + " offers could not be rebuilt on " +
                                "this peer — a def the host has and this build does not (mod parity, law 10). The " +
                                "shop is SHORTER here; buying the rows that DID rebuild stays correct because the " +
                                "intent carries the offer KEY and nothing positional (ResolveOffer). It did not " +
@@ -376,7 +376,7 @@ namespace Multiplayer.Network.Sync
             market.MarketplaceChoices.Clear();
             market.MarketplaceChoices.AddRange(rebuilt);
             ClearHeldOffers();    // whatever was held is now older than what just landed
-            Debug.Log("[MP][market] mirrored " + rebuilt.Count + " offer(s) from the host");
+            MpLog.Log("[MP][market] mirrored " + rebuilt.Count + " offer(s) from the host");
             RepaintOpenMarketplace();
             return true;
         }
@@ -430,7 +430,7 @@ namespace Multiplayer.Network.Sync
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession || engine.IsHost) { ClearHeldOffers(); return; }
                 if (!Seq.ShouldApply(SurfaceIds.GeoMarketplaceOffers, seq)) { ClearHeldOffers(); return; }
-                Debug.Log("[MP][market] re-applying the offer list held from seq=" + seq +
+                MpLog.Log("[MP][market] re-applying the offer list held from seq=" + seq +
                           " — this peer's marketplace is live again");
                 if (ApplyOffers(rows)) Seq.Mark(SurfaceIds.GeoMarketplaceOffers, seq);
             }
@@ -451,7 +451,7 @@ namespace Multiplayer.Network.Sync
                 var ev = module == null ? null : ModuleGeoEvent?.GetValue(module) as GeoscapeEvent;
                 if (module == null || ev == null || ModuleSetEncounter == null)
                 {
-                    Debug.LogWarning("[MP][market] open shop NOT repainted — the module's own rebuild is not " +
+                    MpLog.LogWarning("[MP][market] open shop NOT repainted — the module's own rebuild is not " +
                                      "reachable (module=" + (module == null) + " event=" + (ev == null) + "); the " +
                                      "rows are already correct in the model and reopening the shop shows them");
                     return;
@@ -464,7 +464,7 @@ namespace Multiplayer.Network.Sync
                 }
             }
             catch (Exception ex)
-            { Debug.LogError("[MP][market] repaint of the open shop threw — screen kept: " + ex); }
+            { MpLog.LogError("[MP][market] repaint of the open shop threw — screen kept: " + ex); }
         }
 
         // ─── THE PURCHASE: capture (client) / re-broadcast (host) at ONE funnel ───
@@ -495,7 +495,7 @@ namespace Multiplayer.Network.Sync
                 {
                     // Never silent, and never a local fallback: a purchase this peer cannot address is a
                     // purchase the host cannot re-derive, and running it here would spend the shared wallet.
-                    Debug.LogWarning("[MP][market] client purchase DROPPED — the clicked row is not addressable " +
+                    MpLog.LogWarning("[MP][market] client purchase DROPPED — the clicked row is not addressable " +
                                      "(key=" + (key ?? "none") + " event=" + (ev?.EventID ?? "none") +
                                      "); nothing was spent locally either");
                     return false;
@@ -563,7 +563,7 @@ namespace Multiplayer.Network.Sync
                 // Law 1 (silent swallow): a transpiler that matched nothing leaves the throw in place and
                 // says nothing at all, which is the worst of both worlds — the patch looks applied.
                 if (swapped != 1)
-                    Debug.LogError("[MP][market] CompleteMarketplaceEvent's vehicle pick was NOT replaced (" +
+                    MpLog.LogError("[MP][market] CompleteMarketplaceEvent's vehicle pick was NOT replaced (" +
                                    swapped + " SingleOrDefault call(s) found, expected 1) — the game's own " +
                                    "single-aircraft assumption is still live and a second aircraft parked at " +
                                    "the marketplace will throw on every peer's purchase");
@@ -619,7 +619,7 @@ namespace Multiplayer.Network.Sync
             if (choice.Requirments != null) faction.Wallet.Take(choice.Requirments.Resources, OperationReason.Purchase);
             geoEvent.CompleteMarketplaceEvent(choice, faction);
             choices.Remove(choice);
-            Debug.Log("[MP][market] HOST bought '" + key + "' for " + PriceOf(choice) + " on behalf of peer=" +
+            MpLog.Log("[MP][market] HOST bought '" + key + "' for " + PriceOf(choice) + " on behalf of peer=" +
                       peer + " nonce=" + nonce);
             // The wallet and the goods ride the value rail; the consumed ROW does not, so it is pushed here.
             // HostBroadcastOffers repaints the host's own open shop too — one seam for every list change.

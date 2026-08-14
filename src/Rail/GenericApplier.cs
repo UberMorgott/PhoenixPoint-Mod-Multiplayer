@@ -174,13 +174,13 @@ namespace Multiplayer.Network.Sync
                         string root = ReadResyncRoot(payload);
                         if (!string.IsNullOrEmpty(root))
                         {
-                            Debug.Log("[Multiplayer][rail] resync request from peer " + senderPeerId +
+                            MpLog.Log("[Multiplayer][rail] resync request from peer " + senderPeerId +
                                       " — answering with a SCOPED re-emit of root '" + root + "'");
                             DiffEngine.ForceReemit(root);
                         }
                         else
                         {
-                            Debug.Log("[Multiplayer][rail] resync request from peer " + senderPeerId +
+                            MpLog.Log("[Multiplayer][rail] resync request from peer " + senderPeerId +
                                       " — answering with a FULL resend (the request named no scope)");
                             DiffEngine.RequestFullResend();
                         }
@@ -220,7 +220,7 @@ namespace Multiplayer.Network.Sync
                 // identity). Pumped for delta batches too: the pump is also what advances the bounded expiry.
                 GeoModalMirror.PumpParked();
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] GenericApplier inbound failed: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] GenericApplier inbound failed: " + ex); }
             return true;
         }
 
@@ -284,7 +284,7 @@ namespace Multiplayer.Network.Sync
                     // Reader-level failure mid-batch: leave the seq UNMARKED (SurfaceSeq contract — a failed
                     // apply must not consume the seq) and recover the lost entries via the throttled resync.
                     // Per-entry failures never land here (ApplyEntry catches its own); this is a torn packet.
-                    Debug.LogError("[Multiplayer][rail] GenericApplier: batch failed at seq " + seq + ": " + ex);
+                    MpLog.LogError("[Multiplayer][rail] GenericApplier: batch failed at seq " + seq + ": " + ex);
                     RequestResync(engine, "batch failed at seq " + seq);
                     return;
                 }
@@ -412,11 +412,11 @@ namespace Multiplayer.Network.Sync
                                            as PhoenixPoint.Geoscape.Entities.GeoCharacter;
                                 var reg = IdentityResolver.TacUnitsDict(geo);
                                 if (unit == null || reg == null)
-                                { Debug.LogError("[Multiplayer][rail] structural create '" + rootKey + "': " + (unit == null ? "blob deserialize failed" : "no _tacUnits registry")); return; }
+                                { MpLog.LogError("[Multiplayer][rail] structural create '" + rootKey + "': " + (unit == null ? "blob deserialize failed" : "no _tacUnits registry")); return; }
                                 reg[unit.Id] = unit; // the game's own load registration (ProcessInstanceData:609)
                                 created = true;
                                 touched.Add(unit);   // UiEventMap GeoCharacter arm: native derived-stat refresh + repaint
-                                Debug.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + blob.Length + "B)");
+                                MpLog.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + blob.Length + "B)");
                             }
                             else LogMissOnce("structural create for '" + rootKey + "' not enabled — skipped");
                         }
@@ -438,7 +438,7 @@ namespace Multiplayer.Network.Sync
                                 // native derived-stat recompute and an identity reseed ON the entity, and the
                                 // entity in hand has just been erased from the level.
                                 OpenUiRepaint.MarkDirty();
-                                Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied");
+                                MpLog.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied");
                             }
                             else LogMissOnce("structural destroy for '" + rootKey + "' not enabled — skipped");
                         }
@@ -452,7 +452,7 @@ namespace Multiplayer.Network.Sync
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError("[Multiplayer][rail] structural apply '" + rootKey + "' failed: " + ex);
+                    MpLog.LogError("[Multiplayer][rail] structural apply '" + rootKey + "' failed: " + ex);
                     return; // seq unmarked — the throttled resync path recovers
                 }
                 _lastSeq = seq;
@@ -617,7 +617,7 @@ namespace Multiplayer.Network.Sync
             touched.Add(owner);
             MarkOrderChange(geo, rootKey, owner, field.Name); // the mission wrapper is a MARKER, not a view state (law 11)
             OpenUiRepaint.MarkDirty(); // law 11: the open geoscape shows the new marker NOW
-            Debug.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + t.Name + ")");
+            MpLog.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + t.Name + ")");
             return true;
         }
 
@@ -636,7 +636,7 @@ namespace Multiplayer.Network.Sync
             // re-enter touches — so MarkDirty alone leaves the wrapper on screen. Same seam as the leaf path.
             MarkOrderChange(geo, rootKey, owner, field.Name);
             OpenUiRepaint.MarkDirty();
-            Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied");
+            MpLog.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied");
         }
 
         // ─── Vehicle actor wiring (structural create/destroy for the "V#<id>@<ownerGuid>" root) ───
@@ -724,7 +724,7 @@ namespace Multiplayer.Network.Sync
             // Law 11 via the ONE universal repaint, exactly like the facility pair: UiEventMap has no
             // GeoVehicle arm, so adding the actor to `touched` would be a no-op dressed up as wiring.
             OpenUiRepaint.MarkDirty(); // the open geoscape/roster shows the new aircraft NOW
-            Debug.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + t.Name + " from " + setDef.name + ")");
+            MpLog.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + t.Name + " from " + setDef.name + ")");
             return true;
         }
 
@@ -753,7 +753,7 @@ namespace Multiplayer.Network.Sync
             vehicle.OnExitPlay();                                  // GeoVehicle.cs:602
             UnityEngine.Object.Destroy(vehicle.gameObject);        // :603
             OpenUiRepaint.MarkDirty();
-            Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied (vehicle " + vehicle.VehicleID + ")");
+            MpLog.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied (vehicle " + vehicle.VehicleID + ")");
         }
 
         // ─── Facility element wiring (structural create/destroy for …Layout._facilities#<id>) ───
@@ -793,7 +793,7 @@ namespace Multiplayer.Network.Sync
             if (!ResolveFacilityOwners(geo, rootKey, out var layout, out var pxBase, out _))
             { LogMissOnce("facility owners unresolved at " + rootKey); return false; }
             var fac = Multiplayer.Rail.SerializerRoundtrip.DeserializeGraph(blob, typeof(GeoPhoenixFacility), quiet: true) as GeoPhoenixFacility;
-            if (fac == null) { Debug.LogError("[Multiplayer][rail] structural create '" + rootKey + "': facility blob deserialize failed"); return false; }
+            if (fac == null) { MpLog.LogError("[Multiplayer][rail] structural create '" + rootKey + "': facility blob deserialize failed"); return false; }
             if (!(FacListField.GetValue(layout) is IList list)) return false;
             list.Add(fac);
             fac.OnFacilityStateUpdated += (GeoPhoenixFacility.FacilityStateEventHandler)Delegate.CreateDelegate(
@@ -801,7 +801,7 @@ namespace Multiplayer.Network.Sync
             FacUpdateCache.Invoke(layout, null);
             FacInit.Invoke(pxBase, new object[] { fac });
             OpenUiRepaint.MarkDirty(); // open base screen rebuilds via the UIStatePhoenixBaseLayout table entry
-            Debug.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (facility " + fac.Def?.name + ", " + blob.Length + "B)");
+            MpLog.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (facility " + fac.Def?.name + ", " + blob.Length + "B)");
             return true;
         }
 
@@ -818,7 +818,7 @@ namespace Multiplayer.Network.Sync
             layout.RemoveFacility(fac);
             FacUninit.Invoke(pxBase, new object[] { fac });
             OpenUiRepaint.MarkDirty();
-            Debug.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied (facility " + fac.Def?.name + ")");
+            MpLog.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied (facility " + fac.Def?.name + ")");
         }
 
         private static void RegisterKind(byte kindId, string typeName, ushort fieldCount)
@@ -829,7 +829,7 @@ namespace Multiplayer.Network.Sync
             if (rt == null || rt.Fields.Count != fieldCount)
             {
                 _brokenKinds.Add(kindId);
-                Debug.LogError("[Multiplayer][rail] GenericApplier: kind " + kindId + " (" + typeName + ") " +
+                MpLog.LogError("[Multiplayer][rail] GenericApplier: kind " + kindId + " (" + typeName + ") " +
                                (rt == null ? "unresolvable" : "field count mismatch " + rt.Fields.Count + "≠" + fieldCount) +
                                " — entries of this kind will be skipped (mod parity?)");
                 return;
@@ -961,7 +961,7 @@ namespace Multiplayer.Network.Sync
                 // of them inside ONE second of the first campaign load — MpDiag.On FIRST so the path
                 // concatenation is not built either.
                 if (MpDiag.On && field.Name == "TacUnits")
-                    Debug.Log("[MP][diag] TacUnits APPLY-SKIP (unchanged) " + path);
+                    MpLog.Log("[MP][diag] TacUnits APPLY-SKIP (unchanged) " + path);
                 return; // no-op entry: not applied, not touched, no repaint
             }
             NameTheDivergedField(path, field, subKey);
@@ -1013,7 +1013,7 @@ namespace Multiplayer.Network.Sync
                         // Investigation diag (power retest 2026-07-29), behind the ONE switch: the
                         // host→client direction of the facility power leaf has never been observed live.
                         if (MpDiag.On && field.Name == "_isPowered")
-                            Debug.Log("[MP][diag] facility power APPLY " + path + "." + field.Name + " " +
+                            MpLog.Log("[MP][diag] facility power APPLY " + path + "." + field.Name + " " +
                                       (field.CanRead ? field.GetValue(entity) : null) + "→" + v);
                         field.SetValue(entity, v);
                         break;
@@ -1045,7 +1045,7 @@ namespace Multiplayer.Network.Sync
                         {
                             var ids = new StringBuilder();
                             if (items != null) foreach (var u in items) ids.Append(IdentityResolver.RootRef(u) ?? "?").Append(' ');
-                            Debug.Log("[MP][diag] TacUnits APPLY " + path + " count=" + (isNull || items == null ? -1 : items.Count) +
+                            MpLog.Log("[MP][diag] TacUnits APPLY " + path + " count=" + (isNull || items == null ? -1 : items.Count) +
                                       " [" + ids.ToString().TrimEnd() + "]");
                         }
                         RailMeta.ApplyList(entity, field, isNull ? null : items);
@@ -1442,7 +1442,7 @@ namespace Multiplayer.Network.Sync
                 if (!_lastSitePaint.TryGetValue(s, out var prev) || !string.Equals(prev, line, StringComparison.Ordinal))
                 {
                     _lastSitePaint[s] = line;
-                    Debug.Log(line);
+                    MpLog.Log(line);
                 }
             }
             _siteRepaint.Clear();
@@ -1622,7 +1622,7 @@ namespace Multiplayer.Network.Sync
             if (should)
             {
                 ExploreCurrentSiteMethod.Invoke(v, new object[] { start, end }); // ProcessInstanceData:1126
-                Debug.Log("[Multiplayer][rail] exploration re-seed " + root + " → started " + start +
+                MpLog.Log("[Multiplayer][rail] exploration re-seed " + root + " → started " + start +
                           ", ends " + end + " (LOCAL epoch, stamped when the host's order landed; the host's own " +
                           "leaf reads " + mirrored + " in its own per-actor epoch. Progress derived locally, " +
                           "outcome stays host-only — this timer cannot finish before the host's)");
@@ -1635,7 +1635,7 @@ namespace Multiplayer.Network.Sync
                 // destroyed at the AUTHORITATIVE instant instead of finishing on this peer's own clock.
                 EndExploreCurrentSiteMethod.Invoke(v, null);
                 _localExplorationStart.Remove(v);   // the exploration is over; the next one stamps afresh
-                Debug.Log("[Multiplayer][rail] exploration re-seed " + root + " → cleared (" +
+                MpLog.Log("[Multiplayer][rail] exploration re-seed " + root + " → cleared (" +
                           (inspected ? "the site is now INSPECTED on the host — authoritative DONE forced this " +
                                        "peer's in-flight spinner to completion rather than letting it run out locally"
                                      : "the mirrored order no longer says exploring") + ")");
@@ -1706,7 +1706,7 @@ namespace Multiplayer.Network.Sync
                 foreach (var d in route) path.Add(d.WorldPosition);
                 v.Navigation.Navigate(path);     // GeoVehicle.OnLevelStart:388
                 if (root != null) _seededRoute[root] = route;
-                Debug.Log("[Multiplayer][rail] nav re-seed " + (root ?? "?") + " → " + route.Length + " leg(s)");
+                MpLog.Log("[Multiplayer][rail] nav re-seed " + (root ?? "?") + " → " + route.Length + " leg(s)");
                 return;
             }
 
@@ -1905,7 +1905,7 @@ namespace Multiplayer.Network.Sync
             // (F#…ItemStorage._storageItems), so "pruned 2 phantom dict keys" threw away the only evidence
             // of WHICH two items the peers disagreed about — and the prune is where that evidence dies.
             // The sub-keys are already in hand from the loop above; printing them costs nothing.
-            Debug.Log("[Multiplayer][rail] GenericApplier: census pruned " + extras.Count + " phantom dict key(s) at " +
+            MpLog.Log("[Multiplayer][rail] GenericApplier: census pruned " + extras.Count + " phantom dict key(s) at " +
                       path + "." + field.Name + ": " + string.Join(", ", extraSubs));
         }
 
@@ -1924,7 +1924,7 @@ namespace Multiplayer.Network.Sync
         private static void LogMissOnce(string msg)
         {
             var line = "[Multiplayer][rail] GenericApplier: " + msg;
-            if (RailMeta.CountMiss(line)) Debug.LogWarning(line);
+            if (RailMeta.CountMiss(line)) MpLog.LogWarning(line);
         }
 
         /// <summary>Whole-segment path-prefix match — the same rule the host's forced scope uses
@@ -1953,14 +1953,14 @@ namespace Multiplayer.Network.Sync
             if (_pendingFullAt >= 0f)
             {
                 _pendingFullAt = -1f;
-                Debug.Log("[Multiplayer][rail] GenericApplier: full resend ANSWERED — the mirror holds the " +
+                MpLog.Log("[Multiplayer][rail] GenericApplier: full resend ANSWERED — the mirror holds the " +
                           "host's entry at " + path);
             }
             var hit = PendingRootOf(path);
             if (hit == null) return;
             _pendingScoped.Remove(hit);
             _scopedDropN.Remove(hit); _scopedDropWhy.Remove(hit);
-            Debug.Log("[Multiplayer][rail] GenericApplier: scoped resend of root '" + hit +
+            MpLog.Log("[Multiplayer][rail] GenericApplier: scoped resend of root '" + hit +
                       "' ANSWERED — the mirror holds the host's entry at " + path);
         }
 
@@ -2044,7 +2044,7 @@ namespace Multiplayer.Network.Sync
                 if (full.Length > 0)
                 {
                     _pendingFullAt = -1f;
-                    Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + full);
+                    MpLog.LogWarning("[Multiplayer][rail] GenericApplier: " + full);
                 }
             }
             List<string> dead = null;
@@ -2057,7 +2057,7 @@ namespace Multiplayer.Network.Sync
                 _scopedDropN.TryGetValue(k, out int dropped);
                 _scopedDropWhy.TryGetValue(k, out var why);
                 _scopedDropN.Remove(k); _scopedDropWhy.Remove(k);
-                Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + GiveUpLine(k, now, 0f, dropped, why));
+                MpLog.LogWarning("[Multiplayer][rail] GenericApplier: " + GiveUpLine(k, now, 0f, dropped, why));
             }
         }
 
@@ -2107,7 +2107,7 @@ namespace Multiplayer.Network.Sync
         {
             if (_missedNoLevel) return;   // one line per window, not one per discarded batch
             _missedNoLevel = true;
-            Debug.LogWarning("[Multiplayer][rail] GenericApplier: a host batch was DISCARDED — this peer has " +
+            MpLog.LogWarning("[Multiplayer][rail] GenericApplier: a host batch was DISCARDED — this peer has " +
                              "no STARTED geoscape level yet (mid-load: the level object may already exist " +
                              "while its graph is still being built). It will ask for the whole state back " +
                              "the moment the level is live; until then every further batch is dropped silently.");
@@ -2183,7 +2183,7 @@ namespace Multiplayer.Network.Sync
                 _crcReportedRoot = key;
                 _crcReportedAt = Time.realtimeSinceStartup;
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] CRC report for '" + key + "' failed: " + ex.Message); }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] CRC report for '" + key + "' failed: " + ex.Message); }
         }
 
         /// <summary>MAY THIS REQUEST GO OUT, kept pure so RailCheck L184 can execute it case by case.
@@ -2231,7 +2231,7 @@ namespace Multiplayer.Network.Sync
                 _pendingScoped[rootKey] = now + ScopedAnswerDeadlineSec;
             }
             else { _nextFullResyncAt = now + ResyncThrottleSec; _pendingFullAt = now + ScopedAnswerDeadlineSec; }
-            Debug.LogWarning("[Multiplayer][rail] GenericApplier: " + reason + " — requesting resend" +
+            MpLog.LogWarning("[Multiplayer][rail] GenericApplier: " + reason + " — requesting resend" +
                              (scoped ? " of root '" + rootKey + "'" : " (full)"));
             try
             {
@@ -2244,7 +2244,7 @@ namespace Multiplayer.Network.Sync
                 var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoRail, SyncKind.ActionRequest, body);
                 engine.SendToHost(new NetworkMessage(PacketType.SyncEnvelope, env));
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] GenericApplier resync request failed: " + ex.Message); }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] GenericApplier resync request failed: " + ex.Message); }
         }
 
         /// <summary>Host half of the optional scope above. A legacy one-byte request (or any unreadable

@@ -62,13 +62,13 @@ namespace Multiplayer.Harmony
                     try { MultiplayerUI.Instance?.OnMenuReady(menuCanvas); }
                     catch (Exception e)
                     {
-                        Debug.LogError($"[Multiplayer] OnMenuReady (panel build) failed: {e.Message}");
+                        MpLog.LogError($"[Multiplayer] OnMenuReady (panel build) failed: {e.Message}");
                     }
                 }
             }
             catch (Exception e)
             {
-                Debug.LogError($"[Multiplayer] InjectNetworkButtonPatch failed: {e.Message}");
+                MpLog.LogError($"[Multiplayer] InjectNetworkButtonPatch failed: {e.Message}");
             }
         }
 
@@ -252,7 +252,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError($"[Multiplayer] FinishLevelAndGoToLobby teardown failed: {e.Message}");
+                MpLog.LogError($"[Multiplayer] FinishLevelAndGoToLobby teardown failed: {e.Message}");
             }
         }
     }

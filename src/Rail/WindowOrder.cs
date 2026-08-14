@@ -154,7 +154,7 @@ namespace Multiplayer.Network.Sync
                 });
             }
             catch (Exception ex)
-            { Debug.LogWarning("[MP][windows] order stamp failed — this window falls back to insert order: " + ex.Message); }
+            { MpLog.LogWarning("[MP][windows] order stamp failed — this window falls back to insert order: " + ex.Message); }
         }
 
         /// <summary>THE COMPARATOR, pure and named so RailCheck executes the real one. Priority first and
@@ -409,7 +409,7 @@ namespace Multiplayer.Network.Sync
                 // stale while the player reads.
                 if (queued != null && queued.Count > 0)
                     foreach (var gone in DropResolvedSubjects(queued, RestoreDropsResolvedSubjects.ResolvedSubjectName))
-                        Debug.Log("[MP][windows] queue DROPS " + gone + " on its way to the screen — that " +
+                        MpLog.Log("[MP][windows] queue DROPS " + gone + " on its way to the screen — that " +
                                   "mission has already resolved, so the offer this window carried is dead. " +
                                   "It is not being shown for a battle that is already over. (The restore " +
                                   "filter cannot catch this one: it runs while the queue is rebuilt, which " +
@@ -424,7 +424,7 @@ namespace Multiplayer.Network.Sync
                     if (!_bindLogged)
                     {
                         _bindLogged = true;
-                        Debug.LogError("[MP][windows] queue fields did not bind — modal ORDER falls back to " +
+                        MpLog.LogError("[MP][windows] queue fields did not bind — modal ORDER falls back to " +
                                        "local arrival order and peers can show the same two windows in " +
                                        "opposite sequences");
                     }
@@ -454,7 +454,7 @@ namespace Multiplayer.Network.Sync
                 if (HoldsHead(pending[0], current == null ? null : current.GetType()))
                 {
                     if (_heldOnScreen.Add(current.GetType().Name + "/" + (head == null ? "?" : head.GetType().Name)))
-                        Debug.Log("[MP][windows] queue HELD while " + current.GetType().Name + " is open — " +
+                        MpLog.Log("[MP][windows] queue HELD while " + current.GetType().Name + " is open — " +
                                   (head == null ? "a window" : head.GetType().Name) + " is reviewed on the " +
                                   "geoscape, not on top of a screen the player opened. It drains as soon as " +
                                   "this peer is back on the map (logged once per screen/window pair).");
@@ -466,13 +466,13 @@ namespace Multiplayer.Network.Sync
                 if (!SettleExpired(QueuedAt(pending[0]), Time.realtimeSinceStartup)) return false;
 
                 if (Reorder(pending, OrdinalOf))
-                    Debug.Log("[MP][windows] settled queue re-ordered by rail ordinal — next window is " +
+                    MpLog.Log("[MP][windows] settled queue re-ordered by rail ordinal — next window is " +
                               pending[0].State?.GetType().Name + " (ordinal " + OrdinalOf(pending[0]) + ")");
                 return true;
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][windows] order gate failed — draining unordered rather than stalling " +
+                MpLog.LogError("[MP][windows] order gate failed — draining unordered rather than stalling " +
                                "the queue: " + ex);
                 return true;   // a broken gate must never be able to hold a window forever
             }

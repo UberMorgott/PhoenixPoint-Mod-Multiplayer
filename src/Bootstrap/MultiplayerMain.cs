@@ -14,11 +14,6 @@ namespace Multiplayer
         public static new MultiplayerMain Instance { get; private set; }
         public override bool CanSafelyDisable => false;
 
-        // Exposes the base ModMain logger (otherwise protected) so the co-op host/join gate can report
-        // the reflection version-guard failure through the same log the startup self-check uses. Null
-        // before OnModEnabled / after OnModDisabled — callers null-check.
-        public static ModLogger Log => Instance?.Logger;
-
         /// <summary>The in-game mod settings (see <see cref="MultiplayerConfig"/>). The game builds it and
         /// assigns it before <see cref="OnModEnabled"/> (<c>ModEntry.cs:264</c>); null only if the type
         /// ever fails to instantiate, so callers null-check.</summary>
@@ -36,7 +31,7 @@ namespace Multiplayer
         {
             Instance = this;
             MultiplayerLog.Init(); // earliest: capture startup lines into the dedicated mod log.
-            Logger.LogInfo("[Multiplayer] OnModEnabled");
+            MpLog.Log("[Multiplayer] OnModEnabled");
 
             try
             {
@@ -53,11 +48,11 @@ namespace Multiplayer
             }
             catch (System.Exception e)
             {
-                Logger.LogError("[Multiplayer] mod init failed AFTER patching: " + e, e);
+                MpLog.LogError("[Multiplayer] mod init failed AFTER patching: " + e, e);
             }
 
             _ui = ModGO.AddComponent<MultiplayerUI>();
-            Logger.LogInfo("[Multiplayer] UI initialized");
+            MpLog.Log("[Multiplayer] UI initialized");
 
             // Ping markers: its own pump (polls the hotkey, expires markers, draws the off-screen arrow)
             // and the arrival seam NetworkEngine relays into. Presentation only — see PingMarkers.
@@ -94,20 +89,20 @@ namespace Multiplayer
                 catch (System.Exception e)
                 {
                     UnboundPatches.Add(type.FullName + ": " + e.Message);
-                    Logger.LogError("[Multiplayer] PATCH CLASS DID NOT BIND: " + type.FullName + " — " + e, e);
+                    MpLog.LogError("[Multiplayer] PATCH CLASS DID NOT BIND: " + type.FullName + " — " + e, e);
                 }
             }
             if (UnboundPatches.Count == 0)
-                Logger.LogInfo("[Multiplayer] PatchAll done — every patch class bound");
+                MpLog.Log("[Multiplayer] PatchAll done — every patch class bound");
             else
-                Logger.LogError("[Multiplayer] PatchAll done with " + UnboundPatches.Count + " patch class(es) " +
+                MpLog.LogError("[Multiplayer] PatchAll done with " + UnboundPatches.Count + " patch class(es) " +
                                 "NOT BOUND; those features are ABSENT this session: " +
                                 string.Join(" | ", UnboundPatches.ToArray()));
         }
 
         public override void OnModDisabled()
         {
-            Logger.LogInfo("[Multiplayer] OnModDisabled");
+            MpLog.Log("[Multiplayer] OnModDisabled");
 
             if (NetworkEngine.Instance != null)
             {

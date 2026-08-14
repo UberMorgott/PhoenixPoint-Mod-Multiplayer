@@ -401,7 +401,7 @@ namespace Multiplayer.Network.Sync
                 DurableWindowRegistry.LastCapturedPriorityOccurrence = null;
                 if (p.Shape == DataShape.Unsupported)
                 {
-                    Debug.LogError("[MP][modals] '" + name + "' is DECLARED Mirrored but its data is a " +
+                    MpLog.LogError("[MP][modals] '" + name + "' is DECLARED Mirrored but its data is a " +
                                    (modalData == null ? "null" : modalData.GetType().FullName) + ", which " +
                                    "GeoModalMirror.Describe has no shape for — the client gets NO window. Add the " +
                                    "shape, or move the declaration to LocalOnly/Gap with the reason");
@@ -412,7 +412,7 @@ namespace Multiplayer.Network.Sync
                 // — an asset that exists and cannot be named.
                 if (p.Shape != DataShape.None && p.Shape != DataShape.AssetDeploy && string.IsNullOrEmpty(p.Ref))
                 {
-                    Debug.LogError("[MP][modals] '" + name + "' NOT mirrored — its data has no rail root ref on " +
+                    MpLog.LogError("[MP][modals] '" + name + "' NOT mirrored — its data has no rail root ref on " +
                                    "the host (shape=" + p.Shape + "), so the client would have nothing to resolve it " +
                                    "against and would render the prefab's placeholder text");
                     return;
@@ -425,7 +425,7 @@ namespace Multiplayer.Network.Sync
                 if (NamesEntity(p) &&
                     !ReferenceEquals(IdentityResolver.Resolve(GeoLevel(), p.Ref, null), NamedObject(modalData)))
                 {
-                    Debug.LogError("[MP][modals] '" + name + "' NOT mirrored — the rail named its " +
+                    MpLog.LogError("[MP][modals] '" + name + "' NOT mirrored — the rail named its " +
                                    modalData.GetType().Name + " '" + p.Ref + "', but that path does not " +
                                    "resolve back to that very object on the HOST's own graph, so it names " +
                                    "nothing (or something else) on a peer. The entity is not on the rail yet");
@@ -457,25 +457,25 @@ namespace Multiplayer.Network.Sync
                     {
                         if (dispatchPeer == AircraftDispatch.HostPeer)
                         {
-                            Debug.Log("[MP][modals] HOST raised '" + name + "' seq=" + seq +
+                            MpLog.Log("[MP][modals] HOST raised '" + name + "' seq=" + seq +
                                       " NOT mirrored — mission brief for host's own vehicle, site " + siteRef);
                             return;
                         }
                         engine.SendToClient(dispatchPeer, msg);
-                        Debug.Log("[MP][modals] HOST raised '" + name + "' seq=" + seq + " UNICAST to peer " +
+                        MpLog.Log("[MP][modals] HOST raised '" + name + "' seq=" + seq + " UNICAST to peer " +
                                   dispatchPeer + " — mission brief, site " + siteRef +
                                   " (other peers do NOT see this window)");
                         return;
                     }
                 }
                 engine.BroadcastToAll(msg);
-                Debug.Log("[MP][modals] HOST raised '" + name + "' seq=" + seq + " kind=" + p.Kind +
+                MpLog.Log("[MP][modals] HOST raised '" + name + "' seq=" + seq + " kind=" + p.Kind +
                           " shape=" + p.Shape + " ref=" + (p.Ref == "" ? "none" : p.Ref) +
                           " keys=" + p.Keys.Length + " num=" + p.Num + " priority=" + p.Priority);
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][modals] HOST raise broadcast FAILED for '" + name + "' — no peer will see " +
+                MpLog.LogError("[MP][modals] HOST raise broadcast FAILED for '" + name + "' — no peer will see " +
                                "this window: " + ex);
             }
         }
@@ -580,8 +580,8 @@ namespace Multiplayer.Network.Sync
                 if (Park.Count > 0 || NeedsPark(p))
                 {
                     var evicted = Park.Park(seq, p);
-                    if (evicted != null) Debug.LogError("[MP][modals] " + evicted);
-                    Debug.Log("[MP][modals] raise of '" + NameOf(p.Kind, (ModalType)p.ModalType) + "' seq=" + seq +
+                    if (evicted != null) MpLog.LogError("[MP][modals] " + evicted);
+                    MpLog.Log("[MP][modals] raise of '" + NameOf(p.Kind, (ModalType)p.ModalType) + "' seq=" + seq +
                               " PARKED — waiting for " +
                               (SwitchQuery() == null ? "a live GeoscapeView on this peer"
                                                      : "'" + p.Ref + "' to reach this peer's graph") +
@@ -590,7 +590,7 @@ namespace Multiplayer.Network.Sync
                 }
                 if (RaiseMirrored(p, seq)) Seq.Mark(SurfaceIds.GeoModalRaise, seq);
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] GeoModalMirror inbound failed: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] GeoModalMirror inbound failed: " + ex); }
             return true;
         }
 
@@ -707,7 +707,7 @@ namespace Multiplayer.Network.Sync
             Park.Pump(
                 p => !NeedsPark(p),
                 (p, s) => { if (RaiseMirrored(p, s)) Seq.Mark(SurfaceIds.GeoModalRaise, s); },
-                (p, s, waited) => Debug.LogError(
+                (p, s, waited) => MpLog.LogError(
                     "[MP][modals] parked raise of '" + NameOf(p.Kind, (ModalType)p.ModalType) + "' seq=" + s + " EXPIRED after " +
                     waited + " rail batches — '" + p.Ref + "' never reached this peer's graph, so the window is " +
                     "DROPPED and this player never sees it. The entity is not on the rail (no structural create " +
@@ -731,7 +731,7 @@ namespace Multiplayer.Network.Sync
                 // stated reason, not the old "no view, tough luck". The ?? arm is not decoration: if the two
                 // ever disagreed, the window would vanish with no line at all, and that is this repo's
                 // dominant bug class.
-                Debug.LogWarning("[MP][modals] " + (NoViewRefusal(p) ??
+                MpLog.LogWarning("[MP][modals] " + (NoViewRefusal(p) ??
                     "raise of '" + name + "' DROPPED although it is replayable — NeedsPark parked nothing and " +
                     "the view is gone here, so the two disagreed or the view died between them"));
                 return false;
@@ -743,7 +743,7 @@ namespace Multiplayer.Network.Sync
             {
                 // Both peers run the same DLL, so this means the SENDER's table and ours disagree — a mod/
                 // build mismatch law 10 should have caught. Refuse rather than open a window nobody reviewed.
-                Debug.LogError("[MP][modals] raise of '" + name + "' REFUSED — this peer's " +
+                MpLog.LogError("[MP][modals] raise of '" + name + "' REFUSED — this peer's " +
                                "GeoWindowCoverage does not declare it Mirrored (" +
                                (rule == null ? "undeclared" : rule.Sync.ToString()) + "), so the peers are not " +
                                "running the same coverage table");
@@ -753,7 +753,7 @@ namespace Multiplayer.Network.Sync
             var data = BuildData(geo, p, out string refusal);
             if (refusal != null)
             {
-                Debug.LogError("[MP][modals] raise of '" + name + "' REFUSED — " + refusal);
+                MpLog.LogError("[MP][modals] raise of '" + name + "' REFUSED — " + refusal);
                 return false;
             }
 
@@ -766,7 +766,7 @@ namespace Multiplayer.Network.Sync
                 var bind = data as GeoDeployAssetFactionCharacterBind;
                 if (bind == null)
                 {
-                    Debug.LogError("[MP][modals] raise of '" + name + "' REFUSED — shape " + p.Shape + " rebuilt " +
+                    MpLog.LogError("[MP][modals] raise of '" + name + "' REFUSED — shape " + p.Shape + " rebuilt " +
                                    "no GeoDeployAssetFactionCharacterBind, and UIStateAssetDeployment reads it " +
                                    "unguarded in EnterState:61");
                     return false;
@@ -816,7 +816,7 @@ namespace Multiplayer.Network.Sync
                 if (occurrence.HasValue && occurrence.Value.EventId != null)
                     WindowOrder.BindDurable(request, occurrence.Value);
             }
-            Debug.Log("[MP][modals] raised '" + name + "' seq=" + seq + " kind=" + p.Kind + " shape=" + p.Shape +
+            MpLog.Log("[MP][modals] raised '" + name + "' seq=" + seq + " kind=" + p.Kind + " shape=" + p.Shape +
                       " priority=" + p.Priority + " data=" + (data == null ? "none" : data.GetType().Name));
             return true;
         }

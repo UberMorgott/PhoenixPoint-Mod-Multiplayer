@@ -480,7 +480,7 @@ namespace Multiplayer.Network.Sync
             if (now - _lastFullResendAt < FullResendCooldownSec)
             {
                 if (!_fullResendPending)
-                    Debug.Log("[Multiplayer][rail] DiffEngine: full resend coalesced — one is already in this " +
+                    MpLog.Log("[Multiplayer][rail] DiffEngine: full resend coalesced — one is already in this " +
                               FullResendCooldownSec + "s window; deferred to its end");
                 _fullResendPending = true;
                 return;
@@ -492,7 +492,7 @@ namespace Multiplayer.Network.Sync
             // A resend re-emits the STORED anchor; re-latch first so the client is not rewound to whenever
             // that anchor was taken (it stays current for as long as pause/speed do not change).
             TimeAnchor.Reset();
-            Debug.Log("[Multiplayer][rail] DiffEngine: full resend requested");
+            MpLog.Log("[Multiplayer][rail] DiffEngine: full resend requested");
         }
 
         /// <summary>Scoped forced re-emit — the targeted sibling of <see cref="RequestFullResend"/>: on the
@@ -596,7 +596,7 @@ namespace Multiplayer.Network.Sync
                 // The root is gone on the host but still live on the client: a destroy the structural layer
                 // does not mirror (StructuralPrefixes). No value re-emit can delete it — only naming it helps.
                 if (_structuralSkipsLogged.Add("crc-orphan:" + tag))
-                    Debug.LogError("[Multiplayer][rail] CRC backstop: peer " + peerId + " still holds root '" + rootKey +
+                    MpLog.LogError("[Multiplayer][rail] CRC backstop: peer " + peerId + " still holds root '" + rootKey +
                                    "' which the host no longer has — destroy not mirrored, that client is diverged");
                 return;
             }
@@ -614,13 +614,13 @@ namespace Multiplayer.Network.Sync
             _crcHeals[tag] = heals + 1;
             if (heals == 0)
             {
-                Debug.LogError("[Multiplayer][rail] CRC backstop: root '" + rootKey + "' DIVERGED on peer " + peerId +
+                MpLog.LogError("[Multiplayer][rail] CRC backstop: root '" + rootKey + "' DIVERGED on peer " + peerId +
                                " (host " + hostCrc.ToString("X8") + " != client " + clientCrc.ToString("X8") +
                                " at quiescent seq " + clientSeq + ") — forcing a re-emit of the subtree");
                 ForceReemit(rootKey);
             }
             else if (heals == 1)
-                Debug.LogError("[Multiplayer][rail] CRC backstop: root '" + rootKey + "' STILL diverged on peer " + peerId +
+                MpLog.LogError("[Multiplayer][rail] CRC backstop: root '" + rootKey + "' STILL diverged on peer " + peerId +
                                " after a forced re-emit — the client holds state the host cannot re-state (a removed " +
                                "path, or a structural entity the rail does not mirror). No further re-emits for this root.");
         }
@@ -812,7 +812,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][rail] DiffEngine tick failed: " + ex);
+                MpLog.LogError("[Multiplayer][rail] DiffEngine tick failed: " + ex);
                 AbandonCycle();
                 // The forced scope needs nothing re-armed here: DiffAndEmit never ran, so it never
                 // consumed _forceFull / _forcePrefixes and the next cycle picks the same scope back up.
@@ -985,7 +985,7 @@ namespace Multiplayer.Network.Sync
 
             // The line the stutter hunt reads: did the periodic walk stay inside its per-frame budget.
             if (MpDiag.On)
-                Debug.Log("[MP][rail] cycle: frames=" + frames + " walk=" + walkMs + "ms maxSlice=" +
+                MpLog.Log("[MP][rail] cycle: frames=" + frames + " walk=" + walkMs + "ms maxSlice=" +
                           maxSliceMs.ToString("F1", CultureInfo.InvariantCulture) + "ms roots=" + roots +
                           " changed=" + changed.Count);
 
@@ -993,7 +993,7 @@ namespace Multiplayer.Network.Sync
             if (!_baselined && !honest)
                 // Never silent (law 1): a swallowed baseline left no line at all, and that silence is the
                 // whole reason it survived. The emit itself is the fall-through below.
-                Debug.Log("[Multiplayer][rail] DiffEngine post-boundary walk EMITS instead of baselining: the " +
+                MpLog.Log("[Multiplayer][rail] DiffEngine post-boundary walk EMITS instead of baselining: the " +
                           "boundary was taken on level #" + _boundaryLevelId + " and this walk is on level #" +
                           _cycleLevelId + ". Everything the host wrote across that transition — the mission " +
                           "outcome above all — is NOT in what the clients loaded, so it ships as a delta.");
@@ -1001,7 +1001,7 @@ namespace Multiplayer.Network.Sync
             {
                 _baselined = true;
                 SeedRoots(); // baseline root set — clients got these entities via the save transfer (law 1)
-                Debug.Log("[Multiplayer][rail] DiffEngine BASELINE: entities=" + _entityCounts.Values.Sum() +
+                MpLog.Log("[Multiplayer][rail] DiffEngine BASELINE: entities=" + _entityCounts.Values.Sum() +
                           " fields=" + ordered.Count + " walk=" + walkMs + "ms (no emit — clients share the save)");
                 // A ForceReemit that raced the baseline shipped NOTHING — keep its prefixes armed and
                 // re-run forced, instead of silently dropping the convergence re-emit.
@@ -1025,7 +1025,7 @@ namespace Multiplayer.Network.Sync
                     bool hit = false;
                     for (int i = 0; i < ordered.Count && !hit; i++) hit = PrefixMatchOne(p, ordered[i].Path);
                     if (!hit)
-                        Debug.LogError("[Multiplayer][rail] ForceReemit scope '" + p + "' matched ZERO covered paths — " +
+                        MpLog.LogError("[Multiplayer][rail] ForceReemit scope '" + p + "' matched ZERO covered paths — " +
                                        "nothing was re-emitted and whatever armed it will NOT converge. A scope is whole " +
                                        "path SEGMENTS from a root key (\"S#12\", \"ES\"); the element form " +
                                        "\"<path>.<Field>#<key>\" exists only for EntityCollection fields.");
@@ -1041,7 +1041,7 @@ namespace Multiplayer.Network.Sync
             if (changed.Count > 0 || Time.realtimeSinceStartup >= _nextPerfLogAt)
             {
                 _nextPerfLogAt = Time.realtimeSinceStartup + 10f;
-                Debug.Log("[Multiplayer][rail] DiffEngine tick: entities=" + _entityCounts.Values.Sum() +
+                MpLog.Log("[Multiplayer][rail] DiffEngine tick: entities=" + _entityCounts.Values.Sum() +
                           " fields=" + ordered.Count + " changed=" + changed.Count +
                           " walk=" + walkMs + "ms diff=" + diffMs + "ms" +
                           (packets > 0 ? " sent=" + packets + "pkt/" + bytes + "B" : ""));
@@ -1074,7 +1074,7 @@ namespace Multiplayer.Network.Sync
             if (value is UnityEngine.Object uo && uo == null) return; // destroyed root = ABSENT (structural)
             WalkRoot(key, value);
             if (value != null && _visited.Contains(value) && _dupRootLogged.Add(key))
-                Debug.LogWarning("[Multiplayer][rail] root '" + key + "' (" + value.GetType().Name +
+                MpLog.LogWarning("[Multiplayer][rail] root '" + key + "' (" + value.GetType().Name +
                                  ") was already reached from an EARLIER root — its own subtree ships under that path, nothing under '" +
                                  key + "'. Reorder IdentityResolver.RootKinds if this root should own it.");
             VisitEntity(key, value, _visited, _ordered, _snapshotBack, 0);
@@ -1213,7 +1213,7 @@ namespace Multiplayer.Network.Sync
                             {
                                 _peerLocalPaths.Add(path + "." + f.Name + "#" + k);
                                 if (_structuralSkipsLogged.Add("peer-local-optout"))
-                                    Debug.Log("[Multiplayer][rail] peer-local elements opted out (corridors: derived, " +
+                                    MpLog.Log("[Multiplayer][rail] peer-local elements opted out (corridors: derived, " +
                                               "locally-minted ids — logged once)");
                                 continue;
                             }
@@ -1342,7 +1342,7 @@ namespace Multiplayer.Network.Sync
             {
                 var ids = new StringBuilder();
                 foreach (var u in tacDiag) ids.Append(IdentityResolver.RootRef(u) ?? "?").Append(' ');
-                Debug.Log("[MP][diag] TacUnits HOST-ENCODE " + path + " count=" + tacDiag.Count +
+                MpLog.Log("[MP][diag] TacUnits HOST-ENCODE " + path + " count=" + tacDiag.Count +
                           " [" + ids.ToString().TrimEnd() + "]");
             }
             snap[key] = e;
@@ -1369,7 +1369,7 @@ namespace Multiplayer.Network.Sync
         private static byte KindIdOf(Type t)
         {
             if (_kindIds.TryGetValue(t, out var id)) return id;
-            if (_kinds.Count >= byte.MaxValue) { Debug.LogError("[Multiplayer][rail] DiffEngine: kind id space exhausted"); return byte.MaxValue; }
+            if (_kinds.Count >= byte.MaxValue) { MpLog.LogError("[Multiplayer][rail] DiffEngine: kind id space exhausted"); return byte.MaxValue; }
             id = (byte)_kinds.Count;
             _kinds.Add(t);
             _kindIds[t] = id;
@@ -1445,7 +1445,7 @@ namespace Multiplayer.Network.Sync
         {
             var line = t.Name + "." + field + ": " + reason + " [" + path + "]";
             if (_walkIncidents.Add(line) && _reportWritten)
-                Debug.LogWarning("[Multiplayer][rail] DiffEngine " + what + ": " + line);
+                MpLog.LogWarning("[Multiplayer][rail] DiffEngine " + what + ": " + line);
             return line;
         }
 
@@ -1467,7 +1467,7 @@ namespace Multiplayer.Network.Sync
             // way to tell "this happened once during a load" from "this state has never reached a client and
             // never will". That distinction is the whole content of the report, so it is now stated.
             if (NoteIncidentWalk(line))
-                Debug.LogError("[Multiplayer][rail] DiffEngine PERMANENTLY excluded (failed every walk for at " +
+                MpLog.LogError("[Multiplayer][rail] DiffEngine PERMANENTLY excluded (failed every walk for at " +
                                "least " + PermanentAfterWalks + " walks, ~" + PermanentAfterWalks / 2 +
                                "s): " + line + " — this field has NEVER crossed to a client. The walk DOES " +
                                "keep retrying it every cycle, so nothing here is switched off; what is dead is " +
@@ -1527,14 +1527,14 @@ namespace Multiplayer.Network.Sync
                 if (PayloadFor(kv.Key, now) != CreatePayload.DescendFrame)
                 {
                     if (_structuralSkipsLogged.Add("x:" + kv.Key))
-                        Debug.LogError("[Multiplayer][rail] structural: '" + kv.Key + "' changed class " + was +
+                        MpLog.LogError("[Multiplayer][rail] structural: '" + kv.Key + "' changed class " + was +
                                        " → " + now.FullName + ", which is NOT a Descend field — no destroy+create is " +
                                        "emitted (an actor may never be re-created, law 3; a re-used blob-root id is a " +
                                        "keying gap). Every delta under this path lands on the wrong-class instance.");
                     continue;
                 }
                 (swapped = swapped ?? new List<string>()).Add(kv.Key);
-                Debug.Log("[Multiplayer][rail] structural: '" + kv.Key + "' changed class " + was + " → " +
+                MpLog.Log("[Multiplayer][rail] structural: '" + kv.Key + "' changed class " + was + " → " +
                           now.FullName + " — re-creating (destroy+create), subtree forced");
             }
             return swapped;
@@ -1560,7 +1560,7 @@ namespace Multiplayer.Network.Sync
                     if (!StructuralEnabled(k))
                     {
                         if (_structuralSkipsLogged.Add("d:" + k))
-                            Debug.Log("[Multiplayer][rail] structural: destroy of '" + k + "' not enabled — not mirrored");
+                            MpLog.Log("[Multiplayer][rail] structural: destroy of '" + k + "' not enabled — not mirrored");
                         continue;
                     }
                     if (!SendStructural(engine, 2, k, null, ref packets, ref bytes))
@@ -1574,7 +1574,7 @@ namespace Multiplayer.Network.Sync
                     _prevRoots.Add(kv.Key); // remember it either way — the skip line must not repeat per walk
                     _prevRootTypes[kv.Key] = kv.Value.GetType().FullName;
                     if (_structuralSkipsLogged.Add("c:" + kv.Key))
-                        Debug.Log("[Multiplayer][rail] structural: create of '" + kv.Key + "' (" + kv.Value.GetType().Name + ") not enabled — not mirrored");
+                        MpLog.Log("[Multiplayer][rail] structural: create of '" + kv.Key + "' (" + kv.Value.GetType().Name + ") not enabled — not mirrored");
                     continue;
                 }
                 // Payload arm, in this order — the graph blob is the LAST resort, never the default:
@@ -1597,7 +1597,7 @@ namespace Multiplayer.Network.Sync
                 }
                 if (blob == null || blob.Length == 0)
                 {
-                    Debug.LogError("[Multiplayer][rail] structural: payload for '" + kv.Key + "' (" +
+                    MpLog.LogError("[Multiplayer][rail] structural: payload for '" + kv.Key + "' (" +
                                    kv.Value.GetType().Name + ") failed — retrying next walk");
                     continue; // NOT added to _prevRoots → re-detected next cycle
                 }
@@ -1658,7 +1658,7 @@ namespace Multiplayer.Network.Sync
                     engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope, env));
                     packets++;
                     bytes += (int)ms.Length;
-                    Debug.Log("[Multiplayer][rail] structural " + ((op & ~FragmentedBlobFlag) == 1 ? "create" : "destroy") +
+                    MpLog.Log("[Multiplayer][rail] structural " + ((op & ~FragmentedBlobFlag) == 1 ? "create" : "destroy") +
                               " '" + rootKey + "' sent (" + (blob?.Length ?? 0) + "B blob" +
                               ((op & FragmentedBlobFlag) != 0 ? ", fragment" : "") + ")");
                 }
@@ -1666,7 +1666,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[Multiplayer][rail] structural emit '" + rootKey + "' failed: " + ex.Message);
+                MpLog.LogError("[Multiplayer][rail] structural emit '" + rootKey + "' failed: " + ex.Message);
                 return false;
             }
         }
@@ -1713,7 +1713,7 @@ namespace Multiplayer.Network.Sync
         internal static void NoteUndeliverable(Entry e, uint seq)
         {
             string kind = e.KindId < _kinds.Count ? _kinds[e.KindId].Name : "kind " + e.KindId;
-            Debug.LogError("[Multiplayer][rail] DiffEngine: UNDELIVERABLE " + kind + ".(fieldIdx " + e.FieldIdx +
+            MpLog.LogError("[Multiplayer][rail] DiffEngine: UNDELIVERABLE " + kind + ".(fieldIdx " + e.FieldIdx +
                            ") at " + e.Path + " — value " + (e.Value?.Length ?? 0) + "B exceeds the " + MaxValueBytes +
                            "B envelope cap even after fragmentation; the client's copy of this field is STALE");
             TouchRoot(e.Path, seq); // never quiescent while we are failing to ship it (CRC backstop input)
@@ -1785,7 +1785,7 @@ namespace Multiplayer.Network.Sync
                         packets++;
                         bytes += (int)ms.Length;
                     }
-                    catch (Exception ex) { Debug.LogError("[Multiplayer][rail] DiffEngine emit failed: " + ex.Message); return; }
+                    catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] DiffEngine emit failed: " + ex.Message); return; }
                 }
             }
         }
@@ -1840,10 +1840,10 @@ namespace Multiplayer.Network.Sync
                 Directory.CreateDirectory(dir);
                 var file = Path.Combine(dir, "rail-coverage.txt");
                 File.WriteAllText(file, sb.ToString());
-                Debug.Log("[Multiplayer][rail] coverage report: " + cov + " covered / " + exc + " excluded fields across " +
+                MpLog.Log("[Multiplayer][rail] coverage report: " + cov + " covered / " + exc + " excluded fields across " +
                           _entityCounts.Count + " types, " + _walkIncidents.Count + " walk incidents → " + file);
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] coverage report failed: " + ex.Message); }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] coverage report failed: " + ex.Message); }
         }
     }
 }

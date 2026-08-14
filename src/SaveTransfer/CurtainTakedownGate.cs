@@ -116,7 +116,7 @@ namespace Multiplayer.Harmony
             if (_replaying || !Hold()) return false;
             var timing = GameUtl.GameComponent<TimeSource>()?.Timing;
             if (timing == null) return false;
-            Debug.Log("[Multiplayer] loading-screen take-down PARKED (" + what + ") — holding for all-players reveal");
+            MpLog.Log("[Multiplayer] loading-screen take-down PARKED (" + what + ") — holding for all-players reveal");
             timing.Start(ReplayWhenOpen(what, replay));
             return true;
         }
@@ -124,12 +124,12 @@ namespace Multiplayer.Harmony
         private static IEnumerator<NextUpdate> ReplayWhenOpen(string what, Action replay)
         {
             while (Hold()) yield return NextUpdate.NextFrame;
-            Debug.Log("[Multiplayer] loading-screen take-down RELEASED (" + what + ") — reveal/teardown opened the gate");
+            MpLog.Log("[Multiplayer] loading-screen take-down RELEASED (" + what + ") — reveal/teardown opened the gate");
             _replaying = true;
             try { replay(); }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] take-down replay failed (" + what + "): " + e.Message);
+                MpLog.LogError("[Multiplayer] take-down replay failed (" + what + "): " + e.Message);
             }
             _replaying = false;
         }
@@ -168,7 +168,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] LoadingScreenVisibleGatePatch failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] LoadingScreenVisibleGatePatch failed: " + e.Message);
                 return true;
             }
         }
@@ -216,7 +216,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] InGameCurtainHideGatePatch failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] InGameCurtainHideGatePatch failed: " + e.Message);
                 return true;
             }
         }

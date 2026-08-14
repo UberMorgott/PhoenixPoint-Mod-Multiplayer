@@ -114,7 +114,7 @@ namespace Multiplayer.Network.Sync
             {
                 // Presentation seam: a failure here leaves the button as the game painted it — the vanilla
                 // cap — which refuses a big squad rather than shipping a broken one.
-                Debug.LogError("[MP][deploy] could not apply the lifted deployment cap to START MISSION: " + ex);
+                MpLog.LogError("[MP][deploy] could not apply the lifted deployment cap to START MISSION: " + ex);
             }
         }
     }
@@ -143,7 +143,7 @@ namespace Multiplayer.Network.Sync
                                     ComponentSetDef actorSetDef, bool canFail, object requester)
         {
             if (__result != null) return;
-            Debug.LogError("[MP][deploy] DEPLOY ZONE REFUSED AN ACTOR — it will NOT be on the map. zone=" +
+            MpLog.LogError("[MP][deploy] DEPLOY ZONE REFUSED AN ACTOR — it will NOT be on the map. zone=" +
                            (__instance == null ? "<null>" : __instance.name) + " actor=" +
                            (actorSetDef == null ? "<null>" : actorSetDef.name) + " requester=" +
                            (requester == null ? "<null>" : requester.ToString()) + " canFail=" + canFail +

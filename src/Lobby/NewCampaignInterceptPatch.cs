@@ -91,14 +91,14 @@ namespace Multiplayer.Harmony
             var state = _pendingConfirm;
             if (state == null)
             {
-                Debug.LogWarning("[Multiplayer] new-campaign countdown fired with no held confirm — nothing " +
+                MpLog.LogWarning("[Multiplayer] new-campaign countdown fired with no held confirm — nothing " +
                                  "created. The host can press CONFIRM again on the new-game screen.");
                 return;
             }
             try
             {
                 _committed = true;
-                Debug.Log("[Multiplayer] new-campaign countdown reached zero — re-issuing the host's native " +
+                MpLog.Log("[Multiplayer] new-campaign countdown reached zero — re-issuing the host's native " +
                           "CONFIRM with the settings still on screen; the prefix now falls through to the " +
                           "bootstrap arm and the native creation it always ran.");
                 AccessTools.Method(typeof(UIStateNewGeoscapeGameSettings), "GameSettings_OnConfirm")
@@ -106,7 +106,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] re-issuing the native new-game confirm FAILED — no campaign was " +
+                MpLog.LogError("[Multiplayer] re-issuing the native new-game confirm FAILED — no campaign was " +
                                "created and the latch is released, so the host can press CONFIRM again: " + e);
             }
             finally
@@ -139,7 +139,7 @@ namespace Multiplayer.Harmony
                 // Case C — a client starting a campaign would solo-desync it from the live session.
                 if (SessionLifecycle.ShouldBlockClientLoad(isHost, active))
                 {
-                    Debug.LogWarning("[Multiplayer] Client NEW GAME BLOCKED — only the host can start a new campaign in co-op.");
+                    MpLog.LogWarning("[Multiplayer] Client NEW GAME BLOCKED — only the host can start a new campaign in co-op.");
                     GameUtl.GetMessageBox()?.ShowSimplePrompt(
                         "Only the host can start a new campaign in co-op.",
                         MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
@@ -188,7 +188,7 @@ namespace Multiplayer.Harmony
 
                 // Host in an active session but neither gate open (a transfer is already in flight):
                 // never overlap the one barrier — block rather than desync.
-                Debug.LogWarning("[Multiplayer] NEW GAME blocked: a co-op save transfer is already in flight.");
+                MpLog.LogWarning("[Multiplayer] NEW GAME blocked: a co-op save transfer is already in flight.");
                 GameUtl.GetMessageBox()?.ShowSimplePrompt(
                     "A co-op load is already in progress — try again when it finishes.",
                     MessageBoxIcon.Warning, MessageBoxButtons.OK, null, null);
@@ -196,7 +196,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] new-campaign confirm gate failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] new-campaign confirm gate failed: " + e.Message);
             }
             return true;
         }
@@ -218,13 +218,13 @@ namespace Multiplayer.Harmony
                 bool introWasOn = gameParams.PlayIntroCinematic;
                 ApplyCoopCampaignParams(gameParams);
                 coord.NoteIntroCinematicOwed(introWasOn);
-                Debug.Log("[Multiplayer] New-campaign bootstrap: tutorial forced OFF (co-op starts on the " +
+                MpLog.Log("[Multiplayer] New-campaign bootstrap: tutorial forced OFF (co-op starts on the " +
                           "geoscape); intro cinematic suppressed at creation and " +
                           (introWasOn ? "re-issued to EVERY peer after the reveal." : "not owed (the game mode does not play one)."));
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] new-campaign params prefix failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] new-campaign params prefix failed: " + e.Message);
             }
         }
 
@@ -277,7 +277,7 @@ namespace Multiplayer.Harmony
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] new-campaign back postfix failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] new-campaign back postfix failed: " + e.Message);
             }
         }
 
@@ -297,14 +297,14 @@ namespace Multiplayer.Harmony
                 var mode = game?.Def?.GameModeDefs?.OfType<GeoscapeGameModeDef>().FirstOrDefault();
                 if (mode == null)
                 {
-                    Debug.LogError("[Multiplayer] OpenNativeNewGameScreen: no GeoscapeGameModeDef on PhoenixGame.Def.");
+                    MpLog.LogError("[Multiplayer] OpenNativeNewGameScreen: no GeoscapeGameModeDef on PhoenixGame.Def.");
                     return false;
                 }
                 return SaveLoadInterceptPatch.PushHomeScreenState(new UIStateNewGeoscapeGameSettings(mode));
             }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] OpenNativeNewGameScreen failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] OpenNativeNewGameScreen failed: " + e.Message);
                 return false;
             }
         }
@@ -337,7 +337,7 @@ namespace Multiplayer.Harmony
             try { NetworkEngine.Instance?.SaveTransfer?.OnGeoscapeReady(); }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer] geoscape-ready seam failed: " + e.Message);
+                MpLog.LogError("[Multiplayer] geoscape-ready seam failed: " + e.Message);
             }
         }
     }

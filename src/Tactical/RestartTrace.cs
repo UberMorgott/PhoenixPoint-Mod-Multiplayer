@@ -99,7 +99,7 @@ namespace Multiplayer.Tactical
         }
 
         private static void Write(string step) =>
-            Debug.Log(Tag + " +" + Watch.ElapsedMilliseconds + "ms " + Role() + " " + step);
+            MpLog.Log(Tag + " +" + Watch.ElapsedMilliseconds + "ms " + Role() + " " + step);
 
         /// <summary>Role plus the same-machine instance index, so the two halves of the local co-op rig are
         /// distinguishable when their logs are read side by side.</summary>

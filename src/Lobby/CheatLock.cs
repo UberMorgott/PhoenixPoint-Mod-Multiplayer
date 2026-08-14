@@ -53,7 +53,7 @@ namespace Multiplayer.Network
             state = false;
             if (_said) return;
             _said = true;
-            Debug.Log("[MP][cheatlock] cheat menu refused — this peer is a CLIENT in an active session. " +
+            MpLog.Log("[MP][cheatlock] cheat menu refused — this peer is a CLIENT in an active session. " +
                       "Host-only: every cheat is a console command and it would edit this world behind the " +
                       "rail, which the host never learns of. Logged once per lock, not per press.");
         }
@@ -73,7 +73,7 @@ namespace Multiplayer.Network
         private static void Prefix(AnvilCheatsUI __instance)
         {
             if (!__instance.Active || !ConsoleLock.Locked()) return;
-            Debug.Log("[MP][cheatlock] the cheat menu was open when this peer became a CLIENT — closing it.");
+            MpLog.Log("[MP][cheatlock] the cheat menu was open when this peer became a CLIENT — closing it.");
             __instance.ToggleState(state: false);
         }
     }
@@ -106,7 +106,7 @@ namespace Multiplayer.Network
             if (!_said)
             {
                 _said = true;
-                Debug.Log("[MP][cheatlock] console command '" + command + "' refused — this peer is a CLIENT " +
+                MpLog.Log("[MP][cheatlock] console command '" + command + "' refused — this peer is a CLIENT " +
                           "in an active session. A bound key fires cheats with every window shut, so the " +
                           "command itself is the funnel. Logged once per lock, not per command.");
             }
@@ -151,7 +151,7 @@ namespace Multiplayer.Network
             if (!_said)
             {
                 _said = true;
-                Debug.Log("[MP][cheatlock] console variable '" + variableName + "' assignment refused — " +
+                MpLog.Log("[MP][cheatlock] console variable '" + variableName + "' assignment refused — " +
                           "this peer is a CLIENT in an active session. A variable assignment is not a " +
                           "console command, so it reaches SetValue with both windows shut. Logged once " +
                           "per lock, not per assignment.");
@@ -185,7 +185,7 @@ namespace Multiplayer.Network
             if (!_said)
             {
                 _said = true;
-                Debug.Log("[MP][cheatlock] geoscape resource-giver cheat refused — this peer is a CLIENT " +
+                MpLog.Log("[MP][cheatlock] geoscape resource-giver cheat refused — this peer is a CLIENT " +
                           "in an active session. It writes ViewerFaction.Wallet with OperationReason.Cheat " +
                           "and needs no console, so no other lock covers it. Logged once per lock.");
             }

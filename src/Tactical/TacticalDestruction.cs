@@ -177,7 +177,7 @@ namespace Multiplayer.Tactical
 
         private static void SayOnce(string key, string message)
         {
-            if (_said.Add(key)) Debug.LogError(message);
+            if (_said.Add(key)) MpLog.LogError(message);
         }
 
         // ─── IDENTITY ──────────────────────────────────────────────────────
@@ -253,18 +253,18 @@ namespace Multiplayer.Tactical
             foreach (var g in collided) byGuid.Remove(g);
             foreach (var kv in byGuid) _byGuid[kv.Key] = kv.Value;
             _indexed = true;
-            Debug.Log("[Multiplayer][tac] indexed " + total + " destructible(s) under the navigable root: " +
+            MpLog.Log("[Multiplayer][tac] indexed " + total + " destructible(s) under the navigable root: " +
                       _byGuid.Count + " carry a usable GuidInScene (the game's own save key) and " + _tagOf.Count +
                       " carry a position address, of which " + sharedCells + " cell(s) hold more than one object " +
                       "and are told apart by their index in the same stable walk both peers make.");
             // Both of these are the v1 failure class caught at battle start instead of at the first grenade.
             if (idless > 0)
-                Debug.LogWarning("[Multiplayer][tac] " + idless + " of " + total + " destructible(s) have NO readable " +
+                MpLog.LogWarning("[Multiplayer][tac] " + idless + " of " + total + " destructible(s) have NO readable " +
                                  "GuidInScene — their scene holds no SceneObjectIds registry, the shape " +
                                  "MapPlot:230-243 leaves behind when a parcel's registry was merged and destroyed. " +
                                  "They are still addressable by position, so this is no longer a lost object.");
             if (collided.Count > 0)
-                Debug.LogWarning("[Multiplayer][tac] " + collided.Count + " destructible guid collision(s) covering " +
+                MpLog.LogWarning("[Multiplayer][tac] " + collided.Count + " destructible guid collision(s) covering " +
                                  (collided.Count + dupHits) + " object(s) — SceneObjectIdsComponent.MergeWith:29-34 " +
                                  "mints a FRESH RANDOM guid when a combined one collides, and a random guid is " +
                                  "different on every peer. Those guids are DROPPED on every peer, which is the WHOLE " +
@@ -272,7 +272,7 @@ namespace Multiplayer.Tactical
                                  "nothing else is missing from that index. Every one of them is addressed by " +
                                  "position instead.");
             if (homeless > 0)
-                Debug.LogError("[Multiplayer][tac] " + homeless + " destructible(s) have no transform to stand on, so " +
+                MpLog.LogError("[Multiplayer][tac] " + homeless + " destructible(s) have no transform to stand on, so " +
                                "they have NO position address. If a guid collision also cost one of them its guid it " +
                                "cannot be addressed at all, and the host's damage to it is refused here with a line " +
                                "of its own rather than landing on some other wall.");
@@ -405,7 +405,7 @@ namespace Multiplayer.Tactical
                 return;
             }
             if (notes.Count > 0)
-                Debug.LogWarning("[Multiplayer][tac] environment damage for " + guid + " arrived with parts this " +
+                MpLog.LogWarning("[Multiplayer][tac] environment damage for " + guid + " arrived with parts this " +
                                  "peer could not rebuild: " + string.Join("; ", notes.ToArray()));
 
             using (SyncApplyScope.Enter())
@@ -427,7 +427,7 @@ namespace Multiplayer.Tactical
                 _field = AccessTools.Field(typeof(DestructableDamageReceiver), "_destructable");
                 if (_field == null)
                 {
-                    Debug.LogError("[Multiplayer][tac] DestructableDamageReceiver._destructable did not resolve — " +
+                    MpLog.LogError("[Multiplayer][tac] DestructableDamageReceiver._destructable did not resolve — " +
                                    "no environment damage can be named on the wire and every wall the host breaks " +
                                    "stays solid on every other peer.");
                     return null;
@@ -458,7 +458,7 @@ namespace Multiplayer.Tactical
             try { TacticalDestruction.OnEnvironmentDamage(__instance, damageResult); }
             catch (Exception e)
             {
-                Debug.LogError("[Multiplayer][tac] the environment-damage capture threw and was contained so the " +
+                MpLog.LogError("[Multiplayer][tac] the environment-damage capture threw and was contained so the " +
                                "native effect coroutine survives — that hit is NOT relayed, so the piece of cover " +
                                "it broke stays solid on every other peer: " + e);
             }

@@ -130,7 +130,7 @@ namespace Multiplayer.Network.Sync
                 // everything after it.
                 _undecodable++;
                 if (_undecodable == 1 || _undecodable % 100 == 0)
-                    Debug.LogError("[Multiplayer][rail] an inbound envelope (" + (data == null ? 0 : data.Length) +
+                    MpLog.LogError("[Multiplayer][rail] an inbound envelope (" + (data == null ? 0 : data.Length) +
                                    " bytes) does not decode and is DISCARDED — occurrence " + _undecodable +
                                    ". Whatever surface it belonged to has a hole in its stream, and every " +
                                    "recovery this rail has is armed by a hole its own surface can SEE.");

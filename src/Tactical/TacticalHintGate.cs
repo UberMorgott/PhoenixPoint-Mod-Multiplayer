@@ -65,7 +65,7 @@ namespace Multiplayer.Tactical
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession) return true;
-            Debug.Log("[Multiplayer][tac] hint wait made LOCAL — the turn coroutine does not stop on this " +
+            MpLog.Log("[Multiplayer][tac] hint wait made LOCAL — the turn coroutine does not stop on this " +
                       "peer's popup. The hint stays queued and TryShowContextHint pops it on each peer's own " +
                       "idle frame.");
             __result = Nothing();
@@ -201,7 +201,7 @@ namespace Multiplayer.Tactical
                                                    : PendingField.GetValue(mgr) as List<ContextHelpHint>;
                 if (pending == null)
                 {
-                    Debug.LogError("[MP][hint] hint mirroring is OFF — ContextHelpManager._hintsPendingDisplay " +
+                    MpLog.LogError("[MP][hint] hint mirroring is OFF — ContextHelpManager._hintsPendingDisplay " +
                                    "did not resolve, so a boss panel stays on the one peer that saw it.");
                     return;
                 }
@@ -214,7 +214,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][hint] trigger capture FAILED — this sighting reaches no other peer: " + ex);
+                MpLog.LogError("[MP][hint] trigger capture FAILED — this sighting reaches no other peer: " + ex);
             }
         }
 
@@ -238,7 +238,7 @@ namespace Multiplayer.Tactical
             var msg = Envelope(hintName);
             if (engine.IsHost) engine.BroadcastToAll(msg);
             else engine.SendToHost(msg);
-            Debug.Log("[MP][hint] '" + hintName + "' triggered on this peer — mirrored to every peer");
+            MpLog.Log("[MP][hint] '" + hintName + "' triggered on this peer — mirrored to every peer");
         }
 
         // ─── inbound: relay (host) then show, once ───
@@ -273,7 +273,7 @@ namespace Multiplayer.Tactical
                 // silences this peer's own later sighting too (see Forget).
                 if (!Show(name)) Forget(name);
             }
-            catch (Exception ex) { Debug.LogError("[MP][hint] inbound FAILED: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[MP][hint] inbound FAILED: " + ex); }
             return true;
         }
 
@@ -291,7 +291,7 @@ namespace Multiplayer.Tactical
             var mgr = level == null ? null : level.GetComponent<TacContextHelpManager>();
             if (mgr == null)
             {
-                Debug.LogWarning("[MP][hint] '" + name + "' DROPPED — this peer has no live tactical hint " +
+                MpLog.LogWarning("[MP][hint] '" + name + "' DROPPED — this peer has no live tactical hint " +
                                  "manager (not in a battle yet, or already tearing down); the name is released " +
                                  "so a later sighting on this peer can still raise it.");
                 return false;
@@ -304,7 +304,7 @@ namespace Multiplayer.Tactical
             if (def == null) { def = Find(mgr.AlwaysDisplayedHintsDb, name); mandatory = def != null; }
             if (def == null)
             {
-                Debug.LogWarning("[MP][hint] '" + name + "' SKIPPED on this peer — no hint def by that name in " +
+                MpLog.LogWarning("[MP][hint] '" + name + "' SKIPPED on this peer — no hint def by that name in " +
                                  "either live hint DB. Hints minted by host-only turn-0 code (TFTV's per-mission " +
                                  "gang/Revenant/Ancient defs) do not exist where the battle is a loaded save; " +
                                  "the name is released so a later delivery, after the def is rebuilt, still lands.");
@@ -312,11 +312,11 @@ namespace Multiplayer.Tactical
             }
             if (!mgr.RegisterContextHelpHint(def, mandatory, null))
             {
-                Debug.Log("[MP][hint] '" + name + "' already queued or already dismissed here — not shown twice");
+                MpLog.Log("[MP][hint] '" + name + "' already queued or already dismissed here — not shown twice");
                 return true;
             }
             if (LoadAssets != null) LoadAssets.Invoke(mgr, new object[] { def });
-            Debug.Log("[MP][hint] '" + name + "' queued on this peer from another peer's sighting — the native " +
+            MpLog.Log("[MP][hint] '" + name + "' queued on this peer from another peer's sighting — the native " +
                       "per-frame pump pops it on this peer's own idle frame, blocking nobody");
             return true;
         }

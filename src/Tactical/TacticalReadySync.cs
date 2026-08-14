@@ -97,7 +97,7 @@ namespace Multiplayer.Tactical
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession)
             {
-                Debug.LogWarning("[Multiplayer][tac] ready toggle ignored — no live session. The button should " +
+                MpLog.LogWarning("[Multiplayer][tac] ready toggle ignored — no live session. The button should " +
                                  "not exist outside one; it is only built when a session is active.");
                 return;
             }
@@ -120,7 +120,7 @@ namespace Multiplayer.Tactical
             // evidence that the hit surface is live short of asking a player to describe a colour.
             // The peer's OWN flag only: L119 keeps the tally counters out of every method but the four that
             // draw or write them, because a method that has the count in hand is one `if` from a quorum.
-            Debug.Log("[Multiplayer][tac] ready button pressed — this peer is now " +
+            MpLog.Log("[Multiplayer][tac] ready button pressed — this peer is now " +
                       (LocalReady ? "READY" : "not ready") +
                       ". Advisory only: nothing waits on this.");
         }
@@ -137,7 +137,7 @@ namespace Multiplayer.Tactical
             var session = engine == null ? null : engine.Session;
             if (session == null)
             {
-                Debug.LogError("[Multiplayer][tac] ready intent from peer=" + senderPeerId + " nonce=" + nonce +
+                MpLog.LogError("[Multiplayer][tac] ready intent from peer=" + senderPeerId + " nonce=" + nonce +
                                " DROPPED — the host holds no SessionManager, so no seat can be marked and every " +
                                "peer's ready label stays wrong until the next round reset.");
                 return;
@@ -158,7 +158,7 @@ namespace Multiplayer.Tactical
             var session = engine.Session;
             if (session == null)
             {
-                Debug.LogError("[Multiplayer][tac] ready tally NOT sent (" + why + ") — no SessionManager on the " +
+                MpLog.LogError("[Multiplayer][tac] ready tally NOT sent (" + why + ") — no SessionManager on the " +
                                "host, so nobody's ready label can be updated.");
                 return;
             }
@@ -207,7 +207,7 @@ namespace Multiplayer.Tactical
             // NEITHER client log held a single line about any of them — so "the client's label repaints" was
             // an assumption with no witness, which is this repo's dominant bug shape (silent swallow). One
             // line per ARRIVING tally (0x80 op 4, a handful per turn), never per frame.
-            Debug.Log("[Multiplayer][tac] ready tally applied on this peer: " + ready + "/" + total +
+            MpLog.Log("[Multiplayer][tac] ready tally applied on this peer: " + ready + "/" + total +
                       " — the already-open HUD button was repainted from it. Advisory only: nothing waits " +
                       "on this.");
         }
@@ -228,7 +228,7 @@ namespace Multiplayer.Tactical
             {
                 var session = engine.Session;
                 if (session == null)
-                    Debug.LogError("[Multiplayer][tac] new-round ready reset SKIPPED on the host — no " +
+                    MpLog.LogError("[Multiplayer][tac] new-round ready reset SKIPPED on the host — no " +
                                    "SessionManager, so last round's flags stay on every peer's label.");
                 else
                 {
@@ -349,7 +349,7 @@ namespace Multiplayer.Tactical
             var template = module == null || module.Button == null ? null : module.Button.gameObject;
             if (template == null || template.transform.parent == null)
             {
-                Debug.LogError("[Multiplayer][tac] ready button NOT built — UIModuleEndTurnContainer.Button is " +
+                MpLog.LogError("[Multiplayer][tac] ready button NOT built — UIModuleEndTurnContainer.Button is " +
                                "null or unparented, so there is nothing to clone and no place to put it. The " +
                                "co-op ready indicator is simply absent this battle (nothing else is affected).");
                 return;
@@ -390,7 +390,7 @@ namespace Multiplayer.Tactical
                     hotkeys++;
                 }
                 if (hotkeys == 0)
-                    Debug.LogWarning("[Multiplayer][tac] ready button found NO HotkeyController to hide — if a " +
+                    MpLog.LogWarning("[Multiplayer][tac] ready button found NO HotkeyController to hide — if a " +
                                      "stray platform glyph is still drawn on it, it is not coming from the " +
                                      "native hotkey display and the subtree dump below is where to look.");
 
@@ -418,7 +418,7 @@ namespace Multiplayer.Tactical
                 Repaint();
                 // The CLONE's subtree, not the template's: the question this answers is "did the frame come
                 // across", and only the clone can answer it.
-                Debug.Log("[Multiplayer][tac] co-op ready button built under the native End Turn button (" +
+                MpLog.Log("[Multiplayer][tac] co-op ready button built under the native End Turn button (" +
                           _setters.Count + " label target(s)). Cloned subtree: " + Describe(go.transform));
             }
             catch (Exception ex)
@@ -426,7 +426,7 @@ namespace Multiplayer.Tactical
                 if (!_loggedBuildFailure)
                 {
                     _loggedBuildFailure = true;
-                    Debug.LogError("[Multiplayer][tac] ready button build FAILED — the battle is unaffected but " +
+                    MpLog.LogError("[Multiplayer][tac] ready button build FAILED — the battle is unaffected but " +
                                    "players get no ready indicator (logged once per run): " + ex);
                 }
                 Forget();
@@ -491,7 +491,7 @@ namespace Multiplayer.Tactical
         {
             if (src == null || clone == null)
             {
-                Debug.LogError("[Multiplayer][tac] ready button NOT placed — the native End Turn button or the " +
+                MpLog.LogError("[Multiplayer][tac] ready button NOT placed — the native End Turn button or the " +
                                "clone has no RectTransform, so the clone stays wherever Instantiate left it " +
                                "(on top of the native button).");
                 return;
@@ -557,7 +557,7 @@ namespace Multiplayer.Tactical
             var btn = pgb != null && pgb.BaseButton != null ? pgb.BaseButton : go.GetComponentInChildren<Button>();
             if (btn == null)
             {
-                Debug.LogError("[Multiplayer][tac] ready button has NO Unity Button after cloning — it will " +
+                MpLog.LogError("[Multiplayer][tac] ready button has NO Unity Button after cloning — it will " +
                                "render but never respond to a click.");
                 return;
             }
@@ -620,7 +620,7 @@ namespace Multiplayer.Tactical
             btn.onClick.RemoveListener(_latch.Toggle);
 
             if (_tintDefs.Count == 0)
-                Debug.LogWarning("[Multiplayer][tac] ready button has NO colour-controlled Image to tint — the " +
+                MpLog.LogWarning("[Multiplayer][tac] ready button has NO colour-controlled Image to tint — the " +
                                  "ready state now rests on the MP_ReadyGreen overlay alone, which is the half " +
                                  "of this feature that has never been observed painting. Either the clone's " +
                                  "PhoenixGeneralButton.ControlledElements came across empty, or the prune in " +
@@ -702,7 +702,7 @@ namespace Multiplayer.Tactical
                 if (depth >= 0 && (_labelDepth < 0 || depth < _labelDepth)) _labelDepth = depth;
             }
             if (_setters.Count == 0)
-                Debug.LogWarning("[Multiplayer][tac] ready button found NO text component to label — the button " +
+                MpLog.LogWarning("[Multiplayer][tac] ready button found NO text component to label — the button " +
                                  "will show the cloned End Turn caption instead of the ready count.");
         }
 
@@ -746,7 +746,7 @@ namespace Multiplayer.Tactical
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[Multiplayer][tac] ready label auto-size not applied to " + c.GetType().Name +
+                MpLog.LogWarning("[Multiplayer][tac] ready label auto-size not applied to " + c.GetType().Name +
                                  " — a long translation will be clipped rather than shrunk: " + ex.Message);
             }
         }
@@ -831,7 +831,7 @@ namespace Multiplayer.Tactical
                      " over " + _tintDefs.Count + " tinted def(s), state=" + (all ? "ALL-READY" : "off");
             if (state == _lastGreenState) return;
             _lastGreenState = state;
-            Debug.Log("[Multiplayer][tac] ready button green: " + state +
+            MpLog.Log("[Multiplayer][tac] ready button green: " + state +
                       ". The native latch is what colours the button's own frame; the overlay is the second " +
                       "layer whose paint this line exists to witness.");
         }
@@ -946,7 +946,7 @@ namespace Multiplayer.Tactical
         {
             if (_deferred) return;
             _deferred = true;
-            Debug.Log("[Multiplayer][tac] ready button reachability DEFERRED — the loading curtain is still " +
+            MpLog.Log("[Multiplayer][tac] ready button reachability DEFERRED — the loading curtain is still " +
                       "down, so the EventSystem would answer with the curtain rather than with this button. " +
                       "The measurement runs on the frame the curtain lifts; the button is placed and " +
                       "following the native End Turn row meanwhile.");
@@ -965,7 +965,7 @@ namespace Multiplayer.Tactical
                 // Teardown, or a prefab shape we cannot follow. Stop rather than write into a dead rect —
                 // and say so once, because a silently frozen button is this repo's dominant bug class.
                 if (enabled)
-                    Debug.LogWarning("[Multiplayer][tac] ready button stopped following the native End Turn " +
+                    MpLog.LogWarning("[Multiplayer][tac] ready button stopped following the native End Turn " +
                                      "button (source rect gone). It keeps its last position for the rest of " +
                                      "this battle; nothing else is affected.");
                 enabled = false;
@@ -1034,7 +1034,7 @@ namespace Multiplayer.Tactical
             if (!drawn) _waited++;
             if (!ProbeNow(CurtainLifted(), drawn, _waited)) { ReportDeferred(); return; }
             _measured = true;
-            Debug.Log("[Multiplayer][tac] ready row measured: EndTurn anchorMin=" + Source.anchorMin +
+            MpLog.Log("[Multiplayer][tac] ready row measured: EndTurn anchorMin=" + Source.anchorMin +
                       " anchorMax=" + Source.anchorMax + " pivot=" + Source.pivot +
                       " sizeDelta=" + Source.sizeDelta + " rect.height=" + Source.rect.height +
                       " localScale.y=" + Source.localScale.y + " parentLossyScale.y=" +
@@ -1156,7 +1156,7 @@ namespace Multiplayer.Tactical
                               (g.canvasRenderer != null && g.canvasRenderer.cull ? " culled" : "") + ")");
             }
 
-            Debug.Log("[Multiplayer][tac] ready button footprint: world x=[" + myLeft + ".." + myRight +
+            MpLog.Log("[Multiplayer][tac] ready button footprint: world x=[" + myLeft + ".." + myRight +
                       "] y=[" + myBottom + ".." + myTop + "] vs HUD container " + hud + " -> " + verdict +
                       " | vs canvas " + scr +
                       " | raycast-enabled graphics: " + live + " of " + seen + " active [" +
@@ -1174,7 +1174,7 @@ namespace Multiplayer.Tactical
             // raycaster itself, asked directly in ProbeReachable below — an inference from our own fields
             // never could answer it, which is the whole reason that probe exists.
             if (live > 0 && undrawn == live)
-                Debug.LogError("[Multiplayer][tac] ready button is NOT HIT-TESTABLE: ALL " + live + " of its " +
+                MpLog.LogError("[Multiplayer][tac] ready button is NOT HIT-TESTABLE: ALL " + live + " of its " +
                                "raycast surface(s) report depth=-1, which is uGUI's own marker for " +
                                "\"the canvas never drew this\" — GraphicRaycaster skips exactly those, so the " +
                                "button takes neither hover nor click even though every wire on it is correct. " +
@@ -1206,7 +1206,7 @@ namespace Multiplayer.Tactical
             var es = EventSystem.current;
             if (es == null)
             {
-                Debug.LogError("[Multiplayer][tac] ready button reachability UNKNOWN: no EventSystem.current, " +
+                MpLog.LogError("[Multiplayer][tac] ready button reachability UNKNOWN: no EventSystem.current, " +
                                "so nothing in this battle can be clicked and the probe has nothing to ask.");
                 return;
             }
@@ -1234,14 +1234,14 @@ namespace Multiplayer.Tactical
                            (mine == 0 ? "" : " ancestors=" + Filters());
 
             if (mine == 0)
-                Debug.Log("[Multiplayer][tac] ready button IS REACHABLE: the EventSystem returns it on top at " +
+                MpLog.Log("[Multiplayer][tac] ready button IS REACHABLE: the EventSystem returns it on top at " +
                           "its own centre, so hover and click are wired to a surface that can be hit. " + where);
             else if (mine > 0)
-                Debug.LogError("[Multiplayer][tac] ready button is BURIED: the EventSystem finds it at index " +
+                MpLog.LogError("[Multiplayer][tac] ready button is BURIED: the EventSystem finds it at index " +
                                mine + " at its own centre, under " + hits[0].gameObject.name + " — that object " +
                                "takes the hover and the click instead. " + where);
             else
-                Debug.LogError("[Multiplayer][tac] ready button is UNREACHABLE: the EventSystem returns NOTHING " +
+                MpLog.LogError("[Multiplayer][tac] ready button is UNREACHABLE: the EventSystem returns NOTHING " +
                                "of ours at its own centre, though " + live + " of its graphics are raycast " +
                                "targets. The graphic is set up and the raycaster still refuses it, so the cause " +
                                "is OUTSIDE the clone: an ancestor CanvasGroup/Mask/RectMask2D filtering the " +

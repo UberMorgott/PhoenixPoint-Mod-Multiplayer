@@ -81,7 +81,7 @@ namespace Multiplayer.Network.Sync
                 {
                     // A cinematic with no def is unaddressable (law 2) and the peers get nothing — say so,
                     // because "the video played on one screen only" is invisible from the other side.
-                    Debug.LogWarning("[MP][cutscene] HOST cinematic NOT mirrored — it carries no " +
+                    MpLog.LogWarning("[MP][cutscene] HOST cinematic NOT mirrored — it carries no " +
                                      "VideoPlaybackSourceDef guid, so no peer can name the same video");
                     return;
                 }
@@ -97,11 +97,11 @@ namespace Multiplayer.Network.Sync
                 }
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                     SyncProtocol.EncodeEnvelope(SurfaceIds.GeoCutsceneRaise, SyncKind.StateDelta, inner)));
-                Debug.Log("[MP][cutscene] HOST raised '" + def.name + "' seq=" + seq + " priority=" + priority);
+                MpLog.Log("[MP][cutscene] HOST raised '" + def.name + "' seq=" + seq + " priority=" + priority);
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][cutscene] HOST raise broadcast FAILED — no peer will see this " +
+                MpLog.LogError("[MP][cutscene] HOST raise broadcast FAILED — no peer will see this " +
                                "cinematic: " + ex);
             }
         }
@@ -133,7 +133,7 @@ namespace Multiplayer.Network.Sync
                 var view = View();
                 if (view == null)
                 {
-                    Debug.LogWarning("[MP][cutscene] campaign intro NOT re-issued — no live GeoscapeView at the " +
+                    MpLog.LogWarning("[MP][cutscene] campaign intro NOT re-issued — no live GeoscapeView at the " +
                                      "reveal (the session did not come up on the geoscape); nobody sees it, " +
                                      "and nothing is stuck waiting for it");
                     return false;
@@ -141,19 +141,19 @@ namespace Multiplayer.Network.Sync
                 var def = view.IntroCinematicDef;
                 if (def == null)
                 {
-                    Debug.Log("[MP][cutscene] campaign intro NOT re-issued — this build's GeoscapeView carries no " +
+                    MpLog.Log("[MP][cutscene] campaign intro NOT re-issued — this build's GeoscapeView carries no " +
                               "IntroCinematicDef, so there was never a video to share");
                     return false;
                 }
                 // The game's own opener, never a video API: the 0xBA postfix hangs off exactly this call.
                 view.ToCutsceneState(def);
-                Debug.Log("[MP][cutscene] campaign intro re-issued after the reveal as '" + def.name +
+                MpLog.Log("[MP][cutscene] campaign intro re-issued after the reveal as '" + def.name +
                           "' — mirrored to every peer");
                 return true;
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][cutscene] campaign intro re-issue FAILED — the campaign starts without it: " + ex);
+                MpLog.LogError("[MP][cutscene] campaign intro re-issue FAILED — the campaign starts without it: " + ex);
                 return false;
             }
         }
@@ -178,7 +178,7 @@ namespace Multiplayer.Network.Sync
                 if (!Seq.ShouldApply(SurfaceIds.GeoCutsceneRaise, seq)) return true;
                 if (Raise(guid, priority)) Seq.Mark(SurfaceIds.GeoCutsceneRaise, seq);
             }
-            catch (Exception ex) { Debug.LogError("[Multiplayer][rail] CutsceneMirror inbound failed: " + ex); }
+            catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] CutsceneMirror inbound failed: " + ex); }
             return true;
         }
 
@@ -192,7 +192,7 @@ namespace Multiplayer.Network.Sync
             {
                 // Mod parity (law 10) should have blocked the join; a missing video def is not something a
                 // later delta heals, so it is an error rather than a wait.
-                Debug.LogError("[MP][cutscene] raise DROPPED — def guid " + guid + " is not a live " +
+                MpLog.LogError("[MP][cutscene] raise DROPPED — def guid " + guid + " is not a live " +
                                "VideoPlaybackSourceDef on this peer (mod/build parity gap)");
                 return false;
             }
@@ -201,7 +201,7 @@ namespace Multiplayer.Network.Sync
             {
                 // This peer has no geoscape to put a window in (in a battle, mid-load), and windows are not
                 // replayed after the fact — same contract as the 0xB6 / 0xB7 raises.
-                Debug.LogWarning("[MP][cutscene] raise of '" + video.name + "' DROPPED — this peer has no " +
+                MpLog.LogWarning("[MP][cutscene] raise of '" + video.name + "' DROPPED — this peer has no " +
                                  "live GeoscapeView, and cinematics are not replayed after the fact");
                 return false;
             }
@@ -209,7 +209,7 @@ namespace Multiplayer.Network.Sync
             // — the scope is what stops a peer from re-broadcasting the raise it just applied.
             using (SyncApplyScope.Enter())
                 view.ToCutsceneState(video, priority);
-            Debug.Log("[MP][cutscene] played '" + video.name + "' priority=" + priority +
+            MpLog.Log("[MP][cutscene] played '" + video.name + "' priority=" + priority +
                       " (native replay off this peer's own assets)");
             return true;
         }

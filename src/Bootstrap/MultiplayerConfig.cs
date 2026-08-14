@@ -52,6 +52,21 @@ namespace Multiplayer
         /// Off = today's behaviour, byte for byte.</summary>
         public bool AutoEndTurnWhenAllReady = true;
 
+        [ConfigField("Enable detailed multiplayer diagnostics",
+                     "Writes high-volume synchronization traces used to investigate desyncs and stalls. " +
+                     "Enabled by default for testing; disable it to reduce log volume and hot-path overhead. " +
+                     "Warnings and errors are never hidden by it.")]
+        public bool EnableDiagnosticLogging = true;
+
+        [ConfigField("Write a separate multiplayer log",
+                     "Writes canonical [MP][category] entries to the rotating multiplayer.log files.")]
+        public bool WriteDedicatedLog = true;
+
+        [ConfigField("Duplicate multiplayer entries to Player.log",
+                     "Also writes multiplayer entries to Unity's shared Player.log. Disable this for a cleaner " +
+                     "Player.log; the separate multiplayer log remains available when enabled above.")]
+        public bool WritePlayerLog = true;
+
         /// <summary>OPTIONAL LIFT OF THE 8-SOLDIER DEPLOYMENT CAP. 0 = OFF, the vanilla cap
         /// (<c>TacMissionTypeDef.MaxPlayerUnits</c>, 8 for nearly every mission) stands untouched. Any other
         /// value is the cap, clamped to <see cref="Multiplayer.Network.Sync.DeployCap.Ceiling"/> = 16 from

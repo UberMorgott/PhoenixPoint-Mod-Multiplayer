@@ -62,7 +62,7 @@ namespace Multiplayer.Network
                 }
                 catch (Exception e)
                 {
-                    Debug.LogWarning("[Multiplayer] ClientIdentity nickname load failed: " + e.Message);
+                    MpLog.LogWarning("[Multiplayer] ClientIdentity nickname load failed: " + e.Message);
                     return null;
                 }
             }
@@ -74,7 +74,7 @@ namespace Multiplayer.Network
                 }
                 catch (Exception e)
                 {
-                    Debug.LogWarning("[Multiplayer] ClientIdentity nickname save failed: " + e.Message);
+                    MpLog.LogWarning("[Multiplayer] ClientIdentity nickname save failed: " + e.Message);
                 }
             }
         }
@@ -134,14 +134,14 @@ namespace Multiplayer.Network
                     Guid.TryParse(envOverride, out var fromEnv) && fromEnv != Guid.Empty)
                 {
                     _playerGuid = fromEnv;
-                    Debug.Log($"[Multiplayer] ClientIdentity: using MULTIPLAYER_IDENTITY override {_playerGuid} " +
+                    MpLog.Log($"[Multiplayer] ClientIdentity: using MULTIPLAYER_IDENTITY override {_playerGuid} " +
                               $"(instance {MultiplayerLog.InstanceIndex}).");
                     return;
                 }
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[Multiplayer] ClientIdentity env override failed: " + e.Message);
+                MpLog.LogWarning("[Multiplayer] ClientIdentity env override failed: " + e.Message);
             }
 
             try
@@ -152,7 +152,7 @@ namespace Multiplayer.Network
                     if (TryParseGuid(json, out var parsed) && parsed != Guid.Empty)
                     {
                         _playerGuid = parsed;
-                        Debug.Log($"[Multiplayer] ClientIdentity: loaded {_playerGuid} from " +
+                        MpLog.Log($"[Multiplayer] ClientIdentity: loaded {_playerGuid} from " +
                                   $"{Path.GetFileName(FilePath)} (instance {MultiplayerLog.InstanceIndex}).");
                         return;
                     }
@@ -160,13 +160,13 @@ namespace Multiplayer.Network
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[Multiplayer] ClientIdentity load failed: " + e.Message);
+                MpLog.LogWarning("[Multiplayer] ClientIdentity load failed: " + e.Message);
             }
 
             // First run (or unreadable/empty file): generate once and persist.
             _playerGuid = Guid.NewGuid();
             Save();
-            Debug.Log($"[Multiplayer] ClientIdentity: generated new {_playerGuid} → " +
+            MpLog.Log($"[Multiplayer] ClientIdentity: generated new {_playerGuid} → " +
                       $"{Path.GetFileName(FilePath)} (instance {MultiplayerLog.InstanceIndex}).");
         }
 
@@ -180,7 +180,7 @@ namespace Multiplayer.Network
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[Multiplayer] ClientIdentity save failed: " + e.Message);
+                MpLog.LogWarning("[Multiplayer] ClientIdentity save failed: " + e.Message);
             }
         }
 

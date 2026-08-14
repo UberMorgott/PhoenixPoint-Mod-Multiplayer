@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using Multiplayer.Network.MessageLayer;
 using Multiplayer.Network.Sync;
@@ -127,7 +127,7 @@ namespace Multiplayer.Network
         private static void RunParityConfigRestore()
         {
             try { ParityConfigRestore?.Invoke(); }
-            catch (Exception e) { Debug.LogError("[Multiplayer] parity config restore failed: " + e.Message); }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] parity config restore failed: " + e.Message); }
         }
 
         /// <summary>Draws an arriving ping marker (<c>PingMarkers.Show</c>). Same delegate-field pattern and
@@ -178,7 +178,7 @@ namespace Multiplayer.Network
             SessionNotifier.AttachTo(this);
             // F3: wire the host-leave handler (client drops to menu on host quit/crash); re-arms its latch.
             HostLeaveHandler.AttachTo(this);
-            Debug.Log($"[Multiplayer] transport initialized: {Transport?.TransportType}");
+            MpLog.Log($"[Multiplayer] transport initialized: {Transport?.TransportType}");
             // Fresh session: a genuine connect failure from here on must surface to the user.
             _intentionalDisconnect = false;
             // Belt for the end-of-session phase (it self-clears on the next level; this only covers a
@@ -214,7 +214,7 @@ namespace Multiplayer.Network
             SessionNotifier.AttachTo(this);
             // F3: wire the host-leave handler (inert on the host; arms for the client crash/quit path).
             HostLeaveHandler.AttachTo(this);
-            Debug.Log($"[Multiplayer] transport initialized: {Transport?.TransportType}");
+            MpLog.Log($"[Multiplayer] transport initialized: {Transport?.TransportType}");
             // Fresh session: a genuine connect failure from here on must surface to the user.
             _intentionalDisconnect = false;
             // Belt for the end-of-session phase (it self-clears on the next level; this only covers a
@@ -327,7 +327,7 @@ namespace Multiplayer.Network
             // make the all-transports bind failure LOUD and unmissable in the Player.log.
             if (Transport.State == ConnectionState.Failed)
             {
-                Debug.LogError(
+                MpLog.LogError(
                     $"[Multiplayer] HOST BIND FAILED on ALL transports (port {port}). This instance is NOT " +
                     "hosting — it did NOT silently become a client. Most likely another PhoenixPoint instance " +
                     "on this machine already holds the port. Close the other instance (or free the port), then " +
@@ -563,7 +563,7 @@ namespace Multiplayer.Network
                 bool isCurrentHost = Session.HostPeerId.HasValue && Session.HostPeerId.Value == peerId;
                 if (!_expectingHostLink && !isCurrentHost)
                 {
-                    Debug.LogWarning($"[Multiplayer] Ignoring unsolicited peer connect {peerId} on client — " +
+                    MpLog.LogWarning($"[Multiplayer] Ignoring unsolicited peer connect {peerId} on client — " +
                                      "not the dialed host; host link unchanged.");
                     return;
                 }
@@ -635,7 +635,7 @@ namespace Multiplayer.Network
             }
             catch (Exception ex)
             {
-                Debug.LogError($"[Multiplayer] Failed to deserialize packet: {ex.Message}");
+                MpLog.LogError($"[Multiplayer] Failed to deserialize packet: {ex.Message}");
             }
         }
 
@@ -735,7 +735,7 @@ namespace Multiplayer.Network
                     break;
 
                 case PacketType.SaveDone:
-                    Debug.Log("[Multiplayer] route: SaveDone");
+                    MpLog.Log("[Multiplayer] route: SaveDone");
                     SaveTransfer?.OnSaveDone(msg);
                     break;
 
@@ -744,7 +744,7 @@ namespace Multiplayer.Network
                     break;
 
                 case PacketType.ClientLoaded:
-                    Debug.Log("[Multiplayer] route: ClientLoaded");
+                    MpLog.Log("[Multiplayer] route: ClientLoaded");
                     SaveTransfer?.OnClientLoaded(msg);
                     break;
 
@@ -790,7 +790,7 @@ namespace Multiplayer.Network
                     break;
 
                 default:
-                    Debug.LogWarning($"[Multiplayer] Unrouted packet type: {msg.Type}");
+                    MpLog.LogWarning($"[Multiplayer] Unrouted packet type: {msg.Type}");
                     break;
             }
         }

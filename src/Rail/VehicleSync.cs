@@ -236,7 +236,7 @@ namespace Multiplayer.Network.Sync
                 if (geo == null || !ReferenceEquals(vehicle.Owner, geo.PhoenixFaction))
                 {
                     if (_logged.Add("route:" + vehicleRef))
-                        Debug.Log("[MP][vehicle] CLIENT sim route of " + vehicleRef + " BLOCKED — not a player gesture; the host's route arrives as mirrored motion");
+                        MpLog.Log("[MP][vehicle] CLIENT sim route of " + vehicleRef + " BLOCKED — not a player gesture; the host's route arrives as mirrored motion");
                     return false;
                 }
                 // The route the client computed came off ITS mirror; only the DESTINATION travels and the
@@ -245,7 +245,7 @@ namespace Multiplayer.Network.Sync
                 string siteRef = IdentityResolver.RootRef(dst);
                 if (siteRef == null)
                 {
-                    Debug.LogWarning("[MP][vehicle] CLIENT route of " + vehicleRef + " DROPPED — unaddressable destination (" +
+                    MpLog.LogWarning("[MP][vehicle] CLIENT route of " + vehicleRef + " DROPPED — unaddressable destination (" +
                                      (dst == null ? "empty path" : "site id " + dst.SiteId) + ")");
                     OpenUiRepaint.MarkDirty();
                     return false;
@@ -257,7 +257,7 @@ namespace Multiplayer.Network.Sync
             {
                 // Nothing was written and nothing was sent: no delta will ever repaint the order the UI
                 // already drew, so reconverge from the un-mutated local model like the reject path does.
-                Debug.LogError("[MP][vehicle] CLIENT route capture failed for " + vehicleRef + " — reconverging local UI: " + ex);
+                MpLog.LogError("[MP][vehicle] CLIENT route capture failed for " + vehicleRef + " — reconverging local UI: " + ex);
                 OpenUiRepaint.MarkDirty();
             }
             return false;
@@ -286,7 +286,7 @@ namespace Multiplayer.Network.Sync
                 if (geo == null || !ReferenceEquals(vehicle.Owner, geo.PhoenixFaction))
                 {
                     if (_logged.Add("equip:" + vehicleRef))
-                        Debug.Log("[MP][vehicle] CLIENT loadout write on " + vehicleRef + " BLOCKED — not a player aircraft, nothing to relay");
+                        MpLog.Log("[MP][vehicle] CLIENT loadout write on " + vehicleRef + " BLOCKED — not a player aircraft, nothing to relay");
                     return false;
                 }
                 byte[] body = EncodeSlots(weapons, modules, GuidOfSlot);
@@ -312,7 +312,7 @@ namespace Multiplayer.Network.Sync
                 // edit that really was refused.
                 if (!IsDocked(vehicle))
                 {
-                    Debug.Log("[MP][vehicle] CLIENT loadout write on " + vehicleRef +
+                    MpLog.Log("[MP][vehicle] CLIENT loadout write on " + vehicleRef +
                               " REFUSED locally — " + NotDockedReason);
                     SessionNotifier.ShowToast(NotDockedReason);   // native NotificationController toast
                     // Nothing was written (law 3: the native op never ran) and nothing was sent, so no delta
@@ -328,7 +328,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][vehicle] CLIENT loadout capture failed for " + vehicleRef + " — reconverging local UI: " + ex);
+                MpLog.LogError("[MP][vehicle] CLIENT loadout capture failed for " + vehicleRef + " — reconverging local UI: " + ex);
                 OpenUiRepaint.MarkDirty();
             }
             return false;
@@ -360,7 +360,7 @@ namespace Multiplayer.Network.Sync
                 if (geo == null || !ReferenceEquals(vehicle.Owner, geo.PhoenixFaction))
                 {
                     if (_logged.Add("explore:" + vehicleRef))
-                        Debug.Log("[MP][vehicle] CLIENT site exploration by " + vehicleRef +
+                        MpLog.Log("[MP][vehicle] CLIENT site exploration by " + vehicleRef +
                                   " BLOCKED — not a player aircraft, nothing to relay");
                     return false;
                 }
@@ -369,7 +369,7 @@ namespace Multiplayer.Network.Sync
             }
             catch (Exception ex)
             {
-                Debug.LogError("[MP][vehicle] CLIENT explore capture failed for " + vehicleRef +
+                MpLog.LogError("[MP][vehicle] CLIENT explore capture failed for " + vehicleRef +
                                " — reconverging local UI: " + ex);
                 OpenUiRepaint.MarkDirty();
             }
@@ -498,7 +498,7 @@ namespace Multiplayer.Network.Sync
                 }
                 vehicle.StartTravel(path);
                 AircraftDispatch.Note(vehicle, senderPeerId); // the dispatcher, for the tab-pause rule
-                Debug.Log("[MP][vehicle] HOST intent APPLIED op=travelTo " + vehicleRef + " -> " + siteRef +
+                MpLog.Log("[MP][vehicle] HOST intent APPLIED op=travelTo " + vehicleRef + " -> " + siteRef +
                           " legs=" + path.Count + " nonce=" + nonce + " peer=" + senderPeerId);
             }
             catch (Exception ex) { Reject(senderPeerId, vehicleRef, "travel (throw) " + ex.Message); }
@@ -533,7 +533,7 @@ namespace Multiplayer.Network.Sync
                 if (why != null) { Reject(senderPeerId, vehicleRef, "explore: " + why); return; }
 
                 vehicle.StartExploringCurrentSite();
-                Debug.Log("[MP][vehicle] HOST intent APPLIED op=exploreSite " + vehicleRef + " site=" +
+                MpLog.Log("[MP][vehicle] HOST intent APPLIED op=exploreSite " + vehicleRef + " site=" +
                           IdentityResolver.RootRef(site) + " nonce=" + nonce + " peer=" + senderPeerId);
             }
             catch (Exception ex) { Reject(senderPeerId, vehicleRef, "explore (throw) " + ex.Message); }
@@ -591,7 +591,7 @@ namespace Multiplayer.Network.Sync
                 foreach (var left in weaponPool) storage.AddItem(left);
                 foreach (var left in modulePool) storage.AddItem(left);
 
-                Debug.Log("[MP][vehicle] HOST intent APPLIED op=setEquipment " + vehicleRef +
+                MpLog.Log("[MP][vehicle] HOST intent APPLIED op=setEquipment " + vehicleRef +
                           " weapons=" + wantWeapons.Count + " modules=" + wantModules.Count +
                           " unequipped=" + (weaponPool.Count + modulePool.Count) +
                           " nonce=" + nonce + " peer=" + senderPeerId);

@@ -214,7 +214,7 @@ namespace Multiplayer.Network.Sync
             if (state == null || key == null || !key.StartsWith("M#", StringComparison.Ordinal) ||
                 key.IndexOf('.') >= 0 || key.IndexOf('#', 2) >= 0)
             {
-                Debug.LogError("[Multiplayer][rail] RegisterModRoot: invalid key '" + key + "' (grammar: \"M#<name>\", no '.'/'#') — ignored");
+                MpLog.LogError("[Multiplayer][rail] RegisterModRoot: invalid key '" + key + "' (grammar: \"M#<name>\", no '.'/'#') — ignored");
                 return;
             }
             _modRoots[key] = state;

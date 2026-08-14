@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 using Base.Core;
 using Base.Serialization;
 using Base.UI.MessageBox;
@@ -234,7 +234,7 @@ namespace Multiplayer.UI
             // leave, a host closing its own lobby, a quit, and the campaign-end path never reach this.
             if (HostLeaveHandler.ConsumeLobbyReopen())
             {
-                Debug.Log("[Multiplayer] F3: main menu is back — reopening the network create/join gate.");
+                MpLog.Log("[Multiplayer] F3: main menu is back — reopening the network create/join gate.");
                 ShowNetworkMenu();
             }
         }
@@ -336,7 +336,7 @@ namespace Multiplayer.UI
             }
             catch (System.Exception e)
             {
-                UnityEngine.Debug.LogWarning("[Multiplayer] Early curtain drop failed (fallback to overlay backdrop): " + e.Message);
+                MpLog.LogWarning("[Multiplayer] Early curtain drop failed (fallback to overlay backdrop): " + e.Message);
             }
         }
 
@@ -356,7 +356,7 @@ namespace Multiplayer.UI
             }
             catch (System.Exception e)
             {
-                UnityEngine.Debug.LogWarning("[Multiplayer] Early curtain lift failed: " + e.Message);
+                MpLog.LogWarning("[Multiplayer] Early curtain lift failed: " + e.Message);
             }
         }
 
@@ -687,7 +687,7 @@ namespace Multiplayer.UI
                     // the exception would escape with the gate stuck false forever → dead lobby. Run the
                     // EXACT SAME reopen sequence as the started==false branch, log the cause, and swallow
                     // (the user is informed via the same warning box).
-                    Debug.LogError("[Multiplayer] the host start threw after the lobby locked: " + e);
+                    MpLog.LogError("[Multiplayer] the host start threw after the lobby locked: " + e);
                     ReopenAfterFailedStart();
                     return;
                 }
@@ -946,7 +946,7 @@ namespace Multiplayer.UI
             }
             catch (System.Exception ex)
             {
-                Debug.LogError($"[Multiplayer] Join attempt failed: {ex}");
+                MpLog.LogError($"[Multiplayer] Join attempt failed: {ex}");
                 // Reset any half-open session so a subsequent retry / host still works cleanly.
                 NetworkEngine.Instance?.Shutdown();
                 OnConnectionFailed($"Join failed: {ex.Message}");
@@ -964,7 +964,7 @@ namespace Multiplayer.UI
             // attempt still hanging produced byte-identical logs — which is why the 2026-08-07 report
             // could say only "he waited, then it said it could not connect", with 54 s of silence in the
             // file underneath it.
-            Debug.Log($"[Multiplayer][join] stage {_joinAttemptIndex + 1}/{_joinPlan.Count} " +
+            MpLog.Log($"[Multiplayer][join] stage {_joinAttemptIndex + 1}/{_joinPlan.Count} " +
                       $"{attempt.Transport} → {attempt.Address}:{attempt.Port} — connecting " +
                       $"(deadline {(int)JoinStageTimeoutSec}s for the host's first PEER_LIST).");
             NetworkEngine.Create();
@@ -1144,7 +1144,7 @@ namespace Multiplayer.UI
             {
                 SaveLoadInterceptPatch.Disarm();
                 _lobby?.Show();
-                Debug.LogWarning("[Multiplayer] Could not open the native Load screen for Choose-Save; try again.");
+                MpLog.LogWarning("[Multiplayer] Could not open the native Load screen for Choose-Save; try again.");
             }
         }
 
@@ -1167,7 +1167,7 @@ namespace Multiplayer.UI
             if (!SessionLifecycle.NewCampaignArmGuard(engine.IsHost, engine.IsActiveSession,
                     coord.SessionStarted, coord.TransferActive))
             {
-                Debug.LogWarning("[Multiplayer] New-campaign bootstrap unavailable (session started or transfer in flight).");
+                MpLog.LogWarning("[Multiplayer] New-campaign bootstrap unavailable (session started or transfer in flight).");
                 return;
             }
 
@@ -1178,7 +1178,7 @@ namespace Multiplayer.UI
                 // NAME THE BLOCKER (L181): the old line said only that somebody had not readied, which is
                 // unactionable exactly when it matters — and a row that never finished joining named
                 // nobody at all while holding this button down forever.
-                Debug.LogWarning("[Multiplayer] NEW CAMPAIGN blocked: " +
+                MpLog.LogWarning("[Multiplayer] NEW CAMPAIGN blocked: " +
                                  LobbyController.PeersBlockedBy(engine.Session?.GetLobbyRoster()) +
                                  ". (A peer that dropped out is PAUSED, and one whose JOIN never arrived " +
                                  "is off the roster — neither is counted.)");
@@ -1202,7 +1202,7 @@ namespace Multiplayer.UI
             if (!NewCampaignInterceptPatch.OpenNativeNewGameScreen())
             {
                 _lobby?.Show();
-                Debug.LogWarning("[Multiplayer] Could not open the native New Game screen; try again.");
+                MpLog.LogWarning("[Multiplayer] Could not open the native New Game screen; try again.");
             }
         }
 
@@ -1302,7 +1302,7 @@ namespace Multiplayer.UI
             if (!ok) return false;
 
             SaveLoadInterceptPatch.ArmInPrefix(OnInGameLoadPicked);
-            Debug.Log("[Multiplayer] F2: armed in-game host load intercept (pause-menu Load).");
+            MpLog.Log("[Multiplayer] F2: armed in-game host load intercept (pause-menu Load).");
             return true;
         }
 
@@ -1327,7 +1327,7 @@ namespace Multiplayer.UI
                 transferActive: coord?.TransferActive ?? false);
             if (!ok)
             {
-                Debug.LogWarning("[Multiplayer] F2: in-game load guard closed at delivery; ignoring pick.");
+                MpLog.LogWarning("[Multiplayer] F2: in-game load guard closed at delivery; ignoring pick.");
                 return;
             }
 
@@ -1339,7 +1339,7 @@ namespace Multiplayer.UI
             if (!started)
             {
                 HideLoadOverlay();
-                Debug.LogWarning("[Multiplayer] F2: HostStartSessionInGame did not start (see prior log).");
+                MpLog.LogWarning("[Multiplayer] F2: HostStartSessionInGame did not start (see prior log).");
             }
         }
 
@@ -1468,7 +1468,7 @@ namespace Multiplayer.UI
             try { GUIUtility.systemCopyBuffer = text; }
             catch (System.Exception e)
             {
-                Debug.LogWarning("[Multiplayer] clipboard write failed (" + e.GetType().Name +
+                MpLog.LogWarning("[Multiplayer] clipboard write failed (" + e.GetType().Name +
                                  "); nothing was copied.");
                 return false;
             }
@@ -1482,7 +1482,7 @@ namespace Multiplayer.UI
             try { return GUIUtility.systemCopyBuffer; }
             catch (System.Exception e)
             {
-                Debug.LogWarning("[Multiplayer] clipboard read failed (" + e.GetType().Name + ").");
+                MpLog.LogWarning("[Multiplayer] clipboard read failed (" + e.GetType().Name + ").");
                 return "";
             }
         }
@@ -1519,7 +1519,7 @@ namespace Multiplayer.UI
             // set — only the LAST stage's failure falls through to the user-facing error below.
             if (_joinPlan != null && _joinAttemptIndex + 1 < _joinPlan.Count)
             {
-                Debug.LogWarning($"[Multiplayer][join] stage {_joinAttemptIndex + 1}/{_joinPlan.Count} " +
+                MpLog.LogWarning($"[Multiplayer][join] stage {_joinAttemptIndex + 1}/{_joinPlan.Count} " +
                                  $"({_joinPlan[_joinAttemptIndex].Transport}) FAILED after " +
                                  $"{UnityEngine.Time.realtimeSinceStartup - _joinStageStartedAt:F1}s: {reason} " +
                                  $"— falling back to {_joinPlan[_joinAttemptIndex + 1].Transport}.");
@@ -1532,7 +1532,7 @@ namespace Multiplayer.UI
             }
             // The LAST stage (or a plan-less failure): this is the one the player is told about, so it is
             // also the one the log has to carry. Read the stage BEFORE the plan is dropped.
-            Debug.LogError($"[Multiplayer][join] join ABANDONED after " +
+            MpLog.LogError($"[Multiplayer][join] join ABANDONED after " +
                            $"{(_joinPlan == null ? 0 : _joinPlan.Count)} stage(s), " +
                            $"{UnityEngine.Time.realtimeSinceStartup - _joinStageStartedAt:F1}s in the last one: " +
                            $"{reason}");
@@ -1627,7 +1627,7 @@ namespace Multiplayer.UI
         private void CancelClientConnect()
         {
             // The third outcome of a join, and the one the log could not tell from the other two.
-            Debug.LogWarning($"[Multiplayer][join] CANCELLED by the player after " +
+            MpLog.LogWarning($"[Multiplayer][join] CANCELLED by the player after " +
                              $"{UnityEngine.Time.realtimeSinceStartup - _joinStageStartedAt:F1}s " +
                              $"(stage {_joinAttemptIndex + 1}) — no failure, no deadline.");
             _clientConnecting = false;
@@ -1767,7 +1767,7 @@ namespace Multiplayer.UI
             {
                 // Never block the exit — but never swallow it silently either: if this throws, the other
                 // players are about to be told this player lost connection rather than left.
-                Debug.LogWarning("[Multiplayer] quit farewell not flushed (" + e.Message + ") — remaining " +
+                MpLog.LogWarning("[Multiplayer] quit farewell not flushed (" + e.Message + ") — remaining " +
                                  "players will see a lost-connection notice instead of a leave notice.");
             }
         }
@@ -1802,7 +1802,7 @@ namespace Multiplayer.UI
                 if (_clientConnecting && !engine.IsHost &&
                     (engine.Session?.GetLobbyRoster()?.Count ?? 0) > 0)
                 {
-                    Debug.Log($"[Multiplayer][join] host ACCEPTED the join after " +
+                    MpLog.Log($"[Multiplayer][join] host ACCEPTED the join after " +
                               $"{UnityEngine.Time.realtimeSinceStartup - _joinStageStartedAt:F1}s " +
                               $"(stage {_joinAttemptIndex + 1}) — its first PEER_LIST arrived; opening the lobby.");
                     _clientConnecting = false;
@@ -1847,7 +1847,7 @@ namespace Multiplayer.UI
                 {
                     // Say that the DEADLINE is what ended this, before OnConnectionFailed says what happens
                     // next. Without this line an expired deadline and a still-hanging attempt read the same.
-                    Debug.LogWarning($"[Multiplayer][join] stage DEADLINE at " +
+                    MpLog.LogWarning($"[Multiplayer][join] stage DEADLINE at " +
                                      $"{UnityEngine.Time.realtimeSinceStartup - _joinStageStartedAt:F1}s — no " +
                                      "PEER_LIST from the host, i.e. the transport connected but the host never " +
                                      "accepted the JOIN (it may never have seen one).");
@@ -1892,7 +1892,7 @@ namespace Multiplayer.UI
                 }
                 catch (System.Exception e)
                 {
-                    Debug.LogError("[Multiplayer] the lobby countdown dispatch threw — reopening the lobby " +
+                    MpLog.LogError("[Multiplayer] the lobby countdown dispatch threw — reopening the lobby " +
                                    "rather than leaving it locked forever: " + e);
                     ReopenAfterFailedStart();
                 }

@@ -73,7 +73,7 @@ namespace Multiplayer.Tactical
                 .Where(Emittable)
                 .Cast<MethodBase>()
                 .ToList();
-            Debug.Log("[Multiplayer][tac] confirm probe covers " + found.Count + " entry point(s): " +
+            MpLog.Log("[Multiplayer][tac] confirm probe covers " + found.Count + " entry point(s): " +
                       string.Join(", ", found.Select(m => m.DeclaringType.Name + "." + m.Name).ToArray()));
             return found;
         }
@@ -99,7 +99,7 @@ namespace Multiplayer.Tactical
             {
                 var ability = FirstAbility(__instance);
                 var disabled = ability == null ? (AbilityDisabledState?)null : ability.GetDisabledState();
-                Debug.Log("[Multiplayer][tac] confirm " + __instance.GetType().Name + "." +
+                MpLog.Log("[Multiplayer][tac] confirm " + __instance.GetType().Name + "." +
                           __originalMethod.Name +
                           " actor=" + (ability == null || ability.TacticalActorBase == null
                               ? "?" : ability.TacticalActorBase.DisplayName) +
