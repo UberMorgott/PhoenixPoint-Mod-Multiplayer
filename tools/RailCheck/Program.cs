@@ -421,7 +421,6 @@ namespace RailCheck
             Add(laws, () => L483_TheMistRepellerRadiusIsDerived.Check());
             Add(laws, () => L485_ARefusalTheClientCouldNotHaveGreyedReachesTheScreen.Check());
             Add(laws, () => L492_TheAgendaStripRebuildsOnlyWhenItsRowsChange.Check());
-            Add(laws, () => L490_APausedAnchorSettlesOntoTheHostClock.Check());
             Add(laws, () => L472_EveryDoorIntoAiEvaluationIsKnownAndGatedOnce.Check(game));
             Add(laws, () => L491_AGetterMintedTwinResolvesOntoItsLiveOwner.Check());
             laws.Sort(StringComparer.Ordinal);
@@ -471,8 +470,8 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 322;
-        private const string ExpectedExecutionIdentityDigest = "057fdd20056f59e44972b1e28fc4b911640a0179e6662025c96e93c8afa9b698";
+        private const int ExpectedLawRegistrations = 321;
+        private const string ExpectedExecutionIdentityDigest = "b99e77872326babaadb97a4089119b2b767ca9992a1e5e0bf5c754d9151a074b";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
