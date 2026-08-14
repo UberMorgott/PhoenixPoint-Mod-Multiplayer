@@ -404,7 +404,7 @@ namespace Multiplayer.Network.Sync
                 {
                     field = RailType.Get(cur.GetType())?.FieldByName(seg);
                     if (field == null) return null;
-                    if (typeof(IInstanceData).IsAssignableFrom(field.ValueType))
+                    if (IsRecordedTwin(cur.GetType(), (MemberInfo)field.Fi ?? field.Pi, field.ValueType))
                     {
                         if (key != null) return null;
                         twinDto = RailMeta.FindBridge(cur.GetType()) ?? field.ValueType;
@@ -412,7 +412,8 @@ namespace Multiplayer.Network.Sync
                     }
                 }
                 object val;
-                try { val = field.GetValue(cur); } catch { return null; }
+                try { val = field.GetValue(cur); }
+                catch (Exception ex) { LogGetterThrewOnce(path, cur, field, ex); return null; }
                 if (key == null) { cur = val; continue; }
 
                 cur = null;
@@ -429,6 +430,60 @@ namespace Multiplayer.Network.Sync
             if (cur is UnityEngine.Object fresh && fresh == null) return null;
             if (cur != null && cache != null) cache[path] = cur;
             return cur;
+        }
+
+        /// <summary>A member whose value the GETTER MINTS — writing into what it returns is void, so the
+        /// segment must resolve onto the LIVE owner and its entries land through the DTO-name→live-member
+        /// table (<see cref="RailType.GetBridged"/>). Two shapes, both the game's own record/process
+        /// contract:
+        ///   • an <see cref="IInstanceData"/> member (ActorComponent.SerializationData) — the original arm;
+        ///   • a PROPERTY typed as the owner's own record DTO (<see cref="RailMeta.FindBridge"/>).
+        /// The second arm is <c>GeoHavenDefenseMission.InstanceData</c> (decompile
+        /// GeoHavenDefenseMission.cs:80-91 — <c>get => RecordInstanceData()</c>, <c>set =>
+        /// ProcessInstanceData(value)</c>), and it carries the WHOLE mission state: the class declares no
+        /// serialized fields of its own, so AttackedZoneDef, Status, both deployments, AttackingSites and
+        /// MissionSeed ride as that DTO's 12 leaves (docs/rail-baseline.txt:280-292).
+        ///
+        /// Without it every one of those entries was lost, in the worst of the two ways: the walk called
+        /// the getter, <c>RecordInstanceData</c> reads <c>ObjectiveType => _attackedZoneDef
+        /// .HavenDefenseObjective</c> (:63) and a client whose <c>_attackedZoneDef</c> has not landed yet
+        /// NREs there, so the walk answered null and the applier logged
+        /// <c>entity not found: S#120.SerializationData.ActiveMission.InstanceData</c> — 16x per client in
+        /// one 2026-08-14 session. Self-sustaining: the field that would let the getter succeed rides the
+        /// path the getter breaks, so it never converges. And had the getter succeeded, the write would
+        /// have landed in the throwaway DTO with NO line at all. TFTV read the same never-landed field and
+        /// threw on the client that hovered the haven (<c>AttackedZone => Haven.Zones.First(z => z.Def ==
+        /// _attackedZoneDef)</c> :51 — "Sequence contains no matching element").
+        ///
+        /// STORAGE is the whole gate on the second arm, and it is asked of the MEMBER, not of the type: a
+        /// field — or an auto-property, whose getter hands back the very object it stores — is real
+        /// storage, so a write into what it returns LANDS and redirecting it would lose a genuine object.
+        /// Only a hand-written property can mint a throwaway.</summary>
+        internal static bool IsRecordedTwin(Type live, MemberInfo member, Type dtoType)
+        {
+            if (dtoType == null) return false;
+            if (typeof(IInstanceData).IsAssignableFrom(dtoType)) return true;
+            if (!(member is PropertyInfo pi) || pi.DeclaringType == null) return false;
+            if (pi.DeclaringType.GetField("<" + pi.Name + ">k__BackingField",
+                    BindingFlags.Instance | BindingFlags.NonPublic) != null) return false;
+            return dtoType == RailMeta.FindBridge(live);
+        }
+
+        private static readonly HashSet<string> _getterThrewLogged = new HashSet<string>();
+
+        /// <summary>A member access that THROWS resolves to null and reads on the applier's side as a plain
+        /// "entity not found" — the same line an ordinary missing object produces, so the actual cause
+        /// (a native getter that derives from state this peer has not received) stays invisible. Named
+        /// once per owner-type + member, not per batch: the throw repeats on every entry of the subtree.</summary>
+        private static void LogGetterThrewOnce(string path, object owner, RailField field, Exception ex)
+        {
+            var ownerType = owner?.GetType();
+            if (!_getterThrewLogged.Add((ownerType?.Name ?? "?") + "." + field.Name)) return;
+            MpLog.LogWarning("[Multiplayer][rail] IdentityResolver: " + (ownerType?.Name ?? "?") + "." +
+                             field.Name + " THREW while resolving '" + path + "' (" + ex.GetType().Name + ": " +
+                             ex.Message + ") — the path resolves to null, so every entry under it is dropped " +
+                             "as \"entity not found\". A native getter that derives from state this peer has " +
+                             "not received yet is the usual shape (logged once per member)");
         }
 
         private static object ResolveCachedRoot(GeoLevelController geo, string root, Dictionary<string, object> cache)

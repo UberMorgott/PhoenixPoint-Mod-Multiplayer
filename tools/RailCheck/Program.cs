@@ -421,6 +421,8 @@ namespace RailCheck
             Add(laws, () => L483_TheMistRepellerRadiusIsDerived.Check());
             Add(laws, () => L485_ARefusalTheClientCouldNotHaveGreyedReachesTheScreen.Check());
             Add(laws, () => L472_EveryDoorIntoAiEvaluationIsKnownAndGatedOnce.Check(game));
+            Add(laws, () => L490_APausedAnchorSettlesOntoTheHostClock.Check());
+            Add(laws, () => L491_AGetterMintedTwinResolvesOntoItsLiveOwner.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -468,8 +470,8 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 319;
-        private const string ExpectedExecutionIdentityDigest = "682993f1d6b07b5b029e7b00ff9db0f1832228d129c16a695f34f7c266d9f0f9";
+        private const int ExpectedLawRegistrations = 321;
+        private const string ExpectedExecutionIdentityDigest = "b28df11b9650ec283a1e9f1abe3026f2ec4852cab697e7ae20030cfed6f3bff9";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

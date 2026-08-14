@@ -36,9 +36,23 @@ namespace RailCheck
     ///       deferral list through <c>LatchCompletion</c> and must measure the surface with
     ///       <c>DurableWindowRegistry.MayPresent</c>. Arms (a)-(d) drive one method; without this they stay
     ///       green while the presenter walks around it.
+    ///   (f) <c>surface-only-from-completions</c> — the flag must rise from STANDING on the map, with no
+    ///       completion involved: <c>StampMapSurface(true)</c> alone must open the gate.
+    ///   (g) <c>tick-does-not-stamp</c> / <c>tick-stamps-too-late</c> — IL: <c>ClientTick</c> must call
+    ///       <c>StampMapSurface</c> and must do it BEFORE it touches <c>_deferredCompleted</c>, i.e. above
+    ///       its own early return. Arm (f) proves the seam works; only this proves the tick uses it.
+    ///
+    /// THE REGRESSION (g) EXISTS FOR (commit 0525e7a, live 2026-08-14). The flag was stamped ONLY inside
+    /// LatchCompletion. On the client the first completion landed 0.4 s after <c>UIStateGeoscapeEvent</c>
+    /// opened — a state MapStates deliberately excludes — so MayPresent was false, the completion was
+    /// swallowed as backlog AND the flag stayed down. Every later completion was then read as backlog too:
+    /// research announcements were dead for the rest of the session, and the log said nothing (host
+    /// 23:37:31.101 raised 'RE21'; the clients logged a "presented start", never a "presented complete",
+    /// never a deferral line). The gate has to be stamped by WHERE THE PEER IS, which only the tick knows.
     ///
     /// Falsify: drop the surface guard inside LatchCompletion → (a); make it non-sticky → (c); enqueue
-    /// straight into the deferral list from PresentFromMirror → (e).
+    /// straight into the deferral list from PresentFromMirror → (e); stamp only from the completion again
+    /// → (f)+(g); move the stamp below ClientTick's early return → (g).
     /// </summary>
     internal static class L475_TheOpeningGrantListIsSilentUntilTheFirstMapSurface
     {
@@ -74,6 +88,18 @@ namespace RailCheck
                 yield return "L475 reset-does-not-rearm: ResearchSync.Reset left the gate OPEN, so a peer joining " +
                              "a fresh campaign after an earlier session inherits 'already surfaced' and gets the " +
                              "opening grant list as modals again.";
+            // (f): standing on the map arms the gate WITHOUT a completion. This is the half 0525e7a missed:
+            // a peer whose first completion lands under a non-map window must still be armed by the tick.
+            ResearchSync.Reset();
+            ResearchSync.StampMapSurface(true);
+            if (!ResearchSync.LatchCompletion("PX_NJ_Gauss_AssaultRifle", false) ||
+                ResearchSync.DeferredCompletionCount != 1)
+                yield return "L475 surface-only-from-completions: the gate opens ONLY when a completion happens " +
+                             "to coincide with a map surface (deferred=" + ResearchSync.DeferredCompletionCount +
+                             "). That is the 2026-08-14 regression: the client's first completion arrived under " +
+                             "UIStateGeoscapeEvent, was swallowed, and left the flag down, so every LATER " +
+                             "completion was swallowed too — research went permanently silent on that peer.";
+
             ResearchSync.Reset(); // leave no test rows in the real deferral list
 
             // (e): the gate must be in the presenter's path, not merely present in the file.
@@ -99,6 +125,44 @@ namespace RailCheck
                              "DurableWindowRegistry.MayPresent. 'This peer reached a map surface' has exactly one " +
                              "definition in this repo (DurableWindowRegistry.MapStates); a second one would drift " +
                              "away from the deferral gate it must agree with.";
+
+            // (g): the tick is the only thing that knows where this peer is standing when NOTHING completed,
+            // so the stamp must be IN it, and above the early return that leaves when nothing is pending.
+            var tick = typeof(ResearchSync).GetMethod("ClientTick", Any);
+            var stamp = typeof(ResearchSync).GetMethod("StampMapSurface", Any);
+            var pending = typeof(ResearchSync).GetField("_deferredCompleted",
+                BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+            if (tick == null || stamp == null || pending == null)
+            {
+                yield return "L475 premise-changed: ResearchSync.ClientTick / .StampMapSurface / " +
+                             "._deferredCompleted did not resolve, so the tick-stamp arm cannot see what it " +
+                             "guards. Re-point it before believing any verdict above.";
+                yield break;
+            }
+            int stampAt = TokenIndex(tick, stamp.MetadataToken);
+            int pendingAt = TokenIndex(tick, pending.MetadataToken);
+            if (stampAt < 0)
+                yield return "L475 tick-does-not-stamp: ClientTick never calls StampMapSurface, so the sticky " +
+                             "surface flag can only ever rise from a completion that happened to coincide with a " +
+                             "map surface — the exact 0525e7a shape that silenced research for a whole session.";
+            else if (pendingAt >= 0 && stampAt > pendingAt)
+                yield return "L475 tick-stamps-too-late: ClientTick reads _deferredCompleted before it calls " +
+                             "StampMapSurface, so the stamp sits BELOW the early return that leaves when nothing " +
+                             "is pending — which is every frame before the first completion, i.e. exactly the " +
+                             "frames the flag has to be raised in.";
+        }
+
+        /// <summary>Byte offset of the first mention of <paramref name="token"/> in <paramref name="m"/>'s IL,
+        /// or -1. Ordering between two tokens is what arm (g) needs; <see cref="References"/> is this with the
+        /// answer thrown away.</summary>
+        private static int TokenIndex(MethodBase m, int token)
+        {
+            byte[] il = null;
+            try { il = m.GetMethodBody()?.GetILAsByteArray(); } catch { }
+            if (il == null) return -1;
+            for (int i = 0; i + 4 <= il.Length; i++)
+                if (BitConverter.ToInt32(il, i) == token) return i;
+            return -1;
         }
 
         /// <summary>Does <paramref name="m"/>'s IL mention <paramref name="callee"/>? Raw 4-byte metadata

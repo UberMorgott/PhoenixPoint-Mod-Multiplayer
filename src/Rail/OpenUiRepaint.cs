@@ -6,6 +6,7 @@ using HarmonyLib;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.Abilities;
 using PhoenixPoint.Geoscape.Levels;
+using PhoenixPoint.Geoscape.Levels.Factions;
 using PhoenixPoint.Geoscape.View;
 using PhoenixPoint.Geoscape.View.ViewModules;
 using PhoenixPoint.Geoscape.View.ViewStates;
@@ -67,6 +68,11 @@ namespace Multiplayer.Network.Sync
         // NATIVE one, so it resolves long before the module is live.
         private static readonly FieldInfo TrackerContext =
             AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_context");
+        // The faction InitialSetup:144 reads — asked of the module rather than assumed to be ViewerFaction,
+        // so the signature below is computed over exactly the rows the module would rebuild.
+        private static readonly FieldInfo TrackerFaction =
+            AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_faction");
+        private static string _agendaSignature;
 
         // UIModuleInfoBar: private no-arg UpdatePopulation():276 and the Init(context):144 field that
         // proves the module is live (it dereferences `_context.View` unguarded, so calling it before
@@ -161,10 +167,16 @@ namespace Multiplayer.Network.Sync
             if (TrackerContext.GetValue(tracker) == null) return; // not Init'd yet — InitialSetup would NRE
             try
             {
+                // THE FLICKER (client, reported 2026-08-14). InitialSetup DESTROYS and re-creates every row,
+                // and this ran on EVERY flush — measured at `marks=10`, i.e. ~10 rail batches a second, so the
+                // strip visibly blinked. A rebuild is only owed when the SET OF ROWS changed; the per-element
+                // time text is refreshed by the plain UpdateData below (and by the module's own 1 Hz poll),
+                // which touches no GameObject lifecycle.
+                bool rebuild = AgendaNeedsRebuild(AgendaSignature(TrackerFaction?.GetValue(tracker) as GeoFaction));
                 // law 8: the rebuild re-reads the model and can fire native UI events a capture seam hears.
                 using (SyncApplyScope.Enter())
                 {
-                    TrackerNeedsRefresh.SetValue(tracker, true);
+                    if (rebuild) TrackerNeedsRefresh.SetValue(tracker, true);
                     TrackerUpdateData.Invoke(tracker, null);
                 }
             }
@@ -173,6 +185,71 @@ namespace Multiplayer.Network.Sync
                 if (_loggedFailures.Add("PersistentHud"))
                     MpLog.LogWarning("[Multiplayer][rail] persistent-HUD refresh threw — the top-right tracker may " +
                                      "stay stale until the next screen change (logged once): " + ex);
+            }
+        }
+
+        /// <summary>Does the strip owe a full rebuild? True on the first call of a session, on any change to
+        /// <see cref="AgendaSignature"/>, and whenever the signature could not be read (null = rebuild, the
+        /// safe direction). Its own memory, so L492 can drive it without a live tracker.</summary>
+        internal static bool AgendaNeedsRebuild(string signature)
+        {
+            bool rebuild = signature == null || !string.Equals(signature, _agendaSignature, StringComparison.Ordinal);
+            _agendaSignature = signature;
+            return rebuild;
+        }
+
+        /// <summary>
+        /// EVERYTHING THE STRIP DRAWS, AS ONE STRING — the rebuild key for <see cref="RefreshAgendaTracker"/>.
+        /// Read straight off <c>InitialSetup</c>:144-174, row source by row source, so nothing displayed can
+        /// change without changing this (REACTIVITY is a hard mandate here, not an optimisation):
+        ///   • manufacture head — <c>Manufacture.Current.ManufacturableItem.RelatedItemDef</c> (the row label
+        ///     is that def's display name);
+        ///   • research head — <c>Research.Current.ResearchID</c>;
+        ///   • every vehicle the strip lists — the row exists iff <c>GetCurrentActionTime &gt; 0</c>, which
+        ///     VehicleActionsViewService:177-188 defines as exploring-or-travelling, and its label/icon are
+        ///     the vehicle NAME plus those same two flags;
+        ///   • every facility row — repairing, or building with a non-zero construction time, keyed by def
+        ///     and state.
+        /// NOT included, deliberately: the per-row TIME LEFT. It is the one thing a rebuild does NOT paint —
+        /// <c>UpdateData(element)</c>:271 does, on every call, rebuild or not.
+        /// Returns null when the model cannot be read; null forces the rebuild, so an unreadable model can
+        /// only ever cost a flicker, never a stale strip.
+        /// </summary>
+        private static string AgendaSignature(GeoFaction faction)
+        {
+            if (faction == null) return null;
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                var head = faction.Manufacture?.Current?.ManufacturableItem?.RelatedItemDef;
+                sb.Append(head == null ? "-" : head.name).Append('|')
+                  .Append(faction.Research?.Current?.ResearchID ?? "-").Append('|');
+                foreach (var v in faction.Vehicles)
+                {
+                    if (v == null || (!v.Travelling && !v.IsExploringSite)) continue;
+                    sb.Append(v.Name).Append(v.Travelling ? "@t," : "@x,");
+                }
+                sb.Append('|');
+                if (faction is GeoPhoenixFaction phoenix)
+                    foreach (var b in phoenix.Bases)
+                    {
+                        if (b?.Layout == null) continue;
+                        foreach (var f in b.Layout.Facilities)
+                        {
+                            if (f == null) continue;
+                            if (f.IsRepairing) sb.Append(f.Def == null ? "?" : f.Def.name).Append("@r,");
+                            else if (f.IsBuilding && f.ConstructionTime != TimeUnit.Zero)
+                                sb.Append(f.Def == null ? "?" : f.Def.name).Append("@b,");
+                        }
+                    }
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                if (_loggedFailures.Add("AgendaSignature"))
+                    MpLog.LogWarning("[Multiplayer][rail] agenda-strip signature threw — the top-right strip " +
+                                     "falls back to rebuilding on every flush (logged once): " + ex);
+                return null;
             }
         }
 
@@ -491,6 +568,8 @@ namespace Multiplayer.Network.Sync
             _loggedFailures.Clear();
             _loggedFallback.Clear();
             _loggedSkips.Clear();
+            // …and a dead session's agenda strip must not vouch for the next one's rows: null = rebuild once.
+            _agendaSignature = null;
             // Next session's first refresh must not read a dead session's site refs as a fresh edge.
             _exploringSites.Clear();
         }

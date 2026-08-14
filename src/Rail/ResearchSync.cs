@@ -117,10 +117,29 @@ namespace Multiplayer.Network.Sync
         /// </summary>
         internal static bool LatchCompletion(string researchId, bool onMapSurfaceNow)
         {
-            if (onMapSurfaceNow) _everOnMapSurface = true;
+            StampMapSurface(onMapSurfaceNow);
             if (!_everOnMapSurface) return false; // backlog: latched in _presentedCompleted, never shown
             _deferredCompleted.Add(researchId);
             return true;
+        }
+
+        /// <summary>
+        /// RAISE THE STICKY SURFACE FLAG FROM THE CLOCK, NOT FROM THE COMPLETION.
+        ///
+        /// THE REGRESSION (0525e7a, live 2026-08-14). The flag was stamped ONLY inside
+        /// <see cref="LatchCompletion"/>, i.e. only when a completion happened to land while this peer was
+        /// standing on a map surface. The client's very first completion arrived 0.4 s after
+        /// <c>UIStateGeoscapeEvent</c> opened — a state that is deliberately NOT in
+        /// <c>DurableWindowRegistry.MapStates</c> — so it was swallowed AND the flag stayed down, which made
+        /// every LATER completion look like backlog too. Research announcements died for the session.
+        ///
+        /// The surface is a property of WHERE THIS PEER IS, so it is measured where the peer is measured:
+        /// the sync tick (<see cref="ClientTick"/>), before any early return. The intro still says nothing
+        /// (MayPresent is false there), and one geoscape frame on the map is enough to arm it for good.
+        /// </summary>
+        internal static void StampMapSurface(bool onMapSurfaceNow)
+        {
+            if (onMapSurfaceNow) _everOnMapSurface = true;
         }
 
         /// <summary>Test seam for L475: how many completions are waiting to be shown.</summary>
@@ -387,6 +406,9 @@ namespace Multiplayer.Network.Sync
         /// map, with no further rail traffic needed. Client-only — the host raises its own natively.</summary>
         public static void ClientTick(NetworkEngine engine)
         {
+            // FIRST, above every early return: the flag must rise on the frame this peer stands on the map,
+            // whether or not anything is waiting to be shown (see StampMapSurface).
+            StampMapSurface(DurableWindowRegistry.MayPresent());
             if (engine == null || !engine.IsActiveSession || engine.IsHost || _deferredCompleted.Count == 0) return;
             PumpDeferredCompletions(GenericApplier.GeoLevel());
         }
@@ -516,6 +538,29 @@ namespace Multiplayer.Network.Sync
             [HarmonyPrefix, HarmonyPatch(nameof(Research.InsertAtPosition))]
             private static bool InsertAtPrefix(Research __instance, ResearchElement element, int position)
                 => CaptureIntent(__instance, element, OpInsertAt, position);
+
+            /// <summary>
+            /// OBSERVABILITY ONLY — the host's completion seam had NO log line at all, so "two researches
+            /// completed back to back" could not be diagnosed from a host log: the client side names every id
+            /// it presents (CLIENT presented complete), the authority named none. One line per completion at
+            /// the game's own single completion method (Research.CompleteResearch, decompile :576), carrying
+            /// the id and the GEOSCAPE timestamp — that is the clock the propagation burst of
+            /// AddProgressToCurrentResearch is measured against, wall-clock alone cannot separate two
+            /// completions inside one hourly tick. Not per-frame: it fires exactly once per research, ever.
+            /// </summary>
+            // Typed on purpose: Research also declares a STATIC console command of the same name
+            // (Research.cs:1020, CompleteResearch(IConsole,string,string)) — an untyped patch is an
+            // AmbiguousMatchException at bind time, which L125 catches as a harness crash.
+            [HarmonyPostfix, HarmonyPatch(nameof(Research.CompleteResearch), new[] { typeof(ResearchElement) })]
+            private static void CompletePostfix(Research __instance, ResearchElement research)
+            {
+                if (research == null || __instance?.Faction == null || !__instance.Faction.IsViewerFaction) return;
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return; // client: PresentFromMirror speaks
+                var geo = GenericApplier.GeoLevel();
+                MpLog.Log("[Multiplayer][rail] ResearchSync HOST completed " + research.ResearchID +
+                          " geoT=" + (geo == null ? -1d : geo.Timing.Now.TimeSpan.TotalSeconds));
+            }
         }
 
         // The research SIM GATE used to live here as a prefix on Research.Update. It moved UP one level to
