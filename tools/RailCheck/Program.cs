@@ -420,8 +420,9 @@ namespace RailCheck
             Add(laws, () => L481_ADroppedReferenceAsksForItselfBack.Check());
             Add(laws, () => L483_TheMistRepellerRadiusIsDerived.Check());
             Add(laws, () => L485_ARefusalTheClientCouldNotHaveGreyedReachesTheScreen.Check());
-            Add(laws, () => L472_EveryDoorIntoAiEvaluationIsKnownAndGatedOnce.Check(game));
+            Add(laws, () => L492_TheAgendaStripRebuildsOnlyWhenItsRowsChange.Check());
             Add(laws, () => L490_APausedAnchorSettlesOntoTheHostClock.Check());
+            Add(laws, () => L472_EveryDoorIntoAiEvaluationIsKnownAndGatedOnce.Check(game));
             Add(laws, () => L491_AGetterMintedTwinResolvesOntoItsLiveOwner.Check());
             laws.Sort(StringComparer.Ordinal);
 
@@ -470,8 +471,8 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 321;
-        private const string ExpectedExecutionIdentityDigest = "b28df11b9650ec283a1e9f1abe3026f2ec4852cab697e7ae20030cfed6f3bff9";
+        private const int ExpectedLawRegistrations = 322;
+        private const string ExpectedExecutionIdentityDigest = "057fdd20056f59e44972b1e28fc4b911640a0179e6662025c96e93c8afa9b698";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
