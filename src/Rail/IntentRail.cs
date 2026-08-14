@@ -65,6 +65,36 @@ namespace Multiplayer.Network.Sync
         public static void Register(byte surfaceId, string tag, Dictionary<byte, OpHandler> ops, Action reconverge = null)
             => _families[surfaceId] = new Family { Tag = tag, Ops = ops, Reconverge = reconverge };
 
+        /// <summary>MERGE ops into an already-registered family, for the case where one surface's op table has
+        /// two owners — <c>AssignSync</c> adds the TFTV ASSIGNMENTS gestures to the personnel family, because
+        /// the geoscape band 0xA0-0xBF has no free surface id left and a second
+        /// <see cref="Register"/> call would silently REPLACE the first owner's whole table.
+        /// Registers nothing on its own: the family must exist, i.e. its owner must have run first, and a
+        /// missing one is loud rather than a surface that quietly answers three ops out of fifteen.</summary>
+        public static void RegisterOps(byte surfaceId, Dictionary<byte, OpHandler> ops)
+        {
+            Family family;
+            if (!_families.TryGetValue(surfaceId, out family))
+            {
+                MpLog.LogError("[MP][intent] RegisterOps for unregistered surface 0x" + surfaceId.ToString("X2") +
+                               " — its owning family must register FIRST. The " + (ops == null ? 0 : ops.Count) +
+                               " op(s) are DROPPED and every gesture that uses them dies as 'unknown op'.");
+                return;
+            }
+            if (ops == null) return;
+            foreach (var kv in ops)
+            {
+                // A COLLIDING OP NUMBER IS NEVER SILENT. Two owners on one surface is exactly the setup
+                // where a renumbering leaves the family answering three ops out of fifteen, and the symptom
+                // — one gesture that does nothing — reads as a dead button, not as a table conflict.
+                if (family.Ops.ContainsKey(kv.Key))
+                    MpLog.LogError("[MP][intent] RegisterOps OVERWRITES op " + kv.Key + " on surface 0x" +
+                                   surfaceId.ToString("X2") + " (" + family.Tag + ") — two owners picked the " +
+                                   "same number and the first one's gesture is now dead.");
+                family.Ops[kv.Key] = kv.Value;
+            }
+        }
+
         /// <summary>Full session teardown: drop the dedup window. The nonce counter deliberately
         /// persists (matching the per-family behavior it replaced) — the host prunes a rejoining
         /// peer's window via <see cref="ResetIntentDedupForPeer"/> instead.</summary>

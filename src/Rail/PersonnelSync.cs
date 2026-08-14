@@ -602,7 +602,7 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>The kill funnel under the law, on the MODEL funnel <c>GeoPhoenixFaction.KillCharacter</c>
         /// (the override, GeoPhoenixFaction.cs:1377 — TFTV patches this same target,
-        /// TFTVBaseRework\PersonnelDismissal.cs:158 — plus TFTVVanillaFixes.cs:4213 on the base virtual —
+        /// TFTVBaseRework\PersonnelDismissal.cs:158 — plus TFTVVanillaFixes\Geoscape\GeoscapeVanillaFixes.cs:293-294 on the base virtual —
         /// so the HOST replay re-runs TFTV's prefix natively). ORDERING IS DECLARED, not hoped for: a
         /// prefix returning false cancels the prefixes that would have run after it, so whichever of the
         /// two won an unordered registration decided whether an intent was sent at all — and if TFTV's had

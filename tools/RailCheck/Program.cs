@@ -401,6 +401,8 @@ namespace RailCheck
             Add(laws, () => L374_AReducedDefBecomesTheDef.Check());
             Add(laws, () => L375_NothingAppliesWhileTheLevelIsBeingBuilt.Check());
             Add(laws, () => L433_LoadBarrierPacketsAreBoundToAuthority.Check());
+            Add(laws, () => L441_AssignmentsAreHostAuthoritative.Check());
+            Add(laws, () => L442_AssignmentMirrorRewiresTheSlotPools.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -448,8 +450,8 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 299;
-        private const string ExpectedExecutionIdentityDigest = "380858d03d1315a5947d582aada599e98cad42bfb231762efe7de2cdf4a6b402";
+        private const int ExpectedLawRegistrations = 301;
+        private const string ExpectedExecutionIdentityDigest = "f8cdaed4ee8cf58ca92e339151db6de5a0564274d873034d398615f76c4944e0";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
@@ -635,6 +637,7 @@ namespace RailCheck
                 // walk. Sealed → Concretions never scans the game assembly for them.
                 typeof(Multiplayer.Network.Sync.ScrapCartState), // root "M#cart" (shared scrap cart)
                 typeof(Multiplayer.Network.Sync.MistState),      // root "M#mist" (mist coverage, L59)
+                typeof(Multiplayer.Network.Sync.AssignState),    // root "M#assign" (TFTV ASSIGNMENTS, L441/L442)
                 // Ref-addressable SUB-entities (IdentityResolver.IsRefAddressableType). Their state ships as
                 // elements of the collection that OWNS them, but that collection lives in a TWIN table
                 // (GeoHaven <= InstanceData . Zones) and the expansion below only follows a type's own
@@ -731,7 +734,8 @@ namespace RailCheck
             // registered at runtime (IdentityResolver.RegisterModRoot), so they are named separately.
             sb.Append("roots (IdentityResolver.RootKinds, walk order): " +
                       string.Join(" | ", IdentityResolver.RootKinds.Select(r => "\"" + r.Key + "\" " + r.Type.Name)) +
-                      " + mod-state roots registered at runtime: ScrapCartState (\"M#cart\"), MistState (\"M#mist\")\n");
+                      " + mod-state roots registered at runtime: ScrapCartState (\"M#cart\"), MistState (\"M#mist\")" +
+                      ", AssignState (\"M#assign\")\n");
             sb.Append("seeded (not roots — types the live walk reaches only through a runtime subtype): GeoPhoenixFacility" +
                       " | structural-descend concretions of: " +
                       string.Join(", ", DiffEngine.StructuralDescendKinds.Select(k => k.Name)) + "\n");

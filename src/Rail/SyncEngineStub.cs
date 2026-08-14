@@ -23,6 +23,10 @@ namespace Multiplayer.Network.Sync
             ManufactureSync.RegisterIntents();
             EquipSync.RegisterIntents();
             PersonnelSync.RegisterIntents();
+            // MERGED into the personnel family above, and therefore strictly AFTER it: the TFTV ASSIGNMENTS
+            // gestures are ops 13-15 on that same 0xAF surface (the geoscape band has no free id left), and
+            // IntentRail.Register REPLACES a table — a second Register here would delete ops 1-12.
+            AssignSync.RegisterIntents();
             TimeSync.RegisterIntents();
             FacilitySync.RegisterIntents();
             EventSync.RegisterIntents();
@@ -57,6 +61,10 @@ namespace Multiplayer.Network.Sync
             // Fourth mod root, same symmetric registration: "M#prep" is the site whose deployment-prep screen
             // is open somewhere (DeployPrep). Its two client intents are ops 5/6 on that same 0xB8 surface.
             DeployPrep.Register();
+            // Fifth mod root, same symmetric registration: "M#assign" is TFTV BaseRework's ASSIGNMENTS table
+            // (personnel assignments + recruit-training sessions), which lives in TFTV statics the rail
+            // cannot otherwise see and which the ModData exclusion refuses by design (AssignSync).
+            AssignSync.Register();
             // Geoscape rail surfaces ride the one inbound hook (each returns false for foreign ids):
             // the 0xAD manufacture order channel, the intent engine, and the generic value rail
             // (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the host-side intent dedup.
@@ -140,6 +148,14 @@ namespace Multiplayer.Network.Sync
             // looking at it — the "waits on no human" half of the no-quorum mandate (P13).
             DeployCountdown.HostTick(_engine);
             t = RailCost.Charge("mist", t);
+            // Host: re-project TFTV's assignment/training statics into "M#assign". Client: mirror them back
+            // onto those same statics. HERE, immediately BEFORE the walk, and that position is the whole
+            // point: a change observed this frame is then announced in the SAME frame's batch instead of
+            // waiting out a poll — and on the client the apply lands before OpenUiRepaint.FlushIfDirty at the
+            // end of this tick, so the ASSIGNMENTS board repaints from the state it was just given rather
+            // than one frame late.
+            AssignSync.Tick(_engine);
+            t = RailCost.Charge("assign", t);
             DiffEngine.HostTick(_engine);
             // host-only inside, and IMMEDIATELY AFTER the walk on purpose: the post-mission "writes
             // committed" edge (0xB2) must leave BEHIND the batch that carries those writes, or it announces
@@ -221,6 +237,7 @@ namespace Multiplayer.Network.Sync
             ManufactureSync.Reset();
             EquipSync.Reset();
             MistSync.Reset();
+            AssignSync.Reset();
             VehicleSync.Reset();
             TimeSync.Reset();
             DiffEngine.Reset();
@@ -256,6 +273,7 @@ namespace Multiplayer.Network.Sync
                                                       // teardown) that may not run UIStateRosterDeployment.ExitState
             MistSync.ResetForReloadBoundary(); // BEFORE DiffEngine: the mod root must be empty when the
                                                // post-reload baseline snapshot is taken (see its remark)
+            AssignSync.ResetForReloadBoundary(); // same contract, same reason, same side of the line
             DiffEngine.ResetForReloadBoundary();
             GenericApplier.ResetForReloadBoundary();
         }

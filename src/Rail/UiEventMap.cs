@@ -494,6 +494,13 @@ namespace Multiplayer.Network.Sync
                 // the open screen must lose them — and lose ITSELF when the last container goes.
                 [typeof(UIStateRosterDeployment)] = (s, v) => DeploymentWindowClose.RepaintDeploymentScreen(s, v),
                 [typeof(UIStateResearch)] = (s, v) => { ResearchSync.RepaintResearchUi(); return true; },
+                // TFTV BaseRework force-unlocks the vanilla Recruits tab and rebuilds it as ASSIGNMENTS, so
+                // this screen had no entry at all and fell back to Exit+Enter — a full teardown that happens
+                // to rebuild the panel through TFTV's own EnterState postfix. Its own RefreshPanel() is the
+                // read-direction rebuild P11 asks for. The TFTV lookup stays inside the helper, reached by
+                // name, so nothing on the rail side acquires a load-order dependency (L149 arm (c)); the
+                // helper answers FALSE when TFTV is absent and the fallback runs exactly as before.
+                [typeof(UIStateRosterRecruits)] = (s, v) => AssignSync.RepaintAssignmentsPanel(),
                 [typeof(UIStateEditSoldier)] = (s, v) =>
                 {
                     if (EsSelectProgression == null) return false; // resolve-all-first: decline BEFORE the reseed mutates anything

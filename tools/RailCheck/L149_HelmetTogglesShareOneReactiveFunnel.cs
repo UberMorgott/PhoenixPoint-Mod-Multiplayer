@@ -29,7 +29,7 @@ namespace RailCheck
     /// for that one call (:627-629, `IsHelmetOrAttachment`:903). Nothing is stored, nothing is serialized —
     /// `CharacterIdentity` has no helmet field at all, which arm (a) proves rather than asserts. TFTV's icon
     /// is the same argument reached from the other side: a `PhoenixGeneralButton` cloned onto the edit screen
-    /// (TFTVUI/Personnel/Loadouts.cs:273-329) driving `ShowWithoutHelmet.HelmetsOff`, applied by a PREFIX on
+    /// (TFTVUI/Personnel/Loadouts.cs:156-238) driving `ShowWithoutHelmet.HelmetsOff`, applied by a PREFIX on
     /// that same four-argument `DisplaySoldier` overload (ShowWithoutHelmet.cs:319-321) which forces
     /// `showHelmet = false`. Which helmet a player is looking at is that PLAYER'S OWN VIEW; replicating it
     /// would mean one peer reaching across and changing what another peer sees, which is not reactivity, it

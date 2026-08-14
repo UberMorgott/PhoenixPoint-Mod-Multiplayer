@@ -36,6 +36,17 @@ namespace Multiplayer.Harmony
             typeof(Multiplayer.Network.Sync.PersonnelSync.TftvPromoteCapturePatch),
             typeof(Multiplayer.Tactical.TftvClientChampGuard),
             typeof(Multiplayer.Tactical.TftvErrorMirror),
+            // BaseRework ASSIGNMENTS (AssignSync): four automation MUTES and four gesture CAPTURES. Every one
+            // of them is the whole of that surface's client posture — an unbound mute lets a client simulate
+            // its own assignments, an unbound capture drops the click on the floor.
+            typeof(Multiplayer.Network.Sync.AssignSync.TftvPersonnelAutomationMute),
+            typeof(Multiplayer.Network.Sync.AssignSync.TftvRecruitRegenMute),
+            typeof(Multiplayer.Network.Sync.AssignSync.TftvTrainingClockMute),
+            typeof(Multiplayer.Network.Sync.AssignSync.TftvCompletedDeploymentMute),
+            typeof(Multiplayer.Network.Sync.AssignSync.TftvAssignWorkerCapture),
+            typeof(Multiplayer.Network.Sync.AssignSync.TftvUnassignWorkerCapture),
+            typeof(Multiplayer.Network.Sync.AssignSync.TftvTrainQueueCapture),
+            typeof(Multiplayer.Network.Sync.AssignSync.TftvTrainFinalizeCapture),
         };
 
         /// <summary>What this peer can say about TFTV's patch state, for the diagnostics that ask

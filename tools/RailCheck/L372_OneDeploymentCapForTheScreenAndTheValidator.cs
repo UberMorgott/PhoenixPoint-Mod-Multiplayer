@@ -220,7 +220,8 @@ namespace RailCheck
             if (ceilingValue != 16)
                 yield return "L372 ceiling-moved: DeployCap.Ceiling is " + ceilingValue + ", not 16. There " +
                              "is NO upper guarantee from any deploy zone — TFTV's own UnLimitedDeployment " +
-                             "sets 99 (TFTVConfig.cs:64) and can afford to because with Aircraft Rework on " +
+                             "sets 99 (TFTVAircraftRework/AircraftReworkMissionDeployment.cs:163) and can afford " +
+                             "to because with Aircraft Rework on " +
                              "it collapses the sources to one aircraft anyway. Here a number the map cannot " +
                              "seat is soldiers that silently never appear in the battle";
         }

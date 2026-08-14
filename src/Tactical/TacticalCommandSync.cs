@@ -766,7 +766,7 @@ namespace Multiplayer.Tactical
             {
                 // THE FUMBLE PRE-ROLL (law L66d). TacticalAbility.Activate:1109 rolls the fumble INSIDE the
                 // native body — after this prefix — and TacticalAbility.PlayAction:988-993 (and TFTV's
-                // EnqueueAction fumble fix, TFTVVanillaFixes.cs:4003-4033) consume it SYNCHRONOUSLY before
+                // EnqueueAction fumble fix, TFTVVanillaFixes/Tactical/MadSkunkyFixes.cs:111-142) consume it SYNCHRONOUSLY before
                 // Activate returns. So a fumble shipped after the order would always arrive too late, and a
                 // mirror left to roll its own would play a different shot. Instead the host consumes the ONE
                 // native roll here and memoizes it, so :1109 gets the same value and the bit rides WITH the
