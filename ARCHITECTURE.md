@@ -55,6 +55,17 @@ surface, CRC per path-subtree backstop (diverged subtree resent alone). Join/rec
 save transfer (SaveTransferCoordinator). Journal (P9): written post-pipeline,
 observational, debug builds OK.
 
+**P10 parity gate:** roster admission is recoverable, campaign entry is not permissive. A peer with a
+non-empty game/mod/DLC/synced-setting diff cannot ready or receive a mid-session campaign save. It may
+remain visible while settings auto-converge; the running campaign never waits on it.
+
+**P12 universal-first:** a bespoke value channel requires proof that the generic representation excludes
+the value, reuse of the shared transport ordering primitives, and an executable convergence law.
+`GeoMarketplaceOffers` is the reviewed exception because the committed bridge excludes the offer rows.
+
+**P13 no in-game quorum:** post-entry progress counts live peers only. AFK or paused roster rows cannot hold
+the campaign or a load reveal; waits may depend on local work/clock completion, never on another human action.
+
 ## Rail engine (implemented 2026-07-17) — THE generic value rail (P3/P6/P11)
 
 One generic mechanism covers the whole geoscape VALUE layer; no more per-subsystem hand sync.

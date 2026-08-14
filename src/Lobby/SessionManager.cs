@@ -476,6 +476,7 @@ namespace Multiplayer.Network
             {
                 SystemNotice(SessionLifecycle.FormatReconnectedNotice(client.PlayerName));
                 BroadcastPeerList();
+                _engine.SaveTransfer?.ReplayRevealTo(steamId);
             }
         }
 
@@ -577,6 +578,15 @@ namespace Multiplayer.Network
         {
             yield return 0; // host
             foreach (var c in _clients.Values) yield return c.SlotIndex;
+        }
+
+        /// <summary>Slots currently able to participate in a live load barrier.</summary>
+        public IEnumerable<byte> GetLiveRosterSlots()
+        {
+            yield return 0;
+            foreach (var c in _clients.Values)
+                if (!c.IsPaused)
+                    yield return c.SlotIndex;
         }
 
         /// <summary>Host: resolve a transport sender id to its slotIndex (host self = slot 0).</summary>
@@ -841,15 +851,22 @@ namespace Multiplayer.Network
                 // NOBODY. SystemNotice is the existing client-facing channel (chat line + native toast on
                 // every peer's screen, the departure-notice precedent), which is the same service
                 // ParityComparer.VersionNoticeForClient:121 performs at the door for a version gap.
-                // Deliberately SOFT and deliberately silent about the details: the peer joins, plays and
-                // readies exactly as before, nothing new enters the hashed manifest, and the diff TEXT stays
+                // Roster admission is deliberately soft and silent about the details. Campaign entry and
+                // READY remain blocked until parity converges; nothing new enters the hashed manifest, and the diff TEXT stays
                 // in the host log rather than spamming everyone's chat — refusing a join, or shouting a
                 // cosmetic mod list at four players, is worse than the diff.
                 var parityNotice = JoinParityNotice(true, parityDiffs.Count,
                     string.IsNullOrEmpty(join.Nickname) ? "a player" : join.Nickname);
                 if (parityNotice.Length > 0) SystemNotice(parityNotice);
 
-                if (deferOnboard)
+                if (!CanEnterStartedSession(parityDiffText))
+                {
+                    MpLog.Log($"[Multiplayer] JOIN from {clientId} accepted into the roster but current-state " +
+                              "transfer is BLOCKED until parity converges.");
+                    SystemNotice($"{(string.IsNullOrEmpty(join.Nickname) ? "A player" : join.Nickname)} is " +
+                                 "waiting for compatible game/mod state before entering the campaign.");
+                }
+                else if (deferOnboard)
                 {
                     MpLog.Log($"[Multiplayer] JOIN from {clientId} accepted; save transfer DEFERRED (host is " +
                               "mid-battle/mid-load or already transferring) — it will be served automatically.");
@@ -865,12 +882,16 @@ namespace Multiplayer.Network
         /// headless (RailCheck L371) instead of only observed in a live session — the same shape
         /// <see cref="VehicleSync"/>'s Validate/Facts pair gives L32. "" = say nothing. A lobby (pre-start)
         /// join says nothing here on purpose: its diff is already on the roster badge the joiner will see.
-        /// Never a refusal and never a gate (L84: nobody is thrown out over parity).</summary>
+        /// Never a refusal: roster admission remains soft. Campaign entry is separately blocked while the
+        /// diff is non-empty, so the running peers wait on nobody (L84/P13).</summary>
         internal static string JoinParityNotice(bool sessionStarted, int diffCount, string nick) =>
             !sessionStarted || diffCount <= 0 ? ""
             : "— " + (string.IsNullOrEmpty(nick) ? "a player" : nick) + " joined with an install that differs " +
               "from the host's (" + diffCount + " difference" + (diffCount == 1 ? "" : "s") +
-              ") — co-op may desync; the host log names them —";
+               ") — co-op may desync; the host log names them —";
+
+        internal static bool CanEnterStartedSession(string parityDiffs) =>
+            ParityComparer.ReadyAllowed(parityDiffs);
 
         /// <summary>CLIENT-only, set on the accept: the pending "your Multiplayer version differs from the
         /// host's" notice ("" / null = versions match or unknown). MultiplayerUI drains it exactly once, on
@@ -928,6 +949,8 @@ namespace Multiplayer.Network
             try
             {
                 var manifest = MessageSerializer.DeserializeParityManifest(msg.Payload);
+                var wasBlockedMidSession = _engine.SaveTransfer?.SessionStarted == true &&
+                                           !CanEnterStartedSession(client.ParityDiffs);
                 var diffs = ParityComparer.Format(
                     ParityComparer.Compare(ParityManifestCollector.Collect(), manifest));
                 if (string.Equals(diffs, client.ParityDiffs, StringComparison.Ordinal)) return;
@@ -935,6 +958,13 @@ namespace Multiplayer.Network
                 MpLog.Log($"[Multiplayer] parity update from {msg.SenderSteamId}: " +
                           (diffs.Length == 0 ? "parity OK — READY unlocked." : $"still mismatched:\n{diffs}"));
                 BroadcastPeerList();
+                if (wasBlockedMidSession && CanEnterStartedSession(diffs))
+                {
+                    if (_engine.SaveTransfer.TransferActive || !Sync.GeoRuntime.Instance.IsGeoscapeActive)
+                        _engine.SaveTransfer.DeferOnDemandJoin(msg.SenderSteamId);
+                    else if (!_engine.SaveTransfer.HostOnDemandJoin(msg.SenderSteamId))
+                        _engine.SaveTransfer.DeferOnDemandJoin(msg.SenderSteamId);
+                }
             }
             catch (Exception e) { MpLog.LogError("[Multiplayer] parity update failed: " + e.Message); }
         }

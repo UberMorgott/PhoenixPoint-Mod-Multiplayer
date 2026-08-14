@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using Base.Serialization.General;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
 using Multiplayer.UI;
@@ -70,6 +71,15 @@ namespace RailCheck
         /// can never quietly become the reason the arm found nothing.</summary>
         private const int WalkBudget = 8000;
 
+        private sealed class FakePresentationSeam
+        {
+            [SerializeMember] private int _state;
+            public bool Prefix() => false;
+            public void WriteModel() => _state++;
+            public void UnsafeNativeCall() => GetType().GetMethod("ToString").Invoke(this, null);
+            public void SafeNativeCall() { try { UnsafeNativeCall(); } catch { } }
+        }
+
         internal static IEnumerable<string> Check()
         {
             // PlayerPanel joined the set with the co-op player panel (2026-08-07). It is the ONE screen that
@@ -122,6 +132,17 @@ namespace RailCheck
             foreach (var v in NeverBlocks(seam)) yield return v;
             foreach (var v in NeverWrites(seam)) yield return v;
             foreach (var v in NeverThrows(containment, dispatcher)) yield return v;
+
+            // Controls for all three presentation clauses, not only the RTT containment arm.
+            if (!NeverBlocks(new[] { typeof(FakePresentationSeam) }).Any())
+                yield return "L158 positive-control-block: a bool Prefix was not rejected.";
+            if (!NeverWrites(new[] { typeof(FakePresentationSeam) }).Any())
+                yield return "L158 positive-control-write: a serialized field write was not rejected.";
+            var unsafeCall = typeof(FakePresentationSeam).GetMethod("UnsafeNativeCall", AllMembers);
+            var safeCall = typeof(FakePresentationSeam).GetMethod("SafeNativeCall", AllMembers);
+            if (HasCatch(unsafeCall) || !HasCatch(safeCall))
+                yield return "L158 positive-control-containment: catch detection cannot distinguish an " +
+                             "escaping native call from a contained one.";
 
             // ── arm (d): the reading is contained.
             foreach (var v in ReadingEscapes(typeof(PingTable), railRoots, "the rail")) yield return v;
@@ -304,7 +325,7 @@ namespace RailCheck
                 return body != null && body.ExceptionHandlingClauses
                     .Any(c => c.Flags == ExceptionHandlingClauseOptions.Clause);
             }
-            catch { return true; }   // unreadable body: do not accuse
+            catch { return false; }  // unreadable containment cannot prove that an exception is contained
         }
 
         private static bool IsSerialized(FieldInfo f)

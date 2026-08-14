@@ -66,6 +66,9 @@ namespace Multiplayer.Network
 
         // ─── Host transfer/barrier state ──────────────────────────────────
         private Guid _transferId;
+        // Stable identity of the load boundary. Unlike _rxTransferId this survives ResetRx until the
+        // post-entry LoadComplete is emitted.
+        private Guid _loadBoundaryId;
         private bool _barrierOpen;
         private long _barrierOpenedAtMs;
         // CLIENT loaded-acks only — keyed by the authoritative transport sender id (msg.SenderSteamId).
@@ -635,6 +638,7 @@ namespace Multiplayer.Network
             if (timing == null) return false;
 
             _transferId = Guid.NewGuid();
+            _loadBoundaryId = _transferId;
             timing.Start(HostSerializeAndSendCrt(game, chosen, hostHoldsThisWorld));
             return true;
         }
@@ -868,6 +872,7 @@ namespace Multiplayer.Network
             _loadCompleteSent = false;
             _revealAllSent = false;
             _transferId = Guid.NewGuid();
+            _loadBoundaryId = _transferId;
             // ARM SYNCHRONOUSLY, NOT INSIDE THE COROUTINE. The mid-tactical save write below takes ~1.15 s
             // (live: bytes=1580544 ms=1151), and the barrier used to open only AFTER it — a window in which
             // the previous load's LoadCompletes were still landing in a barrier nobody owned. Opening here
@@ -1069,7 +1074,7 @@ namespace Multiplayer.Network
             if (!_engine.Session.Clients.ContainsKey(peer)) return; // left while waiting
             MpLog.Log($"[Multiplayer] Deferred join: host is back on the Geoscape → onboarding peer={peer} " +
                       $"({_deferredJoins.Count} still waiting).");
-            HostOnDemandJoin(peer);
+            if (!HostOnDemandJoin(peer)) DeferOnDemandJoin(peer);
         }
 
         public bool HostOnDemandJoin(ulong peerId)
@@ -1440,6 +1445,7 @@ namespace Multiplayer.Network
         /// </summary>
         public void OpenTacticalEntryBarrier()
         {
+            _loadBoundaryId = Guid.NewGuid();
             _hostEntryHold = true;
             _revealed = false;        // ordering-critical: arm the hold before Loaded→Playing
             _reachedPlaying = false;  // so OnReachedPlaying fires again at the tactical Playing (label + host done-mark)
@@ -1489,7 +1495,8 @@ namespace Multiplayer.Network
             // transitive graph), so hiding the send behind a helper would take that law down with it. Same
             // packet, same instant, same meaning as the helper — L143 asserts the three seams together.
             MpLog.Log("[Multiplayer] load boundary (tac-entry): broadcasting EntryTransferBegin — every peer curtains NOW.");
-            _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferBegin));
+            _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferBegin,
+                _loadBoundaryId.ToByteArray()));
         }
 
         /// <summary>
@@ -1511,6 +1518,7 @@ namespace Multiplayer.Network
         public void BroadcastLoadBoundaryBegin(string seam)
         {
             if (!_engine.IsHost) return;
+            _loadBoundaryId = Guid.NewGuid();
             // Law L71 — THE CURTAIN IS EVERYONE'S, and it falls when the LOAD starts, not when this peer's own
             // bytes start arriving. A peer that can still click while another peer loads is not merely a UX
             // complaint — it is how a peer ends up INSIDE a sub-screen when its level is torn down (law L70).
@@ -1528,7 +1536,8 @@ namespace Multiplayer.Network
             _tracker.Reset();
             _lastSnapshotMs = -1;
             _lastReportedLoadPct = -1;
-            try { _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferBegin)); }
+            try { _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferBegin,
+                _loadBoundaryId.ToByteArray())); }
             catch (Exception e) { MpLog.LogError("[Multiplayer] EntryTransferBegin broadcast failed: " + e.Message); }
         }
 
@@ -1574,6 +1583,10 @@ namespace Multiplayer.Network
         public void OnEntryTransferBegin(NetworkMessage msg)
         {
             if (_engine.IsHost) return;   // the host ignores its own broadcast (0x47 does the same)
+            if (!_engine.Session.HostPeerId.HasValue || msg.SenderSteamId != _engine.Session.HostPeerId.Value)
+                return;
+            if (msg.Payload != null && msg.Payload.Length == 16)
+                _loadBoundaryId = new Guid(msg.Payload);
             if (_downloadCurtain) return; // already curtained (duplicate delivery / a transfer in flight)
             MpLog.Log("[Multiplayer] load boundary BEGUN on the host — dropping the curtain now (no bytes yet).");
             _downloadCurtain = true;
@@ -1619,12 +1632,17 @@ namespace Multiplayer.Network
         /// <c>NativeTacticalEntry.Enabled</c>) is the same shape in the other direction: geo→tac with every
         /// peer building locally. Same machinery downstream, unchanged: <c>OnReachedPlaying</c> → hold +
         /// LoadComplete, host <c>Update()</c> aggregates → <c>AllDone</c> → <c>RevealAll</c> → simultaneous
-        /// lift, with the existing three openers (roster shrink on peer-left, the host's 180 s forced reveal,
-        /// each peer's own self-reveal) as the belts.
+        /// lift, with live-roster shrink and authenticated RevealAll as the release paths.
         /// </summary>
         public void ArmSelfLoadBarrier(string why)
         {
             if (_engine == null || !_engine.IsActive || !SessionStarted) return; // live co-op sessions only
+            if (_engine.IsHost && !_loadPhaseActive)
+            {
+                _loadBoundaryId = Guid.NewGuid();
+                _engine.BroadcastToAll(new NetworkMessage(PacketType.EntryTransferBegin,
+                    _loadBoundaryId.ToByteArray()));
+            }
             _revealed = false;
             _reachedPlaying = false;
             _loadCompleteSent = false;
@@ -1679,6 +1697,7 @@ namespace Multiplayer.Network
                     return;
                 }
                 _rxTransferId = chunk.TransferId;
+                _loadBoundaryId = chunk.TransferId;
                 _rxTotalBytes = chunk.TotalBytes;
                 _rxBuffer = new byte[chunk.TotalBytes];
                 _rxReceived = 0;
@@ -2093,9 +2112,9 @@ namespace Multiplayer.Network
             var slot = _engine.Session.LocalSlotIndex;
             _tracker.MarkDone(slot); // local self-done
             if (_engine.IsHost) { TryReleaseBarrier(); return; }
-            // _rxTransferId is usually Guid.Empty by now (ResetRx ran at load-prepare) — harmless:
-            // OnLoadComplete discards the transferId and keys done-tracking on the slot alone.
-            var payload = MessageSerializer.SerializeLoadComplete(slot, _rxTransferId);
+            // ResetRx has already cleared _rxTransferId. _loadBoundaryId deliberately survives until this
+            // post-entry acknowledgement so the host can reject packets from an older load.
+            var payload = MessageSerializer.SerializeLoadComplete(slot, _loadBoundaryId);
             _engine.SendToHost(new NetworkMessage(PacketType.LoadComplete, payload));
         }
 
@@ -2142,6 +2161,19 @@ namespace Multiplayer.Network
         /// <summary>All peers: host says everyone is loaded → lift the held overlay now.</summary>
         public void OnRevealAll(NetworkMessage msg)
         {
+            Guid boundaryId;
+            try { (boundaryId, _) = MessageSerializer.DeserializeRevealAll(msg.Payload); }
+            catch (Exception e)
+            {
+                MpLog.LogWarning("[Multiplayer] RevealAll rejected: malformed payload (" + e.Message + ").");
+                return;
+            }
+            if (!LoadBarrierAuthority.AcceptRevealAll(_engine.IsHost, _loadPhaseActive, _revealed,
+                    _loadBoundaryId, boundaryId, _engine.Session.HostPeerId, msg.SenderSteamId))
+            {
+                MpLog.LogWarning("[Multiplayer] RevealAll rejected: sender/phase is not authoritative.");
+                return;
+            }
             MpLog.Log("[Multiplayer] OnRevealAll received → PerformDeferredLift");
             PerformDeferredLift();
         }
@@ -2258,7 +2290,16 @@ namespace Multiplayer.Network
         public void OnLoadComplete(NetworkMessage msg)
         {
             if (!_engine.IsHost) return;
-            var (slot, _) = MessageSerializer.DeserializeLoadComplete(msg.Payload);
+            var (slot, transferId) = MessageSerializer.DeserializeLoadComplete(msg.Payload);
+            var hasSenderSlot = _engine.Session.TryGetSlotForPeer(msg.SenderSteamId, out var senderSlot);
+            if (!LoadBarrierAuthority.AcceptLoadComplete(_engine.IsHost, _loadPhaseActive, _revealed,
+                    _loadBoundaryId, transferId, hasSenderSlot, senderSlot, slot))
+            {
+                MpLog.LogWarning($"[Multiplayer] LoadComplete rejected: sender/slot/boundary is not " +
+                                 $"authoritative sender={msg.SenderSteamId} slot={slot} " +
+                                 $"transfer={transferId} current={_loadBoundaryId}.");
+                return;
+            }
             _tracker.MarkDone(slot);
             TryReleaseBarrier();
         }
@@ -2688,7 +2729,7 @@ namespace Multiplayer.Network
             // `_loadPhaseActive &&` was standing in for after the 2026-08-05 mid-entry reveal, and reading it
             // off the roster instead frees the flag to mean one thing (see its declaration) so the liveness
             // give-up above can cover every barrier window instead of none of the entry's.
-            if (_tracker.AllDone(_engine.Session.GetRosterSlots()))
+            if (_tracker.AllDone(_engine.Session.GetLiveRosterSlots()))
             {
                 BroadcastSnapshot();
                 _loadPhaseActive = false;
@@ -2700,7 +2741,8 @@ namespace Multiplayer.Network
                     _revealAllSent = true;
                     MpLog.Log("[Multiplayer] AllDone → broadcast RevealAll");
                     _engine.BroadcastToAll(new NetworkMessage( // reliable
-                        PacketType.RevealAll, MessageSerializer.SerializeRevealAll(DateTime.UtcNow.Ticks)));
+                        PacketType.RevealAll, MessageSerializer.SerializeRevealAll(
+                            _loadBoundaryId, DateTime.UtcNow.Ticks)));
                     MpLog.Log($"[Multiplayer] host reveal released: AllDone — every roster slot load-complete " +
                               $"(loadedClients={_loadedPeers.Count}).");
                     PerformDeferredLift(); // host reveals at the same instant
@@ -2904,6 +2946,14 @@ namespace Multiplayer.Network
                 MpLog.LogError("[Multiplayer] Failed to resolve PhoenixGame: " + e.Message);
                 return false;
             }
+        }
+
+        /// <summary>Replay the terminal edge to a paused peer that missed the one-shot broadcast.</summary>
+        public void ReplayRevealTo(ulong peerId)
+        {
+            if (!_engine.IsHost || !_revealed || _loadBoundaryId == Guid.Empty) return;
+            _engine.SendToClient(peerId, new NetworkMessage(PacketType.RevealAll,
+                MessageSerializer.SerializeRevealAll(_loadBoundaryId, DateTime.UtcNow.Ticks)));
         }
 
         private static Timing GetTiming()

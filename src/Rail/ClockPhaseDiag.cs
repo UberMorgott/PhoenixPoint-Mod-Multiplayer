@@ -88,7 +88,7 @@ namespace Multiplayer.Network.Sync
                     inner = ms.ToArray();
                 }
                 engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
-                    SyncProtocol.EncodeEnvelope(SurfaceIds.ClockPhaseProbe, SyncKind.StateDelta, inner)));
+                    SyncProtocol.EncodeEnvelope(SurfaceIds.DiagClockPhaseProbe, SyncKind.StateDelta, inner)));
             }
             catch (Exception ex)
             {
@@ -101,7 +101,7 @@ namespace Multiplayer.Network.Sync
         /// surface was consumed. Reads only — no clock write, no anchor write, no rate write.</summary>
         public static bool HandleInbound(NetworkEngine engine, ulong senderPeerId, byte surfaceId, byte[] payload)
         {
-            if (surfaceId != SurfaceIds.ClockPhaseProbe) return false;
+            if (surfaceId != SurfaceIds.DiagClockPhaseProbe) return false;
             if (engine == null || engine.IsHost) return true;
             try
             {

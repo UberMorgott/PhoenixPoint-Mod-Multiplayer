@@ -106,7 +106,7 @@ namespace RailCheck
 
             if (query == null || view == null)
             {
-                yield return "L93 premise-gone: GeoscapeViewSwitchQuery / GeoscapeView no longer resolve — the " +
+                yield return "L93 premise-changed: GeoscapeViewSwitchQuery / GeoscapeView no longer resolve — the " +
                              "window queue this law reasons about is not there to be checked, so every conclusion " +
                              "below is void rather than green.";
                 yield break;

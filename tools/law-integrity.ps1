@@ -32,9 +32,23 @@ $progText = Get-Content -Path $program -Raw
 # than as 100+ orphan files; L193 arm (d) is what forbids it coming back for real.
 $regIds = @{}
 $inlineRegs = [System.Collections.Generic.List[string]]::new()
+$registrationNames = [System.Collections.Generic.List[string]]::new()
 foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\)\s*=>\s*)\s*([A-Za-z_][A-Za-z0-9_]*)')) {
     $n = $m.Groups[1].Value
+    $registrationNames.Add($n)
     if ($n -match '^L(\d+)') { $regIds[$Matches[1]] = $true } else { $inlineRegs.Add($n) }
+}
+
+# Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
+# with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
+# registration multiset (so sparse ids and many registrations per source file remain valid).
+$expectedRegistrationDigest = 'a98b604927571e7af16ac4fdebd0e1041605aa0ea9e6a469e253aa1a84c74c8a'
+$registrationText = (($registrationNames | Sort-Object) -join "`n")
+$registrationDigest = [Convert]::ToHexString(
+    [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))
+).ToLowerInvariant()
+if ($registrationDigest -ne $expectedRegistrationDigest) {
+    Fail "law identity set changed (digest $registrationDigest != committed $expectedRegistrationDigest). A law was added, removed, renamed, or duplicated; review the exact registration diff, then deliberately update the identity digest."
 }
 
 # (a) registration parity, both directions
@@ -76,9 +90,16 @@ $exempt = @()
 if (Test-Path $exemptF) {
     $exempt = Get-Content -Path $exemptF | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }
 }
+if ($exempt.Count -gt 0) {
+    Fail "vacuity exemptions are forbidden; give every listed law an executable guard"
+}
 $bare = foreach ($f in $files) {
     $t = Get-Content -Path $f.FullName -Raw
-    if ($t -notmatch 'premise-changed' -and $t -notmatch 'POSITIVE CONTROL') { $f.Name }
+    # A marker word in prose proves nothing. Require an executable violation string: either the named
+    # premise guard, or a POSITIVE CONTROL section that actually reaches a yield-return arm.
+    $premiseGuard = $t -match '(?is)yield\s+return\s+"[^"\r\n]*premise-changed'
+    $positiveGuard = $t -match '(?is)yield\s+return\s+"[^"\r\n]*(?:positive-control|control-)'
+    if (-not $premiseGuard -and -not $positiveGuard) { $f.Name }
 }
 foreach ($n in $bare) {
     if ($exempt -notcontains $n) { Fail "vacuity: $n has neither 'premise-changed' nor a 'POSITIVE CONTROL' block" }

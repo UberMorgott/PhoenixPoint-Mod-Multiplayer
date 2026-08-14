@@ -73,13 +73,13 @@ namespace RailCheck
             var phaseLine = diag.GetMethod("PhaseLine", AllMembers);
             var engineTick = typeof(SyncEngine).GetMethod("Tick", AllMembers);
             var onGetter = typeof(MpDiag).GetProperty("On", AllMembers)?.GetGetMethod(true);
-            var probeId = typeof(SurfaceIds).GetField("ClockPhaseProbe", AllMembers);
+            var probeId = typeof(SurfaceIds).GetField("DiagClockPhaseProbe", AllMembers);
 
             if (hostTick == null || inbound == null || phaseLine == null || engineTick == null ||
                 onGetter == null || probeId == null)
             {
                 yield return "L153 premise-changed: ClockPhaseDiag.{HostTick,HandleInbound,PhaseLine} / " +
-                             "SyncEngine.Tick / MpDiag.On / SurfaceIds.ClockPhaseProbe did not all resolve. The " +
+                             "SyncEngine.Tick / MpDiag.On / SurfaceIds.DiagClockPhaseProbe did not all resolve. The " +
                              "clock-phase seam has moved or been removed, and this law is asserting about a shape " +
                              "it no longer has — which is exactly how the phase error went unmeasured for ten " +
                              "fix attempts.";
@@ -113,7 +113,7 @@ namespace RailCheck
             {
                 if (f.Name == probeId.Name || f.FieldType != typeof(byte) || !f.IsLiteral) continue;
                 if (Convert.ToByte(f.GetRawConstantValue()) == id)
-                    yield return "L153 probe-id-collides: SurfaceIds.ClockPhaseProbe (0x" + id.ToString("X2") +
+                    yield return "L153 probe-id-collides: SurfaceIds.DiagClockPhaseProbe (0x" + id.ToString("X2") +
                                  ") is also SurfaceIds." + f.Name + ". The geoscape band 0xA0-0xBF is fully " +
                                  "allocated, which is why the probe took a band of its own; a collision routes a " +
                                  "diagnostic payload into a live family's handler.";

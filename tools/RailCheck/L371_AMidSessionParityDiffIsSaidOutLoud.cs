@@ -13,8 +13,8 @@ namespace RailCheck
     /// known content difference is the exact failure class this rail keeps re-learning: the desync arrives
     /// later, and nothing said the reason was on the table at join time.
     ///
-    /// SOFT, and asserted as such by arm (c): the notice is a sentence, never a gate. Nobody is refused over
-    /// a cosmetic mod (L84), and nothing new enters the hashed manifest.
+    /// Roster admission is soft, but campaign entry is blocking: a mismatched peer waits without blocking
+    /// the running campaign. Auto-applied settings may clear the mismatch and release that peer.
     ///
     /// ARMS
     ///   (a) <c>diff-said-to-nobody</c> — a session-started join with diffs must produce a non-empty notice
@@ -66,6 +66,13 @@ namespace RailCheck
                 yield return "L371 lobby-join-shouted-at: a pre-start (lobby) join produced the mid-session " +
                              "notice as well. Its diff already rides the roster badge the joiner is looking at — " +
                              "saying it twice is noise, and the second copy toasts every OTHER peer too.";
+
+            if (SessionManager.CanEnterStartedSession("mod differs"))
+                yield return "L371 mismatched-peer-enters-campaign: a non-empty parity diff can still start " +
+                             "the mid-session save transfer. Roster admission is harmless; incompatible state " +
+                             "entering the live campaign graph is not.";
+            if (!SessionManager.CanEnterStartedSession(""))
+                yield return "L371 positive-control: an empty parity diff cannot enter a started session.";
         }
     }
 }

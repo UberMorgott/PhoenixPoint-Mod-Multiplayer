@@ -1,21 +1,2 @@
-# Laws that contain neither a premise-changed emission nor a POSITIVE CONTROL block.
-# Ratchet: never add to this list. Removing an entry (after adding a guard) is the goal.
-L100_RailLatency.cs
-L101_RewardRows.cs
-L103_NativeTacticalEntry.cs
-L104_ActionAnchor.cs
-L105_StatOrdering.cs
-L106_ModalEntityRaise.cs
-L107_ModalRaiseDeferral.cs
-L108_GameBuildParity.cs
-L109_QueuedStateRaise.cs
-L112_ItemAddressOrdinal.cs
-L113_UnityIdentityEquality.cs
-L114_MultiplayerVersionParity.cs
-L124_WindowOrdinalAndCampaignIntro.cs
-L125_EveryPatchBinds.cs
-L126_TranspilerSubstitutesNeverStores.cs
-L80_AbilityKeyStability.cs
-L93_WindowOrderAndHistory.cs
-L96_VisionAndDisplacement.cs
-L98_ApAuthority.cs
+# Vacuity exemptions are forbidden. Every law must contain an executable premise-change
+# or positive-control failure arm.

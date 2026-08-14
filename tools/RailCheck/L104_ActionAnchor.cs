@@ -50,6 +50,11 @@ namespace RailCheck
 
         internal static IEnumerable<string> Check()
         {
+            foreach (var violation in SubjectGuard(new[] { typeof(TacticalCommandSync) }))
+                yield return violation;
+            foreach (var violation in PositiveControls(typeof(TacticalCommandSync)))
+                yield return violation;
+
             var cmd = typeof(TacticalCommandSync);
             var ability = typeof(TacticalAbility);
             var trackWithCamera = ability.GetProperty("TrackWithCamera", All)?.GetGetMethod(true);
@@ -372,6 +377,26 @@ namespace RailCheck
                     }
             }
         }
+
+        private static IEnumerable<string> SubjectGuard(Type[] subjects)
+        {
+            if (subjects == null || subjects.Length == 0)
+                yield return "L104 premise-changed: an empty subject set was accepted, so the action-anchor law can pass without inspecting its command rail.";
+            else if (Array.Exists(subjects, t => t == null))
+                yield return "L104 premise-changed: an unresolved subject was accepted, so a missing command rail can make the law vacuous.";
+        }
+
+        private static IEnumerable<string> PositiveControls(Type subject)
+        {
+            if (!HasViolation(SubjectGuard(new Type[0])))
+                yield return "L104 control-empty-subject: the executable subject guard did not reject an empty set.";
+            if (!HasViolation(SubjectGuard(new Type[] { null })))
+                yield return "L104 control-unresolved-subject: the executable subject guard did not reject an unresolved type.";
+            if (HasViolation(SubjectGuard(new[] { subject })))
+                yield return "L104 control-valid-subject: TacticalCommandSync was rejected by the subject guard, so the executable checks never reached production code.";
+        }
+
+        private static bool HasViolation(IEnumerable<string> violations) => violations.GetEnumerator().MoveNext();
 
         /// <summary>Same, for a postfix that also takes the patched instance. Null is the honest argument
         /// here: an actor cannot be built headless, and with nothing armed the anchor must not consult it.</summary>

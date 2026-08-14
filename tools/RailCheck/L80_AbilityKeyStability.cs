@@ -127,7 +127,7 @@ namespace RailCheck
             var stateStack = game.GetType("Base.UI.StateStack`1");
             if (viewState == null || stateStack == null)
             {
-                yield return "L80 premise-view-types-gone: TacticalViewState or Base.UI.StateStack`1 did not resolve " +
+                yield return "L80 premise-changed: TacticalViewState or Base.UI.StateStack`1 did not resolve " +
                              "— the repaint's liveness question cannot be checked at all.";
                 yield break;
             }

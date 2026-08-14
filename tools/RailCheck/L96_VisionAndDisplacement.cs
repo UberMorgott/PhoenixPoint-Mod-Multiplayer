@@ -85,7 +85,7 @@ namespace RailCheck
             var vision = game.GetType("PhoenixPoint.Tactical.Levels.TacticalFactionVision");
             if (vision == null)
             {
-                yield return "L96 premise-vision-type-gone: PhoenixPoint.Tactical.Levels.TacticalFactionVision did " +
+                yield return "L96 premise-changed: PhoenixPoint.Tactical.Levels.TacticalFactionVision did " +
                              "not resolve — nothing about the settle's vision carry can be checked.";
             }
             else

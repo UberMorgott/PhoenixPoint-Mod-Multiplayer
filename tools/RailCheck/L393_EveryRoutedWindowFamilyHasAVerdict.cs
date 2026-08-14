@@ -39,7 +39,7 @@ namespace RailCheck
                 yield return "L393 registry-is-not-the-actual-geoscape-router-source";
 
             if (registrations.Count == 0)
-                yield return "L393 router-has-no-registrations: the family set is derived from " +
+                yield return "L393 premise-changed: router-has-no-registrations: the family set is derived from " +
                              "RoutedPresentations, so an empty array would make every arm below vacuous";
 
             // MUST come before the loop. RouterFamilies is RoutedPresentations.ToDictionary(x => x.Family),

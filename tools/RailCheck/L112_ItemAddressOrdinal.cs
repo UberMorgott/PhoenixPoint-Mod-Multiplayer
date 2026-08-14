@@ -55,7 +55,7 @@ namespace RailCheck
             var resolveIn = inv.GetMethod("ResolveIn", All);
             if (chargeOf == null || ordinalOf == null || resolveIn == null)
             {
-                yield return "L112 rule-gone: TacticalInventorySync.ChargeOf / OrdinalOf / ResolveIn no longer all " +
+                yield return "L112 premise-changed: TacticalInventorySync.ChargeOf / OrdinalOf / ResolveIn no longer all " +
                              "exist. Those three ARE the item address rule, shared by A6's batch apply and A7's " +
                              "target codec so the two cannot drift — without them the address is back to a def " +
                              "guid, and two magazines of one type are one address again";

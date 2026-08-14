@@ -80,10 +80,21 @@ namespace RailCheck
             var getOriginal = AccessTools.Method(typeof(HarmonyLib.Harmony).Assembly.GetType("HarmonyLib.PatchTools"),
                                                  "GetOriginalMethod");
 
+            if (getBulk == null || containerField == null || patchMethodsField == null || getOriginal == null)
+            {
+                yield return "L125 premise-changed: Harmony's PatchClassProcessor/PatchTools inspection seams " +
+                             "no longer resolve, so the executable bind sweep cannot discover real targets";
+                yield break;
+            }
+
+            int patchClasses = 0;
+            int resolvedTargets = 0;
+
             foreach (var type in AccessTools.GetTypesFromAssembly(mod))
             {
                 var pcp = new PatchClassProcessor(harmony, type);
                 if (containerField.GetValue(pcp) == null) continue;   // not a patch class at all
+                patchClasses++;
 
                 // Prepare() runs FIRST, exactly as PatchClassProcessor.Patch does — a gated class is
                 // allowed to say "not this run" (TFTV absent, native entry off), and several of them
@@ -128,6 +139,7 @@ namespace RailCheck
                                             .FirstOrDefault(m => m.Name == "Transpiler" && IsTranspiler(m));
                 foreach (var target in targets)
                 {
+                    resolvedTargets++;
                     if (!Emittable(target))
                         yield return "L125 unemittable-target: " + type.Name + " -> " + Describe(target) +
                                      " — its body is closed by a fault/filter handler; Harmony cannot rebuild " +
@@ -136,6 +148,11 @@ namespace RailCheck
                         foreach (var v in ProbeTranspiler(type, transpiler, target)) yield return v;
                 }
             }
+
+            if (patchClasses == 0 || resolvedTargets == 0)
+                yield return "L125 premise-changed: the mod sweep discovered " + patchClasses +
+                             " Harmony patch class(es) and " + resolvedTargets + " resolved target(s). A clean " +
+                             "result over an empty patch surface is not a bind verdict";
         }
 
         /// <summary>The one metadata fact that decides whether Harmony can rebuild a body at all.</summary>

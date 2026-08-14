@@ -6,6 +6,7 @@ using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using System.Text;
 using Base.Serialization.General;
 using HarmonyLib;
@@ -397,18 +398,23 @@ namespace RailCheck
             Add(laws, () => L431_AnItemsAddressIsReadBeforeTheHitNotAfter.Check());
             Add(laws, () => L432_EveryLogUsesTheOneDoor.Check());
             Add(laws, () => L373_EveryTftvGatedPatchIsLateBound.Check());
+            Add(laws, () => L374_AReducedDefBecomesTheDef.Check());
+            Add(laws, () => L375_NothingAppliesWhileTheLevelIsBeingBuilt.Check());
+            Add(laws, () => L433_LoadBarrierPacketsAreBoundToAuthority.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
             // law the rail breaks TODAY is a committed, reviewable fact rather than a permanently red
             // build everyone learns to ignore. A NEW violation changes this file; so does a fixed one.
-            sb.Append("\nknown law violations (" + laws.Count + ") — each one is a rail bug, not a harness limit:\n");
+            sb.Append("\nlaw violations (must be zero): " + laws.Count + "\n");
             foreach (var v in laws) sb.Append("  ! " + v + "\n");
             var snapshot = sb.ToString().Replace("\r\n", "\n");
 
             foreach (var v in laws) Console.Error.WriteLine("LAW VIOLATION  " + v);
 
             if (AbortOnHarnessCrash()) return 2;
+            if (!ValidateLawExecution()) return 2;
+            if (!ValidateNoLawViolations(laws)) return 1;
 
 
             // TWO committed artifacts, two review expectations. The baseline keeps its name (and so its
@@ -431,7 +437,7 @@ namespace RailCheck
             Console.WriteLine("RAILCHECK GREEN — types=" + types.Count +
                               " polymorphic-codec=" + (polymorphicCodec ? "yes" : "no") +
                               " laws-run=" + (_lawsRegistered - _lawsCrashed) + "/" + _lawsRegistered +
-                              " known-violations=" + laws.Count + " (baselined, see docs/rail-baseline.txt)");
+                              " law-violations=" + laws.Count);
             return 0;
         }
 
@@ -441,6 +447,44 @@ namespace RailCheck
         // argued with and a harness that says GREEN gets believed.
 
         private static int _lawsRegistered, _lawsCrashed;
+        private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
+        private const int ExpectedLawRegistrations = 299;
+        private const string ExpectedExecutionIdentityDigest = "380858d03d1315a5947d582aada599e98cad42bfb231762efe7de2cdf4a6b402";
+
+        /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
+        /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
+        /// --update, unless this process executed the committed number of registrations.</summary>
+        private static bool ValidateLawExecution()
+        {
+            var identityText = string.Join("\n", _executedLawIdentities.OrderBy(x => x, StringComparer.Ordinal));
+            string digest;
+            using (var sha = SHA256.Create())
+                digest = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(identityText)))
+                    .Replace("-", "").ToLowerInvariant();
+            if (LawExecutionIsValid(_lawsRegistered, _executedLawIdentities.Count, digest)) return true;
+            Console.Error.WriteLine("RAILCHECK ABORTED — executed " + _lawsRegistered + "/" +
+                                    ExpectedLawRegistrations + " committed law registration(s), identities=" +
+                                    _executedLawIdentities.Count + ", digest=" + digest + ". Zero, duplicate, " +
+                                    "partial, or unexpected execution cannot earn or update a verdict.");
+            return false;
+        }
+
+        internal static bool LawExecutionIsValid(int registrations, int uniqueIdentities, string digest) =>
+            registrations == ExpectedLawRegistrations && registrations > 0 &&
+            uniqueIdentities == ExpectedLawRegistrations && digest == ExpectedExecutionIdentityDigest;
+
+        /// <summary>A law failure is not coverage drift and cannot be approved with --update. The historical
+        /// baseline once carried known failures and still printed GREEN; with that debt now at zero, any law
+        /// violation is an immediate red verdict before either snapshot gate is consulted.</summary>
+        private static bool ValidateNoLawViolations(List<string> laws)
+        {
+            if (NoLawViolations(laws.Count)) return true;
+            Console.Error.WriteLine("RAILCHECK RED — " + laws.Count +
+                                    " executable law violation(s); --update cannot baseline them.");
+            return false;
+        }
+
+        internal static bool NoLawViolations(int count) => count == 0;
 
         /// <summary>Run ONE law inside its own blast radius. A law that threw used to abort the entire run:
         /// <c>RailMeta.CountMiss</c>'s Unity ECall died at law #31 of 153 and the 122 registered after it
@@ -460,7 +504,14 @@ namespace RailCheck
         private static void Add(List<string> laws, Func<IEnumerable<string>> law)
         {
             _lawsRegistered++;
-            try { foreach (var v in law()) laws.Add(v); }
+            try
+            {
+                var result = law();
+                var identity = result?.GetType().FullName ?? "<null-enumerable>";
+                identity = System.Text.RegularExpressions.Regex.Replace(identity, @"d__\d+", "d__");
+                _executedLawIdentities.Add(identity);
+                foreach (var v in result) laws.Add(v);
+            }
             catch (Exception ex)
             {
                 _lawsCrashed++;
@@ -6720,7 +6771,7 @@ namespace RailCheck
         /// minted inside the geoscape band does not merely collide — it SILENTLY EATS every geoscape
         /// envelope on that id, with no log line anywhere (v1 RCA 3ff508d: tactical ids at 0xA0-0xA3 ate
         /// geoscape traffic for days). Hence the partition is a law, not a comment: <c>Geo*</c> = 0xA0-0xBF,
-        /// <c>Tac*</c> = 0x80-0x9F, every value unique, every name banded. Arc A1 adds no tactical surface
+        /// <c>Tac*</c> = 0x80-0x9F, <c>Diag*</c> = 0xC0-0xCF, every value unique, every name banded. Arc A1 adds no tactical surface
         /// (entry rides the native save transfer), so this is the guard standing at the door for A2+.</summary>
         private static IEnumerable<string> SurfaceBandLaw()
         {
@@ -6747,9 +6798,10 @@ namespace RailCheck
 
                 bool tac = f.Name.StartsWith("Tac", StringComparison.Ordinal);
                 bool geo = f.Name.StartsWith("Geo", StringComparison.Ordinal);
-                if (!tac && !geo)
+                bool diag = f.Name.StartsWith("Diag", StringComparison.Ordinal);
+                if (!tac && !geo && !diag)
                     yield return "L62 unbanded-name: " + f.Name + " (0x" + v.ToString("X2") + ") starts with neither " +
-                                 "Geo nor Tac, so which band it must live in is undecidable — the partition that keeps " +
+                                 "Geo, Tac nor Diag, so which band it must live in is undecidable — the partition that keeps " +
                                  "the tactical-first router from eating geoscape traffic is only enforceable by name";
                 else if (geo && (v < 0xA0 || v > 0xBF))
                     yield return "L62 geo-out-of-band: " + f.Name + " = 0x" + v.ToString("X2") + " is outside the " +
@@ -6758,6 +6810,9 @@ namespace RailCheck
                     yield return "L62 tac-out-of-band: " + f.Name + " = 0x" + v.ToString("X2") + " is outside the " +
                                  "tactical band 0x80-0x9F — the tactical hook is consulted FIRST, so this id now " +
                                  "silently swallows whatever geoscape surface shares it";
+                else if (diag && (v < 0xC0 || v > 0xCF))
+                    yield return "L62 diag-out-of-band: " + f.Name + " = 0x" + v.ToString("X2") +
+                                 " is outside the diagnostic band 0xC0-0xCF";
             }
         }
 

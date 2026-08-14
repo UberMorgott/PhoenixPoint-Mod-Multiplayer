@@ -833,7 +833,9 @@ namespace Multiplayer.Network.Sync
         internal static BaseDef DefByReducedId(Type defType, string id)
         {
             if (string.IsNullOrEmpty(id)) return null;
-            var repo = GameUtl.GameComponent<DefRepository>();
+            DefRepository repo;
+            try { repo = GameUtl.GameComponent<DefRepository>(); }
+            catch (System.Security.SecurityException) { return null; } // headless/pre-player host
             if (repo == null) return null; // pre-init — do NOT cache
             var byGuid = repo.GetDef(id);
             if (byGuid != null && defType.IsInstanceOfType(byGuid)) return byGuid;

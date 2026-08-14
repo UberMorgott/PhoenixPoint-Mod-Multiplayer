@@ -52,8 +52,10 @@ namespace RailCheck
                           new[] { typeof(List<string>), typeof(System.Func<IEnumerable<string>>) }, null);
             var abort = p.GetMethod("AbortOnHarnessCrash", All, null, System.Type.EmptyTypes, null);
             var stale = p.GetMethod("StaleBuild", All, null, System.Type.EmptyTypes, null);
+            var execution = p.GetMethod("ValidateLawExecution", All, null, System.Type.EmptyTypes, null);
+            var noViolations = p.GetMethod("ValidateNoLawViolations", All);
             var run = p.GetMethod("Run", All, null, new[] { typeof(string[]) }, null);
-            if (add == null || abort == null || stale == null || run == null)
+            if (add == null || abort == null || stale == null || execution == null || noViolations == null || run == null)
             {
                 yield return "L193 premise-changed: Program.Add / AbortOnHarnessCrash / StaleBuild / Run no " +
                              "longer resolves. Those three guards are the only thing standing between this " +
@@ -83,6 +85,24 @@ namespace RailCheck
                              "HARNESS-CRASH line is an ordinary violation string, so without this stop " +
                              "`--update` writes it into docs/rail-baseline.txt and every later run calls it " +
                              "green — the crash becomes a permanent, invisible hole in coverage.";
+
+            if (!runCalls.Any(c => c.MetadataToken == execution.MetadataToken))
+                yield return "L193 registration-omission-can-be-green: Run no longer validates the executed " +
+                             "registration count. Source text can still contain every Add while if(false) " +
+                             "prevents all of them from running, producing an unearned 0/0 GREEN.";
+
+            if (!runCalls.Any(c => c.MetadataToken == noViolations.MetadataToken))
+                yield return "L193 law-failure-can-be-baselined: Run no longer refuses executable law " +
+                             "violations before snapshot gates; --update could bless a broken rule as GREEN.";
+
+            if (!Program.LawExecutionIsValid(299, 299,
+                    "380858d03d1315a5947d582aada599e98cad42bfb231762efe7de2cdf4a6b402") ||
+                Program.LawExecutionIsValid(299, 298,
+                    "380858d03d1315a5947d582aada599e98cad42bfb231762efe7de2cdf4a6b402") ||
+                Program.LawExecutionIsValid(299, 299, "wrong") ||
+                !Program.NoLawViolations(0) || Program.NoLawViolations(1))
+                yield return "L193 positive-control: execution identity or zero-violation decisions no " +
+                             "longer reject their falsifying rows.";
 
             // ── (c) no verdict about a DLL nobody just built ─────────────────
             if (!runCalls.Any(c => c.MetadataToken == stale.MetadataToken))

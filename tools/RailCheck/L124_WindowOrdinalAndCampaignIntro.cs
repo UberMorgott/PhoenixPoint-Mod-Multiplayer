@@ -371,7 +371,7 @@ namespace RailCheck
             // re-run the whole reveal (and, now, the intro) on top of a session already in it.
             var bootstrap = StateMachineOf(coordType, "NewCampaignAutosaveAndTransferCrt");
             if (bootstrap == null)
-                yield return "L124 intro-replay-off-seam: the new-campaign bootstrap coroutine " +
+                yield return "L124 premise-changed: the new-campaign bootstrap coroutine " +
                              "(NewCampaignAutosaveAndTransferCrt) no longer resolves — the path this law " +
                              "reasons about is not there to be checked.";
             else

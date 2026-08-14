@@ -822,5 +822,4 @@ null-on-construct containers (L20 — the decoder MUST materialize these, never 
 
 summary: covered=463 excluded=77 blobbable=31 geoItemDicts=1
 
-known law violations (1) — each one is a rail bug, not a harness limit:
-  ! L62 unbanded-name: ClockPhaseProbe (0xC0) starts with neither Geo nor Tac, so which band it must live in is undecidable — the partition that keeps the tactical-first router from eating geoscape traffic is only enforceable by name
+law violations (must be zero): 0

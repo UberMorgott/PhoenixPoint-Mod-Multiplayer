@@ -211,7 +211,7 @@ namespace RailCheck
                 stateCtor == null || register == null || handleDeploy == null || capture == null ||
                 send == null || deployAtSite == null)
             {
-                yield return "L109 seam-gone: one of GeoWindowCoverageGate.Postfix / GeoModalMirror" +
+                yield return "L109 premise-changed: one of GeoWindowCoverageGate.Postfix / GeoModalMirror" +
                              ".HostBroadcastQueued|HostBroadcast|BuildData|DeployBind|NeedsPark|NamesEntity|" +
                              "RaiseMirrored / WindowQueueSync.RegisterIntents|HandleDeploy|DeployAtSiteCapture" +
                              ".Prefix / IntentRail.Send / UIStateAssetDeployment.DeployAtSite no longer exists — " +

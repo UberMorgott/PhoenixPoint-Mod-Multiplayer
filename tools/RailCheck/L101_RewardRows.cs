@@ -126,7 +126,7 @@ namespace RailCheck
             var setReward = typeof(RewardsController).GetMethod("SetReward", AllMembers);
             if (showReward == null || setReward == null)
             {
-                yield return "L101 premise-renderer-gone: UIModuleSiteEncounters.ShowReward or " +
+                yield return "L101 premise-changed: UIModuleSiteEncounters.ShowReward or " +
                              "RewardsController.SetReward no longer exists, so this law cannot derive what the " +
                              "page draws and the row table is unchecked. Re-ground it against the new renderer.";
             }

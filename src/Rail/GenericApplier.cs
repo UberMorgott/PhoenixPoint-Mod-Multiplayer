@@ -128,7 +128,9 @@ namespace Multiplayer.Network.Sync
         /// <see cref="StartedGeoLevel"/> next to it.</summary>
         internal static GeoLevelController GeoLevel()
         {
-            var level = GameUtl.CurrentLevel();
+            Base.Levels.Level level;
+            try { level = GameUtl.CurrentLevel(); }
+            catch (System.Security.SecurityException) { return null; } // headless/pre-player host
             return level == null ? null : level.GetComponent<GeoLevelController>();
         }
 
@@ -141,10 +143,13 @@ namespace Multiplayer.Network.Sync
 
         internal static void MarkGeoscapeStarted() => _startedLevel = GeoLevel();
 
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        internal static bool SameLevelInstance(object current, object started) => ReferenceEquals(current, started);
+
         internal static GeoLevelController StartedGeoLevel()
         {
             var geo = GeoLevel();
-            return geo != null && ReferenceEquals(geo, _startedLevel) ? geo : null;
+            return geo != null && SameLevelInstance(geo, _startedLevel) ? geo : null;
         }
 
         /// <summary>Returns true when the surface was consumed (GeoRail, either direction).</summary>

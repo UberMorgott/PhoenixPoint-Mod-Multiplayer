@@ -158,7 +158,7 @@ namespace RailCheck
             var multiplier = vision == null ? null : vision.GetMethod("GetSizeAndStealthVisibilityMultiplier", AllMembers);
             if (multiplier == null ||
                 !Calls(multiplier).Any(c => c.Name == "get_TacticalPerceptionBase"))
-                yield return "L98 premise-visibility-deref-guarded: " +
+                yield return "L98 premise-changed: visibility dereference is now guarded: " +
                              "TacticalFactionVision.GetSizeAndStealthVisibilityMultiplier no longer dereferences " +
                              "TacticalPerceptionBase. That blind dereference IS why the settle path may not reach " +
                              "the native cast — if the engine now tests it, the arm above is banning a call over " +

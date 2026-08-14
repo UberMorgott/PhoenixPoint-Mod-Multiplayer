@@ -52,6 +52,11 @@ namespace RailCheck
 
         internal static IEnumerable<string> Check()
         {
+            foreach (var violation in SubjectGuard(new[] { typeof(TacticalDamageSync) }))
+                yield return violation;
+            foreach (var violation in PositiveControls(typeof(TacticalDamageSync)))
+                yield return violation;
+
             var dmg = typeof(TacticalDamageSync);
             var stamp = dmg.GetProperty("StatEpoch", All);
             var bump = dmg.GetMethod("NoteNativeStatEvent", All);
@@ -158,6 +163,26 @@ namespace RailCheck
                              "without consulting TacticalDamageSync.StatsAreStale, so the stamp is carried " +
                              "all the way to the write and then thrown away.";
         }
+
+        private static IEnumerable<string> SubjectGuard(Type[] subjects)
+        {
+            if (subjects == null || subjects.Length == 0)
+                yield return "L105 premise-changed: an empty subject set was accepted, so stat ordering can pass without inspecting TacticalDamageSync.";
+            else if (Array.Exists(subjects, t => t == null))
+                yield return "L105 premise-changed: an unresolved subject was accepted, so a missing stat rail can make the law vacuous.";
+        }
+
+        private static IEnumerable<string> PositiveControls(Type subject)
+        {
+            if (!HasViolation(SubjectGuard(new Type[0])))
+                yield return "L105 control-empty-subject: the executable subject guard did not reject an empty set.";
+            if (!HasViolation(SubjectGuard(new Type[] { null })))
+                yield return "L105 control-unresolved-subject: the executable subject guard did not reject an unresolved type.";
+            if (HasViolation(SubjectGuard(new[] { subject })))
+                yield return "L105 control-valid-subject: TacticalDamageSync was rejected by the subject guard, so the executable checks never reached production code.";
+        }
+
+        private static bool HasViolation(IEnumerable<string> violations) => violations.GetEnumerator().MoveNext();
 
         /// <summary>Does <paramref name="m"/>'s IL mention <paramref name="callee"/>? A raw 4-byte scan for
         /// the metadata token — see the ponytail note on the class: lenient by construction, never strict.

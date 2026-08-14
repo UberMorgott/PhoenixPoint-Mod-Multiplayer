@@ -89,7 +89,7 @@ namespace RailCheck
             // arm (b) still resolves to real types. Either gone = say so, never report a clean sweep.
             if (typeof(UnityEngine.Object).GetMethod("op_Equality", BindingFlags.Public | BindingFlags.Static) == null)
             {
-                yield return "L113 unity-operator-gone: UnityEngine.Object.op_Equality does not resolve — the sweep " +
+                yield return "L113 premise-changed: UnityEngine.Object.op_Equality does not resolve — the sweep " +
                              "below can no longer detect the bug class it exists for";
                 yield break;
             }
@@ -125,7 +125,7 @@ namespace RailCheck
             // Arm (b) is a named list, so a renamed or deleted method must be LOUD: silently checking one
             // method fewer than it claims to is how a scoped law rots into a green no-op.
             foreach (var name in AddressKeyMethods.Where(n => !seenAddressKey.Contains(n)))
-                yield return "L113 address-key-scope-gone: " + name + " no longer resolves, so arm (b) is checking " +
+                yield return "L113 premise-changed: " + name + " no longer resolves, so arm (b) is checking " +
                              "one method fewer than it claims to — re-point the list or drop the entry";
 
             // A sweep over nothing is the failure mode a coverage law has to rule out first.

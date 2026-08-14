@@ -594,16 +594,22 @@ namespace Multiplayer.Network.MessageLayer
         }
 
         // ─── RevealAll (second barrier: synchronized geoscape reveal) ────────────────
-        // Mirrors SessionBegin exactly: a single long serverTicks (DateTime.UtcNow.Ticks at send),
-        // written via BinaryWriter.Write(long) and read back via BinaryReader.ReadInt64().
-        public static byte[] SerializeRevealAll(long serverTicks)
+        // Boundary identity makes a delayed reliable/UDP duplicate unable to release the next load.
+        public static byte[] SerializeRevealAll(Guid boundaryId, long serverTicks)
         {
             using (var ms = new MemoryStream())
             using (var bw = new BinaryWriter(ms))
             {
+                bw.Write(boundaryId.ToByteArray());
                 bw.Write(serverTicks);
                 return ms.ToArray();
             }
+        }
+
+        public static (Guid boundaryId, long serverTicks) DeserializeRevealAll(byte[] data)
+        {
+            using (var br = new BinaryReader(new MemoryStream(data ?? Array.Empty<byte>())))
+                return (new Guid(br.ReadBytes(16)), br.ReadInt64());
         }
 
         // ─── EntryTransferAbort (tac-entry save transfer will never complete) ────────

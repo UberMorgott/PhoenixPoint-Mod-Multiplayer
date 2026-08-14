@@ -47,6 +47,11 @@ namespace RailCheck
 
         internal static IEnumerable<string> Check()
         {
+            foreach (var violation in SubjectGuard(new[] { typeof(ParityComparer) }))
+                yield return violation;
+            foreach (var violation in PositiveControls(typeof(ParityComparer)))
+                yield return violation;
+
             const string A = "1.30.2.1234";
             const string B = "1.30.2.9999";
 
@@ -129,6 +134,26 @@ namespace RailCheck
                              "ParityManifest.GameVersion, so the field rides the wire and is thrown away. Every " +
                              "arm above would still be green while a cross-build join sails through.";
         }
+
+        private static IEnumerable<string> SubjectGuard(Type[] subjects)
+        {
+            if (subjects == null || subjects.Length == 0)
+                yield return "L108 premise-changed: an empty subject set was accepted, so game-build parity can pass without inspecting ParityComparer.";
+            else if (Array.Exists(subjects, t => t == null))
+                yield return "L108 premise-changed: an unresolved subject was accepted, so a missing parity comparer can make the law vacuous.";
+        }
+
+        private static IEnumerable<string> PositiveControls(Type subject)
+        {
+            if (!HasViolation(SubjectGuard(new Type[0])))
+                yield return "L108 control-empty-subject: the executable subject guard did not reject an empty set.";
+            if (!HasViolation(SubjectGuard(new Type[] { null })))
+                yield return "L108 control-unresolved-subject: the executable subject guard did not reject an unresolved type.";
+            if (HasViolation(SubjectGuard(new[] { subject })))
+                yield return "L108 control-valid-subject: ParityComparer was rejected by the subject guard, so the executable checks never reached production code.";
+        }
+
+        private static bool HasViolation(IEnumerable<string> violations) => violations.GetEnumerator().MoveNext();
 
         /// <summary>Does <paramref name="caller"/> CALL <paramref name="callee"/> in another assembly? The
         /// raw-token scan L105-L107 use cannot answer this: a cross-assembly call site carries a MemberRef

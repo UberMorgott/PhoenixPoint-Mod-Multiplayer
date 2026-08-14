@@ -2,6 +2,10 @@
 
 Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 
+Status correction (2026-08-14): L371 now blocks only the mismatched peer's campaign entry while keeping
+roster admission soft; L374 and L375 are executable and green. Older row prose saying that L371 lets the
+peer play/readies or that L374/L375 are “NOT YET EXECUTABLE” is historical evidence, not current policy.
+
 - `P<n>` = ARCHITECTURAL PRINCIPLE. Prose source `ARCHITECTURE.md`. **Its old wording "law N" means `P<N>`** — same numbers, renamed so `L` is the harness alone.
 - `L<n>` = EXECUTABLE HARNESS LAW. `tools/RailCheck/L<n>_<Name>.cs`, or an inline method in `Program.cs` (marked *inline*). Run: `cd tools/RailCheck && dotnet run -c Debug` — exit 0 green, 1 red.
 - `L-A`…`L-F` = boundary law, `docs/boundary-law.md`, letters, ride/refuse rules. Untouched here.
@@ -36,13 +40,13 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
   - laws: L21 L51 L65
 - **P9 — THE JOURNAL IS OBSERVATIONAL.** Written post-pipeline, never in the decision path; debug builds OK.
   - laws: none
-- **P10 — PARITY IS BLOCKING.** Mod set, DLC set, per-mod settings, the GAME build and OUR build must match on every peer — the save-graph shape has to. An unresolvable def "cannot happen" → LOUD, never silent.
+- **P10 — PARITY BLOCKS CAMPAIGN ENTRY, NOT ROSTER ADMISSION.** Game build, Multiplayer build, host-required DLC, enabled mod set/version and synced settings must match before a peer receives a live campaign. A mismatched peer may keep a roster row and repair auto-applicable settings, but cannot ready or receive a mid-session save until the diff is empty. Other players never wait on it. An unresolvable def is LOUD, never silent.
   - laws: L108 L114
 - **P11 — REPAINT IS THE RAIL'S OTHER HALF.** A mirrored value reaches the screen through the game's OWN read-direction refresh (`UiEventMap`, `UiNativeRepaint`) — never a hand-rolled paint, never a lifecycle transition where the model can express it.
   - laws: L18 L21 L26 L38 L45 L46 L47 L51 L52 L54 L60 L77 L79 L81 L83 L92 L93 L95 L96 L98 L101 L102 L104 L115 L116 L117 L118 L124 L127 L129 L130 L135 L138 L139 L141 L142 L144 L147 L148 L149 L151 L156 L163 L164 L165 L86 L323 L326
-- **P12 — UNIVERSAL-FIRST.** Unnumbered in `ARCHITECTURE.md`, asserted throughout. ONE generic mechanism per layer; the per-subsystem copy is the "macaroni factory" the mandate forbids. One value rail, one intent engine, one nonce allocator, one dedup, one repaint primitive.
+- **P12 — UNIVERSAL-FIRST, EXCEPT BY REPRESENTATION PROOF.** One generic mechanism per layer is the default. A bespoke state channel is permitted only when the committed coverage baseline proves the generic representation excludes the value, the channel still uses the shared envelope/sequence/dedup primitives, and an executable law covers authority, ordering and convergence. `GeoMarketplaceOffers` is the current reviewed exception; an informal subsystem copy is not.
   - laws: L32 L50 L99 L143 L155
-- **P13 — NO QUORUMS, NOBODY KICKED. PROPOSED — not in `ARCHITECTURE.md`.** Developer mandate, stated only in the corpus (quoted by L84, L91): at any moment ANY player must be able to play everything; with 49 of 50 AFK the one active player still plays a whole campaign. Nobody is kicked. A host-side decision about peer P may read P's own intent + shared game state and nothing else. A wait on something that ends BY ITSELF is allowed; a wait on a PERSON is not. SCOPED 2026-08-07 (owner): this governs progress AFTER the game has been entered. The LOBBY is outside it — before the game starts there is no play to block, so the host may hold the start until every LIVE peer has readied (L84 arm (c) now asserts the LIVE-only guard instead of the absence of the gate).
+- **P13 — NO IN-GAME QUORUMS, NOBODY KICKED.** After campaign entry, any active player can keep playing when every other peer is AFK or paused. A barrier may count only live participants and may wait only on work that ends by itself, never on a human action. Lobby readiness and an incompatible joiner's own campaign-entry gate are outside that scope; neither may block an already-running campaign.
   - laws: L26 L64 L71 L82 L84 L91 L94 L109 L118 L119 L120 L122 L129 L136 L143 L145 L150 L151 L155 L85 L86 L324
 - **P14 — DRIFT IS THE GATE, AND A LAW ASSERTS AN OUTCOME.** `docs/rail-baseline.txt` + `docs/rail-contract.txt` = committed snapshots; ANY drift is harness-RED, so a field moving Excluded↔covered is a reviewable diff, never a side effect. A law asserts the executed OUTCOME, not the presence of a call, and carries its own non-vacuity.
   - laws: L6 L9 L22 L23 L33 L48 L49 L72 L103 L125 L163
@@ -337,6 +341,14 @@ Two-level scheme + full law index. Lookup by `P<n>` or `L<n>`.
 
 ## Rows vs registrations — why 155 rows and 135 registered laws
 
+### Mutation verification policy
+
+- Run `tools/mutation-runner.ps1` for the exhaustive 299/299 execution-to-RED check.
+- Synthetic mutations are infrastructure checks, not semantic production coverage.
+- Require compile-valid `src/` mutations for critical authority, barrier, codec, dedupe, ordering, parity, and lifecycle laws.
+- Count a semantic kill only when the named law is RED and restoration returns GREEN.
+- Add targeted mutations for critical bugs; do not maintain one production patch per law.
+
 The two numbers count different things and always will. `tools/law-count.txt` counts REGISTRATIONS
 (one `laws.AddRange(...)` line each); this table counts NUMBERED LAWS. The mapping is many-to-many
 on the inline side. Nothing is missing and no row is invented — verified 2026-08-07.
@@ -367,7 +379,7 @@ on the inline side. Nothing is missing and no row is invented — verified 2026-
 - L26 (old) — record-derived event backlog, deleted 2026-07-30 with the engine it asserted; number re-used by `L26_PauseAndOneShot.cs`.
 - L85, L86 — ISSUED 2026-08-07 (`L85_RestartedHostStreamIsApplied.cs`, `L86_AnnouncedBoundaryHoldsItsAnnouncer.cs`). Taken from the never-issued block on purpose: five agents were minting laws in one tree that day and three successive max+1 picks collided.
 - L87–L90 — never issued. No file, no method, no citation anywhere in the repo.
-- L374, L375 — ISSUED 2026-08-09 as ROWS ONLY: no `L<n>_<Name>.cs`, no `Add(laws, () => …)`, `tools/law-count.txt` NOT bumped, and neither was falsified (no build in the session that wrote them). Written by an agent whose file scope was `GenericApplier.cs`/`RailMeta.cs`/`DiffEngine.cs`/`docs/laws.md`, with `tools/RailCheck/` owned elsewhere — so the rows carry the assertion and the evidence, and the executable half is outstanding work, not an oversight. `tools/law-integrity.ps1` does not read this file, so the rows break nothing; they also defend nothing until the files exist. Renumber if a parallel agent took 374/375 first.
+- L374 and L375 became executable on 2026-08-14: both have file-backed checks, registrations, premise guards and executed controls. L374 also forced the pre-player DefRepository lookup to fail closed; L375 checks the exact started-level instance and every apply/resend entry point.
 
 ## Durable-window inbox allocation clarification (2026-08-10)
 
@@ -466,7 +478,7 @@ same day's audit work took it to **215**) plus the two arms rewritten in `L163` 
 
 ## Attention
 
-- rows in table: 150. numbers issued: 155 (L85–L90 never issued; old L26 retired). Registrations: 130 — see "Rows vs registrations".
+- Current executable total is owned by `tools/law-count.txt` and the registration identity digest; historical row arithmetic below is retained only to explain the old many-to-many inline layout.
 - origin: incident 96 | principle 53 | unclear 2 (L18, L78).
 - guard: premise-changed only 44 | POSITIVE CONTROL only 6 | both 9 | neither 92.
 - guard = POSITIVE CONTROL only: L47 L49 L53 L54 L55 L56 — all inline.
@@ -483,7 +495,7 @@ same day's audit work took it to **215**) plus the two arms rewritten in `L163` 
   - P4c is cited by NOTHING executable. `grep -rn "P4c" tools/RailCheck src` = zero hits; the only mentions in the repo are `ARCHITECTURE.md:313` and this file. L126 ("a transpiler substitutes a computation, never writes one down") is the nearest shape and it is scoped P6 P3 and covers transpilers only, not the repaint/present seams.
   - All three of P4c's clauses are statically assertable over a named seam set (`UiEventMap` arms, `UiNativeRepaint.Table` entries, `OpenUiRepaint`, `ResearchSync.PresentFromMirror`): (a) no prefix in the set returns false / suppresses native — never BLOCK; (b) no member of the set writes a `[SerializeMember]` leaf — never WRITE; (c) every entry is exception-contained — never THROW into game code. Clause (c) is already an unasserted written promise at `ARCHITECTURE.md:192` ("a registered screen that throws keeps the screen + logs once").
   - The hole is about to be loaded, which is why it is worth closing now rather than noting again: HANDOFF §5c option (C) moves death presentation onto the mirror's own local playback, and §5e classes both new features (pings, player panel) as presentation. Both are P4c by construction and neither has a law. (The ping half arrived the same day and is arm (d) of L158; the panel arrived the same day too and DID inherit the seam set — `PlayerPanel` is in it, and `PlayerPanel.Sync` is a containment point. What the seam set could not carry is whether the panel is fed at all, which is L159. The ping MARKERS — §5e's other feature, and a different thing from the RTT ping — arrived 2026-08-07 too: `PingMarkers` is in the seam set and `PingMarkers.Show` is a containment point, and what the seam set could not carry there is that an arriving ping moves no camera, enters no view state and changes no selection, which is L160.)
-- P13 is PROPOSED: not in `ARCHITECTURE.md`; stated only inside the corpus as a developer mandate quoted by L84 + L91; 18 laws defend it. Recommend writing it into `ARCHITECTURE.md` as a numbered principle.
+- P13 is now part of `ARCHITECTURE.md`; L433 closes the load-barrier authority and paused-peer hole.
 - P12, P14, P15, P16 asserted by `ARCHITECTURE.md` but never numbered there → no source cites them by id today.
 - `law 1` carries ≥3 readings in the corpus: (a) the two primitives Intent+Delta — `src/Rail/IntentRail.cs:11`; (b) join is a save transfer, not a delta — `src/Rail/DiffEngine.cs:33`, `ARCHITECTURE.md` P1 line; (c) never a silent swallow — `src/Rail/RailMeta.cs:1704/:1742`, `src/Rail/GenericApplier.cs:408`, `src/Rail/OpenUiRepaint.cs:331`. P1 states all three; not resolved to one.
 - `law 5` and `law 10` are never defined in `ARCHITECTURE.md` — used only from `src/` (34 and 26 citations). P5 and P10 reconstructed from usage.

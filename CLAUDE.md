@@ -22,14 +22,22 @@
 - Two classes, both registered by one `Add(laws, () => ...)` in `tools/RailCheck/Program.cs`: file-backed `L<n>_<Name>.cs` and inline private methods (`RoundTrip`, `CrcBackstopLaw`, `RootOwnershipLaw`, ...).
 - **Never write `laws.AddRange(...)`** — that shape let one throwing law abort the run and silently disable every law after it (`Program.Add`, L193 arm (d) forbids it coming back).
 - `tools/law-count.txt` holds `files=` and `inline=`; bump the right one — the failure message names which class shrank.
-- New file-backed law needs all three: the `L<n>_<Name>.cs` file, `Add(laws, () => L<n>...Check(...))`, `files=` bumped, plus a `premise-changed` or `POSITIVE CONTROL` guard.
+- New file-backed law needs all three: the `L<n>_<Name>.cs` file, `Add(laws, () => L<n>...Check(...))`, `files=` bumped, plus an executable `premise-changed` or positive-control failure arm.
 - New inline law needs the method plus `Add(laws, () => <Method>(...))` and `inline=` bumped. Prefer a new `L<n>_<Name>.cs` file — inline laws carry no vacuity check.
 - RailCheck REFUSES to run against a `Multiplayer.dll` older than `src/**/*.cs` (exit 2, `RAILCHECK REFUSED`) — so never gate on `dotnet run --no-build`. In a shared tree it also fires when another agent edits during your build: re-run.
 - Guard is mandatory on file-backed laws — an unguarded law passes while checking nothing once its subject stops resolving.
-- `tools/vacuity-exempt.txt` = ratchet of pre-existing unguarded laws. Never add; only remove, after adding a guard.
+- `tools/vacuity-exempt.txt` must remain empty. Exemptions are forbidden; fix an unguarded law instead.
 - Deleting either class: lower the matching number in `tools/law-count.txt` + explain why in the commit body — each law encodes a real past bug.
 - `L<n>` = RailCheck laws only. `ARCHITECTURE.md` principles are being renamed `P<n>` — never conflate.
 - `L<n>` numbering is sparse: L78, L85-L90 are unused; L104 exists as a file but emits no `"L104 ..."` string.
+
+### Mutation checks
+
+- Run `pwsh -NoProfile -File tools/mutation-runner.ps1` for the exhaustive 299/299 harness mutation check; shard with `-StartRegistration` and `-Limit`.
+- Synthetic mutations prove the execution-to-RED path only; never call them semantic coverage.
+- Require compile-valid `src/` mutations for critical authority, barrier, codec, dedupe, ordering, parity, and lifecycle laws.
+- A semantic kill requires the named law RED and restored baseline GREEN; document it in `docs/laws.md`.
+- Do not maintain one production patch per law; add targeted mutations for critical boundaries and fixed critical bugs.
 
 ## Load-bearing
 - `IdentityResolver.RootKinds` (`src/Rail/IdentityResolver.cs:241`) order: first arrival wins the visited set, `"GL"` stays last — enforced by L28. Do not reorder.

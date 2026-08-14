@@ -67,7 +67,25 @@ namespace RailCheck
 
         internal static IEnumerable<string> Check()
         {
-            foreach (var pair in TranspilerTargets())
+            // Executed positive control for the opcode classifier used by both store arms. If it cannot
+            // distinguish a store from the corresponding load, a clean production sweep proves nothing.
+            if (!IsStore("stloc.0|") || !IsStore("starg.s|0") || !IsStore("stfld|field") ||
+                !IsStore("stsfld|field") || IsStore("ldloc.0|") || IsStore("ldfld|field"))
+            {
+                yield return "L126 positive-control: the store classifier failed its executed store/load " +
+                             "contrast, so it cannot falsify a transpiler that writes state";
+                yield break;
+            }
+
+            var pairs = TranspilerTargets().ToList();
+            if (pairs.Count == 0)
+            {
+                yield return "L126 premise-changed: no emittable (transpiler, target) pair was discovered in the " +
+                             "mod assembly, so the IL diff would pass without examining a transpiler";
+                yield break;
+            }
+
+            foreach (var pair in pairs)
             {
                 var transpiler = pair.Key;
                 var target = pair.Value;

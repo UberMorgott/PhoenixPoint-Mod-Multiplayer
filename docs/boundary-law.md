@@ -42,9 +42,9 @@ stomping a valid live ref the host would never re-ship.
 ## L-D — classification is decided ONCE
 
 `RailMeta.BuildField` is the single place a field's class (Leaf/Descend/…/Excluded) is decided.
-Downstream code (encoders, appliers, harness) READS the table; it never re-decides. Known violation,
-kept deliberately: the blob encoder's Excluded-arm salvage (RailMeta.cs:1225 — init-only leaves +
-local back-refs), ponytail-marked; move those into BuildField before adding a third case.
+Downstream code reads that table. The only reviewed exception is the blob encoder's Excluded-arm salvage
+for init-only leaves and local back-references; it is compatibility reconstruction, not a second general
+classifier. Any additional salvage case requires a boundary-law change and an executable law in the same commit.
 
 ## L-E — refuse by classification, not by exception
 

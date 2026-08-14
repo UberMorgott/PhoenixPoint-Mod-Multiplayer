@@ -150,7 +150,7 @@ namespace RailCheck
             if (onAccept == null || noticeSetter == null || noticeGetter == null || build == null ||
                 compare == null || mismatch == null || uiUpdate == null)
             {
-                yield return "L114 seam-gone: SessionManager.HandleConnectionAccepted, " +
+                yield return "L114 premise-changed: SessionManager.HandleConnectionAccepted, " +
                              "SessionManager.VersionMismatchNotice, ParityComparer.VersionNoticeForClient/" +
                              "Compare/MultiplayerVersionMismatch or MultiplayerUI.Update no longer exists — " +
                              "the arms above are exercising a gate that is wired to nothing.";

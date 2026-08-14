@@ -131,7 +131,7 @@ namespace RailCheck
             // first-latch fallback, which is what keeps this arm's subject resolvable).
             var scaleGet = effScale?.GetGetMethod(nonPublic: true);
             if (scaleGet == null)
-                yield return "L100 premise-effective-scale-gone: Base.Core.Timing.EffectiveScale did not resolve — " +
+                yield return "L100 premise-changed: Base.Core.Timing.EffectiveScale did not resolve — " +
                              "the rate the publish-lag correction must be priced at no longer exists, so arm D " +
                              "asserts nothing";
             else if (!CallsMethod(canonical, scaleGet))
