@@ -799,14 +799,14 @@ PhoenixPoint.Geoscape.Entities.Sites.GeoHarvestingSite  <=  InstanceData  resolv
   - EXCLUDED HarvestingNextUpdate (NextUpdate): dto-twin unresolved
   - EXCLUDED Output (List`1): dto-twin unresolved
   + Leaf StartedHarvestingAt (TimeUnit) -> live _startedHarvestingAt
-PhoenixPoint.Geoscape.Entities.GeoHaven  <=  InstanceData  resolved=13/14
+PhoenixPoint.Geoscape.Entities.GeoHaven  <=  InstanceData  resolved=12/14
   + Leaf AlertLevel (HavenAlertLevel)
   + Leaf AlertLevelCooldown (Int32) -> live AlertCooldownDaysLeft
   + Leaf AlienAttackImmunityCounter (Int32)
   + Leaf AssignedResearchId (ResearchDef) -> live AssignedResearch
   + Leaf EnvironmentTag (MissionTagDef) -> live HavenEnvironmentTag
   + Descend Leader (GeoHavenLeader)
-  + Leaf MistRepellerRange (EarthUnits) -> live MistRepeller.Range.Range
+  - EXCLUDED MistRepellerRange (EarthUnits): derived radius, re-accumulated continuously by the client's own native routine from mirrored inputs — MistRepeller.ExpansMistRepeller adds RangeIncrease * time.Delta.TotalDays every frame and clamps to MaxRange (MistRepeller.cs:104-122, rescheduled :119 NextUpdate.NextFrame) on the PER-ACTOR clock, which accrues locally on every peer (see the ActorInstanceData.TimingData opt-out above). Both inputs are already right on the client: RangeIncrease is written from MIRRORED state (GeoHaven.cs:1171 ZonesStats.MistRepellerRange off the mirrored Zones collection; GeoPhoenixBase.cs:401 Stats.MistRepellerRangeIncrease off the mirrored Layout) and MaxRange is DEF-FIXED (HavenDef.MaxMistRepellerRange, GeoHaven.cs:1167/1368; PhoenixBaseDef.MaxMistRepellerRange, GeoPhoenixBase.cs:956), with no RNG anywhere on the path. The SEED still lands: the value is in the transferred save and the game reads it back itself (GeoHaven.cs:1369, GeoPhoenixBase.cs:969). Mirroring the RESULT cannot converge while the radius expands — two peers sampling the same ramp a rail-hop apart never hold the same float — so it reported as a CRC divergence candidate on every walk (4x in one 2026-08-14 client session) and trained readers to ignore the CRC log. Same class as the derived pose below. Nothing branches on the byte-identical value per peer: the only gameplay consumer is GeoSite.IsInMistRepeller -> GeoHavenDefenseMission.cs:103 (attacker strength), evaluated where the mission is CONSTRUCTED, i.e. on the host; every other reader is the mist RENDER (MistRendererSystem, redrawn per frame from the live values)
   + Descend NewRecruit (GeoUnitDescriptor) -> live AvailableRecruit
   + LeafList OfferedResources (ResourcePack) -> live StockedResources unordered=no apply=Clear+Add
   + Leaf OriginalOwner (PPFactionDef)
@@ -814,13 +814,13 @@ PhoenixPoint.Geoscape.Entities.GeoHaven  <=  InstanceData  resolved=13/14
   + Leaf RecruitChecked (Boolean) -> live QuerySpawnNewRecruit
   + EntityCollection Zones (List`1) -> live _zones unordered=no apply=IList
   - EXCLUDED _oldRecruit (GeoCharacter): v<4 migration leftover — RecordInstanceData never writes it (GeoHaven.cs:1509-1527); the live recruit rides as NewRecruit -> AvailableRecruit
-PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase  <=  InstanceData  resolved=8/9
+PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase  <=  InstanceData  resolved=7/9
   + Leaf AttackProtectionHours (Int32) -> live BaseAssaultProtectionHours
   + Leaf AutoAssignEnabled (Boolean)
   + Leaf InfestationCounterBase (Int32) -> live _infestationCounterBase
   + Descend Layout (GeoPhoenixBaseLayout)
   + Leaf LocationDescription (LocalizedTextBind)
-  + Leaf MistRepellerRange (EarthUnits) -> live MistRepeller.Range.Range
+  - EXCLUDED MistRepellerRange (EarthUnits): derived radius, re-accumulated continuously by the client's own native routine from mirrored inputs — MistRepeller.ExpansMistRepeller adds RangeIncrease * time.Delta.TotalDays every frame and clamps to MaxRange (MistRepeller.cs:104-122, rescheduled :119 NextUpdate.NextFrame) on the PER-ACTOR clock, which accrues locally on every peer (see the ActorInstanceData.TimingData opt-out above). Both inputs are already right on the client: RangeIncrease is written from MIRRORED state (GeoHaven.cs:1171 ZonesStats.MistRepellerRange off the mirrored Zones collection; GeoPhoenixBase.cs:401 Stats.MistRepellerRangeIncrease off the mirrored Layout) and MaxRange is DEF-FIXED (HavenDef.MaxMistRepellerRange, GeoHaven.cs:1167/1368; PhoenixBaseDef.MaxMistRepellerRange, GeoPhoenixBase.cs:956), with no RNG anywhere on the path. The SEED still lands: the value is in the transferred save and the game reads it back itself (GeoHaven.cs:1369, GeoPhoenixBase.cs:969). Mirroring the RESULT cannot converge while the radius expands — two peers sampling the same ramp a rail-hop apart never hold the same float — so it reported as a CRC divergence candidate on every walk (4x in one 2026-08-14 client session) and trained readers to ignore the CRC log. Same class as the derived pose below. Nothing branches on the byte-identical value per peer: the only gameplay consumer is GeoSite.IsInMistRepeller -> GeoHavenDefenseMission.cs:103 (attacker strength), evaluated where the mission is CONSTRUCTED, i.e. on the host; every other reader is the mist RENDER (MistRendererSystem, redrawn per frame from the live values)
   + Leaf ScannerEnabled (Boolean) -> live SiteScanner.ScannerEnabled
   + Leaf SiteScannerRange (EarthUnits) -> live SiteScanner.Range.Range
   - EXCLUDED Version (Int32): serializer schema version, not state — the DTO's [SerializeType(Version=3)] stamp
@@ -831,7 +831,7 @@ PhoenixPoint.Geoscape.Entities.VehicleFactionController  <=  InstanceData  resol
   + Leaf LastVisitedSite (GeoSite) -> live _lastVisitedSited
   + Leaf WaitForSiteMission (GeoSite) -> live _waitSiteMission
   - EXCLUDED WaitingUpdateTime (NextUpdate): scheduler handle, not state — the DTO records an IUpdateable.NextUpdate whose writer is Timing.Start and whose live handle field is private with no counterpart of this name. What it schedules is a MONOTONE ACCUMULATOR clamped to a def-fixed maximum, and the accumulated VALUE now mirrors through a twin alias, which is the half that matters. Mirroring the client's own next-wakeup time on top of its own live scheduler would fight it (law 4b); correcting the value will not. Same class as the exploration handle above
-twin summary: resolved=81 gaps=34 dispatch=7
+twin summary: resolved=79 gaps=36 dispatch=7
 
 null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), GeoHavenDefenseMissionInstanceData.AttackingSites (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
 

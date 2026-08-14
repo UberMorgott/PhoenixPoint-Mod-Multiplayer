@@ -151,6 +151,26 @@ namespace Multiplayer.Network.Sync
             "next-wakeup time on top of its own live scheduler would fight it (law 4b); correcting the value " +
             "will not. Same class as the exploration handle above";
 
+        private const string MistRepellerRadiusOptOut =
+            "derived radius, re-accumulated continuously by the client's own native routine from mirrored " +
+            "inputs — MistRepeller.ExpansMistRepeller adds RangeIncrease * time.Delta.TotalDays every frame " +
+            "and clamps to MaxRange (MistRepeller.cs:104-122, rescheduled :119 NextUpdate.NextFrame) on the " +
+            "PER-ACTOR clock, which accrues locally on every peer (see the ActorInstanceData.TimingData " +
+            "opt-out above). Both inputs are already right on the client: RangeIncrease is written from " +
+            "MIRRORED state (GeoHaven.cs:1171 ZonesStats.MistRepellerRange off the mirrored Zones " +
+            "collection; GeoPhoenixBase.cs:401 Stats.MistRepellerRangeIncrease off the mirrored Layout) and " +
+            "MaxRange is DEF-FIXED (HavenDef.MaxMistRepellerRange, GeoHaven.cs:1167/1368; " +
+            "PhoenixBaseDef.MaxMistRepellerRange, GeoPhoenixBase.cs:956), with no RNG anywhere on the path. " +
+            "The SEED still lands: the value is in the transferred save and the game reads it back itself " +
+            "(GeoHaven.cs:1369, GeoPhoenixBase.cs:969). Mirroring the RESULT cannot converge while the " +
+            "radius expands — two peers sampling the same ramp a rail-hop apart never hold the same float — " +
+            "so it reported as a CRC divergence candidate on every walk (4x in one 2026-08-14 client " +
+            "session) and trained readers to ignore the CRC log. Same class as the derived pose below. " +
+            "Nothing branches on the byte-identical value per peer: the only gameplay consumer is " +
+            "GeoSite.IsInMistRepeller -> GeoHavenDefenseMission.cs:103 (attacker strength), evaluated where " +
+            "the mission is CONSTRUCTED, i.e. on the host; every other reader is the mist RENDER " +
+            "(MistRendererSystem, redrawn per frame from the live values)";
+
         private static readonly Dictionary<string, string> _optOutMembers = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             // Timing.Now = StartTime + OwnNow (decompile Base.Core/Timing.cs:55) where OwnNow accrues from
@@ -218,6 +238,14 @@ namespace Multiplayer.Network.Sync
             { "PhoenixPoint.Geoscape.Entities.GeoHaven._oldRecruit", "v<4 migration leftover — RecordInstanceData never writes it (GeoHaven.cs:1509-1527); the live recruit rides as NewRecruit -> AvailableRecruit" },
             // Serializer schema version, not game state (GeoPhoenixBase.InstanceData is [SerializeType(Version = 3)]).
             { "PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.Version", "serializer schema version, not state — the DTO's [SerializeType(Version=3)] stamp" },
+
+            // The two mist-repeller radii. Keyed on the LIVE types whose tables carry them (GeoHaven,
+            // GeoPhoenixBase — the DTO members ride those bridged tables, there is no [direct] table for
+            // either InstanceData), deliberately NOT on GeoAlienBase.BaseExpansion: the alien base's own
+            // Range.Range is the SOURCE of the mist and its expansion handle opt-out above explicitly leans
+            // on that value riding, so the reason here would be false there.
+            { "PhoenixPoint.Geoscape.Entities.GeoHaven.MistRepellerRange", MistRepellerRadiusOptOut },
+            { "PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.MistRepellerRange", MistRepellerRadiusOptOut },
 
             // The three POSE carriers of a navigating actor. Keyed on the two owners whose tables carry them
             // (the twin table's owner is the LIVE type — GeoVehicle, which the base walk extends to
@@ -558,6 +586,10 @@ namespace Multiplayer.Network.Sync
             // record / :969 process), and GeoRangeComponent.Range is a real setter with a change-guard that
             // fires OnRangeChanged and rescales the range indicator (GeoRangeComponent.cs:29-46) — so a
             // mirrored radius repaints the globe natively, no UI seam needed.
+            // NOTE: both MistRepellerRange rows are currently INERT — the member is opted out above
+            // (MistRepellerRadiusOptOut, the derived radius), and BuildField consults the opt-out before
+            // resolution. Kept so that dropping the opt-out restores the mapping instead of a silent
+            // "dto-twin unresolved"; the hop chain itself is still exercised by SiteScannerRange.
             { "PhoenixPoint.Geoscape.Entities.GeoHaven.MistRepellerRange", "MistRepeller.Range.Range" },  // GeoHaven.cs:1518 / :1369 (MistRepeller is lazily null — SetValue's hop guard covers it)
             { "PhoenixPoint.Geoscape.Entities.GeoHaven.AlertLevelCooldown", "AlertCooldownDaysLeft" },    // GeoHaven.cs:1520 — the haven ALERT countdown (:904 decrements it)
             { "PhoenixPoint.Geoscape.Entities.GeoHaven.OfferedResources", "StockedResources" },           // GeoHaven.cs:1519 — the trade stock the haven screen shows

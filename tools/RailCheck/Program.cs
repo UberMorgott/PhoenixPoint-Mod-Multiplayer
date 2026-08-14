@@ -418,6 +418,7 @@ namespace RailCheck
             Add(laws, () => L475_TheOpeningGrantListIsSilentUntilTheFirstMapSurface.Check());
             Add(laws, () => L480_TheHavenResearchRollIsHostOnly.Check(game));
             Add(laws, () => L481_ADroppedReferenceAsksForItselfBack.Check());
+            Add(laws, () => L483_TheMistRepellerRadiusIsDerived.Check());
             Add(laws, () => L472_EveryDoorIntoAiEvaluationIsKnownAndGatedOnce.Check(game));
             laws.Sort(StringComparer.Ordinal);
 
@@ -466,8 +467,8 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 317;
-        private const string ExpectedExecutionIdentityDigest = "8632c4ae51144e0f33bb2f31247f8a903ce5f6660f9ba4e7d4d3e72d7b244e8a";
+        private const int ExpectedLawRegistrations = 318;
+        private const string ExpectedExecutionIdentityDigest = "725a89bd51c66fbe70185aa3171598141ae184896e94da57774b0a4db66c6e2d";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
@@ -11143,8 +11144,10 @@ namespace RailCheck
         }
 
         /// <summary>L56 — THE HAVEN / BASE / ALIEN-BASE STATUS TWINS MUST STAY RESOLVED. Capture status, haven
-        /// alert, base assault protection, scanner reach and both mist radii are the state the derived
-        /// objectives panel (L55) and the globe read back. All of them live on DTO members whose live carrier
+        /// alert, base assault protection, scanner reach and the alien base's expansion are the state the
+        /// derived objectives panel (L55) and the globe read back. (The two haven/base mist REPELLER radii
+        /// used to be rows here; they are a derived per-frame accumulation the client re-runs from mirrored
+        /// inputs, are now an explicit opt-out, and L483 owns them.) All of them live on DTO members whose live carrier
         /// the name conventions cannot reach — the DTO name is not the storage name, or the carrier sits one
         /// or TWO hops down a component (<c>MistRepeller.Range.Range</c>, <c>SiteScanner.Range.Range</c>, the
         /// mapping the game itself performs at GeoHaven.cs:1518/1369 and GeoPhoenixBase.cs:1108/969).
@@ -11159,14 +11162,12 @@ namespace RailCheck
             // (live type, DTO type, DTO member, expected live leaf, expected hop chain)
             var rows = new (Type Live, Type Dto, string Member, string Leaf, string[] Hops)[]
             {
-                (typeof(PhoenixPoint.Geoscape.Entities.GeoHaven), typeof(PhoenixPoint.Geoscape.Entities.GeoHaven.InstanceData),
-                    "MistRepellerRange", "Range", new[] { "MistRepeller", "Range" }),
+                // The two MistRepellerRange rows moved OUT of this law: the radius is a derived
+                // accumulation the client re-runs itself and is now an explicit opt-out, asserted by L483.
                 (typeof(PhoenixPoint.Geoscape.Entities.GeoHaven), typeof(PhoenixPoint.Geoscape.Entities.GeoHaven.InstanceData),
                     "AlertLevelCooldown", "AlertCooldownDaysLeft", null),
                 (typeof(PhoenixPoint.Geoscape.Entities.GeoHaven), typeof(PhoenixPoint.Geoscape.Entities.GeoHaven.InstanceData),
                     "OfferedResources", "StockedResources", null),
-                (typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase), typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.InstanceData),
-                    "MistRepellerRange", "Range", new[] { "MistRepeller", "Range" }),
                 (typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase), typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.InstanceData),
                     "SiteScannerRange", "Range", new[] { "SiteScanner", "Range" }),
                 (typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase), typeof(PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.InstanceData),
