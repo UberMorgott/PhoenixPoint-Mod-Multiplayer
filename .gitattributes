@@ -1,0 +1,2 @@
+# Git for Windows runs hooks through sh; CRLF would break the shebang.
+.githooks/* text eol=lf
