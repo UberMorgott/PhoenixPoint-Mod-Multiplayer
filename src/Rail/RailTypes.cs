@@ -8,6 +8,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using Base.Core;
 using Base.Defs;
+using Base.Entities.Statuses;
 using Base.Serialization;
 using Base.Serialization.General;
 using PhoenixPoint.Geoscape.Levels;
@@ -118,8 +119,76 @@ namespace Multiplayer.Network.Sync
                 WrapFi.SetValue(boxed, v);
                 v = boxed;
             }
+            // REACTIVITY, at the one seam every mirrored value passes: see EchoStatChange. Read BEFORE the
+            // write, echo AFTER it — a BaseStat carries its value in a plain field, so nothing else would.
+            var stat = o as BaseStat;
+            float before = stat == null ? 0f : (float)stat.Value;
             if (Fi != null) Fi.SetValue(o, v);
             else Pi.SetValue(o, v, null);
+            if (stat != null) EchoStatChange(stat, before);
+        }
+
+        /// <summary>
+        /// THE SEAM IS THE STAT ITSELF — the geoscape twin of <c>TacticalUiRepaint</c>'s postfix on
+        /// <c>BaseStat.OnStatChange</c>, and the reason this file needs no per-panel repaint anywhere.
+        ///
+        /// <c>BaseStat.Value</c> is a public FIELD (decompile Base.Entities.Statuses/BaseStat.cs:21), so a
+        /// mirrored write lands it directly and never passes <c>BaseStat.Set</c>:95 →
+        /// <c>OnStatChange</c>:111. That method raises <c>StatChangeEvent</c>:50, which is what EVERY
+        /// stat-driven widget in the game subscribes to and the ONLY thing that repaints most of them:
+        /// the flying aircraft's crew strip (<c>AircraftCrewController</c>:90-95 sets
+        /// <c>CrewBarsNeedRefresh</c> at :216, its own <c>Update</c>:235-242 then re-runs
+        /// <c>RefreshCrewBars</c>:172-203 — the health and stamina sliders), the corruption report
+        /// (<c>UIModuleCorruptionReport</c>:181), the roster (<c>UIStateGeoRoster</c>:343-344), the
+        /// edit-soldier screen (<c>UIStateEditSoldier</c>:340) and the geoscape log
+        /// (<c>GeoscapeLog</c>:612-615). On a non-authoritative peer the numbers were arriving and correct
+        /// in the model — the rail carries <c>GeoCharacter._health</c> and <c>_fatigue._stamina</c>, and
+        /// the client log's "UiEventMap: StatusStat rides the universal open-screen repaint" is that
+        /// traffic landing — and every one of those widgets sat frozen on the paint it was built with.
+        /// One echo here unfreezes all of them, on every screen, for every stat, with no screen re-enter
+        /// (which a stat stream must never trigger — law L63) and no UI code that knows a rail exists.
+        ///
+        /// VALUE ONLY, deliberately. Min/Max ride the same struct but move only on augmentation and
+        /// level-up, both of which tear their screen down anyway; a Min/Max write leaves Value untouched,
+        /// compares equal here and raises nothing. Widen the day a Max-only change is seen going stale.
+        ///
+        /// Subscribers are game code and may throw; a throw would abort the rest of the apply batch, so it
+        /// is caught and logged once per session.
+        /// </summary>
+        private static void EchoStatChange(BaseStat stat, float before)
+        {
+            if (_raiseStatChange == null) return;
+            float now = stat.Value;
+            if (now == before) return;
+            try { _raiseStatChange(stat, StatChangeType.Value, before, now); }
+            catch (Exception ex)
+            {
+                if (_statEchoWarned) return;
+                _statEchoWarned = true;
+                MpLog.LogWarning("[Multiplayer][rail] a StatChangeEvent subscriber threw on a mirrored " +
+                                 "stat write (" + stat.Name + "); stat-driven bars may be stale until the " +
+                                 "screen is re-entered (logged once): " + ex);
+            }
+        }
+
+        // Open-instance delegate over the protected raiser, built once. Null only if the game renames it,
+        // which is a silent no-echo — L497 asserts the resolve so that cannot pass unnoticed.
+        private static readonly Action<BaseStat, StatChangeType, float, float> _raiseStatChange =
+            BuildStatRaiser();
+
+        private static bool _statEchoWarned;
+
+        private static Action<BaseStat, StatChangeType, float, float> BuildStatRaiser()
+        {
+            var mi = typeof(BaseStat).GetMethod("OnStatChange",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (mi == null) return null;
+            try
+            {
+                return (Action<BaseStat, StatChangeType, float, float>)Delegate.CreateDelegate(
+                    typeof(Action<BaseStat, StatChangeType, float, float>), mi);
+            }
+            catch { return null; }
         }
 
         internal bool IsWritable()

@@ -93,10 +93,23 @@ namespace Multiplayer.Network.Sync
         /// <summary>The SAME reject, but PUT ON THE PLAYER'S SCREEN — a SEPARATE call site on the notifying
         /// overload precisely so L123's allowlist covers this one arm and cannot widen into the whole vehicle
         /// family (the EquipSync.RejectAndNotify precedent, EquipSync.cs:1189). Reached only from
-        /// <see cref="HandleExploreSite"/>'s two mirror-disagreement arms — see the reason consts.</summary>
-        private static void RejectAndNotify(ulong peer, string vehicleRef, string why) =>
-            IntentRail.Reject(SurfaceIds.GeoVehicleIntent, peer, (vehicleRef ?? "V#?") + " — " + why,
-                              true, Scope(vehicleRef));
+        /// <see cref="HandleExploreSite"/>'s two mirror-disagreement arms — see the reason consts.
+        ///
+        /// THE WIRE CARRIES THE PLAYER'S SENTENCE, THE LOG CARRIES THE DIAGNOSIS (L501). The nudge's reason
+        /// is the only text that reaches a screen, so it is written for the player: no root key, no op code,
+        /// no "stale mirror". The engineering half stays here, in the host's own log, where it is read.</summary>
+        private static void RejectAndNotify(ulong peer, string vehicleRef, string why)
+        {
+            MpLog.LogWarning("[MP][vehicle] HOST explore REJECT (notified) " + (vehicleRef ?? "V#?") + " — " + why);
+            IntentRail.Reject(SurfaceIds.GeoVehicleIntent, peer, PlayerText(why), true, Scope(vehicleRef));
+        }
+
+        /// <summary>What the refused player is actually told, in the game's own voice — short, no blame, no
+        /// identifiers, and never the name of a mod. PURE, and the ONLY producer of vehicle popup text.</summary>
+        internal static string PlayerText(string why) =>
+            ReferenceEquals(why, AlreadyExploringReason) ? "This aircraft is already exploring this site."
+            : ReferenceEquals(why, NotExplorableReason) ? "There is nothing to explore at this location."
+            : null;
 
         /// <summary>THE TWO EXPLORE REFUSALS VANILLA HAS NO CONTROL TO GREY, named so the handler can decide
         /// the notify bit by IDENTITY (the <c>BusyRefusal</c> pattern, TacticalCommandSync.cs:1752) instead of
@@ -115,9 +128,10 @@ namespace Multiplayer.Network.Sync
         /// <summary>WHICH vehicle refusal earns the player's screen — pure so RailCheck L485 can drive the REAL
         /// decision instead of a copy that can agree with itself while the handler disagrees. True for exactly
         /// the two arms above; every other refusal (not docked, cannot redirect, already parked, no crew,
-        /// nothing that can explore) is one the game's OWN gate greys, so a modal for it would be noise.</summary>
-        internal static bool ShouldNotify(string why) =>
-            ReferenceEquals(why, AlreadyExploringReason) || ReferenceEquals(why, NotExplorableReason);
+        /// nothing that can explore) is one the game's OWN gate greys, so a modal for it would be noise.
+        /// Answered BY <see cref="PlayerText"/> rather than beside it: "we notify this arm" and "we have a
+        /// sentence for this arm" cannot drift apart if there is only one table.</summary>
+        internal static bool ShouldNotify(string why) => PlayerText(why) != null;
 
         // ─── THE ONE VALIDATOR (pure — RailCheck L32 drives it) ─────────────
 

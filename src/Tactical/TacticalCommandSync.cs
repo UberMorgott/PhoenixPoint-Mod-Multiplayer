@@ -994,7 +994,10 @@ namespace Multiplayer.Tactical
                 MpLog.Log("[Multiplayer][tac] this peer's command was REFUSED locally — " + refusal +
                           ". First-to-act-wins: that soldier is released the moment its own action ends, which " +
                           "no human has to do (postulate 2). Every other soldier stays commandable.");
-                SessionNotifier.ShowToast(refusal, modalFallback: true);
+                // The player's half, not the diagnostic (L501): the sentence above is the log's, this one is
+                // his. Same rate limit as the remote half — clicking a soldier someone else is driving four
+                // times must not stack four prompts.
+                SessionNotifier.ShowRefusal(PlayerText(BusyRefusal));
                 // AND THE SCREEN COMES BACK (L231). Returning true suppresses the native body's state switch as
                 // well, so a refusal that did not release left the player standing in the targeting state his
                 // click never left, with a toast telling him about a button that no longer did anything.
@@ -1763,9 +1766,18 @@ namespace Multiplayer.Tactical
 
         /// <summary>WHICH command refusal earns the player's screen — pure so RailCheck L485 can drive the REAL
         /// decision. True for exactly the two co-op-invented arms; the game's own ability gate, AP and WP are
-        /// refusals vanilla expresses by DISABLING the control, and a modal per click for those is noise.</summary>
-        internal static bool ShouldNotify(string refusal) =>
-            ReferenceEquals(refusal, BusyRefusal) || ReferenceEquals(refusal, TargetNotOfferedRefusal);
+        /// refusals vanilla expresses by DISABLING the control, and a modal per click for those is noise.
+        /// Answered BY <see cref="PlayerText"/>, so the notify decision and the sentence cannot drift.</summary>
+        internal static bool ShouldNotify(string refusal) => PlayerText(refusal) != null;
+
+        /// <summary>What the refused player is actually told (L501), in the voice the game uses for its own
+        /// refusals — <c>AbilityDisabledState.NoValidTarget</c> is literally "no valid target", so the board
+        /// disagreement says the same thing the vanilla gate would have said had it been able to. No actor
+        /// key, no op code, no protocol vocabulary: the engineering sentence stays in the log. PURE.</summary>
+        internal static string PlayerText(string refusal) =>
+            ReferenceEquals(refusal, BusyRefusal) ? "Another player is already commanding this soldier."
+            : ReferenceEquals(refusal, TargetNotOfferedRefusal) ? "No valid target."
+            : null;
 
         internal static string Validate(bool actorFound, bool actorAlive, bool actorIsPlayerControlled,
                                         bool factionIsPlayingTurn, bool abilityFound, bool abilityIsRider,
@@ -2257,8 +2269,10 @@ namespace Multiplayer.Tactical
             {
                 // No geoscape path prefix: a tactical reject touches nothing on the value rail, and the reject
                 // NUDGE is what repaints the gesturing client's own screen.
-                // Named, not keyed: since L123 this string is shipped to the refused peer and put on its
-                // screen, so it is read by a player and not only by whoever opens the host's log.
+                // TWO TEXTS, ONE DECISION (L501). The notified arms ship the PLAYER's sentence, because that
+                // string is the only thing that reaches a screen and "command for Soldier_6: that actor is
+                // already executing an ability" is a log line wearing a popup's clothes. The engineering
+                // sentence still goes to the host's log, in full, one line above.
                 // NOTIFY, for this refusal only. IntentRail's own doc reserves the popup for a MOD-PROTOCOL
                 // refusal that leaves the player with a dead gesture and no other feedback — "another peer
                 // already took this soldier" is the textbook case, and it was the one arriving silently: the
@@ -2266,9 +2280,13 @@ namespace Multiplayer.Tactical
                 // a cancel and no word. TargetNotOfferedRefusal joined it for the same reason (see its doc):
                 // the client's own GetTargets published that target, so vanilla greyed nothing on that peer.
                 // Every other arm keeps the quiet form (vanilla greys those controls).
+                string shown = PlayerText(refusal);
+                if (shown != null)
+                    MpLog.LogWarning("[Multiplayer][tac] HOST REJECT (notified) command for " +
+                                     SafeActorName(actor) + ": " + refusal);
                 IntentRail.Reject(SurfaceIds.TacCommandIntent, senderPeerId,
-                                  "command for " + SafeActorName(actor) + ": " + refusal,
-                                  ShouldNotify(refusal));
+                                  shown ?? ("command for " + SafeActorName(actor) + ": " + refusal),
+                                  shown != null);
                 // Snap his speculative local play back — but only if the actor is idle HERE. If it is busy, the
                 // command that won is still running and its own end-of-action settle is the corrector; a settle
                 // taken mid-flight would ship a position the host itself is about to leave.

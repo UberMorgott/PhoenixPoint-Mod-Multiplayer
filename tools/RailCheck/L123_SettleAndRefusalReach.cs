@@ -117,7 +117,7 @@ namespace RailCheck
             var reject = rejects.FirstOrDefault(m => m.GetParameters().Any(p => p.ParameterType == typeof(bool)));
             var rejectQuiet = rejects.FirstOrDefault(m => !m.GetParameters().Any(p => p.ParameterType == typeof(bool)));
             var inbound = typeof(IntentRail).GetMethod("HandleInbound", All);
-            var toast = typeof(SessionNotifier).GetMethod("ShowToast", All);
+            var toast = typeof(SessionNotifier).GetMethod("ShowRefusal", All);
             var encodeNudge = typeof(IntentRail).GetMethod("EncodeNudge", All);
             var decodeNudge = typeof(IntentRail).GetMethod("DecodeNudge", All);
             var sendToClient = typeof(NetworkEngine).GetMethod("SendToClient", All);
@@ -136,7 +136,7 @@ namespace RailCheck
                              "(TacticalTurnSync.HostBroadcastTurn/HostSweepTick, TacticalCommandSync.HostSettleAllLive/" +
                              "HostSettle, TacticalActorKey.Of, BaseMap.GetActors, IntentRail.Reject in BOTH " +
                              "its quiet and its notifying overload / HandleInbound / EncodeNudge / " +
-                             "DecodeNudge, SessionNotifier.ShowToast, NetworkEngine.SendToClient/" +
+                             "DecodeNudge, SessionNotifier.ShowRefusal, NetworkEngine.SendToClient/" +
                              "BroadcastToAll, TacticalLevelController.ExecuteAIEvaluationAbilities/" +
                              "ExecuteQueuedAbilitiesSequence, ClientAiEvaluationSeamGate.Prefix). Every arm below " +
                              "would pass vacuously, so 'drift is corrected and refusals are heard' is " +

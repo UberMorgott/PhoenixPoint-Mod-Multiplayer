@@ -131,7 +131,7 @@ namespace RailCheck
 
             // ── (c) THE REFUSAL IS VISIBLE, on BOTH sides of the wire ─────────
             var asm = drive.Assembly;
-            if (!Program.Callees(prefix, asm).Any(c => c.Name == "ShowToast"))
+            if (!Program.Callees(prefix, asm).Any(c => c.Name == "ShowRefusal"))
                 yield return "L146 refusal-is-silent: the local gate refuses a click and shows the player " +
                              "nothing. A dead click with no word is this repo's dominant bug class — it was " +
                              "already measured once (five refused shots in 45 s while the host answered itself " +

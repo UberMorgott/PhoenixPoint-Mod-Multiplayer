@@ -200,7 +200,10 @@ namespace Multiplayer.Network.Sync
                 MpLog.Log("[MP][intent] CLIENT " + Tag(surfaceId) + " reject nudge — repainting open UI" +
                           (reason == null ? "" : " — " + reason) + (notify ? " [notify]" : ""));
                 OpenUiRepaint.MarkDirty();
-                if (notify && reason != null) SessionNotifier.ShowToast(reason, modalFallback: true);
+                // ONE brief notice, deduplicated and rate limited, with the identifiers stripped — the log
+                // line above keeps the full detail, which is where diagnosis belongs (L501). A refused
+                // click is ordinary game feedback, not a report; it must not read as an error.
+                if (notify && reason != null) SessionNotifier.ShowRefusal(reason);
                 return true;
             }
             try

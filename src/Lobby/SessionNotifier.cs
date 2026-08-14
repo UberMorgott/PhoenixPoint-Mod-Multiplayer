@@ -78,6 +78,79 @@ namespace Multiplayer.Network
         //     just chosen to leave.
         // The join toast below stays: nothing else raises one.
 
+        // ─── A REFUSED CLICK (L501) ─────────────────────────────────────────
+        // The reject nudge's `notify` bit lands here. It is NOT a session event: it is the answer to one
+        // click, so it gets the smallest surface that still answers, and it gets it AT MOST ONCE.
+        //
+        // WHAT WENT WRONG (2026-08-14, the session after L485 shipped). The refusals reached the player —
+        // and read as a crash. Four "assign U#12 — TFTV refused the assignment" and three tac-cmd lines in
+        // one session, each one an internal sentence written for a log: root keys, op codes, the name of a
+        // third-party mod as the author of a failure. Zero exceptions in that whole session; the defect
+        // count did not move. The session merely READ as broken, which is a real regression in felt quality.
+        //
+        // So the notice is a PLAYER's sentence and nothing else:
+        //   • Scrub strips our internal identifiers (U#/V# root keys, op=, nonce=, peer=) at the ONE seam
+        //     every notifying call site passes through, so a future caller cannot leak one by forgetting.
+        //   • Collapses drops a repeat, and — where the only surface is the native PROMPT (tactical has no
+        //     NotificationController) — drops ANY second notice inside the window, because four stacked
+        //     modal boxes for four dead clicks is the alarming half of this bug.
+        // Both are pure so RailCheck L501 drives the REAL decision instead of a copy of it.
+
+        internal const float RefusalWindow = 10f;
+        private static string _lastRefusalText;
+        private static float _lastRefusalAt = -1000f;
+
+        private static readonly System.Text.RegularExpressions.Regex InternalIds =
+            new System.Text.RegularExpressions.Regex(@"\s*(U#\d+|V#[^\s]+|op=\d+|nonce=\d+|peer=\d+|\(throw\))",
+                                                     System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>The player-facing form of a refusal reason: our internal identifiers removed and any
+        /// separator they left behind trimmed. Null when nothing sayable survives (the caller then shows
+        /// nothing rather than an empty box). PURE.</summary>
+        internal static string Scrub(string why)
+        {
+            if (string.IsNullOrEmpty(why)) return null;
+            var s = InternalIds.Replace(why, "").Trim(' ', '\t', '—', '-', ':', ',');
+            return s.Length == 0 ? null : s;
+        }
+
+        /// <summary>Whether this refusal notice is DROPPED as a repeat. On a surface with the game's own
+        /// transient toast, only an identical sentence collapses (two different refusals are two facts).
+        /// Where the only surface is the modal prompt, ANY second notice inside the window collapses —
+        /// stacked boxes are the thing being fixed. PURE.</summary>
+        internal static bool Collapses(string text, string lastText, float sinceLast, bool transientSurface) =>
+            sinceLast < RefusalWindow &&
+            (!transientSurface || string.Equals(text, lastText, StringComparison.Ordinal));
+
+        /// <summary>THE refusal seam: one brief notice for a click the host refused, deduplicated and rate
+        /// limited, with the full detail left in the log by the caller. Never throws.</summary>
+        internal static void ShowRefusal(string why)
+        {
+            var text = Scrub(why);
+            if (text == null) return;
+            try
+            {
+                float now = Time.realtimeSinceStartup;
+                bool transient = FindToastSurface() != null;
+                if (Collapses(text, _lastRefusalText, now - _lastRefusalAt, transient))
+                {
+                    MpLog.Log("[Multiplayer] refusal notice collapsed (one already shown within " +
+                              RefusalWindow.ToString("0") + "s): " + text);
+                    return;
+                }
+                _lastRefusalText = text;
+                _lastRefusalAt = now;
+                ShowToast(text, modalFallback: true);
+            }
+            catch (Exception e) { MpLog.LogError("[Multiplayer] refusal notice failed: " + e.Message); }
+        }
+
+        private static NotificationController FindToastSurface()
+        {
+            try { return UnityEngine.Object.FindObjectOfType<NotificationController>(); }
+            catch { return null; }
+        }
+
         /// <summary>
         /// Show a transient toast via the live native NotificationController if one exists in the
         /// current context (geoscape / main menu). No-op in tactical (none present) — chat-only there.
@@ -88,7 +161,7 @@ namespace Multiplayer.Network
         {
             try
             {
-                var controller = UnityEngine.Object.FindObjectOfType<NotificationController>();
+                var controller = FindToastSurface();
                 if (controller != null)
                 {
                     controller.ShowNotification(message);
