@@ -34,11 +34,16 @@ namespace RailCheck
     ///   (e) <c>diff-only-reaches-a-log</c> — the lobby roster row must paint the mismatch in WORDS from
     ///       the row's own diff text, not only as a badge that has to be noticed and clicked.
     ///   (f) <c>parity-gate-waits-on-a-human</c> — the gate stays SOFT and computed: readiness follows
-    ///       from the diff text alone, never from anyone pressing anything (second postulate, no quorums).
+    ///       from the diff text alone, never from anyone pressing anything (second postulate, no quorums),
+    ///       and a diff that really does break the wire still stops that peer.
+    ///   (g) <c>build-gap-blocks-ready</c> — and the BUILD line itself is a BADGE: it paints, it does not
+    ///       lock READY. Both peers run the release they think they run, and the shape that hits it most is
+    ///       the owner's own hand-deployed Multiplayer.dll reaching one instance before another.
     ///
     /// Falsify: make ComposeVersion return the bare version → (a) red; compare only BaseVersion → (a) red;
     /// diff on an unknown hash → (c) red; drop the hashes from the message → (d) red; delete the status-cell
-    /// wording from LobbyPanel → (e) red.
+    /// wording from LobbyPanel → (e) red; ReadyAllowed back to `string.IsNullOrEmpty(parityDiffs)` → (g)
+    /// red; ReadyAllowed → `true` → (f) red.
     /// </summary>
     internal static class L474_TheParityManifestKnowsWhichBuildItIsTalkingTo
     {
@@ -116,11 +121,26 @@ namespace RailCheck
                              "and starts the session. The status cell is already a sentence about that peer; " +
                              "the mismatch belongs in it.";
 
-            if (!ParityComparer.ReadyAllowed("") || ParityComparer.ReadyAllowed(line.Length > 0 ? line : "x"))
+            if (!ParityComparer.ReadyAllowed("") ||
+                ParityComparer.ReadyAllowed("Mod missing on client: some.other.mod v2.0"))
                 yield return "L474 parity-gate-waits-on-a-human: readiness no longer follows from the diff " +
                              "text alone. The gate is SOFT and computed — it must never become a peer " +
                              "confirming, acknowledging or voting on anything (second postulate: one player " +
-                             "drives the whole game while everyone else is AFK).";
+                             "drives the whole game while everyone else is AFK) — and a diff that really " +
+                             "does break the wire must still stop that peer.";
+
+            // (g) THE BUILD LINE IS A BADGE, NOT A BLOCK. Content identity is the right instrument, but it
+            // rides the same text the READY gate reads, so shipping it turned every same-version byte gap
+            // into a hard stop overnight: a Workshop copy against a local build of one release, and — during
+            // development, constantly — a hand-deployed Multiplayer.dll that reached one instance and not
+            // another. Those peers could ready the day before and have nothing to fix at the moment they are
+            // stopped. The words stay; the lock goes.
+            if (line.Length > 0 && !ParityComparer.ReadyAllowed(line))
+                yield return "L474 build-gap-blocks-ready: a same-version BUILD difference locks READY. It is " +
+                             "a warning worth painting, not a wire break: both peers run the release they " +
+                             "think they run, and the shape that hits this most is the owner's own " +
+                             "hand-deployed Multiplayer.dll landing on one instance before another. A gate " +
+                             "that fires on the normal case is a gate players learn to route around.";
         }
 
         private static ParityManifest Manifest(string modVersion) =>
