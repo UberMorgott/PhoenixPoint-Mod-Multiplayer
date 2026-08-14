@@ -27,6 +27,9 @@ came back.
 - **Mod parity compares what is actually loaded.** Other mods are identified by the bytes of the
   assembly rather than by the version text they print, so two TFTV builds both calling themselves
   `1.1.4.5` are no longer declared identical when one of them is missing a field the mod relies on.
+- **Players carry their Steam profile picture.** A small square of the Steam avatar now sits left of
+  the name on your own card, in the lobby roster and in the in-session player list. Someone who
+  joined over the local network or by address has none, and that row is laid out exactly as before.
 
 ### The campaign stays the same on every machine
 
