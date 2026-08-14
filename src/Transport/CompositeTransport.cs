@@ -150,7 +150,12 @@ namespace Multiplayer.Transport
         {
             foreach (var c in _children)
             {
-                try { c.Initialize(); } catch { /* one child failing must not abort others */ }
+                try { c.Initialize(); }
+                catch (Exception ex)
+                {
+                    LogError($"[Multiplayer] CompositeTransport: child {c.TransportType} failed to initialize: " +
+                             $"{ex.GetType().Name}: {ex.Message}");
+                }
             }
         }
 
@@ -260,7 +265,12 @@ namespace Multiplayer.Transport
         {
             foreach (var c in _children)
             {
-                try { c.Broadcast(data, reliable); } catch { }
+                try { c.Broadcast(data, reliable); }
+                catch (Exception ex)
+                {
+                    LogError($"[Multiplayer] CompositeTransport: child {c.TransportType} broadcast failed: " +
+                             $"{ex.GetType().Name}: {ex.Message}");
+                }
             }
         }
 

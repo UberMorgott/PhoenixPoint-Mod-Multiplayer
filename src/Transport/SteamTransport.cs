@@ -34,6 +34,8 @@ namespace Multiplayer.Transport
         // silently dropping every packet forever.
         private readonly Dictionary<ulong, int> _consecutiveSendFailures = new Dictionary<ulong, int>();
         private const int SendFailureThreshold = 5;
+        private bool _packetAvailabilityFailureWarned;
+        private bool _packetReadFailureWarned;
         // The SteamId this CLIENT dialed in Connect(). The only inbound P2P session a client may
         // accept — OnSessionRequest fires for ANY peer that knows our SteamId (it is broadcast in
         // PEER_LIST), and blindly accepting one used to let NetworkEngine's client OnPeerConnected
@@ -671,9 +673,21 @@ namespace Multiplayer.Transport
             try
             {
                 if (_isPacketAvailableMethod != null)
-                    return (bool)_isPacketAvailableMethod.Invoke(null, new object[] { 0 }); // channel 0
+                {
+                    var available = (bool)_isPacketAvailableMethod.Invoke(null, new object[] { 0 }); // channel 0
+                    _packetAvailabilityFailureWarned = false;
+                    return available;
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                if (!_packetAvailabilityFailureWarned)
+                {
+                    _packetAvailabilityFailureWarned = true;
+                    UnityEngine.Debug.LogError("[Multiplayer] SteamTransport: packet availability probe failed: " +
+                                               ex.GetBaseException().Message);
+                }
+            }
             return false;
         }
 
@@ -690,9 +704,18 @@ namespace Multiplayer.Transport
                 var steamIdBox = _packetSteamIdField.GetValue(result);
                 var data = (byte[])_packetDataField.GetValue(result);
                 var steamId = (ulong)_steamIdValueField.GetValue(steamIdBox);
+                _packetReadFailureWarned = false;
                 return new P2PPacket { SteamId = steamId, Data = data };
             }
-            catch { }
+            catch (Exception ex)
+            {
+                if (!_packetReadFailureWarned)
+                {
+                    _packetReadFailureWarned = true;
+                    UnityEngine.Debug.LogError("[Multiplayer] SteamTransport: packet read failed: " +
+                                               ex.GetBaseException().Message);
+                }
+            }
             return null;
         }
 

@@ -714,6 +714,7 @@ namespace Multiplayer.Transport
         // it deliberately does not have.
         private const int SafeDatagramBytes = 1400;   // conservative: 1500 Ethernet minus VPN encapsulation
         private bool _oversizeWarned;
+        private bool _sendFailureWarned;
 
         private void SendRaw(IPEndPoint target, byte[] data)
         {
@@ -725,7 +726,23 @@ namespace Multiplayer.Transport
                                              $"transport has no retransmit, so one lost IP fragment loses the whole " +
                                              $"message silently. Prefer Direct TCP to a reachable host.");
             }
-            try { _udp.Send(data, data.Length, target); } catch { }
+            try
+            {
+                _udp.Send(data, data.Length, target);
+                _sendFailureWarned = false;
+            }
+            catch (Exception ex)
+            {
+                // Send is retried by callers where appropriate. Keep the transport alive, but never make a
+                // dead UDP path indistinguishable from a successful send; one warning per failure burst is
+                // enough to preserve the cause without flooding Player.log.
+                if (!_sendFailureWarned)
+                {
+                    _sendFailureWarned = true;
+                    Debug.LogWarning($"[Multiplayer] StunTransport: send to {target} failed: " +
+                                     $"{ex.GetType().Name}: {ex.Message}");
+                }
+            }
         }
     }
 }
