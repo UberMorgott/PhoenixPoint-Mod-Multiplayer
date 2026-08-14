@@ -46,6 +46,11 @@ namespace RailCheck
     ///       equality is the whole safety property: the client's timer starts after the host's by the wire
     ///       delay and runs the identical def-fixed duration, so it CANNOT complete first.
     ///   (d) an unrelated order delta does not re-anchor a running fill.
+    ///   (g) but a LANDED host start OUTRANKS an existing stamp — the precedence (d) hid. The stamp is
+    ///       cleared in one place only, while the client's own timer usually expires by itself, so a dead
+    ///       stamp routinely outlives the exploration it belonged to; anchoring the NEXT order on it dates
+    ///       `end` into the past and no spinner is ever seeded again (2026-08-14: second and later
+    ///       explorations by the same aircraft showed no ring on any client).
     ///   (e) a running handle with no stamp (the join case — a mid-exploration aircraft arrives through the
     ///       save transfer, law 1b, never as a delta) is ADOPTED, not torn down.
     ///   (f) the decision is REACHED, and the local epoch is actually RECORDED — or (b)-(e) are correct
@@ -55,7 +60,8 @@ namespace RailCheck
     ///
     /// Falsify: return the mirrored value when no edge landed → <c>phantom-exploration</c>; anchor the edge
     /// on the mirrored value instead of <c>localNow</c> → <c>client-can-finish-first</c>; drop the
-    /// <c>haveStamp</c> short-circuit → <c>fill-restarted</c>; return Zero for a running stamp-less handle →
+    /// <c>haveStamp</c> short-circuit → <c>fill-restarted</c>; consult <c>haveStamp</c> BEFORE
+    /// <c>hostStartLanded</c> → <c>stale-stamp-wins</c>; return Zero for a running stamp-less handle →
     /// <c>join-spinner-killed</c>; stop calling <c>ExplorationStartInLocalEpoch</c> from
     /// <c>ReseedExploration</c> → <c>decision-unreached</c>; stop writing <c>_localExplorationStart</c> →
     /// <c>no-local-epoch-recorded</c>; give actors a shared clock → <c>premise-epoch-shared</c>.
@@ -186,6 +192,23 @@ namespace RailCheck
                 yield return "L290 fill-restarted: " + who + " discards this peer's existing stamp and re-anchors " +
                              "at " + kept + ". Every unrelated order leaf on that aircraft (RangeRemaining moves " +
                              "continuously mid-flight) would then restart the progress bar from zero.";
+
+            // (g) A NEW HOST ORDER OUTRANKS AN EXISTING STAMP — the case (d) was silently swallowing, and
+            // the reason the client's SECOND exploration of a session never drew a ring (2026-08-14).
+            var reordered = anchor(true, false, true, HostStart, LocalNow);
+            if (!(reordered == LocalNow))
+                yield return "L290 stale-stamp-wins: " + who + " answers " + reordered + " for an aircraft whose " +
+                             "StartExplorationTime delta JUST LANDED while a stamp from an EARLIER exploration is " +
+                             "still in _localExplorationStart. That stamp is dropped in exactly one place (the " +
+                             "teardown branch of ReseedExploration), but a client's own timer normally expires by " +
+                             "itself — SiteExplorationCompleted:474 -> EndExploreCurrentSite:460 — leaving " +
+                             "IsExploringSite false with the stamp alive, after which `should == IsExploringSite` " +
+                             "returns early and never clears it. Anchoring the new order on that dead stamp puts " +
+                             "`end` in the past, ShouldBeExploring says false, ExploreCurrentSite is never invoked, " +
+                             "and every exploration after the first is invisible on this peer. The arrival edge is " +
+                             "recorded only on a real leaf delta (GenericApplier:1258), so it is a NEW order by " +
+                             "construction and must re-anchor; case (d) still holds because an unrelated order leaf " +
+                             "lands with no edge at all.";
 
             // (e) the join case: a running handle with no stamp is adopted, never torn down.
             var adopted = anchor(false, true, false, HostStart, LocalNow);

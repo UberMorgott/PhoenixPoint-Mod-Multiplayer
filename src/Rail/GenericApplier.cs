@@ -1556,8 +1556,21 @@ namespace Multiplayer.Network.Sync
         internal static TimeUnit ExplorationStartInLocalEpoch(bool hostStartLanded, bool alreadyExploring,
                                                               bool haveStamp, TimeUnit stamp, TimeUnit localNow)
         {
+            // THE ARRIVAL EDGE OUTRANKS THE STAMP, and the order of these two lines is the whole fix
+            // (client bug 2026-08-14: the SECOND and every later exploration by the same aircraft never
+            // showed a ring). The stamp is dropped in exactly ONE place — the teardown branch in
+            // `ReseedExploration` — but the client's own timer normally expires by ITSELF
+            // (SiteExplorationCompleted:474 -> EndExploreCurrentSite:460), leaving `IsExploringSite=false`
+            // while the stamp survives; the next batch then finds `should == IsExploringSite` and returns
+            // early without ever clearing it. From then on every fresh host order reused that DEAD stamp,
+            // whose `end` is long past, so `ShouldBeExploring` said false and `ExploreCurrentSite` was
+            // never invoked again. A landed `StartExplorationTime` arrival is a NEW order by construction
+            // (GenericApplier:1258 records the edge only on a real leaf delta), so it must re-anchor.
+            // (d) `fill-restarted` is untouched: an unrelated order leaf lands with hostStartLanded=false
+            // and still returns the stamp.
+            if (hostStartLanded) return localNow;
             if (haveStamp) return stamp;
-            if (hostStartLanded || alreadyExploring) return localNow;
+            if (alreadyExploring) return localNow;
             return TimeUnit.Zero;
         }
 
@@ -1583,7 +1596,10 @@ namespace Multiplayer.Network.Sync
             var mirrored = (TimeUnit)ExplorationStartField.GetValue(v);
             bool haveStamp = _localExplorationStart.TryGetValue(v, out var stamped);
             var start = ExplorationStartInLocalEpoch(hostStartLanded, v.IsExploringSite, haveStamp, stamped, timing.Now);
-            if (!haveStamp && start > TimeUnit.Zero) _localExplorationStart[v] = start;
+            // OVERWRITE, never preserve: on the arrival edge `start` is a fresh local anchor and the old
+            // entry is exactly the stale value that killed the re-seed. Writing unconditionally keeps the
+            // map in step with the answer above.
+            if (start > TimeUnit.Zero) _localExplorationStart[v] = start;
             var end = site == null ? TimeUnit.Zero : start + site.ExplorationTime;
             bool inspected = site != null && v.Owner != null && site.GetInspected(v.Owner);
             bool should = site != null && ShouldBeExploring(UnderTravelOrder(v), inspected, start,
