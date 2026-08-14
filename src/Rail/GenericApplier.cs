@@ -11,6 +11,7 @@ using PhoenixPoint.Geoscape.Entities.PhoenixBases;
 using PhoenixPoint.Geoscape.Entities.Sites;
 using PhoenixPoint.Geoscape.Levels;
 using UnityEngine;
+using EarthUnits = PhoenixPoint.Common.Core.EarthUnits;
 using CharacterIdentity = PhoenixPoint.Common.Entities.Characters.CharacterIdentity;
 using GeoCharacter = PhoenixPoint.Geoscape.Entities.GeoCharacter;
 using GeoSite = PhoenixPoint.Geoscape.Entities.GeoSite;
@@ -1312,14 +1313,106 @@ namespace Multiplayer.Network.Sync
             if (count < 0 || count > MaxDepartureWatermarks) throw new InvalidDataException("departure generation tail over bound");
             for (int i = 0; i < count; i++)
                 InstallDepartureGeneration(MessageSerializer.ReadBoundedString(reader), reader.ReadUInt64());
+            // The departure-anchor section is optional so an older host's tail still parses (the precedent
+            // ManufactureSync.HandleInbound sets): read it only while bytes remain.
+            if (reader.BaseStream.Position != reader.BaseStream.Length)
+            {
+                if (reader.ReadByte() != DepartureAnchorRail.TailMarker) throw new InvalidDataException("unknown GeoRail tail");
+                int anchors = reader.ReadUInt16();
+                if (anchors > MaxDepartureWatermarks) throw new InvalidDataException("departure anchor tail over bound");
+                // REBUILT, never merged: the host ships its whole map on every emit, so a wholesale replace is
+                // what keeps this bounded by the host's own MaxVehicles cap instead of growing forever.
+                _departureAnchors.Clear();
+                for (int i = 0; i < anchors; i++)
+                {
+                    string key = MessageSerializer.ReadBoundedString(reader);
+                    _departureAnchors[key] = new DepartureAnchorRail.Anchor
+                    { LevelSeconds = reader.ReadDouble(), RangeValue = reader.ReadSingle() };
+                }
+            }
             if (reader.BaseStream.Position != reader.BaseStream.Length) throw new InvalidDataException("trailing GeoRail bytes");
+        }
+
+        private static readonly Dictionary<string, DepartureAnchorRail.Anchor> _departureAnchors =
+            new Dictionary<string, DepartureAnchorRail.Anchor>(StringComparer.Ordinal);
+
+        /// <summary>Is a mirrored order's derivation allowed to start from the LOCAL clock? Never, once the
+        /// host has stamped the departure — that is the whole of the foreign-aircraft fix, kept pure so
+        /// RailCheck L460 can execute it case by case. Returns the leg time already covered on the host,
+        /// or -1 for "no usable anchor, fall back to local now".
+        ///
+        /// The three refusals are all cases where the anchor cannot describe THIS route:
+        ///   • no stamp at all (a save-transfer join, or a host too old to send the section);
+        ///   • a stamp in the future — an un-applied <see cref="TimeAnchor"/> on a fresh client;
+        ///   • a stamp older than the whole route, which means it belongs to a journey already finished, not
+        ///     to the order that just landed. Fast-forwarding by it would park the aircraft on its
+        ///     destination.</summary>
+        internal static double CoveredSeconds(bool haveAnchor, double departureSeconds, double sharedNow,
+                                              double routeSeconds)
+        {
+            if (!haveAnchor || routeSeconds <= 0.0) return -1.0;
+            double elapsed = sharedNow - departureSeconds;
+            return elapsed <= 0.0 || elapsed > routeSeconds ? -1.0 : elapsed;
+        }
+
+        /// <summary>Fast-forward a re-seeded leg to where the HOST already is, so the remaining leg re-derives
+        /// against shared time instead of this peer's own <c>Timing.Now</c>. See
+        /// <see cref="DepartureAnchorRail"/> for why the pose itself is still never mirrored.
+        ///
+        /// The route walk mirrors <c>GeoNavComponent</c> exactly: <c>GeoPathRequest.Calculate</c> makes ONE
+        /// segment per consecutive destination (no subdivision), each timed
+        /// <c>distance.InMeters / (Speed.InMeters / 3600f)</c> (:94-95). Placement goes through the game's own
+        /// <c>GeoActor.SetOrientedGlobeWorldPosition</c> (GeoActor.cs:66-70) rather than a hand-written
+        /// <c>localRotation</c>, and the great-circle point is the same <c>Vector3.Slerp</c> the routine uses
+        /// (:106) — taken about the geoscape centre, since the routine slerps in globe-local space.
+        /// The 5 s pre-roll (:89) needs no correction: the host paid it too, so at the instant this peer's
+        /// re-seeded routine starts moving the host has advanced by exactly those 5 s onto this same point.</summary>
+        private static void AnchorToHostDeparture(GeoVehicle v, string root, List<Vector3> path)
+        {
+            DepartureAnchorRail.Anchor anchor = default(DepartureAnchorRail.Anchor);
+            bool haveAnchor = root != null && _departureAnchors.TryGetValue(root, out anchor);
+            if (!haveAnchor) return;
+            var geo = StartedGeoLevel();
+            if (geo == null || geo.Timing == null || geo.SceneReferences == null ||
+                geo.SceneReferences.Geoscape == null || path.Count == 0) return;
+            float speed = v.Speed.InMeters / 3600f;                   // GeoNavComponent.cs:95
+            if (speed <= 0f) return;
+
+            var from = v.WorldPosition;
+            var legs = new EarthUnits[path.Count];
+            double routeSeconds = 0.0;
+            for (int i = 0; i < path.Count; i++)
+            {
+                legs[i] = GeoMap.Distance(i == 0 ? from : path[i - 1], path[i]);
+                routeSeconds += legs[i].InMeters / speed;
+            }
+            double covered = CoveredSeconds(haveAnchor, anchor.LevelSeconds,
+                                            geo.Timing.Now.TimeSpan.TotalSeconds, routeSeconds);
+            if (covered < 0.0) return;
+
+            var range = new EarthUnits(anchor.RangeValue);
+            var centre = geo.SceneReferences.Geoscape.position;
+            for (int i = 0; i < path.Count; i++)
+            {
+                double legSeconds = legs[i].InMeters / speed;
+                if (legSeconds > 0.0 && covered < legSeconds)
+                {
+                    float t = (float)(covered / legSeconds);
+                    v.SetOrientedGlobeWorldPosition(centre + Vector3.Slerp(from - centre, path[i] - centre, t));
+                    v.RangeRemaining = range - legs[i] * t;
+                    MpLog.Log("[Multiplayer][rail] nav anchor " + root + " → leg " + (i + 1) + "/" + path.Count +
+                              " t=" + t.ToString("F3") + " covered=" + covered.ToString("F0") + "s");
+                    return;
+                }
+                covered -= legSeconds; range -= legs[i]; from = path[i];
+            }
         }
 
         internal static bool HasSettledDeparture(string source, ulong watermark)
         { ulong settled; return watermark != 0 && source != null && _departureWatermarks.TryGetValue(source, out settled) && settled >= watermark; }
 
         internal static void ClearDepartureWatermarks()
-        { _departureWatermarks.Clear(); }
+        { _departureWatermarks.Clear(); _departureAnchors.Clear(); }
 
         /// <summary>
         /// A DERIVED PRESENTATION'S "DONE" DOES NOT ALWAYS LAND ON THE ENTITY THAT IS PRESENTING, and that
@@ -1721,10 +1814,16 @@ namespace Multiplayer.Network.Sync
                     if (dest[i] == null) return; // an unresolved destination: wait for the resend, never fly a null leg
                     route[i] = dest[i];
                 }
+                // The host's own two arms say this aircraft is flying (see UnderTravelOrder), so re-assert the
+                // covered leaf the client's OWN NavigateRoutine falsified at :138 when its re-derived leg ended
+                // early. Nothing changed on the host, so the diff can never carry the correction — this is one
+                // of the leaves the CRC backstop reported permanently DIVERGED.
+                if (!v.Travelling) v.Travelling = true;
                 if (root != null && _seededRoute.TryGetValue(root, out var last) && IsSuffixOf(last, route))
                     return;                      // same route, a waypoint consumed — the client is already flying it
                 var path = new List<Vector3>(route.Length);
                 foreach (var d in route) path.Add(d.WorldPosition);
+                AnchorToHostDeparture(v, root, path); // BEFORE Navigate: CalculatePath:69-72 reads WorldPosition
                 v.Navigation.Navigate(path);     // GeoVehicle.OnLevelStart:388
                 if (root != null) _seededRoute[root] = route;
                 MpLog.Log("[Multiplayer][rail] nav re-seed " + (root ?? "?") + " → " + route.Length + " leg(s)");

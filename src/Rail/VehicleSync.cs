@@ -616,9 +616,72 @@ namespace Multiplayer.Network.Sync
     {
         private static void Postfix(GeoVehicle __instance)
         {
+            DepartureAnchorRail.Stamp(__instance);                  // the host's departure epoch, before the flush
             MissionSync.CommitCapturedVehicleDeparture(__instance); // AFTER native StartTravel write
             OpenUiRepaint.MarkDirty();
         }
+    }
+
+    /// <summary>THE HOST'S DEPARTURE EPOCH, and the reason foreign aircraft used to sit on wildly different
+    /// map positions on every peer.
+    ///
+    /// Aircraft POSE is deliberately NOT mirrored (fbc9065, rail-baseline.txt "EXCLUDED derived pose"): each
+    /// peer re-derives motion from the mirrored ORDER by running its own <c>GeoNavComponent.NavigateRoutine</c>.
+    /// But BOTH start inputs of that derivation are LOCAL — <c>startTime = Timing.Now</c> at leg start
+    /// (GeoNavComponent.cs:96) and <c>CalculatePath</c> from this peer's own <c>WorldPosition</c> (:69-72) —
+    /// and a client re-seeds only when the order delta LANDS. It therefore departs a round-trip late, which at
+    /// geoscape <c>Timing.Scale</c> is minutes to hours of game time. PLAYER craft hide it because every leg
+    /// ends in the host's arrival snap (<c>GenericApplier.ReseedNavigation</c>'s parked arm); a foreign craft
+    /// flies leg after leg with no snap and never reconverges.
+    ///
+    /// So the host stamps WHEN it left and WITH WHAT RANGE, and the client fast-forwards the leg by
+    /// <c>sharedNow - departure</c> before navigating (<c>GenericApplier.AnchorToHostDeparture</c>). The clock
+    /// is the LEVEL clock, which is exactly the one <see cref="TimeAnchor"/> already holds equal across peers —
+    /// per-ACTOR clocks are unshared epochs (see <c>ReseedExploration</c>) and must never be compared.
+    ///
+    /// <c>RangeRemaining</c> rides along for the same reason it shows up in the CRC backstop as permanently
+    /// DIVERGED: <c>NavigateRoutine</c>:116 writes it locally off <c>startRangeRemaining</c>, so a client that
+    /// flew the leg from the wrong place lands on the wrong number and the diff can never correct it — nothing
+    /// changed on the host. Seeding the host's departure value makes the client's own subtraction reproduce the
+    /// host's result exactly.
+    ///
+    /// Its own map, NOT a field of <see cref="DepartureGenerationRail"/>: that one only advances behind
+    /// <c>MissionSync.CaptureVehicleDeparture</c>, which bails on <c>CurrentSite == null</c> — i.e. on exactly
+    /// the mid-route foreign departures this fix exists for.</summary>
+    internal static class DepartureAnchorRail
+    {
+        internal const byte TailMarker = 0xD8;
+        internal struct Anchor { internal double LevelSeconds; internal float RangeValue; }
+
+        private static readonly object Gate = new object();
+        private static readonly Dictionary<string, Anchor> Anchors =
+            new Dictionary<string, Anchor>(StringComparer.Ordinal);
+
+        internal static void Stamp(GeoVehicle vehicle)
+        {
+            var net = NetworkEngine.Instance;
+            if (net == null || !net.IsActiveSession || !net.IsHost || vehicle == null) return;
+            var geo = vehicle.GeoLevel;
+            if (geo == null || geo.Timing == null) return;
+            string identity = IdentityResolver.RootRef(vehicle);
+            if (string.IsNullOrEmpty(identity)) return;
+            var anchor = new Anchor
+            {
+                LevelSeconds = geo.Timing.Now.TimeSpan.TotalSeconds,
+                RangeValue = vehicle.RangeRemaining.Value,
+            };
+            lock (Gate)
+            {
+                if (!Anchors.ContainsKey(identity) && Anchors.Count >= DepartureGenerationRail.MaxVehicles) return;
+                Anchors[identity] = anchor;
+            }
+        }
+
+        internal static KeyValuePair<string, Anchor>[] Snapshot()
+        { lock (Gate) return Anchors.OrderBy(x => x.Key, StringComparer.Ordinal).ToArray(); }
+        internal static void Remove(string vehicleIdentity)
+        { if (vehicleIdentity == null) return; lock (Gate) Anchors.Remove(vehicleIdentity); }
+        internal static void Clear() { lock (Gate) Anchors.Clear(); }
     }
 
     /// <summary>Host-issued generation carried as an optional tail of the existing GeoRail delta. It is

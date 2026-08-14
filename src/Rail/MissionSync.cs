@@ -119,6 +119,7 @@ namespace Multiplayer.Network.Sync
         { lock (SourceDeltaGate) ScheduledSourceDeltas.Clear();
           lock (DepartureGate) DepartureCaptures.Clear();
           DepartureGenerationRail.Clear();
+          DepartureAnchorRail.Clear();
           GenericApplier.ClearDepartureWatermarks(); }
         internal static int ApplyScheduledSourceRevalidationDeltas()
         {

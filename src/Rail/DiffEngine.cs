@@ -1554,7 +1554,8 @@ namespace Multiplayer.Network.Sync
             if (removed != null)
                 foreach (var k in removed)
                 {
-                    if (k.StartsWith("V#", StringComparison.Ordinal)) DepartureGenerationRail.Remove(k);
+                    if (k.StartsWith("V#", StringComparison.Ordinal))
+                    { DepartureGenerationRail.Remove(k); DepartureAnchorRail.Remove(k); }
                     _prevRoots.Remove(k);
                     _prevRootTypes.Remove(k);
                     if (!StructuralEnabled(k))
@@ -1776,6 +1777,13 @@ namespace Multiplayer.Network.Sync
                         w.Write((ushort)departures.Length);
                         foreach (var departure in departures)
                         { w.Write(departure.Key); w.Write(departure.Value); }
+                        // Second optional section, its OWN key set: the generation map only advances behind a
+                        // site-parked capture, the anchor map behind every StartTravel (see DepartureAnchorRail).
+                        var anchors = DepartureAnchorRail.Snapshot();
+                        w.Write(DepartureAnchorRail.TailMarker);
+                        w.Write((ushort)anchors.Length);
+                        foreach (var anchor in anchors)
+                        { w.Write(anchor.Key); w.Write(anchor.Value.LevelSeconds); w.Write(anchor.Value.RangeValue); }
                     }
 
                     try
