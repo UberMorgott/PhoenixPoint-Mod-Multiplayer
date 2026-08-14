@@ -311,7 +311,35 @@ namespace Multiplayer.Network.Sync
                 // (harmless nesting).
                 using (SyncApplyScope.Enter())
                     UiEventMap.Fire(touched, geo);
+                RedeemRefDrops(engine);
             }
+        }
+
+        /// <summary>THE VALUE-BATCH HALF OF THE BACKFILL. A dropped reference leaves the referrer SHORT of
+        /// the host's value — an EntityList element removed as <c>Unresolved</c> (:1073-1076), an
+        /// order-vector member that resolved to nothing (:1106) — and the host, whose OWN value did not
+        /// change, never re-ships it. Until now the only thing that ever redeemed <c>_refDropPaths</c> was
+        /// a structural CREATE arriving behind it (:486): a drop with no create behind it stood until the
+        /// CRC backstop happened to sample that root, whole minutes later. Measured 2026-08-13: roots
+        /// <c>U#4</c>/<c>U#5</c> went silently stale on <c>_equipmentItems</c> right after an equip intent
+        /// popped items out of storage, and the host only named them at quiescent seq 1008/1009 — 21 s and
+        /// 7 s after the fact — with an emergency full-subtree re-emit.
+        ///
+        /// So ask for the REFERRER here, on the same rung the create backfill uses and with the same scope
+        /// rule (never the missing referent — it has no entry of its own to restate). Bounded by
+        /// construction: <see cref="RequestResync"/> is per-root throttled to <see cref="ResyncThrottleSec"/>,
+        /// and a ref that is STILL unresolvable simply re-records itself on the next entry that carries it.
+        /// Skipped while a FULL resend is pending — that answer restates every root anyway, and the join
+        /// hydration where drops arrive in bulk is exactly when one is in flight.</summary>
+        internal static bool ShouldRedeemRefDrops(int dropCount, float pendingFullAt) =>
+            dropCount > 0 && pendingFullAt < 0f;
+
+        private static void RedeemRefDrops(NetworkEngine engine)
+        {
+            if (!ShouldRedeemRefDrops(_refDropPaths.Count, _pendingFullAt)) return;
+            foreach (var scope in new List<string>(_refDropPaths))
+                RequestResync(engine, "dropped reference under '" + scope + "'", scope);
+            _refDropPaths.Clear();
         }
 
         // ─── Oversized-value reassembly (the envelope layer's own split — DiffEngine.FragmentForWire) ───

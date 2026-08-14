@@ -416,6 +416,8 @@ namespace RailCheck
             Add(laws, () => L473_ATftvBindNamesWhatItCouldNotFind.Check());
             Add(laws, () => L474_TheParityManifestKnowsWhichBuildItIsTalkingTo.Check());
             Add(laws, () => L475_TheOpeningGrantListIsSilentUntilTheFirstMapSurface.Check());
+            Add(laws, () => L480_TheHavenResearchRollIsHostOnly.Check(game));
+            Add(laws, () => L481_ADroppedReferenceAsksForItselfBack.Check());
             Add(laws, () => L472_EveryDoorIntoAiEvaluationIsKnownAndGatedOnce.Check(game));
             laws.Sort(StringComparer.Ordinal);
 
@@ -464,8 +466,8 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 315;
-        private const string ExpectedExecutionIdentityDigest = "b06d3ff584a9ef53ad40799a85612d89712975985535950e6b5d39872bf2fa74";
+        private const int ExpectedLawRegistrations = 317;
+        private const string ExpectedExecutionIdentityDigest = "8632c4ae51144e0f33bb2f31247f8a903ce5f6660f9ba4e7d4d3e72d7b244e8a";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
