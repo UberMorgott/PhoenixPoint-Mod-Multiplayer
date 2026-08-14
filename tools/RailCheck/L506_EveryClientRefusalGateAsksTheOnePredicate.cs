@@ -68,6 +68,11 @@ namespace RailCheck
             typeof(AutomanufactureGate),
             typeof(ClientSimGate),
             typeof(EquipStorageGate),
+            typeof(VehicleArrivalGate),
+            typeof(SiteExploredOutcomeGate),
+            typeof(GeoscapeEventRaiseGate),
+            typeof(VehicleGestureGate),
+            typeof(FactionSpawnerGestureGate),
         };
 
         /// <summary>Gates that legitimately still read the engine themselves, each for a stated reason. This
@@ -82,10 +87,9 @@ namespace RailCheck
         ///     this", not "am I a client".
         ///   • ClientAiGate, ClientAiEvaluationSeamGate — the AI-evaluation doors, owned by L320/L472; the
         ///     door set, not this predicate, is what those laws quantify over.
-        ///   • MissionCancelGate, GeoscapeEventRaiseGate — host-arm gates: they carry their own
-        ///     SyncApplyScope reasoning and refuse on the HOST side of a replay, which the client predicate
-        ///     cannot express.
-        ///   • The remainder are refusal gates NOT YET converted (steps 2..5): each is scheduled, and the
+        ///   • MissionCancelGate — a host-arm gate: it carries its own SyncApplyScope reasoning and refuses
+        ///     on the HOST side of a replay, which the client predicate cannot express.
+        ///   • The remainder are refusal gates NOT YET converted (steps 5..): each is scheduled, and the
         ///     listing is what keeps them visible instead of forgotten.</summary>
         private static readonly HashSet<string> AllowedToDerive = new HashSet<string>(StringComparer.Ordinal)
         {
@@ -93,11 +97,9 @@ namespace RailCheck
             "GeoWindowCoverageGate", "LoadBarrierGate", "CurtainTakedownGate", "GeoTeardownResetGate",
             "ViewStateExitLoudGate", "ProgressGate",
             "ActorDamageClientGate", "AccumulationClientGate", "FumbleCheckGate",
-            "ClientAiGate", "ClientAiEvaluationSeamGate", "MissionCancelGate", "GeoscapeEventRaiseGate",
-            // not yet converted — steps 2..5
-            "VehicleArrivalGate", "SiteExploredOutcomeGate",
-            "FactionSpawnerGestureGate", "VehicleGestureGate", "CameraAbilityHintGate",
-            "TacLaunchGate", "ClientDeployGate",
+            "ClientAiGate", "ClientAiEvaluationSeamGate", "MissionCancelGate",
+            // not yet converted — steps 5..
+            "CameraAbilityHintGate", "TacLaunchGate", "ClientDeployGate",
         };
 
         internal static IEnumerable<string> Check()

@@ -270,8 +270,8 @@ namespace Multiplayer.Network.Sync
 
         private static bool Prefix(GeoVehicle __instance)
         {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            // ONE predicate for every client refusal gate (L506). Solo/host/torn-down: native.
+            if (!ClientAuthority.IsClient()) return true;
             var root = IdentityResolver.RootRef(__instance);
             if (root == null) return true; // not rail-mirrored — its arrival is nobody else's truth
 
@@ -314,8 +314,8 @@ namespace Multiplayer.Network.Sync
 
         private static bool Prefix(GeoVehicle vehicle)
         {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            // ONE predicate for every client refusal gate (L506). Solo/host/torn-down: native.
+            if (!ClientAuthority.IsClient()) return true;
             var root = IdentityResolver.RootRef(vehicle);
             if (root == null) return true; // not rail-mirrored — its exploration result is nobody else's truth
 
@@ -359,8 +359,8 @@ namespace Multiplayer.Network.Sync
 
         private static bool Prefix(Base.Eventus.BaseEventData eventData)
         {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            // ONE predicate for every client refusal gate (L506). Solo/host/torn-down: native.
+            if (!ClientAuthority.IsClient()) return true;
             if (SyncApplyScope.Active) return true;                                      // an apply may legitimately reach it
             string id = (eventData as PhoenixPoint.Geoscape.Events.Eventus.GeoscapeEventData)?.EventID ?? "?";
             if (_logged.Add(id))
@@ -412,8 +412,8 @@ namespace Multiplayer.Network.Sync
 
         private static bool Prefix(GeoVehicle __instance, MethodBase __originalMethod)
         {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            // ONE predicate for every client refusal gate (L506). Solo/host/torn-down: native.
+            if (!ClientAuthority.IsClient()) return true;
             if (SyncApplyScope.Active) return true;                                      // an apply may reach it
 
             string who = (__originalMethod == null ? "?" : __originalMethod.Name) + " " +
@@ -460,8 +460,8 @@ namespace Multiplayer.Network.Sync
 
         private static bool Prefix(GeoFaction __instance, MethodBase __originalMethod)
         {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            // ONE predicate for every client refusal gate (L506). Solo/host/torn-down: native.
+            if (!ClientAuthority.IsClient()) return true;
             if (SyncApplyScope.Active) return true;                                      // an apply may reach it
 
             string who = (__originalMethod == null ? "?" : __originalMethod.Name) + " " +

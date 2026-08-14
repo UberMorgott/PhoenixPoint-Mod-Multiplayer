@@ -5838,17 +5838,20 @@ namespace RailCheck
                                          t.GetMethod("TargetMethod", AllMembers) != null &&
                                          t.Name == "VehicleArrivalGate");
                 var prefix = gate?.GetMethod("Prefix", AllMembers);
-                var isHost = HarmonyLib.AccessTools.PropertyGetter(typeof(Multiplayer.Network.NetworkEngine), "IsHost");
+                // The host arm is no longer spelled here: the gate asks ClientAuthority.IsClient (L506), whose
+                // !IsHost term IS the host arm. So the check follows the predicate rather than the raw getter.
+                var isClient = typeof(Multiplayer.Network.Sync.ClientAuthority).GetMethod("IsClient", AllMembers);
                 if (prefix == null)
                     yield return "L43 gate-type-missing: no VehicleArrivalGate with a Prefix binds GeoVehicle.OnArrived — " +
                                  "the arrival outcome's gate cannot be checked for its host arm";
-                else if (isHost == null)
-                    yield return "L43 ishost-unresolved: NetworkEngine.IsHost does not resolve, so the harness cannot " +
-                                 "prove the arrival gate lets the HOST through";
-                else if (!Callees(prefix, typeof(IntentRail).Assembly).Any(c => c.MetadataToken == isHost.MetadataToken))
-                    yield return "L43 host-gated: VehicleArrivalGate.Prefix never reads NetworkEngine.IsHost — the HOST " +
-                                 "would obey its own client gate, so no aircraft in the session ever completes a leg " +
-                                 "(no CurrentSite, no DestinationSites trim, and nothing for the rail to mirror)";
+                else if (isClient == null)
+                    yield return "L43 isclient-unresolved: ClientAuthority.IsClient does not resolve, so the harness " +
+                                 "cannot prove the arrival gate lets the HOST through";
+                else if (!Callees(prefix, typeof(IntentRail).Assembly).Any(c => c.MetadataToken == isClient.MetadataToken))
+                    yield return "L43 host-gated: VehicleArrivalGate.Prefix never asks ClientAuthority.IsClient — the " +
+                                 "one predicate is where the !IsHost term lives, so without it the HOST would obey its " +
+                                 "own client gate and no aircraft in the session ever completes a leg (no CurrentSite, " +
+                                 "no DestinationSites trim, and nothing for the rail to mirror)";
             }
 
             var navigate = HarmonyLib.AccessTools.Method(nav, "Navigate", new[] { typeof(List<UnityEngine.Vector3>) });
@@ -6050,17 +6053,19 @@ namespace RailCheck
                 var gate = DeclaredTypes(typeof(IntentRail).Assembly)
                     .FirstOrDefault(t => t.Name == "SiteExploredOutcomeGate" && t.GetMethod("Prefix", AllMembers) != null);
                 var prefix = gate?.GetMethod("Prefix", AllMembers);
-                var isHost = HarmonyLib.AccessTools.PropertyGetter(typeof(Multiplayer.Network.NetworkEngine), "IsHost");
+                // Same move as L43: the !IsHost term now lives inside ClientAuthority.IsClient (L506).
+                var isClient = typeof(Multiplayer.Network.Sync.ClientAuthority).GetMethod("IsClient", AllMembers);
                 if (prefix == null)
                     yield return "L53 gate-type-missing: no SiteExploredOutcomeGate with a Prefix binds " +
                                  "GeoFaction.OnVehicleSiteExplored — its host arm cannot be checked";
-                else if (isHost == null)
-                    yield return "L53 ishost-unresolved: NetworkEngine.IsHost does not resolve, so the harness cannot " +
-                                 "prove the exploration-outcome gate lets the HOST through";
-                else if (!Callees(prefix, typeof(IntentRail).Assembly).Any(c => c.MetadataToken == isHost.MetadataToken))
-                    yield return "L53 host-gated: SiteExploredOutcomeGate.Prefix never reads NetworkEngine.IsHost — the " +
-                                 "HOST would obey its own client gate, so NO site in the session is ever marked " +
-                                 "inspected and every exploration silently produces nothing";
+                else if (isClient == null)
+                    yield return "L53 isclient-unresolved: ClientAuthority.IsClient does not resolve, so the harness " +
+                                 "cannot prove the exploration-outcome gate lets the HOST through";
+                else if (!Callees(prefix, typeof(IntentRail).Assembly).Any(c => c.MetadataToken == isClient.MetadataToken))
+                    yield return "L53 host-gated: SiteExploredOutcomeGate.Prefix never asks ClientAuthority.IsClient — " +
+                                 "the one predicate is where the !IsHost term lives, so without it the HOST would obey " +
+                                 "its own client gate, NO site in the session is ever marked inspected and every " +
+                                 "exploration silently produces nothing";
             }
             foreach (var n in new[] { "ExploreCurrentSite", "EndExploreCurrentSite" })
             {
