@@ -104,6 +104,7 @@ namespace Multiplayer.Network.Sync
             _scopedDropN.Clear(); _scopedDropWhy.Clear();
             _refDropPaths.Clear(); // those referrers belonged to the replaced state; the save carries the refs
             _fragBuf.Clear(); _fragGot.Clear(); // the transferred save replaced the state these halves belonged to
+            _pendingWire.Clear(); // those objects belonged to the replaced graph; the save wires its own on load
             // (No EventPopup reset here anymore: event windows are live 0xB6 raises, so there is no
             // record-derived latch to re-seed. Its raise-seq stream is a host monotonic counter and MUST
             // survive a reload boundary — rca-3 contract — so it resets only at full teardown.)
@@ -310,7 +311,13 @@ namespace Multiplayer.Network.Sync
                 // already runs inside their scopes; the Wallet/Storage raisers keep their inner scopes
                 // (harmless nesting).
                 using (SyncApplyScope.Enter())
+                {
+                    // BEFORE Fire, and only here: this batch is what filled the objects an earlier structural
+                    // create left empty, so it is the first moment their owner's native load wiring can run
+                    // without dereferencing a leaf that has not landed (see FlushPendingWire).
+                    FlushPendingWire(geo, seq);
                     UiEventMap.Fire(touched, geo);
+                }
                 RedeemRefDrops(engine);
             }
         }
@@ -632,7 +639,11 @@ namespace Multiplayer.Network.Sync
                 else
                 {
                     mission.Site = site;                                  // GeoSite.cs:1628
-                    SiteRegisterMission.Invoke(site, new object[] { mission }); // GeoSite.cs:1629
+                    // NOT invoked here — PARKED. See ParkNativeWiring: the object this create just made is
+                    // still EMPTY (its leaves ride the next batch), and RegisterMission raises the game's own
+                    // SiteMissionStarted synchronously into subscribers that read those leaves.
+                    ParkNativeWiring(rootKey, owner, field, made,
+                        () => SiteRegisterMission.Invoke(site, new object[] { mission })); // GeoSite.cs:1629
                 }
             }
             // A RAW assign is NOT a gap by itself, and the blanket warning that used to sit here said it was
@@ -671,6 +682,100 @@ namespace Multiplayer.Network.Sync
             MarkOrderChange(geo, rootKey, owner, field.Name);
             OpenUiRepaint.MarkDirty();
             MpLog.Log("[Multiplayer][rail] structural destroy '" + rootKey + "' applied");
+        }
+
+        // ─── Deferred native wiring for a structural create (the load ORDER, not a per-case patch) ───
+        // THE FAILURE (2026-08-14 session, 6x on the client, every haven-defence mission). A descend create
+        // makes the object and hands it to the owner's native load wiring in the SAME packet — but the
+        // object is still EMPTY: every one of its classified members rides the NEXT batch of the same stream
+        // (see ApplyDescendCreate's own doc). GeoSite.RegisterMission raises SiteMissionStarted
+        // SYNCHRONOUSLY, and GeoscapeFactionObjectiveSystem.OnSiteMissionStarted:293 reads
+        // `mission.MissionDef.Description` (GeoscapeFactionObjectiveSystem.cs:188) — MissionDef is an
+        // ordinary [SerializeMember] leaf (GeoMission.cs:204) that has not landed yet, so it NREs. The throw
+        // unwound out of ApplyStructural, which correctly leaves the seq UNMARKED — and that turned one
+        // missing objective into a seq gap ("98→100"), a FULL resend, and the divergence/resend storm behind
+        // it. The game's own load path never has this problem because it fills the DTO FIRST and registers
+        // AFTER (GeoSite.ProcessInstanceData:1621-1631); the mirror was doing it in the opposite order.
+        //
+        // So the wiring waits for the batch that carries the values, exactly like the load path waits for
+        // ProcessInstanceData. Generic on purpose: nothing here knows about missions — a create hands over
+        // an action and the flush rung decides WHEN. A wire that still throws is retried on later batches
+        // and finally dropped with a line, never re-thrown into the seq path: the create itself already
+        // landed and the mirror must not lose a whole subtree over a subscriber.
+        private sealed class PendingWire
+        {
+            internal string Path; internal object Owner; internal RailField Field; internal object Made;
+            internal Action Wire; internal uint ParkedSeq; internal int Tries;
+        }
+
+        private static readonly List<PendingWire> _pendingWire = new List<PendingWire>();
+
+        /// <summary>How many value batches a wire may keep failing before it is dropped. Same bound-shape as
+        /// every other parked thing on this rail: retried, then reported — never parked forever.</summary>
+        /// (static readonly, not const: L500's bound guard must be a real runtime test, and a const one the
+        /// compiler folds away is a guard that proves nothing.)
+        internal static readonly int WireMaxTries = 8;
+
+        internal enum WireVerdict { Wait, Wire, Drop }
+
+        /// <summary>The whole decision, pure so RailCheck L500 can drive it case by case. <paramref
+        /// name="stillAssigned"/> false = the field was destroyed or replaced before its values ever landed,
+        /// so there is nothing to wire onto. <paramref name="appliedSeq"/> not past the create's seq = the
+        /// batch carrying the values has not arrived, which is the exact state the inline invoke used to
+        /// call into.</summary>
+        internal static WireVerdict WireDecision(bool stillAssigned, uint parkedSeq, uint appliedSeq, int tries)
+        {
+            if (!stillAssigned) return WireVerdict.Drop;
+            if (appliedSeq <= parkedSeq) return WireVerdict.Wait;
+            return tries >= WireMaxTries ? WireVerdict.Drop : WireVerdict.Wire;
+        }
+
+        private static void ParkNativeWiring(string path, object owner, RailField field, object made, Action wire)
+        {
+            _pendingWire.Add(new PendingWire
+            { Path = path, Owner = owner, Field = field, Made = made, Wire = wire, ParkedSeq = _lastSeq });
+        }
+
+        /// <summary>Run the wiring parked by earlier structural creates, on the value batch that filled them.
+        /// Called from the post-batch rung INSIDE SyncApplyScope (law 8): these are native events raised
+        /// during an apply. Marks the open screen dirty on success — the objective the wiring creates lands
+        /// in the Phoenix agenda, which no leaf of this batch touched (law 11).</summary>
+        private static void FlushPendingWire(GeoLevelController geo, uint appliedSeq)
+        {
+            for (int i = _pendingWire.Count - 1; i >= 0; i--)
+            {
+                var p = _pendingWire[i];
+                bool stillAssigned;
+                try { stillAssigned = ReferenceEquals(p.Field.GetValue(p.Owner), p.Made); }
+                catch { stillAssigned = false; }
+                switch (WireDecision(stillAssigned, p.ParkedSeq, appliedSeq, p.Tries))
+                {
+                    case WireVerdict.Wait: continue;
+                    case WireVerdict.Drop:
+                        _pendingWire.RemoveAt(i);
+                        if (!stillAssigned)
+                            MpLog.Log("[Multiplayer][rail] deferred wiring for '" + p.Path + "' dropped — the field no longer holds what the create made");
+                        else
+                            LogMissOnce("deferred wiring for '" + p.Path + "' gave up after " + p.Tries +
+                                        " batches — the created " + p.Made.GetType().Name + " is assigned and " +
+                                        "mirrored, but its owner's native registration never succeeded");
+                        continue;
+                }
+                try
+                {
+                    p.Wire();
+                    _pendingWire.RemoveAt(i);
+                    OpenUiRepaint.MarkDirty();
+                    MpLog.Log("[Multiplayer][rail] deferred native wiring for '" + p.Path + "' ran at seq " + appliedSeq);
+                }
+                catch (Exception ex)
+                {
+                    // Retried, not lost: the values it needed may simply ride a later batch than this one.
+                    p.Tries++;
+                    LogMissOnce("deferred wiring for '" + p.Path + "' threw (" + p.Tries + "/" + WireMaxTries +
+                                "): " + ex.GetBaseException().Message);
+                }
+            }
         }
 
         // ─── Vehicle actor wiring (structural create/destroy for the "V#<id>@<ownerGuid>" root) ───
