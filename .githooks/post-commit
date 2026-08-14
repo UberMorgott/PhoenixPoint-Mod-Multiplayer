@@ -1,0 +1,26 @@
+#!/bin/sh
+# Refresh the graphify code graph after each commit: AST only, no LLM, no API key.
+# Detached + silent, and always exits 0 so it can never fail a commit.
+
+[ "${GRAPHIFY_SKIP_HOOK:-0}" = "1" ] && exit 0
+command -v graphify >/dev/null 2>&1 || exit 0
+
+# Skip mid-rebase/merge/cherry-pick so a rebuild never blocks --continue.
+GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
+[ -d "$GIT_DIR/rebase-merge" ] && exit 0
+[ -d "$GIT_DIR/rebase-apply" ] && exit 0
+[ -f "$GIT_DIR/MERGE_HEAD" ] && exit 0
+[ -f "$GIT_DIR/CHERRY_PICK_HEAD" ] && exit 0
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+[ -f "$ROOT/graphify-out/graph.json" ] || exit 0
+
+# Deterministic louvain clustering; single worker keeps Git-for-Windows pipes sane.
+export PYTHONHASHSEED=0
+export GRAPHIFY_MAX_WORKERS="${GRAPHIFY_MAX_WORKERS:-1}"
+
+LOG="${HOME}/.cache/graphify-multiplayer2.log"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null
+graphify update "$ROOT" </dev/null >>"$LOG" 2>&1 &
+
+exit 0
