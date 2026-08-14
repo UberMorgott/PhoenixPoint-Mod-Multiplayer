@@ -239,6 +239,21 @@ namespace Multiplayer.Network.Sync
             // Serializer schema version, not game state (GeoPhoenixBase.InstanceData is [SerializeType(Version = 3)]).
             { "PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase.Version", "serializer schema version, not state — the DTO's [SerializeType(Version=3)] stamp" },
 
+            // DERIVED-SETTER member: the only kind whose mirror is wrong no matter what value crosses.
+            // ModifiableValue.EndValue has NO storage — get => BaseValue + ModificationValue, and
+            // set => BaseValue = value - ModificationValue (decompile ModifiableValue.cs:14-24). All three
+            // members ride one Composite leaf whose fields are written in ORDINAL name order (BaseValue,
+            // EndValue, ModificationValue, RailTypes.Build:338), so EndValue lands BETWEEN its two inputs
+            // and re-derives BaseValue against the STALE ModificationValue: after the write BaseValue is
+            // off by (new - old) modification. Zero-modification stats hide it; every augmented, buffed or
+            // equipment-modified stat mirrors wrong, and the error is PERSISTENT because the next walk
+            // sees the corrupted BaseValue as the new truth.
+            // Excluding it loses nothing — there is no state behind it. The getter recomputes it from the
+            // two members that DO ride, on every read, and the game itself treats the pair as the whole
+            // value: CopyFrom(other) copies exactly BaseValue + ModificationValue (:37-41) and the implicit
+            // float conversion every consumer goes through calls the getter (:32-35).
+            { "Base.Entities.Statuses.ModifiableValue.EndValue", "derived member with a SIDE-EFFECTING setter — no storage of its own (get => BaseValue + ModificationValue; set => BaseValue = value - ModificationValue, ModifiableValue.cs:14-24), so mirroring it rewrites the sibling it is derived from against a stale ModificationValue. The two independent members ride and the game recomputes this one on every read (its CopyFrom:37-41 copies exactly that pair)" },
+
             // The two mist-repeller radii. Keyed on the LIVE types whose tables carry them (GeoHaven,
             // GeoPhoenixBase — the DTO members ride those bridged tables, there is no [direct] table for
             // either InstanceData), deliberately NOT on GeoAlienBase.BaseExpansion: the alien base's own
@@ -968,8 +983,14 @@ namespace Multiplayer.Network.Sync
             if (t.IsValueType && !t.IsPrimitive)
             {
                 var rt = RailType.Get(t);
+                // A REVIEWED opt-out (RailField.OptedOut) does not disqualify the struct: the remaining
+                // members still carry it, and the whole point of opting a DERIVED member out is that the
+                // game recomputes it from the ones that ride. Any OTHER exclusion still refuses the type —
+                // that member fell out because nothing resolved or could read it, so the struct would cross
+                // with a real hole in it. At least one Leaf must remain or there is nothing to carry.
                 if (rt != null && rt.Fields.Count > 0 &&
-                    rt.Fields.All(f => f.Class == FieldClass.Leaf))
+                    rt.Fields.All(f => f.Class == FieldClass.Leaf || f.OptedOut) &&
+                    rt.Fields.Any(f => f.Class == FieldClass.Leaf))
                 { kind = LeafKind.Composite; return true; }
             }
             return false;
@@ -1172,9 +1193,14 @@ namespace Multiplayer.Network.Sync
                 case LeafKind.Composite:
                 {
                     var rt = RailType.Get(declared);
-                    w.Write((byte)rt.Fields.Count);
+                    // The wire id is the field INDEX, so an opted-out member simply never gets written and
+                    // every other index stays where it was. Without this skip a composite was the ONE table
+                    // whose exclusions did nothing — its codec walked Fields raw — and a DERIVED member
+                    // (ModifiableValue.EndValue) rode anyway, clobbering the sibling its setter writes.
+                    w.Write((byte)rt.WireFieldCount);
                     for (int i = 0; i < rt.Fields.Count; i++)
                     {
+                        if (rt.Fields[i].OptedOut) continue;
                         w.Write((ushort)i);
                         EncodeLeaf(w, rt.Fields[i].ValueType, rt.Fields[i].GetValue(v));
                     }
@@ -1291,7 +1317,10 @@ namespace Multiplayer.Network.Sync
                         // Keep reading (stream integrity), but a partially-defaulted composite would
                         // clobber the live value — an unresolved member skips the WHOLE composite write.
                         if (ReferenceEquals(v, Unresolved)) { miss = true; continue; }
-                        field?.SetValue(box, v);
+                        // Read it (stream integrity) but never WRITE an opted-out member: the sender is
+                        // supposed to skip it, and honouring one anyway would re-open the derived-setter
+                        // hole from the receiving side.
+                        if (field != null && !field.OptedOut) field.SetValue(box, v);
                     }
                     return miss ? Unresolved : box;
                 }

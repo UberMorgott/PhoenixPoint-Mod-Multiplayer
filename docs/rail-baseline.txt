@@ -31,9 +31,9 @@ Base.Entities.ActorInstanceData  [direct]  covered=3/6
   - EXCLUDED Source (Object): untyped/interface member
   - EXCLUDED SourceTemplate (Object): untyped/interface member
   - EXCLUDED TimingData (TimingInstanceData): per-actor clock (OwnNow/OwnFixedNow accrue every walk on every actor — pure churn; client clocks tick locally, the level clock rides the TimeAnchor "TA" root)
-Base.Entities.Statuses.ModifiableValue  [direct]  covered=3/3
+Base.Entities.Statuses.ModifiableValue  [direct]  covered=2/3
   + Leaf BaseValue (Single)
-  + Leaf EndValue (Single)
+  - EXCLUDED EndValue (Single): derived member with a SIDE-EFFECTING setter — no storage of its own (get => BaseValue + ModificationValue; set => BaseValue = value - ModificationValue, ModifiableValue.cs:14-24), so mirroring it rewrites the sibling it is derived from against a stale ModificationValue. The two independent members ride and the game recomputes this one on every read (its CopyFrom:37-41 copies exactly that pair)
   + Leaf ModificationValue (Single)
 Base.Entities.Statuses.StatResult  [direct]  covered=4/4
   + Leaf Max (Single)
@@ -835,6 +835,6 @@ twin summary: resolved=79 gaps=36 dispatch=7
 
 null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), GeoHavenDefenseMissionInstanceData.AttackingSites (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
 
-summary: covered=477 excluded=77 blobbable=31 geoItemDicts=1
+summary: covered=476 excluded=78 blobbable=31 geoItemDicts=1
 
 law violations (must be zero): 0

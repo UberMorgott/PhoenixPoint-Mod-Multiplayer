@@ -67,6 +67,12 @@ namespace Multiplayer.Network.Sync
         public Type KeyType;         // LeafDict key type
         public Type DictValType;     // LeafDict value type
         public string Exclude;       // reason when Class == Excluded
+        public bool OptedOut;        // Excluded by an EXPLICIT RailMeta._optOutMembers row (a REVIEWED
+                                     // reason about the value's own nature), not by a resolution failure.
+                                     // The distinction is load-bearing for the Composite leaf kind: a
+                                     // value type stays composite ACROSS a reviewed opt-out (its remaining
+                                     // members still carry it), but must still be refused when a member
+                                     // fell out because nothing could resolve or read it.
         public string LiveAlias;     // set when bridge resolution matched by unique type, not name
 
         internal FieldInfo Fi;
@@ -217,6 +223,25 @@ namespace Multiplayer.Network.Sync
         }
 
         public int CoveredCount => Fields.Count(f => f.Class != FieldClass.Excluded);
+
+        /// <summary>Members a Composite leaf actually puts on the wire — every field except the reviewed
+        /// opt-outs. The wire id stays the FIELD INDEX (opt-outs keep their slot), so the set can shrink
+        /// without renumbering anything. Cached: the host walk encodes composites at ~22k members/tick and
+        /// a LINQ count here would allocate a delegate per encoded value.</summary>
+        public int WireFieldCount
+        {
+            get
+            {
+                if (_wireFields < 0)
+                {
+                    int n = 0;
+                    foreach (var f in Fields) if (!f.OptedOut) n++;
+                    _wireFields = n;
+                }
+                return _wireFields;
+            }
+        }
+        private int _wireFields = -1;
 
         private static readonly Dictionary<Type, RailType> Cache = new Dictionary<Type, RailType>();
         private static readonly Dictionary<string, RailType> BridgedCache = new Dictionary<string, RailType>(StringComparer.Ordinal);
@@ -382,7 +407,7 @@ namespace Multiplayer.Network.Sync
             // arm itself silently the day the convention starts resolving. Keyed on the OWNER type (whose
             // table this is) + base types, never on the resolved member — there may be no member.
             var optOut = RailMeta.OptOutReason(owner, name);
-            if (optOut != null) { f.Class = FieldClass.Excluded; f.Exclude = optOut; return f; }
+            if (optOut != null) { f.Class = FieldClass.Excluded; f.Exclude = optOut; f.OptedOut = true; return f; }
             if (fail != null || live == null) { f.Class = FieldClass.Excluded; f.Exclude = fail ?? "no live member"; return f; }
             if (!f.CanRead) { f.Class = FieldClass.Excluded; f.Exclude = "unreadable"; return f; }
 
