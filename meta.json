@@ -13,5 +13,5 @@
     { "Key": "English", "Value": "Cooperative campaign multiplayer mod. Share your Phoenix Point campaign with friends. Supports Steam P2P, direct IP, and STUN NAT traversal." },
     { "Key": "Russian", "Value": "Кооперативный мультиплеер для Phoenix Point. Играйте в одну кампанию с друзьями. Поддерживает Steam P2P, прямой IP и STUN для NAT." }
   ],
-  "Dependencies": []
+  "Dependencies": [ "phoenixrising.tftv" ]
 }

@@ -5,9 +5,13 @@ using UnityEngine;
 namespace Multiplayer.Harmony
 {
     // Late-binds the TFTV-gated [HarmonyPatch] GUARD classes that PatchAll SILENTLY skipped because TFTV's
-    // assembly loads AFTER Multiplayer (PP enables "Morgott.Multiplayer" before "phoenixrising.tftv"). At
-    // PatchAll time their TFTV target types are unresolvable -> Prepare() returns false -> the classes never
+    // assembly loaded AFTER Multiplayer (PP used to enable "Morgott.Multiplayer" before "phoenixrising.tftv").
+    // At PatchAll time their TFTV target types are unresolvable -> Prepare() returns false -> the classes never
     // bind, so every TFTV guard was DEAD in production (the 126x geoscape-teardown NRE storm persisted).
+    //
+    // meta.json now declares "Dependencies": [ "phoenixrising.tftv" ], so PP's own mod manager loads TFTV
+    // FIRST and this binder should find nothing to do. It stays as the belt to that braces: a player on a
+    // hand-installed mod folder, or any future load-order change, must not silently lose every TFTV guard.
     //
     // TWO stages, BOTH mandatory (regression 2026-07-12 — TypeInitializationException at startup):
     //   1. AppDomain.AssemblyLoad callback ONLY sets a pending flag. It must NEVER Patch() here: Harmony
