@@ -77,6 +77,12 @@ namespace Multiplayer.Network.Sync
         /// correction — the exact churn the alarm exists to confess. 0.4 leaves the margin.</summary>
         private const double MaxPublishLagSeconds = 0.4;
 
+        /// <summary>How long a PAUSE has to hold before the anchor gives back the publish-lag compensation it
+        /// priced for the flight — see <see cref="CompensationExpired"/>. Comfortably past
+        /// <see cref="MaxPublishLagSeconds"/> (and past the measured 26-176 ms latch→apply of the 2026-08-12
+        /// session), so the settle can never land on a client whose clock is still in flight.</summary>
+        private const float PauseSettleSeconds = 1f;
+
         /// <summary>The clock collapsed into its own save DTO: the entire anchor in StartTime, accrual zeroed.
         /// The host latches this and the client seeds with it, so the members that never ride (OwnNow) start
         /// out equal on both peers instead of at a default the client would silently keep.
@@ -122,7 +128,7 @@ namespace Multiplayer.Network.Sync
         /// estimating it needs a wire timestamp, and TimeAnchor deliberately rides the game's own DTO,
         /// which has no field to put one in. Add the ping/pong estimator only when in-game says the
         /// residual is still visible.</summary>
-        private static TimingInstanceData Canonical(Timing t)
+        private static TimingInstanceData Canonical(Timing t, bool expired)
         {
             double lag = Math.Min(DiffEngine.LastCycleSeconds, MaxPublishLagSeconds);
             double rate = PriorEffectiveRate(_hostDto != null, _hostDto != null && _hostDto.Paused,
@@ -130,7 +136,9 @@ namespace Multiplayer.Network.Sync
                                              ParentScale(t), t.EffectiveScale);
             double candidate = PredictPublishedSeconds(t.Now.TimeSpan.TotalSeconds, rate, lag);
             double publishedSeconds = MonotonePublishedSeconds(candidate,
-                _hostDto == null ? candidate : _hostDto.StartTime.TimeSpan.TotalSeconds);
+                PublishFloorSeconds(_hostDto != null, expired,
+                                    _hostDto == null ? candidate : _hostDto.StartTime.TimeSpan.TotalSeconds,
+                                    candidate));
             var published = TimeUnit.FromTimeSpan(TimeSpan.FromSeconds(publishedSeconds));
             return new TimingInstanceData
             {
@@ -158,6 +166,59 @@ namespace Multiplayer.Network.Sync
 
         internal static double MonotonePublishedSeconds(double candidate, double previousPublished)
             => Math.Max(candidate, previousPublished);
+
+        /// <summary>
+        /// THE COMPENSATION HAS AN EXPIRY, and until 2026-08-14 it did not — which is the whole of this bug.
+        ///
+        /// THE REPORT (3-instance session 2026-08-13, both clients): <c>[MP][clockphase] dGame=1136.426
+        /// dReal=paused scale=0.00 sinceLatch=59.8 hostLatchAge=59.9</c> — each client's geoscape clock sat
+        /// 1136 GAME seconds AHEAD of the host's, FROZEN at that value for a minute while both clocks were
+        /// paused, and a second stretch held +792 for 33 s. Constant, not accumulating, and the client was not
+        /// advancing: shape (a), a constant REAL-time lead of <c>lag</c> seconds amplified by the geoscape
+        /// rate (1136 / 0.4 ≈ 2841 game-s per real-s — i.e. the compensation, at exactly the
+        /// <see cref="MaxPublishLagSeconds"/> clamp).
+        ///
+        /// WHY IT STUCK. The pause latch prices <c>rate x lag</c> at the PRE-pause rate on purpose (L429): the
+        /// client's clock is NOT frozen in flight, so it really does arrive at <c>Now + rate x lag</c> and an
+        /// uncompensated anchor would rewind it. That is right FOR THE FLIGHT and wrong for the minute after
+        /// it: the host is stopped at <c>Now</c> and is never going to reach the published value, so every
+        /// client is left permanently ahead of a clock that will not move. Nothing could take it back —
+        /// <see cref="Drifted"/> answers 0 error on a stopped clock, <see cref="EnforceDrift"/> compares the
+        /// client against that same compensated anchor, and a re-latch while paused prices rate 0 but was then
+        /// ratcheted straight back up to the old value by <see cref="MonotonePublishedSeconds"/>.
+        /// Downstream, a client whose clock reads up to ~19 game-minutes early fails every "is this interval
+        /// still open" test the shared clock feeds — the exploration leg that "ends at &lt;t&gt; which the local
+        /// clock is already past" is this number and nothing else.
+        ///
+        /// THE FIX is an expiry on the ratchet, not on the compensation: once the pause has held longer than
+        /// any publish lag can be, the flight the compensation paid for is provably over, so the next latch
+        /// publishes the host's HONEST <c>Now</c> and the clients settle onto it. One backward step per pause,
+        /// while both clocks are stopped — never the in-flight rewind L429 forbids, and never a sawtooth,
+        /// because after it the anchor equals the host clock and this predicate answers false.
+        /// </summary>
+        internal static bool CompensationExpired(bool hasPrior, bool hostPaused, bool anchorPaused,
+                                                 double anchorPublished, double hostNow,
+                                                 double sinceLatchSeconds)
+            => hasPrior && hostPaused && anchorPaused && anchorPublished > hostNow &&
+               sinceLatchSeconds >= PauseSettleSeconds;
+
+        /// <summary>The floor <see cref="MonotonePublishedSeconds"/> is asked to hold. The previous
+        /// publication normally — that is what stops a re-latch rewinding a client mid-flight — except once
+        /// the compensation has expired, where the floor is the candidate itself and the anchor is free to
+        /// come back DOWN onto the host's real clock. A first latch has no floor to hold either.</summary>
+        internal static double PublishFloorSeconds(bool hasPrior, bool expired, double previousPublished,
+                                                   double candidate)
+            => hasPrior && !expired ? previousPublished : candidate;
+
+        /// <summary>WHEN A NEW ANCHOR GOES ON THE WIRE, as a pure predicate rather than an inline disjunction,
+        /// because a term dropped from an inline `if` is invisible to a law that can only see which methods
+        /// the body calls (L490 caught exactly that on itself). The first four terms are the original set — no
+        /// prior anchor, a pause change, a speed change, drift — and <paramref name="expired"/> is the settle
+        /// latch: without it <see cref="CompensationExpired"/> can be computed and then thrown away, which
+        /// looks identical from the outside and leaves every client permanently ahead of a stopped host.</summary>
+        internal static bool ShouldLatch(bool hasPrior, bool pausedChanged, bool scaleChanged, bool drifted,
+                                         bool expired)
+            => !hasPrior || pausedChanged || scaleChanged || drifted || expired;
 
         /// <summary>Has the host's real clock left the anchor's own prediction? Catches every jump that is
         /// not a pause/speed change — save-load, time skip, any native re-anchor — and, over long unchanged
@@ -206,9 +267,17 @@ namespace Multiplayer.Network.Sync
         {
             if (t == null) return null;
             bool drifted = _hostDto != null && Drifted(t);
-            if (_hostDto == null || _hostDto.Paused != t.Paused || _hostDto.Scale != t.Scale || drifted)
+            // The settle latch: a pause that has outlived the flight its compensation paid for gives that
+            // compensation back, ONCE (after it the anchor equals the host clock, so the predicate is false
+            // again and there is no churn to count — it is not a drift latch either).
+            bool expired = CompensationExpired(_hostDto != null, t.Paused, _hostDto != null && _hostDto.Paused,
+                                               _hostDto == null ? 0.0 : _hostDto.StartTime.TimeSpan.TotalSeconds,
+                                               t.Now.TimeSpan.TotalSeconds,
+                                               Time.realtimeSinceStartup - _latchedAt);
+            if (ShouldLatch(_hostDto != null, _hostDto != null && _hostDto.Paused != t.Paused,
+                            _hostDto != null && _hostDto.Scale != t.Scale, drifted, expired))
             {
-                var canonical = Canonical(t);
+                var canonical = Canonical(t, expired);
                 _hostTruthAtLatch = t.Now;
                 _hostDto = canonical;
                 _latchedAt = Time.realtimeSinceStartup;
@@ -221,7 +290,7 @@ namespace Multiplayer.Network.Sync
         internal static bool RefreshForAuthoritativeReply(Timing t)
         {
             if (t == null) return false;
-            var canonical = Canonical(t);
+            var canonical = Canonical(t, expired: false);
             _hostTruthAtLatch = t.Now;
             _hostDto = canonical;
             _latchedAt = Time.realtimeSinceStartup;
@@ -321,7 +390,7 @@ namespace Multiplayer.Network.Sync
         internal static TimingInstanceData ClientDto(Timing t)
         {
             if (t == null) return null;
-            return _clientDto ?? (_clientDto = Canonical(t));
+            return _clientDto ?? (_clientDto = Canonical(t, expired: false));
         }
 
         /// <summary>Client, after the delta batch: load the anchor through the game's own seam, but ONLY when
