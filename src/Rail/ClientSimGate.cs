@@ -562,6 +562,18 @@ namespace Multiplayer.Network.Sync
 
             // Diagnostics only — never let a log path decide whether the gate holds (and RailCheck L451
             // invokes this prefix outside Unity, where Debug.Log has no runtime under it).
+            // BELT, and the reason the cascade was ONE-SHOT at the join boundary (user repro 2026-08-14:
+            // the queue emptied itself once, right after the client's save transfer, and never again):
+            // NextResearchUpdate is not mirrored (rail-baseline.txt:544), so on a fresh client it is
+            // maximally stale and CanUpdateResearch (GeoFaction.cs:1396-1407) is satisfied from the first
+            // frame — a gate that opens for one tick then dumps the WHOLE accumulated wallet through the
+            // queue. Restamp it exactly as the native method would (:1416) every time we refuse, so the
+            // stamp stays fresh and a future gap has nothing to drain. Client-only; nothing local reads it.
+            var level = __instance == null ? null : __instance.GeoLevel;
+            if (level?.Timing != null && __instance.Def != null)
+                __instance.NextResearchUpdate =
+                    TimeUtils.GetNextTimeInHours(level.Timing, __instance.Def.ResearchUpdateTimeHours);
+
             try
             {
                 // Log-once, not per-frame: this funnel fires on every faction, every research tick.
