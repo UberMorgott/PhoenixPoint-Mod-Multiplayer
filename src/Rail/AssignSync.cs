@@ -87,7 +87,7 @@ namespace Multiplayer.Network.Sync
         /// here: TFTV loads AFTER this assembly and may not be installed at all, so these are null by design
         /// until the first tick that finds it. The container also makes the bind ALL-OR-NOTHING by
         /// construction — <see cref="_h"/> is published only once every member resolved.</summary>
-        private sealed class Tftv
+        internal sealed class Tftv
         {
             public Type Personnel, Info, RoleEnum, Training, SessionType, SlotTypeEnum;
             public PropertyInfo Assignments;
@@ -191,18 +191,60 @@ namespace Multiplayer.Network.Sync
             if (_bindFailed) return false;
             var personnel = AccessTools.TypeByName(TftvPersonnelTypeName);
             if (personnel == null) return false; // TFTV absent or not loaded yet — inert, not an error
-            var info = AccessTools.TypeByName(TftvPersonnelInfoTypeName);
-            var training = AccessTools.TypeByName(TftvTrainingTypeName);
+            Tftv h;
+            List<string> missing;
+            bool ok = TryResolve(personnel,
+                                 AccessTools.TypeByName(TftvPersonnelInfoTypeName),
+                                 AccessTools.TypeByName(TftvTrainingTypeName),
+                                 AccessTools.TypeByName(TftvWorkersTypeName),
+                                 AccessTools.TypeByName(TftvAssignmentEnumTypeName),
+                                 out h, out missing);
+            if (ok) _h = h;
+            else _bindFailed = true;
+            if (_bindLogged) return ok;
+            _bindLogged = true;
+            if (ok)
+                MpLog.Log("[MP][assign] TFTV BaseRework personnel surface bound — ASSIGNMENTS now rides the " +
+                          "\"" + RootKey + "\" mod root." +
+                          (h.SStartLevel == null
+                              ? " This TFTV build has no RecruitTrainingSession.StartLevel; the mirror reads it " +
+                                "from VirtualLevelAchieved, which upstream seeds to the same value at queue time."
+                              : ""));
+            else
+                MpLog.LogError("[MP][assign] TFTV BIND FAILED (upstream rename?) — the ASSIGNMENTS screen is " +
+                               "NOT replicated: assignments and training sessions diverge silently between " +
+                               "peers and the research/production economies drift apart. RailCheck L441's " +
+                               "premise arm names the same shape. Missing member(s): " +
+                               string.Join(", ", missing.ToArray()) + ".");
+            return ok;
+        }
+
+        /// <summary>The whole member probe in ONE place, so it can be driven against a synthetic surface
+        /// (RailCheck L473) instead of only against whatever TFTV happens to be installed.
+        ///
+        /// IT NAMES WHAT IT DID NOT FIND. A 23-member all-or-nothing bind whose only output is "BIND FAILED"
+        /// sends the reader hunting the wrong rename — that cost one wrong diagnosis already.
+        ///
+        /// OPTIONAL MEMBERS ARE NOT IN THE REQUIRED SET. <c>RecruitTrainingSession.StartLevel</c> is recent
+        /// upstream (TrainingFacilityRework.cs:62); a peer on an older TFTV build reports the same version
+        /// string, so parity cannot see the difference and the whole surface used to die on that one field.
+        /// It has an EXACT fallback: upstream seeds <c>StartLevel = VirtualLevelAchieved</c> at queue time
+        /// (:166-167) and never mutates it, so the mirrored virtual level answers the same number. No other
+        /// member gets this treatment: for every one of them the "fallback" would be a made-up value
+        /// (StartHour 0 mis-draws every progress bar, SpPaid 0 mis-refunds), i.e. exactly the silent
+        /// divergence the all-or-nothing gate exists to prevent.</summary>
+        internal static bool TryResolve(Type personnel, Type info, Type training, Type workers, Type roleEnum,
+                                        out Tftv h, out List<string> missing)
+        {
             var session = training == null ? null : training.GetNestedType("RecruitTrainingSession", All);
-            var workers = AccessTools.TypeByName(TftvWorkersTypeName);
-            var h = new Tftv
+            h = new Tftv
             {
                 SlotTypeEnum = workers == null ? null : workers.GetNestedType("FacilitySlotType", All),
                 ResyncWorkSlots = AccessTools.Method(personnel, "ResyncWorkSlots"),
                 RefreshInfoBar = AccessTools.Method(workers, "RefreshInfoBar"),
                 Personnel = personnel,
                 Info = info,
-                RoleEnum = AccessTools.TypeByName(TftvAssignmentEnumTypeName),
+                RoleEnum = roleEnum,
                 Training = training,
                 SessionType = session,
                 Assignments = personnel.GetProperty("Assignments", All),
@@ -227,26 +269,38 @@ namespace Multiplayer.Network.Sync
                 SDismissed = session?.GetField("WasDismissed", All),
             };
 
-            bool ok = h.SlotTypeEnum != null && h.ResyncWorkSlots != null && h.RefreshInfoBar != null &&
-                      h.RoleEnum != null && h.Assignments != null && h.InfoId != null && h.InfoCharacter != null &&
-                      h.InfoAssignment != null && h.InfoSpec != null && h.Sessions != null && h.Applied != null &&
-                      h.Pending != null && h.SPersonnelId != null && h.SCharacter != null && h.SGeoUnitId != null &&
-                      h.SSpec != null && h.SStartHour != null && h.SDuration != null && h.STargetLevel != null &&
-                      h.SCompleted != null && h.SStartLevel != null && h.SVirtual != null && h.SSpPaid != null &&
-                      h.SDismissed != null;
-            if (ok) _h = h;
-            else _bindFailed = true;
-            if (_bindLogged) return ok;
-            _bindLogged = true;
-            if (ok)
-                MpLog.Log("[MP][assign] TFTV BaseRework personnel surface bound — ASSIGNMENTS now rides the " +
-                          "\"" + RootKey + "\" mod root.");
-            else
-                MpLog.LogError("[MP][assign] TFTV BIND FAILED (upstream rename?) — the ASSIGNMENTS screen is " +
-                               "NOT replicated: assignments and training sessions diverge silently between " +
-                               "peers and the research/production economies drift apart. RailCheck L441's " +
-                               "premise arm names the same shape.");
-            return ok;
+            var probe = h;
+            var absent = new List<string>();
+            Action<string, object> req = (name, handle) => { if (handle == null) absent.Add(name); };
+            req("Workers.FacilitySlotType", probe.SlotTypeEnum);
+            req("PersonnelData.ResyncWorkSlots", probe.ResyncWorkSlots);
+            req("Workers.RefreshInfoBar", probe.RefreshInfoBar);
+            req("PersonnelAssignment", probe.RoleEnum);
+            req("PersonnelData.Assignments", probe.Assignments);
+            req("PersonnelInfo", probe.Info);
+            req("PersonnelInfo.Id", probe.InfoId);
+            req("PersonnelInfo.Character", probe.InfoCharacter);
+            req("PersonnelInfo.Assignment", probe.InfoAssignment);
+            req("PersonnelInfo.TrainingSpec", probe.InfoSpec);
+            req("TrainingFacilityRework", probe.Training);
+            req("TrainingFacilityRework.RecruitSessions", probe.Sessions);
+            req("TrainingFacilityRework._appliedStatLevels", probe.Applied);
+            req("TrainingFacilityRework._pendingPostRecruitStatApply", probe.Pending);
+            req("RecruitTrainingSession", probe.SessionType);
+            req("RecruitTrainingSession.PersonnelId", probe.SPersonnelId);
+            req("RecruitTrainingSession.Character", probe.SCharacter);
+            req("RecruitTrainingSession.GeoUnitId", probe.SGeoUnitId);
+            req("RecruitTrainingSession.TargetSpecialization", probe.SSpec);
+            req("RecruitTrainingSession.StartHour", probe.SStartHour);
+            req("RecruitTrainingSession.DurationHours", probe.SDuration);
+            req("RecruitTrainingSession.TargetLevel", probe.STargetLevel);
+            req("RecruitTrainingSession.Completed", probe.SCompleted);
+            req("RecruitTrainingSession.VirtualLevelAchieved", probe.SVirtual);
+            req("RecruitTrainingSession.SpPaid", probe.SSpPaid);
+            req("RecruitTrainingSession.WasDismissed", probe.SDismissed);
+            // OPTIONAL, and deliberately not on the list above: RecruitTrainingSession.StartLevel.
+            missing = absent;
+            return absent.Count == 0;
         }
 
         // ─── HOST: the projection ───────────────────────────────────────────────────────────────
@@ -292,7 +346,9 @@ namespace Multiplayer.Network.Sync
                     Put(State.SessionStartHour, id, (double)_h.SStartHour.GetValue(s));
                     Put(State.SessionDurationHours, id, (double)_h.SDuration.GetValue(s));
                     Put(State.SessionTargetLevel, id, (int)_h.STargetLevel.GetValue(s));
-                    Put(State.SessionStartLevel, id, (int)_h.SStartLevel.GetValue(s));
+                    // StartLevel is optional (Bind/TryResolve): an older TFTV has no such field, and its
+                    // VirtualLevelAchieved still carries the queue-time start level.
+                    Put(State.SessionStartLevel, id, (int)(_h.SStartLevel ?? _h.SVirtual).GetValue(s));
                     Put(State.SessionVirtualLevel, id, (int)_h.SVirtual.GetValue(s));
                     Put(State.SessionSpPaid, id, (int)_h.SSpPaid.GetValue(s));
                     Put(State.SessionCompleted, id, (bool)_h.SCompleted.GetValue(s));
@@ -477,7 +533,8 @@ namespace Multiplayer.Network.Sync
                 _h.SStartHour.SetValue(s, Read(State.SessionStartHour, kv.Key, 0d));
                 _h.SDuration.SetValue(s, Read(State.SessionDurationHours, kv.Key, 1d));
                 _h.STargetLevel.SetValue(s, Read(State.SessionTargetLevel, kv.Key, 1));
-                _h.SStartLevel.SetValue(s, Read(State.SessionStartLevel, kv.Key, 1));
+                if (_h.SStartLevel != null) // optional member — an older TFTV has no field to write it into
+                    _h.SStartLevel.SetValue(s, Read(State.SessionStartLevel, kv.Key, 1));
                 _h.SVirtual.SetValue(s, Read(State.SessionVirtualLevel, kv.Key, 1));
                 _h.SSpPaid.SetValue(s, Read(State.SessionSpPaid, kv.Key, 0));
                 _h.SCompleted.SetValue(s, Read(State.SessionCompleted, kv.Key, false));

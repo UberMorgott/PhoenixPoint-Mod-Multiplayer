@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Text;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
+using PhoenixPoint.Tactical.Entities.Abilities;
 using PhoenixPoint.Tactical.Levels;
 
 namespace RailCheck
@@ -64,8 +65,8 @@ namespace RailCheck
     ///   (c) THE SWEEP IS OVER EVERY ACTOR, NOT ONE: it enumerates the map and asks each actor for its key,
     ///       rather than settling a single subject. A sweep of one is the bug with a new name.
     ///   (d) THE CLIENT CANNOT RUN AI EVALUATION FROM EITHER DOOR: the gate is on
-    ///       <c>ExecuteAIEvaluationAbilities</c> itself, which is the ONLY thing both entry points into
-    ///       <c>ExecuteQueuedAbilitiesSequence</c> share. This is the checkable form of "on a client,
+    ///       <c>AIEvaluationAbility.Activate</c>, the funnel BOTH doors below the turn coroutine pass
+    ///       through, and the effect route into <c>ExecuteAIEvaluationAbilities</c> still reaches it. This is the checkable form of "on a client,
     ///       SetTransform for an AI faction's actor happens only inside SyncApplyScope": the runtime
     ///       statement is not decidable headless, but its one known cause is.
     ///   (e) THE REFUSAL REACHES THE ONE PEER THAT GESTURED, AND NOBODY ELSE: unicast to the sender, never a
@@ -97,7 +98,7 @@ namespace RailCheck
             var cmdSync = mod.GetType("Multiplayer.Tactical.TacticalCommandSync");
             var turnSync = mod.GetType("Multiplayer.Tactical.TacticalTurnSync");
             var actorKey = mod.GetType("Multiplayer.Tactical.TacticalActorKey");
-            var aiEvalGate = mod.GetType("Multiplayer.Tactical.ClientAiEvaluationGate");
+            var aiEvalGate = mod.GetType("Multiplayer.Tactical.ClientAiEvaluationSeamGate");
 
             var broadcastTurn = turnSync?.GetMethod("HostBroadcastTurn", All);
             // The sweep is ARMED at the announcement and FIRED once this host's own turn has started
@@ -137,7 +138,7 @@ namespace RailCheck
                              "its quiet and its notifying overload / HandleInbound / EncodeNudge / " +
                              "DecodeNudge, SessionNotifier.ShowToast, NetworkEngine.SendToClient/" +
                              "BroadcastToAll, TacticalLevelController.ExecuteAIEvaluationAbilities/" +
-                             "ExecuteQueuedAbilitiesSequence, ClientAiEvaluationGate.Prefix). Every arm below " +
+                             "ExecuteQueuedAbilitiesSequence, ClientAiEvaluationSeamGate.Prefix). Every arm below " +
                              "would pass vacuously, so 'drift is corrected and refusals are heard' is " +
                              "UNCHECKED rather than satisfied";
                 yield break;
@@ -164,19 +165,25 @@ namespace RailCheck
                              "what left every actor the host is not animating uncorrected";
 
             // ═══ (d) THE CLIENT CANNOT RUN AI EVALUATION FROM EITHER DOOR ═══
+            // The gate moved OFF this method on 2026-08-14: ExecuteAIEvaluationAbilities is only one of the
+            // two doors (AIEvaluationStatus.OnApply is the other), so the verdict now sits on the funnel both
+            // pass through, AIEvaluationAbility.Activate. This arm keeps the half that is L123's own — that
+            // the effect route still reaches evaluation, so the funnel below it is still load-bearing — and
+            // leaves the completeness claim to L320/L472, which sweep for a third door.
             var patchAttr = aiEvalGate.GetCustomAttributesData()
                                       .FirstOrDefault(a => a.AttributeType.Name == "HarmonyPatch" &&
-                                                           a.ConstructorArguments.Count == 2);
+                                                           a.ConstructorArguments.Count == 3);
+            var patchedType = patchAttr == null ? null : patchAttr.ConstructorArguments[0].Value as Type;
             string patched = patchAttr == null ? null : patchAttr.ConstructorArguments[1].Value as string;
-            if (patched != "ExecuteAIEvaluationAbilities")
-                yield return "L123 client-can-still-run-enemy-ai: ClientAiEvaluationGate patches '" +
-                             (patched ?? "<nothing resolvable>") + "' rather than " +
-                             "TacticalLevelController.ExecuteAIEvaluationAbilities. That method is the ONLY " +
-                             "thing both routes into ExecuteQueuedAbilitiesSequence share — the turn " +
-                             "coroutine (TacticalFaction.AIUpdateCrt:439, which ClientAiGate already covers) " +
-                             "and ExecuteQueuedAbilitiesEffect.OnApply:22, an authored effect started " +
-                             "straight on Timing that no gate touches. Patching either caller instead leaves " +
-                             "the other door open, and the client moves the aliens on its own screen";
+            if (patchedType != typeof(AIEvaluationAbility) || patched != "Activate")
+                yield return "L123 client-can-still-run-enemy-ai: ClientAiEvaluationSeamGate patches '" +
+                             (patchedType?.Name ?? "<nothing resolvable>") + "." + (patched ?? "?") +
+                             "' rather than AIEvaluationAbility.Activate. That method is the ONLY thing both " +
+                             "routes into an AI decision share below the turn coroutine — " +
+                             "ExecuteQueuedAbilitiesEffect.OnApply:22 -> ExecuteAIEvaluationAbilities -> " +
+                             "TacticalAbility.Execute:1159 -> Activate, and AIEvaluationStatus.OnApply:17 -> " +
+                             "Activate directly. Gating either caller instead leaves the other door open, " +
+                             "and the client moves the aliens on its own screen";
             if (!Reaches(queuedSeq, aiEval, game) &&
                 !Program.Callees(Iterator(queuedSeq), game).Any(c => Same(c, aiEval)))
                 yield return "L123 premise-changed: ExecuteQueuedAbilitiesSequence no longer runs " +

@@ -411,6 +411,12 @@ namespace RailCheck
             Add(laws, () => L452_TheReputationStripRepaintsOnTheRail.Check());
             Add(laws, () => L453_ThePerSoldierXpSplitComesFromTheHostRecord.Check());
             Add(laws, () => L460_AReSeededLegStartsFromTheHostDepartureEpoch.Check());
+            Add(laws, () => L471_TheOpenShopRepaintReachesTheNativeList.Check());
+            Add(laws, () => L470_TheMistBlobFitsTheStringLeafItRidesOn.Check());
+            Add(laws, () => L473_ATftvBindNamesWhatItCouldNotFind.Check());
+            Add(laws, () => L474_TheParityManifestKnowsWhichBuildItIsTalkingTo.Check());
+            Add(laws, () => L475_TheOpeningGrantListIsSilentUntilTheFirstMapSurface.Check());
+            Add(laws, () => L472_EveryDoorIntoAiEvaluationIsKnownAndGatedOnce.Check(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -458,8 +464,8 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 309;
-        private const string ExpectedExecutionIdentityDigest = "e2725e0d156cf5b091011884f81588bcf9acd2da0f70ccce030952535d198450";
+        private const int ExpectedLawRegistrations = 315;
+        private const string ExpectedExecutionIdentityDigest = "b06d3ff584a9ef53ad40799a85612d89712975985535950e6b5d39872bf2fa74";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

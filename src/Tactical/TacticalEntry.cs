@@ -310,87 +310,70 @@ namespace Multiplayer.Tactical
     }
 
     /// <summary>
-    /// CLIENT turn control, arm 3 — THE OTHER DOOR INTO ENEMY AI (law L123, 2026-08-05).
+    /// CLIENT turn control, arm 3 — THE FUNNEL INTO ENEMY AI EVALUATION (laws L123/L320/L472).
     ///
-    /// <see cref="ClientAiGate"/> above blocks <c>TacticalFaction.AIUpdateCrt</c>, which was believed to be
-    /// how AI decisions are reached. It is one of TWO. <c>TacticalLevelController.
-    /// ExecuteQueuedAbilitiesSequence</c>:1226-1232 runs panic → AI-evaluation → hurt-reaction, and it has a
-    /// SECOND caller that no gate touches: <c>ExecuteQueuedAbilitiesEffect.OnApply</c>:22 — an ordinary
-    /// authored EFFECT, started straight on <c>TacticalLevelController.Timing</c>, outside any turn
-    /// coroutine. Its <c>ExecuteAIEvaluationAbilities</c>:1234-1264 then executes an
-    /// <c>AIEvaluationAbility</c> on every <c>CurrentFaction</c> actor carrying an
-    /// <c>AIEvaluationStatus</c> — on a client, in the alien turn, that is the aliens.
+    /// <see cref="ClientAiGate"/> above blocks <c>TacticalFaction.AIUpdateCrt</c>, which reaches
+    /// <c>AIFaction.EvaluateActionsAsync</c>:109 DIRECTLY (TacticalFaction.cs:593) and is therefore a door of
+    /// its own. Every OTHER route into an AI decision goes through one class, <c>AIEvaluationAbility</c>, by
+    /// two known doors:
+    ///   • <c>ExecuteQueuedAbilitiesEffect.OnApply</c>:22 → <c>TacticalLevelController.
+    ///     ExecuteQueuedAbilitiesSequence</c>:1226-1232 → <c>ExecuteAIEvaluationAbilities</c>:1234-1264 →
+    ///     <c>ability.Execute(null)</c> → <c>TacticalAbility.Execute</c>:1159 → <c>Activate</c>. An ordinary
+    ///     authored EFFECT started straight on <c>Timing</c>, OUTSIDE any turn coroutine — which is why the
+    ///     turn-level hold above cannot see it.
+    ///   • <c>AIEvaluationStatus.OnApply</c>:17 → <c>Activate()</c> DIRECTLY under
+    ///     <c>AIEvaluationStatusDef.ExecuteActionsOnApply</c> — no coroutine, no turn machinery at all. A
+    ///     status merely MIRRORED onto a client walked straight into
+    ///     <c>AIEvaluationAbility.ExecuteAIEvaluation</c>:32 → <c>TacticalFaction.EvaluateAiActionsAsync</c>
+    ///     :668 → <c>AIFaction.EvaluateActionsAsync</c>:109, and the client decided for itself.
     ///
-    /// That is the leak the live log shows verbatim: <c>this CLIENT activated 'Move_AbilityDef' on
+    /// That is the leak the live log showed verbatim: <c>this CLIENT activated 'Move_AbilityDef' on
     /// Fishman_17 … the client ran enemy AI of its own</c>, 10 ms BEFORE the host's own mirror of a different
-    /// move, 200 ms after a <c>Panic_AbilityDef … ExecuteQueuedAbilitiesSequence:1225</c> line, and a full
-    /// 8 s before <c>client AI turn SUPPRESSED</c> ever appeared. The peers then disagreed about where a
-    /// cloaked enemy was, and every shot the client aimed at the one only IT could see was refused.
+    /// move, and a full 8 s before <c>client AI turn SUPPRESSED</c> ever appeared. The peers then disagreed
+    /// about where a cloaked enemy was, and every shot the client aimed at the one only IT could see was
+    /// refused.
     ///
-    /// NARROWED TO THE AI ARM ON PURPOSE. Panic and hurt-reaction are REACTIONS to something that already
-    /// happened and ride the ordinary mirror; AI evaluation is a DECISION, and law 5 puts every decision on
-    /// the host. Blocking the whole sequence would take the first two with it. Returning an empty coroutine
-    /// (rather than <see cref="ClientAiGate"/>'s hold) is right here because this is not a turn boundary:
-    /// nothing downstream is waiting on it, and the host's own run of the same evaluation arrives as
-    /// ordinary 0x82 mirrors.
-    /// </summary>
-    [HarmonyPatch(typeof(TacticalLevelController), "ExecuteAIEvaluationAbilities")]
-    internal static class ClientAiEvaluationGate
-    {
-        private static bool Prefix(ref IEnumerator<NextUpdate> __result)
-        {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
-            MpLog.LogWarning("[Multiplayer][tac] client AI EVALUATION suppressed — reached outside the turn " +
-                             "coroutine (ExecuteQueuedAbilitiesEffect → ExecuteQueuedAbilitiesSequence), which " +
-                             "ClientAiGate does not cover. An AI decision is the host's; its result arrives on " +
-                             "0x82 like every other action.");
-            __result = Nothing();
-            return false;
-        }
-
-        private static IEnumerator<NextUpdate> Nothing() { yield break; }
-    }
-
-    /// <summary>
-    /// CLIENT turn control, arm 4 — THE SEAM. Arms 2 and 3 are DOORS; this one is where the doors meet.
+    /// ONE GATE, ON THE FUNNEL — 2026-08-14. There used to be TWO here: this seam AND a narrower
+    /// <c>ClientAiEvaluationGate</c> sited on <c>ExecuteAIEvaluationAbilities</c>. The narrow one was
+    /// upstream of this one on ONE of the two doors, so it fired 43 times in a single session while this
+    /// gate's own message — worded as a backstop that should never speak — stayed silent, and the pair could
+    /// drift into disagreeing about the same decision. It is REMOVED: <c>Activate</c> is the one method both
+    /// doors pass through and <c>ExecuteAIEvaluation</c> is private to the class with <c>Activate</c> as its
+    /// only referrer, so gating here closes the CLASS rather than an instance (L320 arm (a) asserts exactly
+    /// that, L472 sweeps the assembly for a third door). Losing the narrow gate costs nothing: with
+    /// <c>Activate</c> refused, <c>Execute</c>:1159-1164 sees <c>IsExecuting</c> false and returns at once,
+    /// so <c>ExecuteAIEvaluationAbilities</c> walks its actor list doing nothing — exactly what the empty
+    /// coroutine produced, minus the second verdict. Panic and hurt-reaction, the sequence's other two arms,
+    /// are REACTIONS that ride the ordinary mirror and were never in scope.
     ///
-    /// <see cref="ClientAiEvaluationGate"/> covers ONE caller of <c>AIEvaluationAbility</c>:
-    /// <c>TacticalLevelController.ExecuteAIEvaluationAbilities</c>:1257, which reaches it as
-    /// <c>ability.Execute(null)</c>. That is not the only caller. <c>TacticalAbility.Execute</c>:1158-1160
-    /// is a two-liner over <c>Activate(parameter)</c>, and <c>AIEvaluationStatus.OnApply</c>:17 calls that
-    /// SAME <c>Activate()</c> DIRECTLY whenever <c>AIEvaluationStatusDef.ExecuteActionsOnApply</c> is set —
-    /// no coroutine, no turn machinery, nothing arm 3 can see. So a status merely MIRRORED onto a client
-    /// walked straight into <c>AIEvaluationAbility.ExecuteAIEvaluation</c>:32 →
-    /// <c>TacticalFaction.EvaluateAiActionsAsync</c>:668 → <c>AIFaction.EvaluateActionsAsync</c>:109, and
-    /// the client decided for itself — law 5's exact prohibition, reached without tripping a single gate.
-    ///
-    /// GATED AT THE SEAM ON PURPOSE. <c>Activate</c> is the one method BOTH doors pass through, so this
-    /// closes the class instead of the instance; a gate per known call path is precisely how the previous
-    /// hole opened. (<c>AIFaction.EvaluateActionsAsync</c> is the seam one level deeper and would also
-    /// catch arm 2's <c>AIUpdateCrt</c>:593 — but suppressing it there leaves the caller reading a STALE
+    /// (<c>AIFaction.EvaluateActionsAsync</c> is the seam one level deeper and would also catch arm 2's
+    /// <c>AIUpdateCrt</c>:593 — but suppressing it there leaves the caller reading a STALE
     /// <c>EvaluationResult</c>, since nulling it is the first thing the real method does. Blocking at
     /// <c>Activate</c> means nothing downstream ever reads that field.)
     ///
-    /// LOUD BY CONSTRUCTION — that is the whole design, not a log-level preference. Arm 3 already stops the
-    /// ordinary path UPSTREAM of here, so on a client this prefix is unreachable via any door we know
-    /// about. Every line it prints is therefore a caller nobody had enumerated. A backstop that says
-    /// nothing when it catches something is the silent-swallow class this project keeps paying for.
+    /// LOUD ONCE, THEN COUNTED. This is the ordinary path on a client, so it speaks per battle, not per
+    /// actor: a line repeated 43 times is noise that hides the one line that matters, and a suppression that
+    /// says nothing at all is the silent-swallow class this project keeps paying for. The counter is what
+    /// makes the silence afterwards honest.
     /// </summary>
     [HarmonyPatch(typeof(AIEvaluationAbility), "Activate", new[] { typeof(object) })]
     internal static class ClientAiEvaluationSeamGate
     {
+        private static int _suppressed;
+
         private static bool Prefix(AIEvaluationAbility __instance)
         {
             var engine = NetworkEngine.Instance;
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return true;
-            MpLog.LogError("[Multiplayer][tac] client AI evaluation BACKSTOP caught '" +
-                           (__instance?.TacticalActor?.name ?? "<unknown actor>") + "' — AIEvaluationAbility." +
-                           "Activate was reached by a caller NO gate covers, so name it and close it: the " +
-                           "known door (ExecuteAIEvaluationAbilities) is suppressed upstream by " +
-                           "ClientAiEvaluationGate, and the other one on record is AIEvaluationStatus.OnApply " +
-                           "under ExecuteActionsOnApply. Suppressed either way — an AI decision is the host's " +
-                           "and its result arrives on 0x82 like every other action.");
+            if (++_suppressed == 1 || _suppressed % 100 == 0)
+                MpLog.LogWarning("[Multiplayer][tac] client AI evaluation suppressed (#" + _suppressed +
+                                 ") — AIEvaluationAbility.Activate on '" +
+                                 (__instance?.TacticalActor?.name ?? "<unknown actor>") + "'. Both doors run " +
+                                 "through here (ExecuteAIEvaluationAbilities via TacticalAbility.Execute, and " +
+                                 "AIEvaluationStatus.OnApply under ExecuteActionsOnApply), so this is the one " +
+                                 "verdict for all of them: an AI decision is the host's and its result " +
+                                 "arrives on 0x82 like every other action. Further hits are counted, not " +
+                                 "printed.");
             return false;
         }
     }
