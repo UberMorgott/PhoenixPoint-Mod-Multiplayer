@@ -14,6 +14,7 @@
 - `deploy.ps1` — builds `Multiplayer.dll` into `Mods/Multiplayer`; needs a Phoenix Point install.
 - `dotnet run -c Debug --project tools/RailCheck` — law harness; needs a Phoenix Point install (reflects over real game assemblies).
 - `pwsh -File tools/law-integrity.ps1` — source-level only, runs anywhere; also `.github/workflows/laws.yml`.
+- PATH `dotnet` here is the x86 host with no SDK (`C:\Program Files (x86)\dotnet\dotnet.exe`), so a hand-run `deploy.ps1` / RailCheck dies with `sdk-not-found` + `build failed (-2147450725)` — broken PATH, not a broken build. Prefix with `$env:PATH = 'C:\Program Files\dotnet;' + $env:PATH` (SDK 10.0.300). `.githooks/pre-commit` already falls back on its own (`RailCheck: PATH dotnet has no SDK, using ...`) — that is why commits pass; do not "fix" it.
 - Never claim verified without pasting one of those actually run — "looks right" is not verification.
 - `git config core.hooksPath .githooks` — wires both into pre-commit; one-time, per clone.
 
