@@ -170,8 +170,10 @@ namespace Multiplayer.Network.Sync
 
         private static bool Prefix(GeoPhoenixFacility __instance, bool powered)
         {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // solo/host: native
+            // ONE predicate for every client refusal gate (L506). Solo/host/torn-down: native. The session
+            // term this gate used to carry opened it in the UNKNOWN window, which is exactly where RoutePower
+            // reaches it — GeoPhoenixBase:555 runs post-load, on the save the client just took from the host.
+            if (!ClientAuthority.IsClient()) return true;
             bool allow = SyncApplyScope.Active;
 
             // Diagnostic (power retest 2026-07-29): WHO tried to write power on a client, and whether it
