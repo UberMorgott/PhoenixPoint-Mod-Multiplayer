@@ -61,6 +61,10 @@ namespace RailCheck
             var token = cmd.GetField("_mirrorSkipsCameraWait", All);
             var onActivated = cmd.GetMethod("OnAbilityActivated", All);
             var applyActivate = cmd.GetMethod("ApplyActivate", All);
+            var tailPatch = typeof(TacticalCommandSync).Assembly
+                .GetType("Multiplayer.Tactical.SharedAttackDoesNotWaitForLocalCameraTail");
+            var tailScope = typeof(TacticalCommandSync).Assembly
+                .GetType("Multiplayer.Tactical.SharedFireCoroutineCameraReadScope");
 
             // ── (a) THE GAME STILL GATES THE VISIBLE START ON THE CAMERA ───
             // The whole anchor is a claim about the game's own code. Pinned against the real assembly so a
@@ -79,6 +83,16 @@ namespace RailCheck
                                  "WaitForCameraChase under TrackWithCamera — the action no longer waits for the " +
                                  "camera, so skipping that wait anchors NOTHING and this arc needs re-measuring.";
             }
+
+            var tailPostfix = tailPatch?.GetMethod("Postfix", All);
+            if (tailPostfix == null || !Calls(tailPostfix,
+                    cmd.GetProperty("SharedAttackMustNotWaitForCamera", All)?.GetGetMethod(true)) ||
+                !Calls(tailScope?.GetMethod("Prefix", All), cmd.GetMethod("EnterFireCoroutineFrame", All)) ||
+                !Calls(tailScope?.GetMethod("Finalizer", All), cmd.GetMethod("ExitFireCoroutineFrame", All)))
+                yield return "L104 camera-tail-gates-simulation: FireWeaponAtTargetCrt waits on the local " +
+                             "CameraDirector.Busy after projectiles; L75 intentionally makes that camera state " +
+                             "different by selection, so a shared attack must force that presentation-only " +
+                             "tail out of action completion/settle timing.";
 
             // ── (b) THE EXEMPTION IS ONE MECHANISM, TAKEN BY BOTH PATHS ────
             // The mirror path (ApplyActivate) and the ACTING path (OnAbilityActivated) must arm the SAME
@@ -308,6 +322,32 @@ namespace RailCheck
                     yield return "L104(j): ApplyActivate does not arm the aim anchor — every MIRROR is left on " +
                                  "its own animator, so a mirror still walking keeps AimLoop and fires with no " +
                                  "wind-up at all while the acting peer plays the full one.";
+
+                var normalize = cmd.GetMethod("NormalizeRelayedShootStart", All);
+                var normalizeRule = cmd.GetMethod("ShouldNormalizeRelayedShoot", All);
+                if (normalize == null || normalizeRule == null ||
+                    !Calls(normalize, typeof(PhoenixPoint.Tactical.Levels.PathProcessors.PathProcessorUtils)
+                                      .GetMethod("SetNullNavParams", All)))
+                    yield return "L104(j): relayed shoot baseline is unbound or no longer uses the game's " +
+                                 "nav-free SetNullNavParams; FreeCam AimLoop can survive into replay.";
+                else
+                {
+                    var sequence = Callees(applyActivate);
+                    int normalizeAt = sequence.FindIndex(m => m.MetadataToken == normalize.MetadataToken &&
+                                                              m.Module == normalize.Module);
+                    int activateAt = normalizeAt < 0 ? -1 :
+                        sequence.FindIndex(normalizeAt + 1, m => m.Name == "Activate");
+                    if (normalizeAt < 0 || activateAt < 0 || normalizeAt >= activateAt)
+                        yield return "L104(j): ApplyActivate does not normalize the relayed ShootAbility " +
+                                     "animator BEFORE native Activate; the clicker's pre-confirm AimLoop and " +
+                                     "a watcher's Null state still enter FireWeaponAtTargetCrt differently.";
+                    Func<bool, bool, bool> rule = (shoot, navigating) =>
+                        (bool)normalizeRule.Invoke(null, new object[] { shoot, navigating });
+                    if (!rule(true, false) || rule(false, false) || rule(true, true))
+                        yield return "L104(j): shoot-baseline rule must normalize only ShootAbility after nav " +
+                                     "completion. This covers FreeCam and move-followup at its destination " +
+                                     "without stomping movement or unrelated abilities.";
+                }
 
                 // EXECUTED, part 1 — THE ARM PREDICATE ITSELF, which is what makes the branch constant.
                 var set = aimToken.GetValue(null) as HashSet<int>;

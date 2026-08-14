@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -23,6 +24,63 @@ using UnityEngine;
 
 namespace Multiplayer.Tactical
 {
+    /// <summary>Every host-native activation, including AI and autonomous reactions, enters the same future
+    /// epoch scheduler as a player order. Target every virtual override: patching only the base body is too
+    /// late because ShootAbility schedules its action after returning from base.Activate.</summary>
+    [HarmonyPatch]
+    internal static class HostNativeActivationWaitsForExecuteEpoch
+    {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            var signature = new[] { typeof(object) };
+            var seen = new HashSet<MethodBase>();
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type[] types;
+                try { types = assembly.GetTypes(); }
+                catch (ReflectionTypeLoadException ex) { types = ex.Types.Where(t => t != null).ToArray(); }
+                catch { continue; }
+                foreach (var t in types)
+                {
+                    if (!typeof(TacticalAbility).IsAssignableFrom(t)) continue;
+                    var m = AccessTools.DeclaredMethod(t, nameof(TacticalAbility.Activate), signature);
+                    if (m != null && !m.IsAbstract && seen.Add(m)) yield return m;
+                }
+            }
+            var baseMethod = AccessTools.Method(typeof(TacticalAbility), nameof(TacticalAbility.Activate), signature);
+            if (baseMethod != null && seen.Add(baseMethod)) yield return baseMethod;
+        }
+
+        [HarmonyPriority(Priority.First)]
+        private static bool Prefix(TacticalAbility __instance, object parameter)
+            => !TacticalCommandSync.ScheduleHostNativeAtEpoch(__instance, parameter);
+
+        private static void Finalizer(TacticalAbility __instance)
+            => TacticalCommandSync.ClearScheduledCaptureSuppression(__instance);
+
+        internal static int BindLateAssembly(HarmonyLib.Harmony harmony, Assembly assembly)
+        {
+            if (harmony == null || assembly == null) return 0;
+            Type[] types;
+            try { types = assembly.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { types = ex.Types.Where(t => t != null).ToArray(); }
+            int count = 0;
+            var prefix = new HarmonyMethod(AccessTools.Method(typeof(HostNativeActivationWaitsForExecuteEpoch), "Prefix"));
+            var finalizer = new HarmonyMethod(AccessTools.Method(typeof(HostNativeActivationWaitsForExecuteEpoch), "Finalizer"));
+            foreach (var t in types)
+            {
+                if (!typeof(TacticalAbility).IsAssignableFrom(t)) continue;
+                var m = AccessTools.DeclaredMethod(t, nameof(TacticalAbility.Activate), new[] { typeof(object) });
+                if (m == null || m.IsAbstract) continue;
+                var info = HarmonyLib.Harmony.GetPatchInfo(m);
+                if (info != null && info.Prefixes.Any(p => p.owner == harmony.Id)) continue;
+                harmony.Patch(m, prefix, null, null, finalizer);
+                count++;
+            }
+            return count;
+        }
+    }
+
     /// <summary>
     /// THE capture seam (law 4a), on the ONE generic funnel: <c>TacticalAbility.Activate(object)</c>
     /// (<c>TacticalAbility</c>:1078). On the BASE method, so the single patch covers every derived ability
@@ -98,6 +156,46 @@ namespace Multiplayer.Tactical
 
         private static bool Prefix(TacticalAbility ability, TacticalAbilityTarget target)
             => !TacticalCommandSync.PublishClickedOrder(ability, target);
+    }
+
+    /// <summary>
+    /// The move-and-act path does not return to <see cref="ClickedOrderWaitsForTheEcho"/>.  At the end of
+    /// <c>MoveAbility.Move</c> the engine calls its private <c>TryToExecuteFollowupAbility</c>, which directly
+    /// invokes <c>FollowupAbility.ExecuteAndWait</c>.  The follow-up references deliberately do not ride in
+    /// the move payload, so this method runs with them only on the peer that made the original click.  Turn
+    /// that second command into the same host-recorded order as an ordinary click before the direct execute;
+    /// when it is published, an empty coroutine suppresses the speculative local animation.
+    /// </summary>
+    [HarmonyPatch]
+    internal static class MoveFollowupWaitsForTheEcho
+    {
+        internal static readonly MethodBase Seam = AccessTools.Method(
+            typeof(MoveAbility), "TryToExecuteFollowupAbility", new[] { typeof(TacticalAbilityTarget) });
+
+        private static bool Prepare()
+        {
+            if (Seam != null) return true;
+            MpLog.LogError("[Multiplayer][tac] FOLLOWUP ECHO SEAM NOT BOUND — " +
+                           "MoveAbility.TryToExecuteFollowupAbility(TacticalAbilityTarget) did not resolve. " +
+                           "Move-and-fire follow-ups will start locally before the host record (law L230).");
+            return false;
+        }
+
+        private static MethodBase TargetMethod() => Seam;
+
+        private static IEnumerator<NextUpdate> Nothing() { yield break; }
+
+        private static bool Prefix(TacticalAbilityTarget target, ref IEnumerator<NextUpdate> __result)
+        {
+            var followup = target?.FollowupAbility;
+            if (followup == null || !TacticalCommandSync.PublishClickedOrder(followup, target.FollowupAbilityTarget))
+                return true;
+
+            __result = Nothing();
+            MpLog.Log("[MP][tac] move follow-up published before local ExecuteAndWait; local direct start " +
+                      "suppressed until the host record returns.");
+            return false;
+        }
     }
 
     /// <summary>
@@ -399,6 +497,33 @@ namespace Multiplayer.Tactical
         }
 
         private static IEnumerator<NextUpdate> NoWait() { yield break; }
+    }
+
+    /// <summary>L75 intentionally gives selected and non-selected peers different camera state. The native
+    /// fire coroutine reads Busy after projectiles are gone; that presentation value may not delay shared
+    /// action completion, the host settle, or the next order.</summary>
+    [HarmonyPatch(typeof(Base.Cameras.CameraDirector), nameof(Base.Cameras.CameraDirector.Busy), MethodType.Getter)]
+    internal static class SharedAttackDoesNotWaitForLocalCameraTail
+    {
+        private static void Postfix(ref bool __result)
+        {
+            __result = TacticalCommandSync.CameraBusyAnswer(
+                __result, TacticalCommandSync.SharedAttackMustNotWaitForCamera);
+        }
+    }
+
+    [HarmonyPatch]
+    internal static class SharedFireCoroutineCameraReadScope
+    {
+        private static MethodBase TargetMethod()
+        {
+            var state = typeof(TacticalLevelController).GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
+                .FirstOrDefault(t => t.Name.Contains("FireWeaponAtTargetCrt"));
+            return state == null ? null : AccessTools.Method(state, "MoveNext");
+        }
+
+        private static void Prefix(object __instance) => TacticalCommandSync.EnterFireCoroutineFrame(__instance);
+        private static void Finalizer() => TacticalCommandSync.ExitFireCoroutineFrame();
     }
 
     /// <summary>THE STANDING HALF of the local-UI release (<see cref="TacticalCommandSync.MovePollMustBeWithheld"/>

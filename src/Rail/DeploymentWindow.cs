@@ -356,6 +356,22 @@ namespace Multiplayer.Network.Sync
             occurrence = matches[0].Occurrence; return true;
         }
 
+        internal static bool TryFindAvailableForMission(DurableInboxStore store, MembershipId member,
+            string stableMissionSubject, out OccurrenceId occurrence)
+        {
+            occurrence = default(OccurrenceId);
+            if (store == null || string.IsNullOrEmpty(stableMissionSubject) ||
+                !store.Ledger.Members.Contains(member)) return false;
+            var matches = store.Ledger.EntriesFor(member).Where(x =>
+                (x.Lifecycle == InboxLifecycle.Deferred || x.Lifecycle == InboxLifecycle.Queued ||
+                 x.Lifecycle == InboxLifecycle.Open) &&
+                string.Equals(x.Occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal) &&
+                x.Occurrence.SubjectIds.Contains(stableMissionSubject, StringComparer.Ordinal) &&
+                x.Predecessor.HasValue).ToArray();
+            if (matches.Length != 1) return false;
+            occurrence = matches[0].Occurrence; return true;
+        }
+
         internal static bool TryReenterDeferredOccurrence(OccurrenceId expectedOccurrence,
             string stableMissionSubject, out OccurrenceId occurrence)
         {

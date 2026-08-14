@@ -81,9 +81,11 @@ namespace RailCheck
                              "skips the RECORD term only — it must still wait for the host's mission to land on " +
                              "this peer's own site, or the watch opens UIStateRosterDeployment around a mission " +
                              "this peer does not have.";
-            if (!Program.CalleeSequence(step).Any(c => c != null && c.Name == "EnqueuePriorityOccurrence"))
-                yield return "L272 arrival-term-dropped: Step does not record the arrived mission as a durable " +
-                             "priority occurrence for later Geoscape-only presentation.";
+            if (!Program.CalleeSequence(step).Any(c => c != null && c.Name == "Announce" &&
+                                                       c.DeclaringType != null &&
+                                                       c.DeclaringType.Name == "DeployPrep"))
+                yield return "L272 arrival-term-dropped: Step does not publish the arrived mission's exact " +
+                             "durable preparation door.";
 
             // ── (e) the eventless arm is bounded, and its clock starts at the click ─────────────────
             if (!Program.CalleeSequence(armHaven).Any(c => c != null && c.Name == "get_realtimeSinceStartup"))

@@ -216,7 +216,7 @@ namespace Multiplayer.Network.Sync
         /// that is already running is re-asserted false within ~1 s (TimeAnchor.cs:224-245).
         /// Both native bodies are provably inert past the write for <c>paused == true</c>: the only side
         /// branch in <c>SetGamePauseState</c> needs <c>!paused</c> (GeoscapeView.cs:1259).</summary>
-        private static bool PausesLocally(bool paused) => paused;
+        private static bool PausesLocally(bool paused) => false;
 
         // ─── THE TAB-PAUSE RULE (the pause follows the DISPATCHER, never the audience) ────────────────
 
@@ -484,6 +484,12 @@ namespace Multiplayer.Network.Sync
                     else geo.Timing.Paused = paused;   // view mid-init: same write, same events
                 }
                 finally { _replayingRemotePause = false; }
+                // A no-op setter emits no EffectiveScaleChangedEvent and therefore no ordinary delta. The
+                // requesting client is block-first and needs the authoritative echo even in that case.
+                TimeAnchor.RefreshForAuthoritativeReply(geo.Timing);
+                DiffEngine.ForceReemit("T");
+                DiffEngine.ForceReemit("TA");
+                DiffEngine.FlushNow();
                 MpLog.Log("[MP][pause] peer=" + senderPeerId + " → paused=" + paused + " nonce=" + nonce);
                 return;
             }

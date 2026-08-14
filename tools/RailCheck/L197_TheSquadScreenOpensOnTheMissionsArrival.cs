@@ -68,20 +68,25 @@ namespace RailCheck
             var watch = arrival?.GetMethod("Watch", All);
             var tick = arrival?.GetMethod("Tick", All);
             var step = arrival?.GetMethod("Step", All);
-            var should = nav?.GetMethod("ShouldOpenDeployment", All);
-            var headed = nav?.GetMethod("AlreadyHeadedForDeployment", All);
             var postfix = nav?.GetMethod("Postfix", All);
             var syncTick = typeof(SyncEngine).GetMethod("Tick", All, null, Type.EmptyTypes, null);
             var hostBroadcast = typeof(EventPopup).GetMethod("HostBroadcast", All);
             var raiseMirrored = typeof(EventPopup).GetMethod("RaiseMirrored", All);
+            var eventAnswer = typeof(EventSync).GetMethod("HandleAnswer", All);
+            var deployPrep = mod.GetType("Multiplayer.Network.Sync.DeployPrep");
+            var publishMission = deployPrep?.GetMethod("PublishMission", All);
+            var suppress = deployPrep?.GetMethod("SuppressNextEntitledEnter", All);
+            var consume = deployPrep?.GetMethod("ConsumeEntitledEnter", All);
+            var enterPatch = mod.GetType("Multiplayer.Network.Sync.DeployPrepEnterPatch")?.GetMethod("Postfix", All);
 
             if (hasArrived == null || givenUp == null || watch == null || tick == null || step == null ||
-                should == null || headed == null || postfix == null || syncTick == null ||
-                hostBroadcast == null || raiseMirrored == null)
+                postfix == null || syncTick == null ||
+                hostBroadcast == null || raiseMirrored == null || eventAnswer == null || publishMission == null ||
+                suppress == null || consume == null || enterPatch == null)
             {
                 yield return "L197 premise-changed: MissionArrivalNav.{MissionHasArrived,ArrivalGivenUp,Watch," +
-                             "Tick,Step}, MissionEncounterNav.{ShouldOpenDeployment,AlreadyHeadedForDeployment," +
-                             "Postfix}, SyncEngine.Tick or EventPopup.{HostBroadcast,RaiseMirrored} no longer " +
+                             "Tick,Step}, MissionEncounterNav.Postfix, SyncEngine.Tick or " +
+                             "EventPopup.{HostBroadcast,RaiseMirrored} no longer " +
                              "resolves. The squad screen's arrival trigger has been reshaped and every arm below " +
                              "would pass vacuously — which is how a peer silently kept not reaching it.";
                 yield break;
@@ -126,39 +131,59 @@ namespace RailCheck
                              "MissionArrivalNav.Tick. The whole point is a trigger that does NOT depend on this " +
                              "peer's own dialog teardown — unwired, the squad screen is back to being whatever " +
                              "FinishEncounter happened to see.";
-            if (!Program.Callees(hostBroadcast, mod).Any(m => Same(m, watch)) ||
-                !Program.Callees(raiseMirrored, mod).Any(m => Same(m, watch)))
-                yield return "L197 watch-is-never-armed: one of EventPopup.HostBroadcast / RaiseMirrored no " +
-                             "longer arms MissionArrivalNav.Watch. BOTH are needed: a client's window is " +
-                             "mirrored, and a HOST that loses the answer race never ran its own SelectChoice:612 " +
-                             "either, so it owes itself exactly the same screen.";
+            if (!Program.Callees(raiseMirrored, mod).Any(m => Same(m, watch)))
+                yield return "L197 watch-is-never-armed: EventPopup.RaiseMirrored no longer arms the addressed " +
+                             "client's MissionArrivalNav watch.";
+            if (Program.Callees(hostBroadcast, mod).Any(m => Same(m, watch)))
+                yield return "L197 host-claims-client-entitlement: EventPopup.HostBroadcast arms an arrival " +
+                             "watch on the host for a window dispatched to another peer.";
             var stepCalls = Program.Callees(step, mod).ToList();
-            if (!stepCalls.Any(m => Same(m, should)) || !stepCalls.Any(m => Same(m, headed)))
-                yield return "L197 arrival-double-queues: MissionArrivalNav.Step opens the screen without " +
-                             "asking ShouldOpenDeployment AND AlreadyHeadedForDeployment. ToDeploymentState:596 " +
-                             "QUEUES at int.MaxValue into a list GeoscapeViewSwitchQuery.GetRestorableData puts " +
-                             "in the SAVE, so a second request is a deployment screen for a finished mission, " +
-                             "waiting for the player after the battle.";
-            if (!Program.Callees(step, typeof(MissionArrivalNav).Assembly)
-                        .Any(m => m.Name == "EnqueuePriorityOccurrence"))
-                yield return "L197 arrival-records-nothing: MissionArrivalNav.Step does not record the durable " +
-                             "priority occurrence for the Geoscape-gated scheduler.";
-            // RESTORED 2026-08-10, after being replaced by the arm above in ae2099d. Recording the occurrence
-            // is NOT presenting it: DurableInboxEngine.TryPresentNext has no production caller, so the queue
-            // the hand-off relied on is drained by nothing. With only the record arm in place the harness
-            // stayed green while BOTH clients sat on the geoscape after answering a mission start ("priority
-            // occurrence ready … presentation remains behind DurableWindowRegistry.MayPresent", live
-            // 2026-08-10) — this arm is exactly the "green harness, missing screen" it was written against,
-            // and it must be held TOGETHER with the record arm, never traded for it.
-            if (!Program.Callees(step, typeof(GeoscapeView).Assembly).Any(m => m.Name == "LaunchMission"))
-                yield return "L197 arrival-opens-nothing: MissionArrivalNav.Step never reaches " +
-                             "GeoscapeView.LaunchMission, so every arm above is about a watch that decides " +
-                             "correctly and then does nothing — green harness, missing screen.";
-            if (!Program.Callees(step, typeof(MissionArrivalNav).Assembly).Any(m => m.Name == "MayPresent"))
-                yield return "L197 arrival-yanks-a-peer: MissionArrivalNav.Step opens the screen without asking " +
-                             "DurableWindowRegistry.MayPresent. A peer reading Research or queueing " +
-                             "Manufacturing must not be dragged to the squad screen by somebody else's answer; " +
-                             "the gate is also what lets the watch stay armed until this peer is back on the map.";
+            if (!stepCalls.Any(m => m.Name == "MayAutoOpen") ||
+                !Program.Callees(step, typeof(GeoscapeView).Assembly).Any(m => m.Name == "LaunchMission"))
+                yield return "L197 entitled-arrival-opens-nothing: MissionArrivalNav.Step must gate and perform " +
+                             "the addressed client's one local LaunchMission after exact ActiveMission arrival.";
+            var mayAuto = arrival.GetMethod("MayAutoOpen", All);
+            if (mayAuto == null || (bool)mayAuto.Invoke(null, new object[] { true, true }) ||
+                !(bool)mayAuto.Invoke(null, new object[] { true, false }) ||
+                (bool)mayAuto.Invoke(null, new object[] { false, false }))
+                yield return "L197 entitlement-role-broken: only (entitled=true, host=false) may auto-open.";
+            if (!stepCalls.Any(m => Same(m, suppress)) ||
+                !Program.Callees(enterPatch, mod).Any(m => m.Name == "AnnounceFromEnter"))
+                yield return "L197 entitlement-handoff-unwired: entitled arrival must arm an exact-key one-shot " +
+                             "and deployment EnterState must consume it before ordinary Announce.";
+            suppress.Invoke(null, new object[] { "mission:A" });
+            if ((bool)consume.Invoke(null, new object[] { "mission:B" }) ||
+                !(bool)consume.Invoke(null, new object[] { "mission:A" }) ||
+                (bool)consume.Invoke(null, new object[] { "mission:A" }))
+                yield return "L197 entitlement-handoff-not-exactly-once: the per-mission suppression crossed " +
+                             "keys or survived its first matching EnterState.";
+            var answerCalls = Program.Callees(eventAnswer, mod).ToList();
+            if (!answerCalls.Any(m => Same(m, publishMission)))
+                yield return "L197 host-publishes-zero: EventSync.HandleAnswer does not call host-only " +
+                             "DeployPrep.PublishMission for the exact created mission.";
+            var publishCalls = Program.Callees(publishMission, mod).ToList();
+            if (publishCalls.Any(m => m.Name == "Announce") ||
+                publishCalls.SelectMany(m => Program.Callees(m, mod)).Any(m => m.Name == "Send" &&
+                    m.DeclaringType?.Name == "IntentRail"))
+                yield return "L197 host-publish-reaches-intent: PublishMission reaches Announce/IntentRail.Send; " +
+                             "a host-authoritative write must never masquerade as a client request.";
+
+            // Universal producer audit: every mod callsite reaching native deployment navigation is named.
+            var allowed = new HashSet<string> {
+                "Multiplayer.Network.Sync.MissionArrivalNav.Step",
+                "Multiplayer.Network.Sync.MissionEncounterNav.Postfix",
+                "Multiplayer.Network.Sync.DeployPrep.Join"
+            };
+            foreach (var type in mod.GetTypes())
+            foreach (var method in type.GetMethods(All))
+            {
+                bool navigates = Program.Callees(method, typeof(GeoscapeView).Assembly)
+                    .Any(m => m.Name == "LaunchMission" || m.Name == "ToDeploymentState");
+                if (navigates && !allowed.Contains(type.FullName + "." + method.Name))
+                    yield return "L197 unclassified-deployment-producer: " + type.FullName + "." + method.Name +
+                                 " reaches LaunchMission/ToDeploymentState outside PrepJoinButton, an entitled " +
+                                 "local arrival, or the local dialog completion funnel.";
+            }
 
             // ── (d) NO QUORUM: the pure decisions read no peer at all ────────────────
             var peerish = new[] { "NetworkEngine", "SessionManager", "PingTable", "PeerListEntry",

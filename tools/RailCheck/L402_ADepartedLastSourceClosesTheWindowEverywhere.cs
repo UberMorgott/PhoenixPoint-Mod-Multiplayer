@@ -84,23 +84,18 @@ namespace RailCheck
             ulong terminal; string refusal;
             if (!new DurableSourceRevalidationEngine(store, (o, m) => { })
                     .TryRevalidate(deployment, vehicle, onlySource, noSource, false, out terminal, out refusal) ||
-                terminal == 0)
-                yield return "L402 last-source-departure-was-refused: " + (refusal ?? "no terminal revision");
+                terminal != 0)
+                yield return "L402 last-source-departure-was-refused-or-terminal: " + (refusal ?? "terminal revision minted");
             else
             {
                 foreach (var member in members)
                 {
                     var entry = store.Ledger.Get(deployment, member);
-                    if (entry.Lifecycle != InboxLifecycle.Removed ||
-                        entry.TerminalReason != TerminalReason.SourceInvalidated ||
-                        entry.TombstoneRevision != terminal)
-                        yield return "L402 window-survived-for-a-peer-after-its-last-source-left: member " +
-                                     member.PlayerGuid + " kept lifecycle " + entry.Lifecycle + " reason " +
-                                     entry.TerminalReason + " — the owner's rule is that it goes for EVERYONE";
+                    if (entry.Lifecycle == InboxLifecycle.Removed || entry.TerminalReason.HasValue)
+                        yield return "L402 unavailable-mission-was-tombstoned-for-member: " + member.PlayerGuid;
                 }
-                if (carrier.Removed != 1 || carrier.Reason != TerminalReason.SourceInvalidated)
-                    yield return "L402 carrier-was-not-torn-down-once-without-callbacks: removed=" +
-                                 carrier.Removed + " reason=" + carrier.Reason;
+                if (carrier.Removed != 0)
+                    yield return "L402 availability-change-tore-down-the-persistent-carrier";
             }
 
             // ── the mission must survive: the whole departure path may never cancel it ──

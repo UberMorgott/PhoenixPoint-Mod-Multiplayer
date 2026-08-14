@@ -118,6 +118,18 @@ namespace Multiplayer.Harmony
         private static void BindAll()
         {
             var summary = new System.Text.StringBuilder("late-bound: ");
+            try
+            {
+                var tftv = AccessTools.TypeByName("TFTV.TFTVMain");
+                int actions = Multiplayer.Tactical.HostNativeActivationWaitsForExecuteEpoch
+                    .BindLateAssembly(_harmony, tftv?.Assembly);
+                summary.Append("HostNativeEpoch=").Append(actions).Append(" ");
+            }
+            catch (Exception e)
+            {
+                summary.Append("HostNativeEpoch=FAILED ");
+                MpLog.LogWarning("[Multiplayer] late tactical execute-epoch bind failed — " + e.Message);
+            }
             foreach (var t in _patchClasses)
             {
                 try

@@ -102,7 +102,7 @@ namespace Multiplayer.Network.Sync
             // ANSWERED BY THAT BUTTON: nothing is cancelled, nothing is re-raised, and no peer is offered a
             // choice that is already taken. Blocks nobody (P13) — the refusal lasts exactly as long as the
             // door does, and the door takes itself down when the drop launches, is cancelled or flies off.
-            if (DeployPrep.ReofferIsRedundant(DeployPrep.LiveSiteRef(), siteRef))
+            if (DeployPrep.HasPersistentMissionAt(siteRef))
             {
                 EventPopup.BriefProbe(siteRef, "reoffer-has-a-door", what + " — a deployment prep for THIS " +
                     "site is already announced, so the DEPLOYMENT PREP button on the geoscape is the " +

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using Multiplayer.Network.Sync;
 using PhoenixPoint.Geoscape.View.ViewStates;
@@ -25,7 +26,7 @@ namespace RailCheck
     ///       for the peer whose own announcement is still the live one, and never on an empty announcement.
     ///       Without it a stale close from a superseded screen takes somebody else's door away.
     ///   (d) <c>root-unregistered</c> — <c>"M#prep"</c> must still be the registered mod root, because the
-    ///       whole mechanism is that one replicated string and nothing else.
+    ///       whole mechanism is one replicated per-mission dictionary and nothing else.
     ///   (e) <c>root-never-crosses</c> — <c>DeployPrepState</c> must CLASSIFY with at least one rail field.
     ///       Registering a mod root is only half the contract (<c>IdentityResolver.RegisterModRoot</c>): the
     ///       state class must carry <c>[SerializeType(SerializeAll)]</c> or <c>RailMeta.HasPersistentMembers</c>
@@ -62,7 +63,18 @@ namespace RailCheck
             var root = typeof(DeployPrep).GetField("RootKey", All);
             var idle = typeof(DeployPrep).GetMethod("IdleGeoscape", All);
             var redundant = typeof(DeployPrep).GetMethod("ReofferIsRedundant", All);
-            if (shows == null || clears == null || root == null || idle == null || redundant == null)
+            var persistent = typeof(DeployPrep).GetMethod("HasPersistentMissionAt", All);
+            var liveRecords = typeof(DeployPrep).GetMethod("LiveRecords", All);
+            var records = typeof(DeployPrepState).GetField("Records", All);
+            var sameMission = typeof(DeployPrep).GetMethod("SameMission", All);
+            var closeExact = typeof(DeployPrep).GetMethod("CloseExact", All);
+            var openMatches = typeof(DeployPrep).GetMethod("OpenMatches", All);
+            var handleClose = typeof(DeployPrep).GetMethod("HandleClose", All);
+            var handleOpen = typeof(DeployPrep).GetMethod("HandleOpen", All);
+            var explicitDoor = typeof(DurableInboxEngine).GetMethod("DeploymentUsesExplicitDoor", All);
+            if (shows == null || clears == null || root == null || idle == null || redundant == null ||
+                persistent == null || liveRecords == null || records == null || sameMission == null ||
+                closeExact == null || openMatches == null || handleClose == null || handleOpen == null || explicitDoor == null)
             {
                 yield return "L424 premise-changed: DeployPrep.ShowsButton / ClearsOnWithdraw / RootKey / " +
                              "IdleGeoscape / ReofferIsRedundant no " +
@@ -71,6 +83,45 @@ namespace RailCheck
                              "being the launch quorum P13 forbids.";
                 yield break;
             }
+
+            var prepOccurrence = new OccurrenceId("DeploymentPreparing", "t", new[] { "S#7|M" });
+            if (!DurableInboxEngine.DeploymentUsesExplicitDoor(prepOccurrence) ||
+                DurableInboxEngine.DeploymentUsesExplicitDoor(new OccurrenceId("Modal:X", "t", new[] { "x" })))
+                yield return "L424 remote-preparation-forced-navigation: DeploymentPreparing is not classified " +
+                             "as an explicit persistent door, or an unrelated modal was classified as one.";
+
+            var relay = typeof(MissionReoffer).GetMethod("RelayGesture", All);
+            if (relay == null || !Program.Callees(relay, typeof(DeployPrep).Assembly)
+                    .Any(m => m.MetadataToken == persistent.MetadataToken && m.Module == persistent.Module))
+                yield return "L424 departed-door-allows-destructive-reoffer: MissionReoffer.RelayGesture does " +
+                             "not consult HasPersistentMissionAt. A temporarily unservable KeepEncounter mission " +
+                             "can then reach ShowMissionBriefing -> GeoMission.Cancel before its aircraft returns.";
+
+            if (records.FieldType != typeof(Dictionary<string, string>))
+                yield return "L424 concurrent-preparations-share-one-slot: DeployPrepState.Records is not a " +
+                             "stable-mission-keyed dictionary, so one POI can overwrite another.";
+            if (liveRecords.ReturnType != typeof(KeyValuePair<string, string>[]))
+                yield return "L424 prep-list-is-not-deterministic: LiveRecords does not return the sorted " +
+                             "stable-key/site records consumed by the button stack.";
+            const string missionA = "S#7|mission-A", missionB = "S#7|mission-B";
+            if (!DeployPrep.SameMission(missionA, missionA) || DeployPrep.SameMission(missionA, missionB) ||
+                DeployPrep.SameMission("", missionB))
+                yield return "L424 stale-mission-revived-at-reused-site: stable mission A is treated as B " +
+                             "merely because both occupy S#7. A stale button could open B, and B's re-offer " +
+                             "could be suppressed by A's record.";
+            var sameSite = new Dictionary<string, string> {
+                [missionA] = "S#7", [missionB] = "S#7" };
+            if (!DeployPrep.CloseExact(sameSite, missionA, "S#7") || sameSite.ContainsKey(missionA) ||
+                !sameSite.TryGetValue(missionB, out var survivor) || survivor != "S#7" ||
+                DeployPrep.CloseExact(sameSite, missionB, "S#wrong"))
+                yield return "L424 delayed-close-deleted-replacement-mission: closing exact A at S#7 did not " +
+                             "leave B at S#7 intact, or a mismatched site was accepted.";
+            if (!Program.Callees(handleClose, typeof(DeployPrep).Assembly).Any(m =>
+                    m.MetadataToken == closeExact.MetadataToken && m.Module == closeExact.Module) ||
+                !Program.Callees(handleOpen, typeof(DeployPrep).Assembly).Any(m =>
+                    m.MetadataToken == openMatches.MetadataToken && m.Module == openMatches.Module))
+                yield return "L424 prep-wire-bypasses-mission-pair-validation: OpPrepOpen/Close handlers do not " +
+                             "reach the exact stable-key+site decisions exercised above.";
 
             // ── (a) arity ───────────────────────────────────────────────────────────────────────
             var ps = shows.GetParameters();
@@ -113,7 +164,7 @@ namespace RailCheck
             // ── (d) the root ────────────────────────────────────────────────────────────────────
             if (!string.Equals(root.GetValue(null) as string, "M#prep", StringComparison.Ordinal))
                 yield return "L424 root-unregistered: DeployPrep.RootKey is no longer \"M#prep\". The whole " +
-                             "mechanism is that one replicated string on the 0xAC value rail; a renamed root " +
+                             "mechanism is that one replicated dictionary on the 0xAC value rail; a renamed root " +
                              "is a root neither peer mirrors and the button never appears on anybody.";
 
             // ── (e) the root actually classifies ────────────────────────────────────────────────

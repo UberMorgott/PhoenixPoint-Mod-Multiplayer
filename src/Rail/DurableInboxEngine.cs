@@ -426,15 +426,23 @@ namespace Multiplayer.Network.Sync
             var openEntries = entries.Where(x => x.Lifecycle == InboxLifecycle.Open)
                 .OrderBy(x => x.HostOrderKey).ToArray();
             if (openEntries.Length > 1) return RepairMultipleOpen(expected, openEntries);
-            var next = entries.Where(x => x.Lifecycle == InboxLifecycle.Queued)
+            var next = entries.Where(x => x.Lifecycle == InboxLifecycle.Queued &&
+                                          !DeploymentUsesExplicitDoor(x.Occurrence))
                 .OrderByDescending(x => DurableWindowRegistry.PriorityOf(x.Occurrence)).ThenBy(x => x.HostOrderKey).FirstOrDefault();
             if (next == null) return TryResumeSuspended(geoscapeStarted, currentViewState);
+            // Deployment preparation is an AVAILABLE persistent door, never a remote navigation command.
+            // The initiator already owns its native screen; every other member keeps this queued until its
+            // own PrepJoinButton gesture explicitly re-enters it. In particular, a client start cannot yank
+            // the host out of a geoscape event window when that window later becomes idle.
             var open = openEntries.FirstOrDefault();
             if (open != null)
                 return DurableWindowRegistry.PriorityOf(next.Occurrence) > DurableWindowRegistry.PriorityOf(open.Occurrence) &&
                     TryPreempt(open.Occurrence, next.Occurrence, geoscapeStarted, currentViewState);
             return CommitOpenAndPresent(next);
         }
+
+        internal static bool DeploymentUsesExplicitDoor(OccurrenceId occurrence) =>
+            string.Equals(occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal);
 
         internal bool ConfirmNativePresented(OccurrenceId occurrence)
         {
@@ -762,7 +770,10 @@ namespace Multiplayer.Network.Sync
         internal DeploymentSourceSnapshot Before { get; } internal DeploymentSourceSnapshot After { get; }
         internal bool UniquelyBound { get; }
         internal ulong DepartureWatermark { get; }
-        internal bool Terminal => UniquelyBound || After.SourceCount == 0 || After.OccupantCount == 0;
+            // Source loss is availability, not mission outcome.  The ActiveMission may be a KeepEncounter
+            // mission whose aircraft is allowed to leave and return; tombstoning here made that return
+            // impossible without destructive ShowMissionBriefing -> GeoMission.Cancel re-offer.
+            internal bool Terminal => false;
     }
 
     internal sealed class SourceRevalidationItem

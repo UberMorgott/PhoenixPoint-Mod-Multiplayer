@@ -283,6 +283,9 @@ namespace Multiplayer.Network.Sync
             /// window carries no host ordering key at all. Closing it needs a host→client ordering signal that
             /// does not exist yet; RailCheck <b>L93 client-raise-not-host-ordered</b> holds the bug open.</summary>
             public int Priority;
+            /// <summary>True only on a mission-confirmation UNICAST addressed to this receiving client.
+            /// It is a local navigation entitlement, not mission authority.</summary>
+            public bool AutoOpenMissionOnArrival;
         }
 
         /// <summary>[seq:u32][eventId][siteRef][vehicleRef][title][narrative][priority:i32]. Pure both ways so
@@ -300,6 +303,7 @@ namespace Multiplayer.Network.Sync
                 w.Write(p.Title ?? "");
                 w.Write(p.Narrative ?? "");
                 w.Write(p.Priority);
+                w.Write(p.AutoOpenMissionOnArrival);
                 return ms.ToArray();
             }
         }
@@ -318,6 +322,7 @@ namespace Multiplayer.Network.Sync
                     Title = WireString.ReadText(r),
                     Narrative = WireString.ReadProse(r),
                     Priority = r.ReadInt32(),
+                    AutoOpenMissionOnArrival = r.ReadBoolean(),
                 };
             }
         }
@@ -378,8 +383,6 @@ namespace Multiplayer.Network.Sync
                         r.State is UIStateGeoscapeEvent ui && ReferenceEquals(ui.Event, ev));
                     if (request != null) WindowOrder.BindDurable(request, occurrence);
                 }
-                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventRaise, SyncKind.StateDelta, Encode(seq, p));
-                var msg = new NetworkMessage(PacketType.SyncEnvelope, env);
                 // MISSION UNICAST: a mission start confirmation reaches only the peer whose vehicle triggered
                 // it. The host's own vehicle: no broadcast (the host already has the window natively). A
                 // client's vehicle: SendToClient. Dispatcher unknown: safety fallback to BroadcastToAll.
@@ -393,16 +396,20 @@ namespace Multiplayer.Network.Sync
                     {
                         MpLog.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq +
                                   " NOT mirrored — mission start confirmation for host's own vehicle " + vehicleRef);
-                        MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
                         return;
                     }
-                    engine.SendToClient(dispatchPeer, msg);
+                    p.AutoOpenMissionOnArrival = true;
+                    var unicastEnv = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventRaise, SyncKind.StateDelta,
+                                                                 Encode(seq, p));
+                    var unicastMessage = new NetworkMessage(PacketType.SyncEnvelope, unicastEnv);
+                    engine.SendToClient(dispatchPeer, unicastMessage);
                     MpLog.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq +
                               " UNICAST to peer " + dispatchPeer + " — mission start confirmation, vehicle " +
                               vehicleRef + " (other peers do NOT see this window)");
-                    MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
                     return;
                 }
+                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventRaise, SyncKind.StateDelta, Encode(seq, p));
+                var msg = new NetworkMessage(PacketType.SyncEnvelope, env);
                 engine.BroadcastToAll(msg);
                 MpLog.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority +
                           " site=" + (p.SiteRef == "" ? "none" : p.SiteRef) + " vehicle=" +
@@ -410,7 +417,6 @@ namespace Multiplayer.Network.Sync
                           " narrLen=" + p.Narrative.Length);
                 // The host watches its own mission windows for the same reason a client does — it can LOSE
                 // the race, and then its native SelectChoice:612 never ran here either (MissionArrivalNav).
-                MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
             }
             catch (Exception ex)
             {
@@ -422,7 +428,7 @@ namespace Multiplayer.Network.Sync
         /// <summary>Unicast a mission-start event to a SINGLE client whose vehicle triggered the mission.
         /// Called from the <see cref="EventRaiseBroadcast"/> Postfix when the Prefix suppressed the host's
         /// native window. Builds the same payload as <see cref="HostBroadcast"/> but sends via SendToClient;
-        /// the host's MissionArrivalNav still watches so it navigates to deployment when the client starts.</summary>
+        /// only that addressed client receives the local auto-open entitlement.</summary>
         internal static void HostBroadcastMissionUnicast(GeoscapeView view, GeoscapeEvent ev, ulong targetPeer)
         {
             var engine = NetworkEngine.Instance;
@@ -439,6 +445,7 @@ namespace Multiplayer.Network.Sync
                     Title = LiveTitle(data),
                     Narrative = LiveNarrative(data, ev.Context),
                     Priority = 0,   // the host has no queued request for this window (its raise was suppressed)
+                    AutoOpenMissionOnArrival = true,
                 };
                 uint seq = Seq.Next(SurfaceIds.GeoEventRaise);
                 var store = DurableInboxSession.ActiveStore;
@@ -461,7 +468,6 @@ namespace Multiplayer.Network.Sync
                           "' seq=" + seq + " vehicle=" + (p.VehicleRef == "" ? "none" : p.VehicleRef) +
                           " site=" + (p.SiteRef == "" ? "none" : p.SiteRef) +
                           " (host's native window was suppressed)");
-                MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
             }
             catch (Exception ex)
             {
@@ -996,7 +1002,8 @@ namespace Multiplayer.Network.Sync
             _unanswered[p.EventId] = new KeyValuePair<uint, Raise>(seq, p);
             // The squad screen must not depend on this peer's own dialog teardown running to completion —
             // see MissionArrivalNav. Armed from the RAISE, fired from the mission's ARRIVAL.
-            MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef);
+            if (p.AutoOpenMissionOnArrival)
+                MissionArrivalNav.Watch(p.EventId, data, p.SiteRef, p.VehicleRef, true);
             return true;
         }
 

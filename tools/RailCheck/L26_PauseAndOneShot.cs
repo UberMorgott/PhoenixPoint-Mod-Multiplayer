@@ -121,9 +121,7 @@ namespace RailCheck
                              "resume no longer reaches the game's own funnel — which is also where the " +
                              "TimeLimit guard (GeoscapeView.cs:1259) and the events that flush the delta live";
 
-            // THE CLIENT'S ONE ASYMMETRY, executed. A pause runs LOCALLY (an already-paused host swallows
-            // the re-write, so no delta would ever come back to pause it); a resume does NOT (that direction
-            // would run the client's campaign ahead of the host — it still SHIPS, and the host applies it).
+            // BLOCK-FIRST IN BOTH DIRECTIONS. The host force-reemits T+TA even for a swallowed no-op.
             var locally = typeof(TimeSync).GetMethod("PausesLocally", AllMembers);
             if (locally == null)
                 yield return "L26 client-pause-blocked: TimeSync.PausesLocally is gone, so nothing decides " +
@@ -131,15 +129,25 @@ namespace RailCheck
                              "under that player's popup exactly as it did on 2026-08-04";
             else
             {
-                if (!(bool)locally.Invoke(null, new object[] { true }))
-                    yield return "L26 client-pause-blocked: a client's PAUSE is blocked again. The host " +
-                                 "re-writing an already-true Timing.Paused is swallowed by the change-gated " +
-                                 "setter (Timing.cs:112) — no event, no diff, no delta — so that client free-" +
-                                 "runs under its own open window with nothing to correct it";
+                if ((bool)locally.Invoke(null, new object[] { true }))
+                    yield return "L26 client-pause-predicts: a client's PAUSE still mutates locally before the " +
+                                 "host record, so the initiator and watchers have different rates in flight and " +
+                                 "one shared TimeAnchor compensation cannot be correct for both";
                 if ((bool)locally.Invoke(null, new object[] { false }))
                     yield return "L26 client-resumes-locally: a client's RESUME now runs locally. That is the " +
                                  "one direction that is not self-healing: the client's campaign runs ahead of " +
                                  "the host's. The intent alone is enough — nothing refuses it any more";
+                if (applier != null && (!Reaches(applier, "DiffEngine", "ForceReemit") ||
+                                        !Reaches(applier, "DiffEngine", "FlushNow") ||
+                                        !Reaches(applier, "TimeAnchor", "RefreshForAuthoritativeReply")))
+                    yield return "L26 no-op-pause-has-no-echo: HandleIntentOp must force-reemit and flush the " +
+                                 "authoritative T+TA roots from a freshly relatched anchor when the native " +
+                                 "setter swallows an equal value";
+                if (applier != null && !HasOrderedAuthoritativeReply(applier))
+                    yield return "L26 authoritative-reply-out-of-order: HandleIntentOp must call " +
+                                 "RefreshForAuthoritativeReply, ForceReemit(\"T\"), ForceReemit(\"TA\"), " +
+                                 "then FlushNow, in exactly that order. Missing, renamed, or swapped roots " +
+                                 "can publish an aged or incomplete authoritative clock reply.";
             }
 
             // ─── (c) THE GAME'S OWN ONE-SHOT PAUSE, THE PREMISE THE MOD'S SEAM WAS DELETED FOR ───
@@ -299,6 +307,53 @@ namespace RailCheck
                     (ownerName == null || callee.DeclaringType?.Name == ownerName)) found = true;
             });
             return found;
+        }
+
+        /// <summary>Proves the no-op reply protocol from the actual HandleIntentOp callsites, including
+        /// each ForceReemit string argument. Merely counting calls is insufficient: swapping T/TA or
+        /// changing either literal still compiles and silently changes the wire ordering.</summary>
+        private static bool HasOrderedAuthoritativeReply(MethodBase m)
+        {
+            var events = new List<string>();
+            string pendingLiteral = null;
+            var typeArgs = m?.DeclaringType != null && m.DeclaringType.IsGenericType
+                ? m.DeclaringType.GetGenericArguments() : null;
+            var methodArgs = m != null && m.IsGenericMethodDefinition ? m.GetGenericArguments() : null;
+
+            WalkIl(m, (op, pos, il) =>
+            {
+                if (op == OpCodes.Ldstr)
+                {
+                    try { pendingLiteral = m.Module.ResolveString(BitConverter.ToInt32(il, pos)); }
+                    catch { pendingLiteral = null; }
+                    return;
+                }
+
+                if ((op == OpCodes.Call || op == OpCodes.Callvirt) && op.OperandType == OperandType.InlineMethod)
+                {
+                    MethodBase callee = null;
+                    try { callee = m.Module.ResolveMethod(BitConverter.ToInt32(il, pos), typeArgs, methodArgs); }
+                    catch { }
+                    if (callee?.DeclaringType == typeof(TimeAnchor) && callee.Name == "RefreshForAuthoritativeReply")
+                        events.Add("refresh");
+                    else if (callee?.DeclaringType == typeof(DiffEngine) && callee.Name == "ForceReemit")
+                        events.Add("force:" + (pendingLiteral ?? "<nonliteral>"));
+                    else if (callee?.DeclaringType == typeof(DiffEngine) && callee.Name == "FlushNow")
+                        events.Add("flush");
+                }
+
+                // The string must be the argument loaded at this callsite, not an unrelated earlier
+                // literal. Nop is harmless sequence-point padding; any other instruction breaks the link.
+                if (op != OpCodes.Nop) pendingLiteral = null;
+            });
+
+            var forces = events.Where(e => e.StartsWith("force:", StringComparison.Ordinal)).ToList();
+            if (!forces.SequenceEqual(new[] { "force:T", "force:TA" })) return false;
+            int refresh = events.IndexOf("refresh");
+            int t = events.IndexOf("force:T");
+            int ta = events.IndexOf("force:TA");
+            int flush = events.IndexOf("flush");
+            return refresh >= 0 && refresh < t && t < ta && ta < flush;
         }
 
         /// <summary>True when every store of <paramref name="field"/> in this method writes the constant 1.

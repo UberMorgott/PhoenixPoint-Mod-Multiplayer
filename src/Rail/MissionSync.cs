@@ -1295,7 +1295,7 @@ namespace Multiplayer.Network.Sync
             internal string EventId;
             internal string SiteRef;
             internal string VehicleRef;
-            internal string HostTriggerId;
+            internal bool AutoOpenEntitled;
             /// <summary>Which <c>GeoscapeEventRecord.TriggerCount</c> THIS window is answered from —
             /// <c>EventPopup.RaiseTriggerCount</c> read off the live record at arm time, the same number
             /// <c>EventPopup</c> binds to the window itself. Without it the watch read a record left over
@@ -1305,9 +1305,6 @@ namespace Multiplayer.Network.Sync
             /// to the preparation screen, while the client whose <c>Reset#1</c> delta had already landed
             /// (<c>PP-Instance2 11430</c>) got the dialog. Two peers, two stages, one raise.</summary>
             internal int RaiseTriggerCount;
-            /// <summary>One line per watch, not one per frame: Step polls from SyncEngine.Tick, so an
-            /// unconditional "waiting for a map state" log would be a spew.</summary>
-            internal bool PresentationDeferred;
             internal float ResolvedAt;   // realtimeSinceStartup of the first tick the record read Completed
         }
 
@@ -1325,15 +1322,14 @@ namespace Multiplayer.Network.Sync
 
         internal static void Reset() { _watched.Clear(); }
 
-        /// <summary>Arm the watch for a window this peer was actually shown. Called from BOTH raise paths —
-        /// the host's own (<c>EventPopup.HostBroadcast</c>) and the mirror's
-        /// (<c>EventPopup.RaiseMirrored</c>) — because a HOST can lose the answer race too, and then its
-        /// native <c>SelectChoice</c>:612 never ran here either.</summary>
-        internal static void Watch(string eventId, GeoscapeEventData data, string siteRef, string vehicleRef)
+        /// <summary>Arm the watch for a window this peer was actually shown and, for automatic navigation,
+        /// explicitly addressed by the host. A remote client's unicast never arms the host.</summary>
+        internal static void Watch(string eventId, GeoscapeEventData data, string siteRef, string vehicleRef,
+                                   bool autoOpenEntitled = false)
         {
             if (string.IsNullOrEmpty(eventId) || string.IsNullOrEmpty(siteRef)) return;
             if (!EventPopup.AnyChoiceStartsMission(data)) return;
-            Arm(eventId, eventId, siteRef, vehicleRef, 0f);
+            Arm(eventId, eventId, siteRef, vehicleRef, 0f, autoOpenEntitled);
         }
 
         /// <summary>THE EVENTLESS ARM (2026-08-08). A haven infiltration has no <c>GeoscapeEvent</c> anywhere in
@@ -1353,10 +1349,11 @@ namespace Multiplayer.Network.Sync
             Watched prior;
             if (_watched.TryGetValue(key, out prior) && prior != null && prior.ResolvedAt > 0f)
                 startedAt = prior.ResolvedAt;
-            Arm(key, null, siteRef, vehicleRef, startedAt);
+            Arm(key, null, siteRef, vehicleRef, startedAt, true);
         }
 
-        private static void Arm(string key, string eventId, string siteRef, string vehicleRef, float resolvedAt)
+        private static void Arm(string key, string eventId, string siteRef, string vehicleRef, float resolvedAt,
+                                bool autoOpenEntitled)
         {
             if (!_watched.ContainsKey(key) && _watched.Count >= MaxWatched)
             {
@@ -1370,6 +1367,7 @@ namespace Multiplayer.Network.Sync
             _watched[key] = new Watched
             {
                 EventId = eventId, SiteRef = siteRef, VehicleRef = vehicleRef, ResolvedAt = resolvedAt,
+                AutoOpenEntitled = autoOpenEntitled,
                 RaiseTriggerCount = live == null ? 0
                     : EventPopup.RaiseTriggerCount(live.State, live.TriggerCount)
             };
@@ -1380,6 +1378,10 @@ namespace Multiplayer.Network.Sync
         /// mission the host minted from it.</summary>
         internal static bool MissionHasArrived(bool answerResolved, bool choiceStartsMission, bool missionRunnable)
             => answerResolved && choiceStartsMission && missionRunnable;
+
+        /// <summary>Only the addressed non-host peer owns the one automatic local navigation.</summary>
+        internal static bool MayAutoOpen(bool autoOpenEntitled, bool isHost)
+            => autoOpenEntitled && !isHost;
 
         /// <summary>PURE (RailCheck L197). Has a resolved window waited too long for a mission that is never
         /// coming? Monotone in <paramref name="now"/> and bounded by a constant, so it cannot become an
@@ -1403,6 +1405,8 @@ namespace Multiplayer.Network.Sync
         internal static bool AnswerIsIn(string eventId, bool recordResolved)
             => eventId == null || recordResolved;
 
+        // Kept as a pure compatibility seam for the durable occurrence laws. MissionArrivalNav no longer
+        // mints one itself; DeployPrep owns the stable per-mission publication identity.
         internal static string HostTrigger(string existing) =>
             string.IsNullOrEmpty(existing) ? "arrival:" + Guid.NewGuid().ToString("N") : existing;
 
@@ -1481,67 +1485,21 @@ namespace Multiplayer.Network.Sync
                 return;
             }
 
-            // clickWasReplayed: TRUE on purpose. This seam holds no GeoscapeEvent instance to ask the memo
-            // about, and it does not need one — the ONLY case NativeSelectChoiceRan answers true for is a host
-            // whose own SelectChoice:598-613 ran, and :612 inside that same call already queued the screen, so
-            // AlreadyHeadedForDeployment answers it one term over. Assuming "native did not run" can therefore
-            // only ever cost a redundant question, never a duplicate screen.
-            if (!MissionEncounterNav.ShouldOpenDeployment(true, engine.IsHost, true,
-                                                          MissionEncounterNav.AlreadyHeadedForDeployment(view)))
-            {
-                _watched.Remove(key);
-                MpLog.Log("[MP][mission] arrival watch for '" + key + "' retired — this peer is already in, or " +
-                          "queued for, UIStateRosterDeployment; re-issuing LaunchMission would leave a SECOND " +
-                          "deployment request in a queue that is part of the save.");
-                return;
-            }
-
-            // DWI owns the RANKING; the peer's own map surface owns the MOMENT, and this seam owns the
-            // NAVIGATION. ae2099d handed presentation to "the durable scheduler" — but
-            // DurableInboxEngine.TryPresentNext has NO production caller, so a Queued DeploymentPreparing
-            // entry is drained by nobody and every client that answered a mission start stayed on the
-            // geoscape (live 2026-08-10, both clients: "priority occurrence ready … presentation remains
-            // behind DurableWindowRegistry.MayPresent", and neither ever moved). L197's restored
-            // arrival-opens-nothing arm is what keeps the call here.
-            if (engine.IsHost)
-            {
-                w.HostTriggerId = HostTrigger(w.HostTriggerId);
-                var store = DurableInboxSession.ActiveStore;
-                if (store == null)
-                    throw new InvalidOperationException("durable inbox store is not installed");
-                var missionIdentity = DurableWindowRegistry.StableMissionSubject(mission);
-                var subjects = DurableWindowRegistry.MissionOccurrenceSubjects(w.SiteRef, w.VehicleRef, missionIdentity);
-                var occurrence = new OccurrenceId(w.EventId ?? "MissionOffer", w.HostTriggerId,
-                    subjects);
-                DurableWindowRegistry.EnqueuePriorityOccurrence(store, occurrence);
-            }
-            // NOT a quorum and NOT a yank (P13 + the owner's 2026-08-10 nuance): the gate reads THIS peer's
-            // own view state only. On a geoscape map state the preparation screen opens immediately; on
-            // Research/Manufacturing/anything else the watch simply stays armed and presents the moment the
-            // player returns to the map. Nothing waits on another human.
-            var viewState = view.CurrentViewState?.GetType();
-            if (!DurableWindowRegistry.MayPresent(true, viewState))
-            {
-                if (!w.PresentationDeferred)
-                {
-                    w.PresentationDeferred = true;
-                    MpLog.Log("[MP][brief] deployment-deferred '" + key + "' — " + because + " and the mission " +
-                              "has arrived, but this peer is on " + (viewState == null ? "no view state" :
-                              viewState.Name) + ", which is not a geoscape map surface. The watch stays armed " +
-                              "and opens the preparation screen the moment this peer is back on the map; no " +
-                              "peer is pulled out of the screen it is using and nothing waits on a player.");
-                }
-                return;
-            }
             _watched.Remove(key);
+            if (!MayAutoOpen(w.AutoOpenEntitled, engine.IsHost))
+            {
+                DeployPrep.Announce(mission);
+                MpLog.Log("[MP][brief] deployment-door-published '" + key + "' at " + w.SiteRef + " — " +
+                          because + "; this peer has no local auto-open entitlement.");
+                return;
+            }
             var container = IdentityResolver.Resolve(geo, w.VehicleRef, null) as GeoVehicle
                             ?? view.GetVehicleOnSite(site);
-            view.LaunchMission(mission, container);                                  // ToDeploymentState:596
-            MpLog.Log("[MP][brief] deployment-presented '" + key + "' at " + w.SiteRef + " on " +
-                      (engine.IsHost ? "HOST" : "CLIENT") + " — " + because + "; the preparation screen was " +
-                      "opened from the MISSION'S ARRIVAL through the game's own LaunchMission, from " +
-                      (viewState == null ? "the map" : viewState.Name) + ". Nothing waited on a dialog " +
-                      "teardown and nothing waited on another player.");
+            DeployPrep.SuppressNextEntitledEnter(DurableWindowRegistry.StableMissionSubject(mission));
+            view.LaunchMission(mission, container);
+            MpLog.Log("[MP][brief] entitled-local-arrival opened '" + key + "' at " + w.SiteRef +
+                      " exactly once; watch retired before LaunchMission. DeployPrep will be announced by " +
+                      "UIStateRosterDeployment.EnterState, not duplicated here.");
         }
     }
 

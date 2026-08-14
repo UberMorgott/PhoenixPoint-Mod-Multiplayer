@@ -382,23 +382,15 @@ namespace Multiplayer.Network.Sync
                       " selected=" + rec.SelectedChoice + " nonce=" + nonce + " peer=" + senderPeerId +
                       (clearedStale ? " (cleared stale IsCompleted from prior raise)" : ""));
 
-            // Native tail (:604-613), BOTH HALVES. WHICH peer plays the mission is tactical scope (law 5);
-            // dropping the mission silently is not an option — that is the swallow class.
-            //
-            // :611 BEFORE :612, and the order is the whole point (RailCheck L144). LaunchMission only QUEUES
-            // the squad screen, and that queue is dead while this peer's OWN encounter window is the current
-            // queried state switch — so a tail that copied only :612 left the losing host staring at a stale
-            // picker with a deployment request behind it that nothing would ever serve. Native never separates
-            // the two: UIModuleSiteEncounters.SelectChoice:611-612 is FinishEncounter(); LaunchMission(…).
             var mission = reward?.ApplyResult?.StartMission;
             if (mission == null) return;
-            if (geo.View == null)
-                MpLog.LogWarning("[MP][events] '" + eventId + "' generated a mission but there is no GeoscapeView to launch it");
+            if (!DeployPrep.PublishMission(mission))
+                MpLog.LogError("[MP][events] HOST applied client-owned answer for '" + eventId +
+                               "' but exact DeployPrep publication was refused; no host navigation was attempted.");
             else
-            {
-                MissionEncounterNav.FinishOwnEncounterWindow(geo.View, eventId, true);   // :611
-                geo.View.LaunchMission(mission, ev.Context.Vehicle);                     // :612
-            }
+                MpLog.Log("[MP][events] HOST applied client-owned answer for '" + eventId + "' and published the " +
+                          "exact durable preparation door; host navigation was not entitled and LaunchMission " +
+                          "was not called. The addressed client owns its one local arrival watch.");
         }
 
         /// <summary>Task-8 ordinary shared-choice funnel. Mission-start choices deliberately remain on the

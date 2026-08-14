@@ -85,12 +85,11 @@ namespace RailCheck
                 var terminalBefore = unique ? before : after;
                 var terminalEngine = new DurableSourceRevalidationEngine(terminalStore, (o, m) => { });
                 if (!terminalEngine.TryRevalidate(occurrence, departed, terminalBefore, remaining, unique,
-                        out terminal, out refusal) || terminal != 2 || refusal != null ||
-                    terminalStore.Ledger.AllEntries.Any(x => x.Lifecycle != InboxLifecycle.Removed ||
-                        x.TerminalReason != TerminalReason.SourceInvalidated || x.TombstoneRevision != terminal) ||
-                    carrier.Removed != 1 || carrier.Reason != TerminalReason.SourceInvalidated)
-                    yield return unique ? "L388 uniquely-bound-source-was-not-tombstoned-before-silent-removal" :
-                        "L388 last-source-was-not-tombstoned-before-silent-removal";
+                        out terminal, out refusal) || terminal != 0 || refusal != null ||
+                    terminalStore.Ledger.AllEntries.Any(x => x.Lifecycle == InboxLifecycle.Removed ||
+                        x.TerminalReason.HasValue) || carrier.Removed != 0)
+                    yield return unique ? "L388 uniquely-bound-source-retired-a-live-mission" :
+                        "L388 last-source-retired-a-live-mission";
             }
 
             var sourceEngine = typeof(DurableSourceRevalidationEngine);
@@ -125,8 +124,6 @@ namespace RailCheck
                 applyGenerationTail == null || installGeneration == null ||
                 !UniqueControl(uniqueField, uniqueBinding) || !Calls(capture, uniqueBinding) ||
                 !Calls(capture, typeof(DeploymentSourceSnapshot).GetMethod("ContainsSource", All)) ||
-                !Calls(revalidate, typeof(DurableSourceRevalidationEngine).GetMethod("RetryTerminalTeardown", All)) ||
-                !Calls(typeof(DurableSourceRevalidationEngine).GetMethod("RetryTerminalTeardown", All), remove) ||
                 !Calls(travelPrefix, capture) || !Calls(repaint, commit) || !Calls(commit, revalidate) ||
                 Calls(rail, revalidate) || !Calls(rail, applyScheduled) || !Calls(applyScheduled, install) ||
                 !Calls(applyScheduled, repaintSource) || !Calls(repaintSource, fireSource) ||
@@ -289,19 +286,12 @@ namespace RailCheck
                 maxLifecycle.Ledger.Get(occurrence,a).Lifecycle!=InboxLifecycle.Open)
                 yield return "L388 lifecycle-max-boundary-wrapped-or-partially-tombstoned";
 
-            var retryStore=Make(); var throwOnce=new ThrowOnceCarrier();
-            retryStore.Carriers.Register(occurrence,DurableCarrierClass.NativeCurrent,throwOnce);
+            var unavailableStore=Make();
             var empty=new DeploymentSourceSnapshot(new Dictionary<string,IEnumerable<string>>());
-            if(!new DurableSourceRevalidationEngine(retryStore,(o,m)=>{}).TryRevalidateBatch(
+            if(!new DurableSourceRevalidationEngine(unavailableStore,(o,m)=>{}).TryRevalidateBatch(
                     new[]{new SourceRevalidationPlan(occurrence,"V#1",before,empty,false)},out batch,out refusal)||
-                retryStore.Ledger.AllEntries.Any(x=>x.Lifecycle!=InboxLifecycle.Removed||
-                    x.TerminalReason!=TerminalReason.SourceInvalidated||x.TombstoneRevision!=2)||throwOnce.Calls!=1||
-                DurableSourceRevalidationEngine.RetryTerminalTeardown(retryStore,new[]{occurrence})!=1||throwOnce.Calls!=2)
-                yield return "L388 transient-carrier-failure-lost-authority-or-was-not-retryable";
-            HostLedger restored; var ledgerBytes=retryStore.Ledger.EncodeCanonical();
-            if(!DurableInboxCodec.TryDecodeLedger(ledgerBytes,out restored,out refusal)||
-                restored.AllEntries.Any(x=>x.TerminalReason!=TerminalReason.SourceInvalidated||x.TombstoneRevision!=2))
-                yield return "L388 source-invalidated-tombstone-did-not-survive-save-load";
+                unavailableStore.Ledger.AllEntries.Any(x=>x.Lifecycle==InboxLifecycle.Removed||x.TerminalReason.HasValue))
+                yield return "L388 unavailable-preparation-was-tombstoned-instead-of-retained";
         }
 
         private static bool Calls(MethodBase from, MethodBase target)

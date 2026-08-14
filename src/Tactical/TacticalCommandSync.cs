@@ -18,6 +18,7 @@ using PhoenixPoint.Tactical.Entities.Abilities;
 using PhoenixPoint.Tactical.Entities.Equipments;
 using PhoenixPoint.Tactical.Entities.Statuses;
 using PhoenixPoint.Tactical.Levels;
+using PhoenixPoint.Tactical.Levels.PathProcessors;
 using PhoenixPoint.Tactical.UI;
 using UnityEngine;
 
@@ -96,7 +97,10 @@ namespace Multiplayer.Tactical
     public static class TacticalCommandSync
     {
         // Wire ops on SurfaceIds.TacCommand (host→all) and SurfaceIds.TacCommandIntent (client→host).
-        private const byte OpActivate = 1;
+        // Wire v2: actionId + executeAt precede the command. Keep old op 1 retired so mixed DLLs reject
+        // cleanly instead of decoding actorKey bytes as an epoch.
+        private const byte OpActivate = 7;
+        private const byte OpMoveActivate = 8;
         private const byte OpSettle = 2;
         /// <summary>A7 — SELECTING A WEAPON IS NOT AN ABILITY, which is why it never crossed. The model
         /// funnel is <c>EquipmentComponent.SetSelectedEquipment</c>:242 (it fires the game's own
@@ -118,6 +122,88 @@ namespace Multiplayer.Tactical
         internal const byte OpIntentSelectEquipment = 4;
 
         private static readonly SurfaceSeq Seq = new SurfaceSeq();
+        internal const int MinExecuteLeadMs = 50;
+        internal const int MaxExecuteLeadMs = 600;
+        internal const int ExecuteJitterMarginMs = 34;
+        private const int MaxScheduledActivations = 256;
+        private const int CompletedActionIdWindow = 1024;
+        private const long MaxExecuteFutureMs = 2000;
+        private const long MaxExecutePastMs = 10000;
+        private static ulong _nextActionId;
+        private static ulong _highestCompletedActionId;
+        private static ulong _battleActionEpoch;
+        private static ulong _retiredActionEpoch;
+        private static long _epochSerial;
+        private sealed class ActionIdWindow
+        {
+            private readonly HashSet<ulong> _ids = new HashSet<ulong>();
+            private readonly Queue<ulong> _order = new Queue<ulong>();
+            internal bool Contains(ulong id) => _ids.Contains(id);
+            internal void Add(ulong id)
+            {
+                if (!_ids.Add(id)) return;
+                _order.Enqueue(id);
+                while (_order.Count > CompletedActionIdWindow) _ids.Remove(_order.Dequeue());
+            }
+            internal void Clear() { _ids.Clear(); _order.Clear(); }
+        }
+        private static readonly ActionIdWindow _completedActions = new ActionIdWindow();
+
+        private sealed class ScheduledActivation
+        {
+            internal ulong Epoch;
+            internal ulong Id;
+            internal long ExecuteAt;
+            internal int Key;
+            internal string Guid;
+            internal TacticalAbilityTarget Target;
+            internal bool Fumbled;
+            internal List<string> Unresolved;
+        }
+
+        private static readonly List<ScheduledActivation> _scheduledActivations = new List<ScheduledActivation>();
+        private static readonly HashSet<TacticalAbility> _scheduledCaptureSuppressed = new HashSet<TacticalAbility>();
+
+        internal static int ComputeExecuteLeadMs(int maxRttMs)
+        {
+            int lead = (maxRttMs < 0 ? 0 : maxRttMs / 2) + ExecuteJitterMarginMs;
+            return Math.Max(MinExecuteLeadMs, Math.Min(MaxExecuteLeadMs, lead));
+        }
+
+        private static int HostExecuteLeadMs(NetworkEngine engine)
+        {
+            int max = -1;
+            if (engine?.Session != null)
+                foreach (var peer in engine.Session.Clients.Keys)
+                    max = Math.Max(max, engine.Session.Ping.GetPingMs(peer));
+            return ComputeExecuteLeadMs(max);
+        }
+
+        private static ulong CurrentActionEpoch()
+        {
+            if (_battleActionEpoch != 0) return _battleActionEpoch;
+            if (NetworkEngine.Instance == null || !NetworkEngine.Instance.IsHost)
+            {
+                MpLog.LogError("[MP][tac] a client attempted to mint an action epoch — refused.");
+                return 0;
+            }
+            _battleActionEpoch = NewActionEpoch();
+            return _battleActionEpoch;
+        }
+
+        private static ulong NewActionEpoch()
+        {
+            ulong epoch = BitConverter.ToUInt64(Guid.NewGuid().ToByteArray(), 0) ^
+                          (ulong)System.Threading.Interlocked.Increment(ref _epochSerial);
+            return epoch == 0 ? 1UL : epoch;
+        }
+
+        internal static void EpochResetModel(bool host, ulong current, ulong generated,
+                                             out ulong retired, out ulong next)
+        {
+            retired = current;
+            next = host ? (generated == 0 ? 1UL : generated) : 0UL;
+        }
 
         /// <summary>
         /// A5 INVERTS THE RIDER SET, and the inversion IS the arc's generic content. A3a..A4 kept a WHITELIST
@@ -600,8 +686,19 @@ namespace Multiplayer.Tactical
             _saidUncovered.Clear();
             _mirrorSkipsCameraWait.Clear();   // live ability refs: never let them outlive the battle
             _queuedMirrors.Clear();           // same: a watched record belongs to the battle it queued in
+            _scheduledActivations.Clear();
+            _scheduledCaptureSuppressed.Clear();
+            _nextActionId = 0;
+            _highestCompletedActionId = 0;
+            ulong nextEpoch;
+            bool epochHost = NetworkEngine.Instance != null && NetworkEngine.Instance.IsHost;
+            EpochResetModel(epochHost, _battleActionEpoch, epochHost ? NewActionEpoch() : 0UL,
+                            out _retiredActionEpoch, out nextEpoch);
+            _battleActionEpoch = nextEpoch;
+            _completedActions.Clear();
             _awaitingEcho.Clear();            // same: an echo wait belongs to ONE battle, never the next one
             _relayedAim.Clear();              // L104(j): keys belong to ONE battle
+            _cameraUngatedAttacks.Clear();
             _saidKeyless.Clear();
             _replayOriginPeer = 0;
             TacticalActorDrive.Reset();       // live ability refs: a drive mark belongs to ONE battle
@@ -656,6 +753,7 @@ namespace Multiplayer.Tactical
             var engine = LiveEngine();
             if (engine == null) return;                  // solo, or connected but not in a co-op game
             if (SyncApplyScope.Active) return;           // law 8: this activation IS a mirror being applied
+            if (ability != null && _scheduledCaptureSuppressed.Remove(ability)) return;
             // AND NOTHING IS RELAYED FOR A BATTLE THAT IS ALREADY SCORED (law L334). The cheaper half of the
             // same 2026-08-08 defect: the client kept a live ExitMission button through the mission end and
             // pressed it once more (:2338, 154 ms after applying the end), which is what produced the reject
@@ -772,6 +870,14 @@ namespace Multiplayer.Tactical
                 // native roll here and memoizes it, so :1109 gets the same value and the bit rides WITH the
                 // order. Clients never roll at all (FumbleCheckGate).
                 bool fumbled = FumbleGate.RollForHost(ability);
+                if (ability is IMoveAbility)
+                {
+                    Send(OpMoveActivate, "legacy move " + actor.name + " " + name, _replayOriginPeer,
+                         w => { WriteCommand(w, key, guid, target); w.Write(fumbled); });
+                    return;
+                }
+                ulong actionId = ++_nextActionId;
+                long executeAt = PingTable.NowMs() + HostExecuteLeadMs(engine);
                 // WHOSE ORDER IS NOW RUNNING ON THIS SOLDIER. Every accepted order — the host's own click and
                 // every replay of a peer's intent — passes through here with _replayOriginPeer already naming
                 // its origin (0 = the host), so the ownership the hold in HandleActivate consults is written at
@@ -785,7 +891,7 @@ namespace Multiplayer.Tactical
                 ulong exclude = OrderWaitsForTheEcho(true, true, ability is IMoveAbility) ? 0UL : _replayOriginPeer;
                 Send(OpActivate, "mirror " + actor.name + " " + name + " " + Where(target) +
                      (IsAutonomous(target) ? " [" + target.AttackType + "]" : "") + (fumbled ? " FUMBLED" : ""),
-                     exclude, w => { WriteCommand(w, key, guid, target); w.Write(fumbled); });
+                     exclude, w => { w.Write(CurrentActionEpoch()); w.Write(actionId); w.Write(executeAt); WriteCommand(w, key, guid, target); w.Write(fumbled); });
             }
             else
                 IntentRail.Send(SurfaceIds.TacCommandIntent, OpIntentActivate,
@@ -1251,6 +1357,7 @@ namespace Multiplayer.Tactical
         /// exactly the case whose AP cost no peer can reproduce.</summary>
         internal static void OnAbilityActionEnded(TacticalAbility ability)
         {
+            _cameraUngatedAttacks.Remove(ability);
             var engine = LiveEngine();
             if (engine == null || !engine.IsHost) return;
             if (!IsRider(ability)) return;
@@ -1263,6 +1370,39 @@ namespace Multiplayer.Tactical
         /// removed per-actor, because an actor can only get into vanilla's aim LOOP by having shot before,
         /// and that shot was relayed — so by the moment the branch could disagree, every peer is armed.</summary>
         private static readonly HashSet<int> _relayedAim = new HashSet<int>();
+        private static readonly HashSet<TacticalAbility> _cameraUngatedAttacks = new HashSet<TacticalAbility>();
+        [ThreadStatic] private static Stack<TacticalAbility> _fireCoroutineStack;
+        private static readonly Dictionary<Type, FieldInfo> _fireAbilityFields = new Dictionary<Type, FieldInfo>();
+        internal static bool SharedAttackMustNotWaitForCamera =>
+            _fireCoroutineStack != null && _fireCoroutineStack.Count != 0 &&
+            _cameraUngatedAttacks.Contains(_fireCoroutineStack.Peek());
+        internal static bool CameraBusyAnswer(bool nativeBusy, bool exactSharedFireIterator) =>
+            exactSharedFireIterator ? false : nativeBusy;
+        internal static void EnterFireCoroutineFrame(object iterator)
+        {
+            TacticalAbility ability = null;
+            if (iterator != null)
+            {
+                FieldInfo field;
+                var type = iterator.GetType();
+                lock (_fireAbilityFields)
+                {
+                    if (!_fireAbilityFields.TryGetValue(type, out field))
+                    {
+                        foreach (var candidate in type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                            if (typeof(TacticalAbility).IsAssignableFrom(candidate.FieldType))
+                            { field = candidate; break; }
+                        _fireAbilityFields[type] = field;
+                    }
+                }
+                ability = field?.GetValue(iterator) as TacticalAbility;
+            }
+            (_fireCoroutineStack ?? (_fireCoroutineStack = new Stack<TacticalAbility>())).Push(ability);
+        }
+        internal static void ExitFireCoroutineFrame()
+        {
+            if (_fireCoroutineStack != null && _fireCoroutineStack.Count != 0) _fireCoroutineStack.Pop();
+        }
 
         private static void ArmRelayedAim(int key) { if (key != 0) _relayedAim.Add(key); }
 
@@ -1276,6 +1416,26 @@ namespace Multiplayer.Tactical
         /// Key 0 = no shared identity: an actor no peer can name is one no peer can agree with either, so it
         /// keeps the game's own answer.</summary>
         internal static bool IsRelayedAimKey(int key) => key != 0 && _relayedAim.Contains(key);
+
+        internal static bool ShouldNormalizeRelayedShoot(bool isShootAbility, bool actorIsNavigating)
+            => isShootAbility && !actorIsNavigating;
+
+        /// <summary>Give every host-recorded shoot the same nav-free animator baseline before activation.</summary>
+        private static void NormalizeRelayedShootStart(TacticalActorBase actor, TacticalAbility ability)
+        {
+            var tacticalActor = actor as TacticalActor;
+            var nav = tacticalActor?.TacticalNav;
+            if (!ShouldNormalizeRelayedShoot(ability is ShootAbility, nav != null && nav.IsNavigating)) return;
+            var animator = actor.Animator;
+            if (animator == null) return;
+            int travelBefore = animator.GetInteger("TravelType");
+            int shootBefore = animator.GetInteger("ShootSegmentType");
+            PathProcessorUtils.SetNullNavParams(animator);
+            MpLog.Log("[MP][tac] host-record shoot baseline " + SafeActorName(actor) +
+                      " animator TravelType=" + travelBefore + "->" + animator.GetInteger("TravelType") +
+                      " ShootSegmentType=" + shootBefore + "->" + animator.GetInteger("ShootSegmentType") +
+                      "; navComplete=true, before Activate.");
+        }
 
         /// <summary>
         /// THE TURN-EDGE SWEEP (law L123) — settle EVERY keyed live actor, once per host faction turn.
@@ -2101,16 +2261,27 @@ namespace Multiplayer.Tactical
                 return;
             }
 
-            // Native, and mirrored to everyone EXCEPT the peer that already played it locally. The origin is
-            // scoped around this one synchronous call: the capture postfix inside reads it, and the move
-            // coroutine it starts runs later with the field already cleared.
-            _replayOriginPeer = senderPeerId;
-            FillLiveTargetObject(ability, target);
-            try { ability.Activate(target); }
-            finally { _replayOriginPeer = 0; }
+            if (ability is IMoveAbility)
+            {
+                _replayOriginPeer = senderPeerId;
+                FillLiveTargetObject(ability, target);
+                try { ability.Activate(target); }
+                finally { _replayOriginPeer = 0; }
+                return;
+            }
+
+            // Mint one future host-clock epoch before any peer, including this host, enters native Activate.
+            // The fixed lead covers ordinary RTT/frame jitter; nobody waits for an ack or another player.
+            ulong actionId = ++_nextActionId;
+            long executeAt = PingTable.NowMs() + HostExecuteLeadMs(engine);
+            bool fumbled = FumbleGate.RollForHost(ability);
+            _cmdOwner[key] = senderPeerId;
+            Send(OpActivate, "scheduled action " + actionId + " " + actor.name,
+                 0, w => { w.Write(CurrentActionEpoch()); w.Write(actionId); w.Write(executeAt); WriteCommand(w, key, guid, target); w.Write(fumbled); });
+            QueueActivation(CurrentActionEpoch(), actionId, executeAt, key, guid, target, fumbled, unresolved);
             MpLog.Log("[Multiplayer][tac] HOST command from peer=" + senderPeerId + " ACCEPTED — " + actor.name +
                       " " + (ability.AbilityDef == null ? "?" : ability.AbilityDef.name) + " → " +
-                      Where(target) + " nonce=" + nonce);
+                      Where(target) + " nonce=" + nonce + " action=" + actionId + " executeAt=" + executeAt);
         }
 
         /// <summary>HOST: is this soldier busy with an ability THIS peer's own previous order started? Every
@@ -2122,7 +2293,8 @@ namespace Multiplayer.Tactical
         {
             var actor = TacticalActorKey.ResolveActor(Tlc(), key, out _);
             ulong owner;
-            return actor != null && actor.HasExecutingAbility() &&
+            bool scheduled = _scheduledActivations.Exists(a => a.Key == key);
+            return actor != null && (actor.HasExecutingAbility() || scheduled) &&
                    _cmdOwner.TryGetValue(key, out owner) && owner == peer;
         }
 
@@ -2138,6 +2310,7 @@ namespace Multiplayer.Tactical
 
         internal static void HostTick(NetworkEngine engine)
         {
+            TickScheduledActivations(engine);
             if (_deferred.Count == 0) return;
             if (engine == null || !engine.IsHost) { _deferred.Clear(); return; }
             for (int i = 0; i < _deferred.Count; )
@@ -2303,7 +2476,6 @@ namespace Multiplayer.Tactical
 
         private static void ApplyInbound(byte[] payload)
         {
-            _recordArrived = Time.realtimeSinceStartup;
             try
             {
                 using (var ms = new MemoryStream(payload ?? new byte[0]))
@@ -2312,29 +2484,68 @@ namespace Multiplayer.Tactical
                     uint seq = r.ReadUInt32();
                     byte op = r.ReadByte();
                     if (!Seq.ShouldApply(SurfaceIds.TacCommand, seq)) return;  // stale re-delivery (law 7)
+                    Action commit;
                     if (op == OpActivate)
                     {
-                        NoteCatchUpBurst();
+                        ulong epoch = r.ReadUInt64();
+                        ulong actionId = r.ReadUInt64();
+                        long executeAt = r.ReadInt64();
                         int actorKey = r.ReadInt32();
                         string abilityGuid = WireString.ReadKey(r);
                         var unresolved = new List<string>();
                         var target = ReadCommandTarget(r, unresolved);
                         bool fumbled = r.ReadBoolean();
-                        ApplyActivate(actorKey, abilityGuid, target, fumbled, unresolved);
+                        commit = () =>
+                        {
+                            NoteCatchUpBurst();
+                            QueueActivation(epoch, actionId, executeAt, actorKey, abilityGuid, target, fumbled, unresolved);
+                        };
                     }
-                    else if (op == OpSettle) QueueSettle(r.ReadInt32(),
-                                                        new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle()),
-                                                        r.ReadSingle(), r.ReadSingle(), r.ReadBoolean(),
-                                                        TacticalStatusSet.Read(r), ReadTraits(r),
-                                                        r.ReadBoolean() ? WireString.ReadKey(r) : null,
-                                                        ReadUses(r), TftvChampIdentity.Read(r), ReadVision(r));
-                    else if (op == OpSelectEquipment) ApplySelectEquipment(r.ReadInt32(), WireString.ReadKey(r));
+                    else if (op == OpMoveActivate)
+                    {
+                        int actorKey = r.ReadInt32();
+                        string abilityGuid = WireString.ReadKey(r);
+                        var unresolved = new List<string>();
+                        var target = ReadCommandTarget(r, unresolved);
+                        bool fumbled = r.ReadBoolean();
+                        commit = () => ApplyActivate(actorKey, abilityGuid, target, fumbled, unresolved);
+                    }
+                    else if (op == OpSettle)
+                    {
+                        int key = r.ReadInt32();
+                        var pos = new Vector3(r.ReadSingle(), r.ReadSingle(), r.ReadSingle());
+                        float ap = r.ReadSingle(), wp = r.ReadSingle();
+                        bool forced = r.ReadBoolean();
+                        var statuses = TacticalStatusSet.Read(r);
+                        var traits = ReadTraits(r);
+                        string selected = r.ReadBoolean() ? WireString.ReadKey(r) : null;
+                        var uses = ReadUses(r);
+                        var champ = TftvChampIdentity.Read(r);
+                        var vision = ReadVision(r);
+                        commit = () => QueueSettle(key, pos, ap, wp, forced, statuses, traits,
+                                                   selected, uses, champ, vision);
+                    }
+                    else if (op == OpSelectEquipment)
+                    {
+                        int key = r.ReadInt32();
+                        string guid = WireString.ReadKey(r);
+                        commit = () => ApplySelectEquipment(key, guid);
+                    }
                     else
                     {
                         MpLog.LogError("[Multiplayer][tac] unknown host→all command op " + op + " (seq=" + seq +
                                        ") — this peer can no longer follow the shared battle.");
                         return;
                     }
+                    // TRANSACTION BOUNDARY: every byte is decoded and exact EOF is proved before commit.
+                    // A trailing/malformed retransmit therefore has zero side effects every time it arrives.
+                    if (r.BaseStream.Position != r.BaseStream.Length)
+                    {
+                        MpLog.LogError("[Multiplayer][tac] command record has trailing bytes — rejected.");
+                        return;
+                    }
+                    MarkRecordArrived();
+                    commit();
                     Seq.Mark(SurfaceIds.TacCommand, seq);
                 }
             }
@@ -2342,6 +2553,119 @@ namespace Multiplayer.Tactical
             {
                 MpLog.LogError("[Multiplayer][tac] command inbound FAILED — this peer's battle has diverged from " +
                                "the host's: " + ex);
+            }
+        }
+
+        private static void MarkRecordArrived() => _recordArrived = Time.realtimeSinceStartup;
+
+        internal static bool ExecuteEpochReached(long hostNowMs, long executeAtMs) => hostNowMs >= executeAtMs;
+
+        internal static string ValidateActionHeader(ulong epoch, ulong currentEpoch, ulong retiredEpoch,
+                                                     ulong id, long executeDeltaMs, int pendingCount,
+                                                     bool duplicate)
+        {
+            if (epoch == 0 || epoch == retiredEpoch || (currentEpoch != 0 && epoch != currentEpoch)) return "epoch";
+            if (id == 0) return "id";
+            if (duplicate) return "duplicate";
+            if (pendingCount >= MaxScheduledActivations) return "pending";
+            if (executeDeltaMs > MaxExecuteFutureMs || executeDeltaMs < -MaxExecutePastMs) return "time";
+            return null;
+        }
+
+        /// <summary>Captures host-native/AI/reaction producers before their virtual Activate override runs.
+        /// Player clicks already stop at PublishClickedOrder; this covers everything that originates inside
+        /// the engine and therefore has no view-state caller to gate.</summary>
+        internal static bool ScheduleHostNativeAtEpoch(TacticalAbility ability, object parameter)
+        {
+            var engine = LiveEngine();
+            if (engine == null || !engine.IsHost || SyncApplyScope.Active || ability == null ||
+                !IsRider(ability) || ability is IMoveAbility)
+                return false;
+            var actor = ability.TacticalActorBase;
+            var target = parameter as TacticalAbilityTarget;
+            int key = TacticalActorKey.Of(actor);
+            string guid = ability.AbilityDef == null ? null : ability.AbilityDef.Guid;
+            if (key == 0 || string.IsNullOrEmpty(guid) || (target != null && FirstUnkeyableTargetField(target) != null))
+                return false;
+            ulong id = ++_nextActionId;
+            long at = PingTable.NowMs() + HostExecuteLeadMs(engine);
+            bool fumbled = FumbleGate.RollForHost(ability);
+            _cmdOwner[key] = 0;
+            Send(OpActivate, "scheduled native action " + id + " " + SafeActorName(actor), 0,
+                 w => { w.Write(CurrentActionEpoch()); w.Write(id); w.Write(at); WriteCommand(w, key, guid, target); w.Write(fumbled); });
+            QueueActivation(CurrentActionEpoch(), id, at, key, guid, target, fumbled, new List<string>());
+            _scheduledCaptureSuppressed.Add(ability);
+            return true;
+        }
+
+        internal static void ClearScheduledCaptureSuppression(TacticalAbility ability)
+        {
+            if (ability != null) _scheduledCaptureSuppressed.Remove(ability);
+        }
+
+        private static bool QueueActivation(ulong epoch, ulong id, long executeAt, int key, string guid,
+                                            TacticalAbilityTarget target, bool fumbled,
+                                            List<string> unresolved)
+        {
+            var engine = NetworkEngine.Instance;
+            bool duplicate = id != 0 && (id <= _highestCompletedActionId || _completedActions.Contains(id) ||
+                                         _scheduledActivations.Exists(a => a.Id == id));
+            long preliminaryNow;
+            bool clockKnown = PingTable.TryHostNowMs(engine != null && engine.IsHost, out preliminaryNow);
+            string invalid = ValidateActionHeader(epoch, _battleActionEpoch, _retiredActionEpoch, id,
+                                                  executeAt - preliminaryNow, _scheduledActivations.Count, duplicate);
+            if (invalid == "epoch")
+            {
+                MpLog.LogWarning("[MP][tac] zero action epoch dropped.");
+                return false;
+            }
+            if (engine != null && !engine.IsHost && _battleActionEpoch == 0) _battleActionEpoch = epoch;
+            if (invalid != null && invalid != "time")
+            {
+                MpLog.LogWarning("[MP][tac] invalid action header dropped: " + invalid + " action=" + id);
+                return false;
+            }
+            long hostNow = preliminaryNow;
+            if (!clockKnown)
+            {
+                MpLog.LogError("[MP][tac] host clock unknown/stale; action=" + id + " starts immediately, never blocks.");
+                executeAt = hostNow;
+            }
+            if (executeAt - hostNow > MaxExecuteFutureMs || hostNow - executeAt > MaxExecutePastMs)
+            {
+                MpLog.LogError("[MP][tac] malformed executeAt for action=" + id + " delta=" + (executeAt - hostNow) + "ms; dropped.");
+                return false;
+            }
+            _scheduledActivations.Add(new ScheduledActivation
+            {
+                Epoch = epoch, Id = id, ExecuteAt = executeAt, Key = key, Guid = guid, Target = target,
+                Fumbled = fumbled, Unresolved = unresolved
+            });
+            _scheduledActivations.Sort((a, b) => a.ExecuteAt != b.ExecuteAt
+                ? a.ExecuteAt.CompareTo(b.ExecuteAt) : a.Id.CompareTo(b.Id));
+            return true;
+        }
+
+        private static void TickScheduledActivations(NetworkEngine engine)
+        {
+            if (_scheduledActivations.Count == 0 || engine == null) return;
+            long now;
+            if (!PingTable.TryHostNowMs(engine.IsHost, out now))
+            {
+                MpLog.LogError("[MP][tac] host clock became stale with pending actions; releasing immediately.");
+                now = long.MaxValue;
+            }
+            while (_scheduledActivations.Count > 0 && ExecuteEpochReached(now, _scheduledActivations[0].ExecuteAt))
+            {
+                var a = _scheduledActivations[0];
+                _scheduledActivations.RemoveAt(0);
+                _completedActions.Add(a.Id);
+                if (a.Id > _highestCompletedActionId) _highestCompletedActionId = a.Id;
+                long late = Math.Max(0L, now - a.ExecuteAt);
+                MpLog.Log("[MP][tac] action=" + a.Id + " executeAt=" + a.ExecuteAt +
+                          " actual=" + now + " lateness=" + late + "ms actor=" + a.Key);
+                ApplyActivate(a.Key, a.Guid, a.Target, a.Fumbled, a.Unresolved);
+                if (!PingTable.TryHostNowMs(engine.IsHost, out now)) now = long.MaxValue;
             }
         }
 
@@ -2811,7 +3135,25 @@ namespace Multiplayer.Tactical
             // is too late for the frame the FPS HUD is already drawing.
             ReleaseLocalUiHolding(actor, "a mirrored " +
                                   (ability.AbilityDef == null ? ability.GetType().Name : ability.AbilityDef.name));
-            using (SyncApplyScope.Enter()) ability.Activate(target);
+            NormalizeRelayedShootStart(actor, ability);
+            bool ungateCameraTail = ability is ShootAbility;
+            if (ungateCameraTail) _cameraUngatedAttacks.Add(ability);
+            try
+            {
+                using (SyncApplyScope.Enter()) ability.Activate(target);
+            }
+            catch
+            {
+                if (ungateCameraTail) _cameraUngatedAttacks.Remove(ability);
+                throw;
+            }
+            if (ungateCameraTail && !ability.IsExecuting && !ability.IsEnqueued)
+                _cameraUngatedAttacks.Remove(ability);
+            if (ability is ShootAbility && actor.Animator != null)
+                MpLog.Log("[MP][tac] host-record shoot Activate returned for " + SafeActorName(actor) +
+                          " animator TravelType=" + actor.Animator.GetInteger("TravelType") +
+                          " ShootSegmentType=" + actor.Animator.GetInteger("ShootSegmentType") +
+                          " executing=" + ability.IsExecuting + " enqueued=" + ability.IsEnqueued + ".");
             // DID IT START, OR ONLY GET IN LINE? THE ENGINE'S OWN ANSWER — and the reason the old read of
             // ExecutingAbilities alone had to go: it fired on 8 of 8 mirrors in a whole battle and named
             // IdleAbility as the blocker every time, which sent an RCA after the normal path.
@@ -3024,6 +3366,7 @@ namespace Multiplayer.Tactical
         internal static void ClientTick(NetworkEngine engine)
         {
             if (engine == null || !engine.IsActiveSession || engine.IsHost) return;
+            TickScheduledActivations(engine);
             // BEFORE the settle guard, not inside it: a queued mirror and a pending settle are independent,
             // and gating the watchdog on _pending would make it run only while a settle happened to be in
             // flight — which is precisely when the bug it watches for does NOT need reporting.

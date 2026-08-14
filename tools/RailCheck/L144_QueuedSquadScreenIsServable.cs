@@ -160,18 +160,16 @@ namespace RailCheck
                                  "player.";
             }
 
-            // ─── (d) STRUCTURAL: BOTH halves of the native tail, from the one caller ─
+            // ─── (d) STRUCTURAL: a relayed client answer publishes a door, never host navigation ─
             var reachedOwn = Program.Callees(handle, typeof(MissionSync).Assembly).ToList();
-            if (!reachedOwn.Any(m => m.Name == "FinishOwnEncounterWindow"))
-                yield return "L144 native-tail-half-copied: EventSync.HandleAnswer does not reach " +
-                             "MissionEncounterNav.FinishOwnEncounterWindow. That is the shipped bug verbatim — " +
-                             "the tail runs LaunchMission (SelectChoice:612) without FinishEncounter (:611), so " +
-                             "the peer that did NOT click queues a screen behind a window nothing will close.";
-            if (!Program.Callees(handle, typeof(GeoscapeView).Assembly)
-                        .Any(m => m.Name == "LaunchMission" && m.DeclaringType == typeof(GeoscapeView)))
-                yield return "L144 navigates-off-the-native-funnel: EventSync.HandleAnswer does not reach " +
-                             "GeoscapeView.LaunchMission. Closing the window without queueing the screen leaves " +
-                             "the peer on a bare geoscape — the other half of the same pair.";
+            if (!reachedOwn.Any(m => m.Name == "PublishMission" && m.DeclaringType?.Name == "DeployPrep"))
+                yield return "L144 remote-answer-drops-door: EventSync.HandleAnswer does not publish DeployPrep " +
+                             "after the host creates the mission.";
+            if (reachedOwn.Any(m => m.Name == "FinishOwnEncounterWindow") ||
+                Program.Callees(handle, typeof(GeoscapeView).Assembly).Any(m => m.Name == "LaunchMission"))
+                yield return "L144 remote-answer-navigates-host: a client-owned answer reaches the host's " +
+                             "encounter closer or LaunchMission. Only the addressed client is entitled to " +
+                             "automatic local navigation; the host receives the persistent door.";
             if (!Program.Callees(closer, typeof(MissionSync).Assembly).Any(m => m.Name == "MustFinishOwnEncounterWindow"))
                 yield return "L144 verdict-is-decorative: FinishOwnEncounterWindow does not call " +
                              "MustFinishOwnEncounterWindow, so arms (a)-(c) assert a function nothing runs — " +

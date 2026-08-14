@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Base.Serialization.General;
@@ -25,7 +26,7 @@ namespace Multiplayer.Network.Sync
     [SerializeType(SerializeMembersByDefault = SerializeMembersType.SerializeAll)]
     public sealed class DeployPrepState
     {
-        public string SiteRef = "";
+        public Dictionary<string, string> Records = new Dictionary<string, string>();
     }
 
     /// <summary>
@@ -79,17 +80,16 @@ namespace Multiplayer.Network.Sync
         /// withdraw the announcement", which is a question about this peer's own screen and nothing a
         /// mirror could get right.
         ///
-        /// ponytail: ONE slot, last announcement wins. Two peers prepping two different sites at once
-        /// leaves the button pointing at the more recent one, and a joiner leaving the screen clears an
-        /// announcement the original peer is still standing in. Upgrade path if that is ever felt: make
-        /// <see cref="DeployPrepState"/> carry a set of site refs, not a second mechanism here.</summary>
-        private static string _mine;
+        /// Keyed per stable mission identity: two aircraft preparing different POIs never overwrite or
+        /// withdraw one another.</summary>
+        private static readonly Dictionary<string, string> _mine = new Dictionary<string, string>(StringComparer.Ordinal);
 
         /// <summary>HOST-ONLY: whose announcement the root currently carries (0 = this host's own screen).
         /// The one thing a withdrawal-on-drop needs and nothing else knows — <c>ExitState</c> is the only
         /// other way this root is ever cleared, and a peer that crashed or lost its socket inside the prep
         /// screen will never run it.</summary>
-        private static ulong _announcer;
+        private static readonly Dictionary<string, ulong> _announcers = new Dictionary<string, ulong>(StringComparer.Ordinal);
+        private static readonly HashSet<string> _suppressNextEntitledEnter = new HashSet<string>(StringComparer.Ordinal);
 
         /// <summary>PURE (RailCheck L424). IS THE DOOR ON SCREEN? Three booleans, and the point is which
         /// three: a session, an announced site, and THIS peer's own idle geoscape. There is no term for
@@ -159,7 +159,47 @@ namespace Multiplayer.Network.Sync
         /// arm (a) pins that arity at three because a fourth term is exactly where "…and peer N has joined"
         /// would one day be written. This one is a local fact about this peer's own graph, and it stays out
         /// of the predicate the law guards.</summary>
-        internal static string LiveSiteRef() => StillServable(State.SiteRef) ? State.SiteRef : "";
+        internal static KeyValuePair<string, string>[] LiveRecords() => State.Records
+            .Where(x => RecordMatches(x.Key, x.Value) && StillServable(x.Value))
+            .OrderBy(x => x.Key, StringComparer.Ordinal).ToArray();
+        internal static string LiveSiteRef() => LiveRecords().Select(x => x.Value).FirstOrDefault() ?? "";
+
+        /// <summary>The announcement while its campaign mission still exists, independently of whether a
+        /// deployment source is parked there this frame.  A KeepEncounter mission survives its aircraft
+        /// departing; retaining this identity makes the door hide while unservable and become live again on
+        /// return, without cancelling/re-offering the mission.</summary>
+        internal static string PersistentSiteRef()
+            => State.Records.OrderBy(x => x.Key, StringComparer.Ordinal).Where(x => RecordMatches(x.Key, x.Value))
+                .Select(x => x.Value).FirstOrDefault() ?? "";
+        internal static bool HasPersistentMissionAt(string siteRef) => State.Records.Any(x =>
+            string.Equals(x.Value, siteRef, StringComparison.Ordinal) && RecordMatches(x.Key, x.Value));
+
+        internal static bool SameMission(string recordedKey, string liveKey) =>
+            !string.IsNullOrEmpty(recordedKey) && string.Equals(recordedKey, liveKey, StringComparison.Ordinal);
+
+        private static bool RecordMatches(string missionKey, string siteRef)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(missionKey) || string.IsNullOrEmpty(siteRef)) return false;
+                var geo = GenericApplier.GeoLevel();
+                var site = geo == null ? null : IdentityResolver.Resolve(geo, siteRef, null) as GeoSite;
+                return SameMission(missionKey, DurableWindowRegistry.StableMissionSubject(site?.ActiveMission));
+            }
+            catch { return false; }
+        }
+
+        private static bool MissionExists(string siteRef)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(siteRef)) return false;
+                var geo = GenericApplier.GeoLevel();
+                var site = geo == null ? null : IdentityResolver.Resolve(geo, siteRef, null) as GeoSite;
+                return site?.ActiveMission != null;
+            }
+            catch { return false; }
+        }
 
         /// <summary>PURE (RailCheck L424 arm (g)). IS A RE-OFFER OF THIS SITE'S MISSION REDUNDANT, because the
         /// door into it is already standing? The 2026-08-13 report's second half, and it is the SAME root as
@@ -179,9 +219,11 @@ namespace Multiplayer.Network.Sync
         /// <summary>The only writer of the root. MarkDirty for the same reason
         /// <c>DeployCountdown.ClearPending</c> has it: on the host the write is local, so nothing else
         /// would repaint the screen it changes.</summary>
-        private static void Publish(string siteRef)
+        private static void Publish(string missionKey, string siteRef)
         {
-            State.SiteRef = siteRef ?? "";
+            if (string.IsNullOrEmpty(missionKey)) return;
+            if (string.IsNullOrEmpty(siteRef)) State.Records.Remove(missionKey);
+            else State.Records[missionKey] = siteRef;
             OpenUiRepaint.MarkDirty();
         }
 
@@ -192,13 +234,15 @@ namespace Multiplayer.Network.Sync
                 var engine = NetworkEngine.Instance;
                 if (engine == null || !engine.IsActiveSession) return;
                 var siteRef = IdentityResolver.RootRef(mission?.Site);
-                if (string.IsNullOrEmpty(siteRef)) return;
-                _mine = siteRef;
-                if (engine.IsHost) { _announcer = 0; Publish(siteRef); }
+                var missionKey = DurableWindowRegistry.StableMissionSubject(mission);
+                if (string.IsNullOrEmpty(siteRef) || string.IsNullOrEmpty(missionKey)) return;
+                _mine[missionKey] = siteRef;
+                if (engine.IsHost) { _announcers[missionKey] = 0; Publish(missionKey, siteRef); }
                 else
                 {
                     IntentRail.Send(SurfaceIds.GeoMissionIntent, MissionSync.OpPrepOpen,
-                        "prep open " + siteRef, w => w.Write(siteRef));
+                        "prep open " + missionKey + " at " + siteRef,
+                        w => { w.Write(missionKey); w.Write(siteRef); });
                 }
                 MpLog.Log("[MP][deploy] deployment PREP announced for " + siteRef + " — every other peer on " +
                           "an idle geoscape now has the join button. Nobody has to press it: it is a door, " +
@@ -217,28 +261,32 @@ namespace Multiplayer.Network.Sync
         /// geoscape things and come back" flow, and it is what puts the door on the leaving peer's own
         /// geoscape too. Only a deployment that is really over (launched, cancelled, its last aircraft
         /// departed) withdraws.</summary>
-        internal static void Withdraw()
+        internal static void Withdraw(GeoMission mission)
         {
             try
             {
                 var engine = NetworkEngine.Instance;
-                if (_mine == null || engine == null || !engine.IsActiveSession) { _mine = null; return; }
-                if (StillServable(_mine))
+                string key = DurableWindowRegistry.StableMissionSubject(mission);
+                string siteRef = IdentityResolver.RootRef(mission?.Site);
+                if (string.IsNullOrEmpty(key) || !_mine.ContainsKey(key) || engine == null || !engine.IsActiveSession)
+                { if (!string.IsNullOrEmpty(key)) _mine.Remove(key); return; }
+                if (RecordMatches(key, siteRef))
                 {
-                    MpLog.Log("[MP][deploy] left the deployment prep for " + _mine + " but the drop is still " +
-                              "servable — the join door STAYS on every peer's geoscape, this one's included. " +
-                              "Nobody is waiting on anybody: it is an offer, not a gate (P13).");
+                    MpLog.Log("[MP][deploy] left the deployment prep for " + siteRef + " but its ActiveMission " +
+                              "still exists — the persistent door is retained. It hides while no deployment " +
+                              "source is present and becomes live again when an aircraft returns; no mission " +
+                              "Cancel or re-offer is involved.");
                     return;
                 }
-                string mine = _mine;
-                _mine = null;
+                _mine.Remove(key);
                 if (engine.IsHost)
                 {
-                    if (ClearsOnWithdraw(mine, State.SiteRef)) Publish("");
+                    Publish(key, "");
                     return;
                 }
                 IntentRail.Send(SurfaceIds.GeoMissionIntent, MissionSync.OpPrepClose,
-                    "prep close " + mine, w => w.Write(mine));
+                    "prep close " + key + " at " + siteRef,
+                    w => { w.Write(key); w.Write(siteRef); });
             }
             catch (Exception ex)
             {
@@ -251,21 +299,35 @@ namespace Multiplayer.Network.Sync
 
         internal static void HandleOpen(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
+            string requestedKey = WireString.ReadKey(r);
             string siteRef = WireString.ReadKey(r);
             var geo = GenericApplier.GeoLevel();
             var site = geo == null ? null : IdentityResolver.Resolve(geo, siteRef, null) as GeoSite;
-            if (site?.ActiveMission == null)
+            if (!OpenMatches(requestedKey, site?.ActiveMission))
             {
                 // NEVER SILENT: the sender IS standing in a deployment screen, so a host that cannot see the
                 // mission behind it is a rail defect, not a race the player caused.
                 MpLog.LogWarning("[MP][deploy] prep-open from peer " + senderPeerId + " for " +
-                                 (siteRef ?? "S#?") + " IGNORED — the host has no ActiveMission there. No join " +
-                                 "button is published; that peer's own screen is untouched.");
+                                 (siteRef ?? "S#?") + " key=" + (requestedKey ?? "<none>") +
+                                 " IGNORED — that exact ActiveMission is not current there. No join button is " +
+                                 "published; a delayed A announcement can never publish replacement B.");
                 return;
             }
-            _announcer = senderPeerId;
-            Publish(siteRef);
-            MpLog.Log("[MP][deploy] HOST published prep " + siteRef + " nonce=" + nonce + " peer=" + senderPeerId);
+            _announcers[requestedKey] = senderPeerId;
+            Publish(requestedKey, siteRef);
+            MpLog.Log("[MP][deploy] HOST published prep " + requestedKey + " at " + siteRef +
+                      " nonce=" + nonce + " peer=" + senderPeerId);
+        }
+
+        internal static bool OpenMatches(string requestedKey, GeoMission currentMission) =>
+            SameMission(requestedKey, DurableWindowRegistry.StableMissionSubject(currentMission));
+
+        internal static bool CloseExact(IDictionary<string, string> records, string missionKey, string siteRef)
+        {
+            if (records == null || string.IsNullOrEmpty(missionKey) || string.IsNullOrEmpty(siteRef) ||
+                !records.TryGetValue(missionKey, out var recordedSite) ||
+                !string.Equals(recordedSite, siteRef, StringComparison.Ordinal)) return false;
+            return records.Remove(missionKey);
         }
 
         /// <summary>THE ANNOUNCING PEER IS GONE. Its <c>ExitState</c> will never run, so without this the door
@@ -279,39 +341,60 @@ namespace Multiplayer.Network.Sync
         internal static void OnPeerGone(ulong steamId)
         {
             var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsHost || steamId == 0 || _announcer != steamId) return;
-            _announcer = 0;
-            if (string.IsNullOrEmpty(State.SiteRef)) return;
-            // THE DOOR IS THE SITE'S, NOT THE DROPPED PEER'S. Its own ExitState will never run, which is why
-            // this hook exists at all — but the aircraft it announced may still be parked there with a full
-            // squad, and taking the offer away would leave the REMAINING players with no entrance into a
-            // deployment they can still fly (and no way to make one: only entering the screen announces).
-            // The dead-button worry this hook was added for is answered by LiveSiteRef instead.
-            if (StillServable(State.SiteRef))
-            {
-                MpLog.Log("[MP][deploy] the peer who announced the deployment prep for " + State.SiteRef +
-                          " is gone, but the drop is still servable — the join door STAYS for everybody " +
-                          "left. It hides by itself the moment the site stops being deployable.");
-                return;
-            }
-            MpLog.Log("[MP][deploy] the peer standing in the deployment prep for " + State.SiteRef +
-                      " is gone — withdrawing its announcement, because it will never run ExitState itself. " +
-                      "Every other peer's join button clears; nothing else changes.");
-            Publish("");
+            if (engine == null || !engine.IsHost || steamId == 0) return;
+            foreach (var key in _announcers.Where(x => x.Value == steamId).Select(x => x.Key).ToArray())
+                _announcers.Remove(key); // mission-owned door survives its announcing socket
         }
 
         internal static void HandleClose(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
         {
+            string missionKey = WireString.ReadKey(r);
             string siteRef = WireString.ReadKey(r);
-            if (!ClearsOnWithdraw(siteRef, State.SiteRef))
+            if (!CloseExact(State.Records, missionKey, siteRef))
             {
-                MpLog.Log("[MP][deploy] prep-close from peer " + senderPeerId + " for " + (siteRef ?? "S#?") +
-                          " landed on '" + State.SiteRef + "' — a newer announcement already took the slot, so " +
-                          "the live door stays open.");
+                MpLog.Log("[MP][deploy] stale prep-close from peer " + senderPeerId + " ignored for " +
+                          missionKey + " at " + siteRef + " — no exact record pair exists; a delayed close " +
+                          "for mission A cannot remove mission B on the same site.");
                 return;
             }
-            _announcer = 0;
-            Publish("");
+            _announcers.Remove(missionKey);
+            OpenUiRepaint.MarkDirty();
+        }
+
+        /// <summary>Host-authoritative exact publication. This seam never reaches the client intent rail.</summary>
+        internal static bool PublishMission(GeoMission mission)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return false;
+            string missionKey = DurableWindowRegistry.StableMissionSubject(mission);
+            string siteRef = IdentityResolver.RootRef(mission?.Site);
+            if (string.IsNullOrEmpty(missionKey) || string.IsNullOrEmpty(siteRef) ||
+                !OpenMatches(missionKey, mission?.Site?.ActiveMission)) return false;
+            _announcers[missionKey] = 0;
+            Publish(missionKey, siteRef);
+            MpLog.Log("[MP][deploy] HOST published exact mission door " + missionKey + " at " + siteRef +
+                      " without an intent/send path.");
+            return true;
+        }
+
+        internal static void SuppressNextEntitledEnter(string missionKey)
+        {
+            if (!string.IsNullOrEmpty(missionKey)) _suppressNextEntitledEnter.Add(missionKey);
+        }
+
+        internal static bool ConsumeEntitledEnter(string missionKey)
+            => !string.IsNullOrEmpty(missionKey) && _suppressNextEntitledEnter.Remove(missionKey);
+
+        internal static void AnnounceFromEnter(GeoMission mission)
+        {
+            string key = DurableWindowRegistry.StableMissionSubject(mission);
+            if (ConsumeEntitledEnter(key))
+            {
+                MpLog.Log("[MP][deploy] entitled arrival entered prep for " + key +
+                          "; duplicate OpPrepOpen suppressed (host already published the exact door).");
+                return;
+            }
+            Announce(mission);
         }
 
         // ─── THE DOOR ITSELF ────────────────────────────────────────────────
@@ -333,16 +416,18 @@ namespace Multiplayer.Network.Sync
         /// the launch this peer may go on to press is the ordinary 0xB8 <c>OpLaunch</c> the dispatching peer
         /// uses, validated host-side exactly as before.
         /// </summary>
-        internal static void Join()
+        internal static void Join(string missionKey)
         {
             try
             {
                 var geo = GenericApplier.GeoLevel();
-                var site = geo == null ? null : IdentityResolver.Resolve(geo, State.SiteRef, null) as GeoSite;
+                if (string.IsNullOrEmpty(missionKey) || !State.Records.TryGetValue(missionKey, out var siteRef)) return;
+                var site = geo == null ? null : IdentityResolver.Resolve(geo, siteRef, null) as GeoSite;
                 var mission = site?.ActiveMission;
-                if (geo?.View == null || mission == null)
+                if (geo?.View == null || mission == null ||
+                    !SameMission(missionKey, DurableWindowRegistry.StableMissionSubject(mission)))
                 {
-                    MpLog.LogWarning("[MP][deploy] JOIN pressed for " + (State.SiteRef ?? "S#?") + " but this " +
+                    MpLog.LogWarning("[MP][deploy] JOIN pressed for " + (siteRef ?? "S#?") + " but this " +
                                      "peer has no ActiveMission there — it launched, was cancelled, or the site " +
                                      "is not mirrored yet. Nothing opened, nothing was sent; the button clears " +
                                      "when the announcing peer leaves its screen.");
@@ -350,7 +435,7 @@ namespace Multiplayer.Network.Sync
                 }
                 var vehicle = site.GetPlayerVehiclesOnSite()
                                   ?.FirstOrDefault(v => v != null && v.GetCharacterCount() > 0);
-                MpLog.Log("[MP][deploy] JOIN pressed — opening the deployment prep screen for " + State.SiteRef +
+                MpLog.Log("[MP][deploy] JOIN pressed — opening the deployment prep screen for " + siteRef +
                           " through the game's own GeoscapeView.LaunchMission, container=" +
                           (vehicle == null ? "<site>" : vehicle.name) + ". Both info popups are skipped and no " +
                           "peer is asked for permission.");
@@ -365,9 +450,10 @@ namespace Multiplayer.Network.Sync
 
         internal static void ResetForReloadBoundary()
         {
-            _mine = null;
-            _announcer = 0;
-            State.SiteRef = "";
+            _mine.Clear();
+            _announcers.Clear();
+            _suppressNextEntitledEnter.Clear();
+            State.Records.Clear();
         }
     }
 
@@ -377,7 +463,7 @@ namespace Multiplayer.Network.Sync
     [HarmonyPatch(typeof(UIStateRosterDeployment), "EnterState")]
     internal static class DeployPrepEnterPatch
     {
-        private static void Postfix(UIStateRosterDeployment __instance) => DeployPrep.Announce(__instance?.Mission);
+        private static void Postfix(UIStateRosterDeployment __instance) => DeployPrep.AnnounceFromEnter(__instance?.Mission);
     }
 
     /// <summary>Withdraw on the way out — the ONE hook that covers all three ends of a prep window: the
@@ -385,6 +471,6 @@ namespace Multiplayer.Network.Sync
     [HarmonyPatch(typeof(UIStateRosterDeployment), "ExitState")]
     internal static class DeployPrepExitPatch
     {
-        private static void Postfix() => DeployPrep.Withdraw();
+        private static void Postfix(UIStateRosterDeployment __instance) => DeployPrep.Withdraw(__instance?.Mission);
     }
 }

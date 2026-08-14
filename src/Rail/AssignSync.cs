@@ -100,6 +100,7 @@ namespace Multiplayer.Network.Sync
 
         private static Tftv _h;
         private static bool _bindLogged;
+        private static bool _bindFailed;
         private static bool _mirrorSeen;
 
         private static Dictionary<string, SpecializationDef> _specsByName;
@@ -168,6 +169,11 @@ namespace Multiplayer.Network.Sync
         private static bool Bind()
         {
             if (_h != null) return true;
+            // Once PersonnelData is visible, TFTV's assembly has finished loading and this surface cannot
+            // acquire the missing members later.  Retrying the full reflection probe every frame used to
+            // cost 100-170 ms on TFTV versions whose surface has drifted, freezing every UI window and also
+            // inflating main-thread RTT.  Keep the feature inert after the one loud failure instead.
+            if (_bindFailed) return false;
             var personnel = AccessTools.TypeByName(TftvPersonnelTypeName);
             if (personnel == null) return false; // TFTV absent or not loaded yet — inert, not an error
             var info = AccessTools.TypeByName(TftvPersonnelInfoTypeName);
@@ -214,6 +220,7 @@ namespace Multiplayer.Network.Sync
                       h.SCompleted != null && h.SStartLevel != null && h.SVirtual != null && h.SSpPaid != null &&
                       h.SDismissed != null;
             if (ok) _h = h;
+            else _bindFailed = true;
             if (_bindLogged) return ok;
             _bindLogged = true;
             if (ok)

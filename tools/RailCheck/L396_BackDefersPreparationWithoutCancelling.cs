@@ -205,11 +205,27 @@ namespace RailCheck
             if (Calls(prefix, typeof(GeoMission).GetMethod("Cancel", All)))
                 yield return "L396 Back-deferral-directly-called-mission-Cancel";
 
-            // POSITIVE CONTROL: queued is intentionally presentable; this catches a scheduler disabled wholesale.
+            // Deployment availability is an explicit door: a remote queued occurrence must not navigate.
             var controlCarrier = new ProbeCarrier();
-            if (!new DurableInboxEngine(Make(InboxLifecycle.Queued), member, controlCarrier)
-                    .TryPresentNext(true, typeof(UIStateNothingSelected)) || controlCarrier.PresentCalls != 1)
-                yield return "L396 control-not-red: ordinary-queued-preparation-was-not-presentable";
+            if (new DurableInboxEngine(Make(InboxLifecycle.Queued), member, controlCarrier)
+                    .TryPresentNext(true, typeof(UIStateNothingSelected)) || controlCarrier.PresentCalls != 0)
+                yield return "L396 queued-preparation-forced-remote-navigation";
+
+            var ordinary = new OccurrenceId("OrdinaryNotice", "after-prep", new[] { "notice" });
+            var mixed = new DurableInboxStore(new HostLedger(new[] {
+                new InboxEntry(predecessor, member, InboxLifecycle.Removed, default(CanonicalChoiceId), 1, 1,
+                    new HostOrderKey(1, predecessor.TriggerId), terminalReason: TerminalReason.Superseded,
+                    supersededBy: occurrence),
+                new InboxEntry(occurrence, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 2, 0,
+                    new HostOrderKey(1, occurrence.TriggerId), predecessor: predecessor),
+                new InboxEntry(ordinary, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0,
+                    new HostOrderKey(2, ordinary.TriggerId))
+            }, 2, members));
+            var mixedCarrier = new ProbeCarrier();
+            if (!new DurableInboxEngine(mixed, member, mixedCarrier)
+                    .TryPresentNext(true, typeof(UIStateNothingSelected)) || mixedCarrier.PresentCalls != 1 ||
+                mixed.Ledger.Get(ordinary, member).Lifecycle != InboxLifecycle.Open)
+                yield return "L396 explicit-prep-blocked-the-ordinary-window-behind-it";
         }
 
         private static bool Calls(MethodInfo from, MethodInfo to)

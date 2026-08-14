@@ -8,12 +8,13 @@ using PhoenixPoint.Geoscape.View.ViewStates;
 namespace RailCheck
 {
     /// <summary>
-    /// L406 — ONE PEER'S CONFIRM PUTS THE PREPARATION WINDOW FIRST IN EVERY PEER'S QUEUE.
+    /// L406 — ONE PEER'S CONFIRM MAKES A DURABLE PREPARATION DOOR AVAILABLE TO EVERY PEER.
     ///
     /// OWNER DECISION 2026-08-10, verbatim: "а окно подготовки к высадке у всех на первое место перемещается
     /// если кто-то выбрал начать миссию." A PUSH, not a wait: nothing here reads another peer's readiness and
     /// nothing blocks on a human action (P13, NO QUORUM). A peer that is AFK simply finds the window on top
-    /// of its own queue whenever it looks.
+    /// of its own durable state whenever it looks. It does NOT navigate that peer: DeploymentPreparing is
+    /// consumed by the explicit PrepJoinButton door and is excluded from modal presentation candidates.
     ///
     /// THE PROMOTION IS THE OCCURRENCE, NOT A NUMBER OF OURS. Two facts do the whole job and both already
     /// existed; this law is what stops either from being quietly dropped:
@@ -69,6 +70,9 @@ namespace RailCheck
 
             // ── (a) top of the durable order, over every family the registry actually knows ─────────
             var prepPriority = DurableWindowRegistry.PriorityOf(preparation);
+            if (!DurableInboxEngine.DeploymentUsesExplicitDoor(preparation))
+                yield return "L406 preparation-is-modal: DeploymentPreparing is no longer classified as an " +
+                             "explicit door, so the priority record can force-open a remote peer's roster.";
             if (prepPriority != DurableWindowPriority.Deployment)
                 yield return "L406 preparation-not-top-priority: DeploymentPreparing ranks " + prepPriority +
                              ", not Deployment. DurablePriorityHead sorts PriorityOf DESCENDING, so anything " +

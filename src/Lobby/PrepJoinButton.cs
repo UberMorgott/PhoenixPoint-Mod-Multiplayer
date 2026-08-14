@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using Multiplayer.Network;
 using Multiplayer.Network.Sync;
 using UnityEngine;
@@ -61,18 +63,14 @@ namespace Multiplayer.UI
         /// <c>Pad*3 + TitleH + ButtonH</c> = 104 tall. Both may be up at once for five seconds.</summary>
         private static int Top => LobbyTheme.Scale(180);
 
-        private Button _button;
+        private Transform _canvas;
+        private readonly Dictionary<string, Button> _buttons = new Dictionary<string, Button>(StringComparer.Ordinal);
         private bool _loggedFailure;
 
         internal void Attach(Transform barCanvas)
         {
             if (barCanvas == null) return;
-            _button = UiToolkit.CreateButton(barCanvas.gameObject, "MultiplayerPrepJoin", Label,
-                                             new Vector2(0f, -Top), new Vector2(Width, Height),
-                                             new Vector2(0.5f, 1f), DeployPrep.Join);
-            if (_button == null) return;
-            CountdownPanel.SkinButton(_button);   // the raycaster the canvas needs is added by CountdownPanel.Attach
-            _button.gameObject.SetActive(false);
+            _canvas = barCanvas;
         }
 
         /// <summary>The containment point L158 names: one try/catch, because this runs from
@@ -84,7 +82,7 @@ namespace Multiplayer.UI
             try { SyncCore(); }
             catch (Exception e)
             {
-                if (_button != null) _button.gameObject.SetActive(false);
+                foreach (var button in _buttons.Values) if (button != null) button.gameObject.SetActive(false);
                 if (_loggedFailure) return;
                 _loggedFailure = true;
                 MpLog.LogError("[Multiplayer] deployment-prep join button FAILED and is hidden for the rest of " +
@@ -94,13 +92,34 @@ namespace Multiplayer.UI
 
         private void SyncCore()
         {
-            if (_button == null) return;
+            if (_canvas == null) return;
             var engine = NetworkEngine.Instance;
-            bool show = DeployPrep.ShowsButton(
-                engine != null && engine.IsActiveSession,
-                DeployPrep.LiveSiteRef(),
-                DeployPrep.IdleGeoscape(GenericApplier.GeoLevel()?.View?.CurrentViewState?.GetType()));
-            if (_button.gameObject.activeSelf != show) _button.gameObject.SetActive(show);
+            bool idle = DeployPrep.IdleGeoscape(GenericApplier.GeoLevel()?.View?.CurrentViewState?.GetType());
+            var live = engine != null && engine.IsActiveSession && idle
+                ? DeployPrep.LiveRecords() : Array.Empty<KeyValuePair<string, string>>();
+            var wanted = new HashSet<string>(live.Select(x => x.Key), StringComparer.Ordinal);
+            foreach (var stale in _buttons.Keys.Where(x => !wanted.Contains(x)).ToArray())
+            {
+                if (_buttons.TryGetValue(stale, out var old) && old != null) Destroy(old.gameObject);
+                _buttons.Remove(stale);
+            }
+            for (int i = 0; i < live.Length; i++)
+            {
+                string key = live[i].Key;
+                if (!_buttons.TryGetValue(key, out var button) || button == null)
+                {
+                    string captured = key;
+                    button = UiToolkit.CreateButton(_canvas.gameObject, "MultiplayerPrepJoin" + _buttons.Count,
+                        Label + "  " + live[i].Value, new Vector2(0f, -(Top + i * (Height + LobbyTheme.Scale(6)))),
+                        new Vector2(Width, Height), new Vector2(0.5f, 1f), () => DeployPrep.Join(captured));
+                    if (button == null) continue;
+                    CountdownPanel.SkinButton(button);
+                    _buttons[key] = button;
+                }
+                var rect = button.GetComponent<RectTransform>();
+                if (rect != null) rect.anchoredPosition = new Vector2(0f, -(Top + i * (Height + LobbyTheme.Scale(6))));
+                button.gameObject.SetActive(true);
+            }
         }
     }
 }

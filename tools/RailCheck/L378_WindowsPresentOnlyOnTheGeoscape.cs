@@ -24,22 +24,9 @@ namespace RailCheck
 
             var step = typeof(MissionArrivalNav).GetMethod("Step",
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-            if (step == null || !CallsNamed(step, "MissionHasArrived") ||
-                !CallsNamed(step, "EnqueuePriorityOccurrence") ||
-                !CallsNamed(step, "MissionOccurrenceSubjects"))
-                yield return "L378 mission-arrival-does-not-revalidate-before-durable-enqueue";
-            // RE-AIMED 2026-08-10. This arm used to FORBID the direct LaunchMission, on the premise that the
-            // task-6 scheduler would present the queued DeploymentPreparing entry instead. It does not:
-            // DurableInboxEngine.TryPresentNext has no production caller, so the hand-off left the queue
-            // undrained and every client that answered a mission start stayed on the geoscape (live
-            // 2026-08-10). What this law is actually FOR is the display GATE — so it now demands the
-            // navigation exist AND be gated, which is the property "windows present only on the geoscape".
-            if (!CallsNamed(step, "LaunchMission") || !CallsNamed(step, "MayPresent"))
-                yield return "L378 mission-arrival-presents-ungated-or-not-at-all: MissionArrivalNav.Step must " +
-                             "open the squad screen through GeoscapeView.LaunchMission and must ask " +
-                             "DurableWindowRegistry.MayPresent first. Without the call nothing ever presents " +
-                             "the preparation window (no scheduler drains the queue); without the gate a peer " +
-                             "reading Research is yanked out of it by another peer's answer.";
+            if (step == null || !CallsNamed(step, "MissionHasArrived") || !CallsNamed(step, "MayAutoOpen") ||
+                !CallsNamed(step, "Announce"))
+                yield return "L378 mission-arrival-does-not-revalidate-before-durable-door";
 
             var member = new MembershipId("arrival-player");
             var initial = new HostLedger(Array.Empty<InboxEntry>(), 9,

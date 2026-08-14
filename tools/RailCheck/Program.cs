@@ -3976,13 +3976,15 @@ namespace RailCheck
                 VehicleRef = "V#3@abc",
                 Title = "Haven under attack",
                 Narrative = "[HavenName] calls for help",
+                AutoOpenMissionOnArrival = true,
             };
             var back = EventPopup.Decode(EventPopup.Encode(42u, p), out uint seq);
             if (seq != 42u)
                 yield return "L39 raise-round-trip: seq came back as " + seq + ", not 42 — the idempotence guard reads " +
                              "a wrong number and either drops live windows or lets one re-delivery open a second one";
             if (back.EventId != p.EventId || back.SiteRef != p.SiteRef || back.VehicleRef != p.VehicleRef ||
-                back.Title != p.Title || back.Narrative != p.Narrative)
+                back.Title != p.Title || back.Narrative != p.Narrative ||
+                back.AutoOpenMissionOnArrival != p.AutoOpenMissionOnArrival)
                 yield return "L39 raise-round-trip: the payload came back as (" + back.EventId + "," + back.SiteRef +
                              "," + back.VehicleRef + "," + back.Title + "," + back.Narrative + ") — a dropped or " +
                              "shifted field means the client builds the window against the WRONG context";
@@ -7686,9 +7688,11 @@ namespace RailCheck
                 // Owner is Ability, not TacticalAbility: Activate's virtual SLOT is declared on Ability
                 // (Ability.cs:34) and that is the type the call token names, whatever the receiver's static
                 // type is. Naming TacticalAbility here would be a permanently-red law about nothing.
-                if (!Reaches(handle, "Ability", "Activate"))
+                var scheduledApply = ModMethod(sync, "ApplyActivate");
+                if (!(Reaches(handle, "TacticalCommandSync", "QueueActivation") &&
+                      Reaches(scheduledApply, "Ability", "Activate")))
                     yield return "L65 host-not-native: HandleActivate does not reach TacticalAbility.Activate — an " +
-                                 "accepted command must run the SAME native funnel the host's own click runs";
+                                 "accepted command must queue the SAME native funnel every peer runs at the host epoch";
                 if (!Reaches(handle, "IntentRail", "Reject"))
                     yield return "L65 silent-refusal: HandleActivate does not reach IntentRail.Reject — a refused " +
                                  "command would vanish with no log and no nudge, and the losing peer would keep its " +

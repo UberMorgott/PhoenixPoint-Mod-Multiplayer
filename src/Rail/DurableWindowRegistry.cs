@@ -132,8 +132,13 @@ namespace Multiplayer.Network.Sync
             {
                 __state = new RaiseState { Before = DurableWindowRegistry.QueueCount() };
                 OccurrenceId deferred;
-                string subject = _explicitReentry == null ? null : DurableWindowRegistry.StableMissionSubject(mission);
+                string subject = DurableWindowRegistry.StableMissionSubject(mission);
                 if (!string.IsNullOrEmpty(subject) && TryTakeExplicitReentry(subject, out deferred))
+                    __state.DeferredOccurrence = deferred;
+                else if (!string.IsNullOrEmpty(subject) && _explicitReentry == null &&
+                         WindowQueueSync.TryLocalMember(DurableInboxSession.ActiveStore, out var member) &&
+                         DeploymentWindowClose.TryFindAvailableForMission(DurableInboxSession.ActiveStore,
+                             member, subject, out deferred))
                     __state.DeferredOccurrence = deferred;
                 else
                     __state.TriggerId = "deployment:" + Guid.NewGuid().ToString("N");

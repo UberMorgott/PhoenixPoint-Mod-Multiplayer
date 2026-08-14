@@ -192,15 +192,18 @@ namespace Multiplayer.Network
         public SessionManager(NetworkEngine engine)
         {
             _engine = engine;
+            PingTable.ResetHostClock();
         }
 
         public void InitializeAsHost()
         {
+            PingTable.ResetHostClock();
             HostPeerId = null; // we are the host
         }
 
         public void SetHostPeer(ulong hostPeerId)
         {
+            PingTable.ResetHostClock();
             HostPeerId = hostPeerId;
             var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
             _lastHeartbeat[hostPeerId] = now;
@@ -211,7 +214,8 @@ namespace Multiplayer.Network
         public void Update()
         {
             var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
-            Ping.Tick(now);   // discards any probe a main-thread stall crossed — must run before the send
+            var pingNow = PingTable.NowMs();
+            Ping.Tick(pingNow);   // discards any probe a main-thread stall crossed — must run before the send
             FlushPeerList(); // one roster per frame, however many things changed in it (see BroadcastPeerList)
 
             // Periodic heartbeat — also the RTT probe. Sent UNRELIABLE: a retransmitted probe measures the
@@ -219,13 +223,13 @@ namespace Multiplayer.Network
             if (now - _lastHeartbeatSend > HeartbeatIntervalMs)
             {
                 _lastHeartbeatSend = now;
-                var stamp = Ping.StartProbe(now);
+                var stamp = Ping.StartProbe(pingNow);
 
                 if (_engine.IsHost)
                 {
                     // The host's probe carries its ping TABLE as well — only the host has a link to every
                     // peer, so only the host can measure everyone, and this is a broadcast it already sends.
-                    _engine.BroadcastUnreliable(new NetworkMessage(PacketType.Heartbeat, Ping.Encode(stamp, now)));
+                    _engine.BroadcastUnreliable(new NetworkMessage(PacketType.Heartbeat, Ping.Encode(stamp, pingNow)));
                 }
                 else if (HostPeerId.HasValue)
                 {
@@ -1055,6 +1059,7 @@ namespace Multiplayer.Network
         public void HandleHeartbeat(NetworkMessage msg)
         {
             var now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+            var pingNow = PingTable.NowMs();
 
             if (_engine.IsHost)
             {
@@ -1067,7 +1072,7 @@ namespace Multiplayer.Network
                 ResumePeer(msg.SenderSteamId); // the resume edge — a paused peer is back (no-op otherwise)
 
                 if (msg.Type == PacketType.HeartbeatAck)
-                    Ping.Sample(msg.SenderSteamId, BitConverter.ToInt64(PingTable.EchoStamp(msg.Payload), 0), now);
+                    Ping.Sample(msg.SenderSteamId, BitConverter.ToInt64(PingTable.EchoStamp(msg.Payload), 0), pingNow);
                 else
                     _engine.SendToClient(msg.SenderSteamId,
                         new NetworkMessage(PacketType.HeartbeatAck, PingTable.EchoStamp(msg.Payload)),
@@ -1086,13 +1091,15 @@ namespace Multiplayer.Network
                     // (inbound flowing, outbound dead) is detectable while host packets keep arriving.
                     _lastHeartbeatAck = now;
                     if (HostPeerId.HasValue)
-                        Ping.Sample(HostPeerId.Value, BitConverter.ToInt64(PingTable.EchoStamp(msg.Payload), 0), now);
+                        Ping.Sample(HostPeerId.Value, BitConverter.ToInt64(PingTable.EchoStamp(msg.Payload), 0), pingNow);
                 }
                 else
                 {
                     // Host probe: merge its ping table (that is how a client learns every OTHER peer's
                     // latency — it has no link to them) and ack so the host can measure US.
-                    var stamp = Ping.Decode(msg.Payload, now);
+                    var stamp = Ping.Decode(msg.Payload, pingNow);
+                    if (HostPeerId.HasValue)
+                        PingTable.ObserveHostClock(stamp, pingNow, Ping.GetPingMs(HostPeerId.Value, pingNow));
                     _engine.SendToHost(new NetworkMessage(PacketType.HeartbeatAck, BitConverter.GetBytes(stamp)),
                                        reliable: false);
                 }

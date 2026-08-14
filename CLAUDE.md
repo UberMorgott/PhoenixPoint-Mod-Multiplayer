@@ -3,13 +3,14 @@
 ## Environment
 
 - Use PowerShell and Windows paths for every command and subagent.
-- Use `E:\Dev Games\PP-Instance2` when a Phoenix Point installation is required.
+- Use `D:\Steam\steamapps\common\Phoenix Point` when the primary Phoenix Point installation is required.
+- Co-op test instances are `D:\PP-Instance2` and `D:\PP-Instance3`; `E:\Dev Games\PP-Instance2` does not exist on this machine.
 - Prefix build commands with `$env:PATH = 'C:\Program Files\dotnet;' + $env:PATH`; the default `dotnet` has no SDK.
 - Never publish or upload unless the user explicitly asks.
 
 ## Verification
 
-- Build and deploy: `.\deploy.ps1 -GameDir 'E:\Dev Games\PP-Instance2'`.
+- Build and deploy: `.\deploy.ps1 -GameDir 'D:\Steam\steamapps\common\Phoenix Point'`.
 - Run laws: `dotnet run -c Debug --project tools/RailCheck`.
 - Run source integrity: `pwsh -NoProfile -File tools/law-integrity.ps1`.
 - Enable commit hooks once per clone: `git config core.hooksPath .githooks`.

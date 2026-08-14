@@ -61,9 +61,18 @@ namespace RailCheck
             var canonical = anchor.GetMethod("Canonical", AllMembers);
             var hostDtoM = anchor.GetMethod("HostDto", AllMembers);
             var hostDtoF = anchor.GetField("_hostDto", AllMembers);
+            var hostTruthF = anchor.GetField("_hostTruthAtLatch", AllMembers);
+            var drifted = anchor.GetMethod("Drifted", AllMembers);
+            var predict = anchor.GetMethod("PredictPublishedSeconds", AllMembers);
+            var error = anchor.GetMethod("HostPredictionError", AllMembers);
+            var monotone = anchor.GetMethod("MonotonePublishedSeconds", AllMembers);
+            var refresh = anchor.GetMethod("RefreshForAuthoritativeReply", AllMembers);
             var scaleF = typeof(TimingInstanceData).GetField("Scale");
+            var pausedF = typeof(TimingInstanceData).GetField("Paused");
             var lagGet = typeof(DiffEngine).GetProperty("LastCycleSeconds", AllMembers)?.GetGetMethod(nonPublic: true);
-            if (canonical == null || hostDtoM == null || hostDtoF == null || scaleF == null || lagGet == null)
+            if (canonical == null || hostDtoM == null || hostDtoF == null || hostTruthF == null || drifted == null ||
+                predict == null || error == null || monotone == null || refresh == null ||
+                scaleF == null || pausedF == null || lagGet == null)
             {
                 yield return "L429 unresolved: TimeAnchor.Canonical / HostDto / _hostDto, " +
                              "TimingInstanceData.Scale or DiffEngine.LastCycleSeconds did not all resolve — " +
@@ -91,9 +100,18 @@ namespace RailCheck
                              "without it a green here means nothing";
                 yield break;
             }
+            if (!ReadsField(drifted, hostTruthF))
+                yield return "L429 compensated-anchor-self-churns: Drifted compares host Now against the " +
+                             "receiver-priced DTO StartTime instead of the uncompensated host truth; a pause " +
+                             "then looks like drift and emits the backward half of the globe sawtooth.";
+            if (!CallsMethod(canonical, predict) || !CallsMethod(canonical, monotone) ||
+                !CallsMethod(drifted, error) || !CallsMethod(refresh, canonical))
+                yield return "L429 pure-model-decorative: production Canonical/Drifted/fresh-reply do not call " +
+                             "PredictPublishedSeconds, MonotonePublishedSeconds, HostPredictionError and " +
+                             "Canonical respectively; numeric regressions are testing a second implementation.";
 
             // ── arm A: the lag is priced at the rate from BEFORE this latch.
-            if (!ReadsField(canonical, hostDtoF) || !ReadsField(canonical, scaleF))
+            if (!ReadsField(canonical, hostDtoF) || !ReadsField(canonical, scaleF) || !ReadsField(canonical, pausedF))
                 yield return "L429 lag-priced-post-latch: TimeAnchor.Canonical computes its publish-lag " +
                              "compensation without reading the previous anchor's own Scale (_hostDto.Scale), " +
                              "so it is pricing real seconds of transit at the rate that has ALREADY replaced " +
@@ -106,6 +124,32 @@ namespace RailCheck
                              "(Base.Core/Timing.cs:99-129), which is why the LAST PUBLISHED DTO's own Scale " +
                              "is the running rate through the whole pause — and why pricing from it leaves " +
                              "the resume latch, the half that already worked, computing exactly what it did";
+
+            // Numeric transition: all clients are block-first, so they share the prior host posture.
+            double running = TimeAnchor.PriorEffectiveRate(true, false, 100.0, 1.0, 0.0);
+            double pausePublished = TimeAnchor.PredictPublishedSeconds(1000.0, running, 0.1);
+            double paused = TimeAnchor.PriorEffectiveRate(true, true, 100.0, 1.0, 0.0);
+            double resumeCandidate = TimeAnchor.PredictPublishedSeconds(1000.0, paused, 0.1);
+            double resumePublished = TimeAnchor.MonotonePublishedSeconds(resumeCandidate, pausePublished);
+            double repeatedPausedError = TimeAnchor.HostPredictionError(1000.0, 1000.0, paused, 10.0);
+            if (running != 100.0 || paused != 0.0 || pausePublished != 1010.0 ||
+                repeatedPausedError != 0.0 || resumePublished != pausePublished)
+                yield return "L429 pause-resume-oscillates: numeric prior-rate model is not running->100, " +
+                             "paused->0 with repeated paused ticks producing zero drift and a non-backward " +
+                             "resume publication.";
+
+            // First/reset latch uses live fallback; an aged cached running anchor cannot win on no-op resume.
+            if (TimeAnchor.PriorEffectiveRate(false, true, 999.0, 999.0, 7.0) != 7.0)
+                yield return "L429 first-latch-uses-stale-prior: reset/first latch did not use live fallback.";
+            double oldRunningAnchor = 1000.0;
+            double freshNoopResume = TimeAnchor.MonotonePublishedSeconds(
+                TimeAnchor.PredictPublishedSeconds(5000.0, 100.0, 0.1), oldRunningAnchor);
+            double repeatedNoopResume = TimeAnchor.MonotonePublishedSeconds(
+                TimeAnchor.PredictPublishedSeconds(5100.0, 100.0, 0.1), freshNoopResume);
+            if (freshNoopResume != 5010.0 || repeatedNoopResume != 5110.0 ||
+                repeatedNoopResume < freshNoopResume)
+                yield return "L429 stale-running-anchor-reemitted: a no-op resume can reuse an aged running " +
+                             "anchor instead of freshly pricing host Now, rewinding the requesting client.";
         }
 
         /// <summary>Does this method's IL load the given field, static or instance? Same naive linear token

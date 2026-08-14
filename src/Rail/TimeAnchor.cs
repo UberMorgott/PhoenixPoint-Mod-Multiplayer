@@ -51,6 +51,7 @@ namespace Multiplayer.Network.Sync
     internal static class TimeAnchor
     {
         private static TimingInstanceData _hostDto;
+        private static TimeUnit _hostTruthAtLatch; // uncompensated host clock; DTO StartTime is receiver-priced
         private static float _latchedAt;        // local realtime of the latch — the host-side prediction base
         private static TimingInstanceData _clientDto;
         private static float _appliedAt;        // local realtime of the last apply — the client-side prediction base
@@ -124,18 +125,39 @@ namespace Multiplayer.Network.Sync
         private static TimingInstanceData Canonical(Timing t)
         {
             double lag = Math.Min(DiffEngine.LastCycleSeconds, MaxPublishLagSeconds);
-            double rate = _hostDto == null ? t.EffectiveScale : _hostDto.Scale * ParentScale(t);
-            var publishLag = TimeUnit.FromTimeSpan(TimeSpan.FromSeconds(Math.Max(0.0, rate * lag)));
+            double rate = PriorEffectiveRate(_hostDto != null, _hostDto != null && _hostDto.Paused,
+                                             _hostDto == null ? 0.0 : _hostDto.Scale,
+                                             ParentScale(t), t.EffectiveScale);
+            double candidate = PredictPublishedSeconds(t.Now.TimeSpan.TotalSeconds, rate, lag);
+            double publishedSeconds = MonotonePublishedSeconds(candidate,
+                _hostDto == null ? candidate : _hostDto.StartTime.TimeSpan.TotalSeconds);
+            var published = TimeUnit.FromTimeSpan(TimeSpan.FromSeconds(publishedSeconds));
             return new TimingInstanceData
             {
                 Paused = t.Paused,
                 Scale = t.Scale,
-                StartTime = t.Now + publishLag,
-                StartFixedTime = t.Now + publishLag,
+                StartTime = published,
+                StartFixedTime = published,
                 OwnNow = TimeUnit.Zero,
                 OwnFixedNow = TimeUnit.Zero,
             };
         }
+
+        /// <summary>Rate the receivers uniformly held before this latch. A paused prior anchor advances 0.</summary>
+        internal static double PriorEffectiveRate(bool hasPrior, bool priorPaused, double priorScale,
+                                                  double parentScale, double liveFallback)
+            => hasPrior ? (priorPaused ? 0.0 : priorScale * parentScale) : liveFallback;
+
+        /// <summary>Pure numeric anchor model used by the pause/resume regression.</summary>
+        internal static double PredictPublishedSeconds(double hostNow, double priorRate, double lagSeconds)
+            => hostNow + Math.Max(0.0, priorRate * Math.Min(lagSeconds, MaxPublishLagSeconds));
+
+        internal static double HostPredictionError(double hostNow, double truthAtLatch, double rate,
+                                                   double elapsed)
+            => Math.Abs(hostNow - (truthAtLatch + rate * elapsed));
+
+        internal static double MonotonePublishedSeconds(double candidate, double previousPublished)
+            => Math.Max(candidate, previousPublished);
 
         /// <summary>Has the host's real clock left the anchor's own prediction? Catches every jump that is
         /// not a pause/speed change — save-load, time skip, any native re-anchor — and, over long unchanged
@@ -172,8 +194,10 @@ namespace Multiplayer.Network.Sync
         {
             if (_hostDto.Paused != t.Paused || _hostDto.Scale != t.Scale) return false;
             double rate = t.EffectiveScale; // Paused ? 0 : CumulativeScale — the true d(Now)/d(realtime)
-            double predicted = _hostDto.StartTime.TimeSpan.TotalSeconds + rate * (Time.realtimeSinceStartup - _latchedAt);
-            return Math.Abs(t.Now.TimeSpan.TotalSeconds - predicted) > Math.Max(5.0, rate * 0.5);
+            double error = HostPredictionError(t.Now.TimeSpan.TotalSeconds,
+                                               _hostTruthAtLatch.TimeSpan.TotalSeconds, rate,
+                                               Time.realtimeSinceStartup - _latchedAt);
+            return error > Math.Max(5.0, rate * 0.5);
         }
 
         /// <summary>Host: the "TA" root object. Same values between latches ⇒ the walk encodes identical bytes
@@ -184,11 +208,24 @@ namespace Multiplayer.Network.Sync
             bool drifted = _hostDto != null && Drifted(t);
             if (_hostDto == null || _hostDto.Paused != t.Paused || _hostDto.Scale != t.Scale || drifted)
             {
-                _hostDto = Canonical(t);
+                var canonical = Canonical(t);
+                _hostTruthAtLatch = t.Now;
+                _hostDto = canonical;
                 _latchedAt = Time.realtimeSinceStartup;
                 ChurnCheck(drifted);
             }
             return _hostDto;
+        }
+
+        /// <summary>Fresh host answer even when Timing's change-gated setter swallowed an equal value.</summary>
+        internal static bool RefreshForAuthoritativeReply(Timing t)
+        {
+            if (t == null) return false;
+            var canonical = Canonical(t);
+            _hostTruthAtLatch = t.Now;
+            _hostDto = canonical;
+            _latchedAt = Time.realtimeSinceStartup;
+            return true;
         }
 
         /// <summary>THE runnable check. A latch is an EVENT (pause, speed, load), never a heartbeat: if this
@@ -392,6 +429,7 @@ namespace Multiplayer.Network.Sync
         internal static void Reset()
         {
             _hostDto = null;
+            _hostTruthAtLatch = TimeUnit.Zero;
             _clientDto = null;
             _appliedAt = 0f;
         }

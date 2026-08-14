@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using Multiplayer.Network.Sync;
 
 namespace RailCheck
@@ -50,6 +51,10 @@ namespace RailCheck
     ///       housekeeping: a mod root that is non-empty at a boundary gets captured by the post-reload
     ///       baseline walk, is therefore never emitted, and the client stays permanently stale until a full
     ///       resend (IdentityResolver.cs:205-206).
+    ///   (i) <c>bind-failure-retries-forever</c> — once TFTV's anchor type is visible, a missing remainder
+    ///       is version drift, not late loading: CLR has already loaded that assembly. The failed probe must
+    ///       latch for the AppDomain lifetime, while an absent anchor must remain retryable. Reloading a
+    ///       campaign does not change assemblies and therefore must not clear the latch.
     ///
     /// Falsify: invert the gate in any mute prefix → (c); make a prefix `return true` → (d); drop the
     /// <c>ShouldRunNative</c> call from a capture → (e); call the TFTV method without asking
@@ -96,16 +101,19 @@ namespace RailCheck
             var engineTick = typeof(SyncEngine).GetMethod("Tick", All);
             var engineBoundary = typeof(SyncEngine).GetMethod("ResetForReloadBoundary", All);
             var engineDetach = typeof(SyncEngine).GetMethod("DetachAllChannels", All);
+            var bind = sync.GetMethod("Bind", All);
+            var bindFailed = sync.GetField("_bindFailed", All);
 
             if (door == null || funnel == null || strictFunnel == null || resolve == null || reject == null ||
                 register == null || registerIntents == null || registerOps == null || engineCtor == null ||
                 rootKey == null || engineTick == null || engineBoundary == null || engineDetach == null ||
-                handlers.Any(h => h.Value == null))
+                bind == null || bindFailed == null || handlers.Any(h => h.Value == null))
             {
                 yield return "L441 premise-changed: AssignSync's authority seam no longer resolves " +
                              "(RunNativeAutomation / RunNativeSimulation / Resolve / the three host handlers / " +
                              "Reject / Register / RegisterIntents / RootKey, IntentRail.ShouldRunNative, " +
-                             "IntentRail.RegisterOps, or the SyncEngine constructor and lifecycle entry points). " +
+                             "IntentRail.RegisterOps, AssignSync.Bind/_bindFailed, or the SyncEngine " +
+                             "constructor and lifecycle entry points). " +
                              "TFTV internals are reached by reflection here, so an upstream or local rename " +
                              "makes this whole surface fail SILENTLY — re-point the law at whatever carries " +
                              "the decision now; do not delete it, because a client that keeps simulating " +
@@ -298,6 +306,30 @@ namespace RailCheck
                                  "housekeeping: a mod root that is non-empty when the post-reload BASELINE walk " +
                                  "runs is captured by it and therefore never emitted, so the client keeps the " +
                                  "pre-reload table until somebody forces a full resend.";
+            }
+
+            // ═══ (i) a drifted TFTV surface is probed once, not once per frame ═══
+            // TypeByName(anchor)==null deliberately returns BEFORE this store: that is the late-load path and
+            // it keeps retrying. Once the anchor exists, however, all types in that assembly are available;
+            // a missing member is stable version drift. Resetting on a campaign reload would revive the
+            // 100-170 ms reflection walk even though no assembly can change at that boundary.
+            bool bindReadsLatch = Program.FieldRefs(bind, OpCodes.Ldsfld)
+                .Any(f => f.MetadataToken == bindFailed.MetadataToken && f.Module == bindFailed.Module);
+            bool bindSetsLatch = Program.FieldRefs(bind, OpCodes.Stsfld)
+                .Any(f => f.MetadataToken == bindFailed.MetadataToken && f.Module == bindFailed.Module);
+            if (!bindReadsLatch || !bindSetsLatch)
+                yield return "L441 bind-failure-retries-forever: AssignSync.Bind no longer both reads and " +
+                             "sets _bindFailed. A TFTV member rename then repeats the full reflection probe " +
+                             "on every SyncEngine.Tick, freezing UI windows and inflating main-thread RTT.";
+
+            foreach (var resetName in new[] { "ResetForReloadBoundary", "Reset" })
+            {
+                var reset = sync.GetMethod(resetName, All);
+                if (Program.FieldRefs(reset, OpCodes.Stsfld)
+                    .Any(f => f.MetadataToken == bindFailed.MetadataToken && f.Module == bindFailed.Module))
+                    yield return "L441 bind-failure-latch-reset: AssignSync." + resetName +
+                                 " writes _bindFailed. A campaign reload cannot change the loaded TFTV " +
+                                 "assembly, so clearing the latch only restores the per-frame reflection stall.";
             }
         }
 

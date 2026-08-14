@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using Multiplayer.Network.MessageLayer;
 
 namespace Multiplayer.Network
@@ -58,6 +59,40 @@ namespace Multiplayer.Network
     /// </summary>
     public class PingTable
     {
+        private static long _hostClockOffsetMs;
+        private static bool _hostClockKnown;
+        private static long _hostClockSampledAt;
+        private const long HostClockStaleMs = 3500;
+        private static readonly double TickToMs = 1000.0 / Stopwatch.Frequency;
+
+        public static bool TryHostNowMs(bool isHost, out long hostNow)
+        {
+            long now = NowMs();
+            if (isHost) { hostNow = now; return true; }
+            if (!HostClockUsable(_hostClockKnown, now, _hostClockSampledAt))
+            { hostNow = now; return false; }
+            hostNow = now + _hostClockOffsetMs;
+            return true;
+        }
+
+        internal static bool HostClockUsable(bool known, long now, long sampledAt) =>
+            known && sampledAt > 0 && now >= sampledAt && now - sampledAt <= HostClockStaleMs;
+
+        public static void ResetHostClock()
+        {
+            _hostClockKnown = false;
+            _hostClockOffsetMs = 0;
+            _hostClockSampledAt = 0;
+        }
+
+        public static void ObserveHostClock(long hostSentAtMs, long receivedAtMs, int rttMs)
+        {
+            if (hostSentAtMs <= 0 || rttMs < 0) return;
+            long sample = hostSentAtMs + rttMs / 2L - receivedAtMs;
+            _hostClockOffsetMs = !_hostClockKnown ? sample : (_hostClockOffsetMs * 3L + sample) / 4L;
+            _hostClockKnown = true;
+            _hostClockSampledAt = receivedAtMs;
+        }
         /// <summary>Probe cadence — this IS <c>SessionManager.HeartbeatIntervalMs</c>, named here because
         /// staleness and the in-flight window are both expressed in it.</summary>
         public const int CadenceMs = 1000;
@@ -101,7 +136,7 @@ namespace Multiplayer.Network
         /// decays the fiction away.</summary>
         private static bool StallCrossed(long nowMs) => _lastTickMs != 0 && nowMs - _lastTickMs > MaxTickGapMs;
 
-        public static long NowMs() => DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
+        public static long NowMs() => (long)(Stopwatch.GetTimestamp() * TickToMs);
 
         /// <summary>Once per frame, before anything else. Poisons the in-flight probes if the main thread
         /// stalled across them — see <see cref="MaxTickGapMs"/>.</summary>
