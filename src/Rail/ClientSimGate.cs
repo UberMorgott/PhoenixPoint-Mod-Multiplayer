@@ -544,35 +544,47 @@ namespace Multiplayer.Network.Sync
                 typeof(PhoenixPoint.Geoscape.Levels.Factions.GeoAlienFaction), "UpdateResearch");
         }
 
+        // Never throws: RailCheck L451 invokes this prefix outside Unity, and a level lookup that dies
+        // there would turn a behavioural law into a harness crash.
+        private static Base.Levels.Level CurrentLevel()
+        {
+            try { return GameUtl.CurrentLevel(); } catch { return null; }
+        }
+
         private static bool Prefix(GeoFaction __instance)
         {
             var engine = NetworkEngine.Instance;
             if (engine != null && engine.IsHost) { _clientLevel = null; return true; } // host: fully native
 
-            bool known = engine != null;
-            if (known) _clientLevel = GameUtl.CurrentLevel();                           // client, latch the level
-            else if (_clientLevel == null || !ReferenceEquals(GameUtl.CurrentLevel(), _clientLevel))
+            if (engine != null) _clientLevel = CurrentLevel() ?? _clientLevel;          // client, latch the level
+            else if (_clientLevel == null || !ReferenceEquals(CurrentLevel(), _clientLevel))
                 return true;                                                            // solo: native
 
-            // Log-once, not per-frame: this funnel fires on every faction, every research tick.
-            if (!_loggedBlock)
+            // Diagnostics only — never let a log path decide whether the gate holds (and RailCheck L451
+            // invokes this prefix outside Unity, where Debug.Log has no runtime under it).
+            try
             {
-                _loggedBlock = true;
-                MpLog.Log("[MP][research] ClientResearchGate BLOCK (" +
-                          (__instance?.Def == null ? "?" : __instance.Def.name) +
-                          ") — a client never runs native research progression; NextResearchUpdate is not " +
-                          "mirrored, so one tick here would burn the whole queue at once");
+                // Log-once, not per-frame: this funnel fires on every faction, every research tick.
+                if (!_loggedBlock)
+                {
+                    _loggedBlock = true;
+                    MpLog.Log("[MP][research] ClientResearchGate BLOCK (" +
+                              (__instance?.Def == null ? "?" : __instance.Def.name) +
+                              ") — a client never runs native research progression; NextResearchUpdate is not " +
+                              "mirrored, so one tick here would burn the whole queue at once");
+                }
+                // The evidence line the RCA asked for: the OLD predicate (engine==null || !IsActiveSession)
+                // would have let this through. If this prints, the unknown window is real and observed.
+                if (!_loggedWindow && (engine == null || !engine.IsActiveSession))
+                {
+                    _loggedWindow = true;
+                    MpLog.Log("[MP][research] ClientResearchGate WINDOW — engine=" +
+                              (engine == null ? "null" : "present,IsActiveSession=false") +
+                              ": the previous Research.Update gate would have been OPEN here and the client " +
+                              "would have cascaded its whole research queue");
+                }
             }
-            // The evidence line the RCA asked for: the OLD predicate (engine==null || !IsActiveSession)
-            // would have let this through. If this ever prints, the unknown window is real and observed.
-            if (!_loggedWindow && (engine == null || !engine.IsActiveSession))
-            {
-                _loggedWindow = true;
-                MpLog.Log("[MP][research] ClientResearchGate WINDOW — engine=" +
-                          (engine == null ? "null" : "present,IsActiveSession=false") +
-                          ": the previous Research.Update gate would have been OPEN here and the client " +
-                          "would have cascaded its whole research queue");
-            }
+            catch { }
             return false;
         }
     }
