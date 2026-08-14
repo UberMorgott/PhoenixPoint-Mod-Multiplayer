@@ -5,11 +5,10 @@
 - Same for subagents: brief them to use PowerShell.
 
 ## Deploy target
-- Deploy only into the Steam game folder: `D:\Steam\steamapps\common\Phoenix Point` (confirmed by appid `839770` in `D:\Steam\steamapps\libraryfolders.vdf`; only Steam library on this machine).
-- `& .\deploy.ps1 -GameDir 'D:\Steam\steamapps\common\Phoenix Point'` — `-GameDir` wins over `$env:PhoenixPointDir` and the script's hardcoded probe list.
+- The only Phoenix Point install on this machine is `E:\Dev Games\PP-Instance2` (verified: `PhoenixPointWin64_Data\Managed\Assembly-CSharp.dll` present). Deploy there.
+- `& .\deploy.ps1 -GameDir 'E:\Dev Games\PP-Instance2'` — `-GameDir` wins over `$env:PhoenixPointDir` and the script's hardcoded probe list, none of which resolve here.
 - Never publish to the Steam Workshop, never upload — local file install only, unless explicitly asked.
-- `$extraModRoots` in `deploy.ps1` also mirrors to `D:\PP-Instance2` / `D:\PP-Instance3` (co-op test instances) — game folder is the target that matters.
-- Docs elsewhere say `E:\Dev Games\PP-Instance2`; that path does not exist here — the dev instance is `D:\PP-Instance2`.
+- Paths named elsewhere in the docs do NOT exist on this machine and the probe list will not find them: `D:\Steam\steamapps\common\Phoenix Point`, `D:\PP-Instance2`, `D:\PP-Instance3` (the last two are `$extraModRoots` in `deploy.ps1`, so they log `SKIPPED (not found)` — that warning is expected, not a failure).
 
 ## Verify
 - `deploy.ps1` — builds `Multiplayer.dll` into `Mods/Multiplayer`; needs a Phoenix Point install.
@@ -47,5 +46,6 @@
 - The version lives in **`meta.json` only** (bare `"0.9.11"`, no suffix). The `-beta` suffix exists only in the tag `vX.Y.Z-beta` and the CHANGELOG header — no csproj/README/assembly copy to keep in sync.
 - Script refuses on: not `main`, dirty tree, tag already exists, missing CHANGELOG section, and any RED from `deploy.ps1` / RailCheck / `law-integrity.ps1` — gates run before the commit, so a failure leaves nothing committed or tagged.
 - It commits `chore(release): X.Y.Z-beta` (only `meta.json` + `CHANGELOG.md`) and puts the **annotated** tag on that exact commit, then verifies the tag landed on HEAD.
-- It NEVER pushes. It prints `git push origin main vX.Y.Z-beta`; running that is a deliberate human step.
+- It NEVER pushes without `-Publish`. Plain run prints `git push origin main vX.Y.Z-beta`; running that is a deliberate human step.
+- `-Publish` is what makes a release visible: push, then pack `artifacts/Multiplayer-X.Y.Z-beta.zip` (root folder `Multiplayer/` with dll+pdb+meta.json) and `gh release create` as a pre-release, notes = the CHANGELOG section, assets = zip+dll+pdb. Without it you get a bare tag and no release page — that is how `v0.9.11`/`v0.9.12`/`v0.9.13-beta` shipped unannounced.
 - Historical tags are inconsistent — `v0.9.0/1/2/5-beta` are lightweight, `v0.9.3-beta` sits 23 commits past its release commit, `v0.9.5-beta`/`v0.9.10-beta` one commit past, and `v0.9.7-beta` shipped with `meta.json` still reading `0.9.6`. Published tags are left alone; do not "fix" them without the user's explicit OK.
