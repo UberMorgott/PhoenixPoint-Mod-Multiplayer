@@ -83,6 +83,11 @@ namespace Multiplayer.Network.Sync
             AccessTools.Field(typeof(GeoscapeViewSwitchQuery), "_viewStateSwitchRequests"); // GeoscapeViewSwitchQuery.cs:15
         private static readonly FieldInfo CurrentField =
             AccessTools.Field(typeof(GeoscapeViewSwitchQuery), "_currentStateSwitchRequest"); // :17
+        /// <summary>The view the query belongs to (<c>GeoscapeViewSwitchQuery.cs:13</c>, assigned in the
+        /// ctor at :22 and readonly) — see <see cref="CurrentViewStateOf"/> for why the gate must read it
+        /// rather than look the geoscape up globally.</summary>
+        private static readonly FieldInfo ViewField =
+            AccessTools.Field(typeof(GeoscapeViewSwitchQuery), "_view");
 
         /// <summary>Per-request order key. A CLASS because the store below needs a reference value, and a
         /// ConditionalWeakTable because a request the game drops must not be kept alive by our bookkeeping —
@@ -262,6 +267,44 @@ namespace Multiplayer.Network.Sync
         /// PRIORITY and not about the WINDOW, and a law can only execute that if the extraction — request →
         /// (priority, state type) — is on the pure side of the seam. Inline, it is only assertable by IL,
         /// and IL cannot tell "reads the head's type" from "reads the head's type for the log line".</summary>
+        /// <summary>
+        /// THE SCREEN THIS QUERY IS ABOUT — ASKED OF THE QUERY'S OWN VIEW, NEVER LOOKED UP GLOBALLY.
+        ///
+        /// THE REPORT (client, 2026-08-14, multiplayer.log one clock): the player was in the recruits
+        /// screen from 23:55:30 (`SetGeoRosterControls`) with no navigation of any kind afterwards; the
+        /// host's event window arrived at 23:55:58.631 and this gate HELD it correctly at :58.647
+        /// (`queue HELD while UIStateRosterRecruits is open`) — and then at 23:56:02.207 the window opened
+        /// anyway, straight onto that screen (`SetGeoscapeEventControls`, with no map control set logged
+        /// between the two, i.e. the player never left). Nothing else can produce that: the head was
+        /// priority 0, no `order gate failed` line was written, and the hold had already proved
+        /// `_currentStateSwitchRequest` was null. The one remaining input is the one this method replaces —
+        /// <c>GenericApplier.GeoLevel()?.View?.CurrentViewState</c> read NULL for a single frame, and L163's
+        /// own (correct) rule that a null state DRAINS then let the window through. ONE frame is enough:
+        /// the push is permanent.
+        ///
+        /// THE GATE MUST ASK THE OBJECT IT IS GATING. <c>ProcessQueriedStateSwitch</c> runs from
+        /// <c>GeoscapeView.Update</c>:1358, so the view that owns this query is alive by construction
+        /// whenever this is called, whatever the global level lookup says while a level swap, a curtain or
+        /// a save transfer is in flight. Reading <c>_view</c> makes "no current state" mean what L163 says
+        /// it means — the state stack is genuinely empty — instead of "the mod could not find the geoscape
+        /// this frame". The predicate is untouched; the DEFECT WAS THE READ, and it was a hole under every
+        /// window family at once, which is why it is fixed here and not per family.
+        ///
+        /// The global lookup stays as the fallback for a game rename: a null <c>ViewField</c> must not make
+        /// the gate blind, and the old behaviour is what it degrades to.
+        /// </summary>
+        internal static Type CurrentViewStateOf(GeoscapeViewSwitchQuery query)
+        {
+            // ReferenceEquals, NOT `== null`: GeoscapeView is a UnityEngine.Object, whose overloaded
+            // operator reports "null" for a live managed reference whose native half is not there — which
+            // is every view this method is handed outside a player, and would send the read straight back
+            // to the global lookup this fix exists to leave. The state stack is a managed field and reads
+            // the same either way, and the whole gate runs inside ReadyToDequeue's catch.
+            var view = query == null || ViewField == null ? null : ViewField.GetValue(query) as GeoscapeView;
+            if (ReferenceEquals(view, null)) view = GenericApplier.GeoLevel()?.View;
+            return ReferenceEquals(view, null) ? null : view.CurrentViewState?.GetType();
+        }
+
         internal static bool HoldsHead(GeoscapeViewStateSwitchRequest head, Type currentViewState) =>
             head != null &&
             HoldsForOpenScreen(head.Priority, head.State == null ? null : head.State.GetType(), currentViewState);
@@ -449,12 +492,12 @@ namespace Multiplayer.Network.Sync
                 // reordering, and reordering on a LOCAL condition (which screen this peer has open) is the
                 // one thing this class exists to avoid. Promote it to the head only if a session shows an
                 // answer window queued behind a held one; the measured defect was the head itself.
-                var current = GenericApplier.GeoLevel()?.View?.CurrentViewState;
+                var current = CurrentViewStateOf(query);
                 var head = pending[0].State;
-                if (HoldsHead(pending[0], current == null ? null : current.GetType()))
+                if (HoldsHead(pending[0], current))
                 {
-                    if (_heldOnScreen.Add(current.GetType().Name + "/" + (head == null ? "?" : head.GetType().Name)))
-                        MpLog.Log("[MP][windows] queue HELD while " + current.GetType().Name + " is open — " +
+                    if (_heldOnScreen.Add(current.Name + "/" + (head == null ? "?" : head.GetType().Name)))
+                        MpLog.Log("[MP][windows] queue HELD while " + current.Name + " is open — " +
                                   (head == null ? "a window" : head.GetType().Name) + " is reviewed on the " +
                                   "geoscape, not on top of a screen the player opened. It drains as soon as " +
                                   "this peer is back on the map (logged once per screen/window pair).");
