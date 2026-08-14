@@ -5,6 +5,7 @@ using System.Linq;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Common.Levels.Missions;
+using PhoenixPoint.Tactical.Entities;
 using PhoenixPoint.Tactical.Levels;
 using PhoenixPoint.Tactical.Levels.FactionObjectives;
 using UnityEngine;
@@ -80,10 +81,21 @@ namespace Multiplayer.Tactical
         private static readonly Dictionary<FactionObjective, int> Exp = new Dictionary<FactionObjective, int>();
         private static readonly Dictionary<FactionObjective, int> Sp = new Dictionary<FactionObjective, int>();
 
+        /// <summary>CLIENT: the host's PER-SOLDIER payout, actor key → <c>LevelProgression.ExperienceEarned</c>.
+        /// The pool above is mirrored, but the SPLIT is not derivable from it: <c>GiveExperienceForObjectives</c>
+        /// :235-238 orders the actors by <c>Contribution</c> (purely local — <c>AddForTakingDamage</c>:881 clamps
+        /// to LOCAL health and nothing puts it on a rail), floors each share (:270-271) and then hands the floor
+        /// remainder out as +1 XP to the FIRST N of that order (:291-294). A tie in contribution therefore orders
+        /// differently per peer and one soldier ends up 1-2 XP apart. So the OUTPUT is mirrored, not the inputs.
+        /// Consumed by <see cref="ExperienceSplitSeam"/> — a postfix, because this arrives ahead of the client's
+        /// own award and applying it in <see cref="ApplyOutcome"/> would be overwritten by it.</summary>
+        private static readonly Dictionary<int, int> Earned = new Dictionary<int, int>();
+
         internal static void Reset()
         {
             Exp.Clear();
             Sp.Clear();
+            Earned.Clear();
         }
 
         /// <summary>Content identity: the concrete evaluator plus the two localization keys the def gave it.
@@ -115,6 +127,17 @@ namespace Multiplayer.Tactical
                         w.Write((byte)o.State);
                         w.Write(o.GetActualExperienceReward());
                         w.Write(o.GetActualSkillPointsReward());
+                    }
+                    // TRAILING BLOCK: the split the host just paid out. Same actor filter the game itself used
+                    // (TacticalFaction:236), so a key-less actor simply never appears and the client keeps its
+                    // own number for it.
+                    var actors = player.GetOwnedActors<TacticalActor>()
+                        .Where(a => a.LevelProgression != null && TacticalActorKey.Of(a) != 0).ToList();
+                    w.Write(actors.Count);
+                    foreach (var a in actors)
+                    {
+                        w.Write(TacticalActorKey.Of(a));
+                        w.Write(a.LevelProgression.ExperienceEarned);
                     }
                 });
         }
@@ -169,6 +192,20 @@ namespace Multiplayer.Tactical
                               " state=" + state + " exp=" + exp + " sp=" + sp + ".");
                 }
             }
+            // Trailing per-soldier split; absent in an old-format payload → nothing stashed, the client keeps
+            // its own numbers (same back-compat shape as ManufactureSync.HandleInbound:314).
+            Earned.Clear();
+            var body = r.BaseStream;
+            if (body.Position < body.Length)
+            {
+                int n = r.ReadInt32();
+                for (int i = 0; i < n; i++)
+                {
+                    int key = r.ReadInt32();
+                    int earned = r.ReadInt32();
+                    if (key != 0) Earned[key] = earned;
+                }
+            }
             if (player == null)
                 MpLog.LogError("[Multiplayer][tac] the host's mission-end objective board arrived with no " +
                                "Player-participant faction on this peer — this peer will score its own board " +
@@ -220,6 +257,39 @@ namespace Multiplayer.Tactical
             {
                 int v;
                 if (__instance != null && Sp.TryGetValue(__instance, out v)) __result = v;
+            }
+        }
+
+        /// <summary>CLIENT: overwrite this peer's own split with the host's, the instant it has finished
+        /// computing it. A POSTFIX and not <see cref="ApplyOutcome"/>, because the correction lands on the wire
+        /// BEFORE the client runs its own <c>GameOver</c> → <c>GiveExperienceForObjectives</c>, which would
+        /// simply add on top of anything stamped earlier. This still runs before <c>UIStateBattleSummary</c> is
+        /// built, so the summary table (<c>UIModuleBattleSummary</c>:284/294/339) paints the host's numbers.
+        /// The delta may be NEGATIVE and that is safe: <c>LevelProgression.AddExperience</c>:77-93 no-ops its
+        /// level-up loop for a negative amount. Stash is consumed, so it can never pay a second faction or a
+        /// second battle.</summary>
+        [HarmonyPatch(typeof(TacticalFaction), nameof(TacticalFaction.GiveExperienceForObjectives))]
+        internal static class ExperienceSplitSeam
+        {
+            private static void Postfix(TacticalFaction __instance)
+            {
+                if (Earned.Count == 0 || __instance == null ||
+                    __instance.ParticipantKind != TacMissionParticipant.Player) return;
+                int fixedUp = 0;
+                foreach (var a in __instance.GetOwnedActors<TacticalActor>())
+                {
+                    int hostEarned;
+                    if (a.LevelProgression == null || !Earned.TryGetValue(TacticalActorKey.Of(a), out hostEarned))
+                        continue;
+                    int delta = hostEarned - a.LevelProgression.ExperienceEarned;
+                    if (delta == 0) continue;
+                    a.LevelProgression.AddExperience(delta);
+                    fixedUp++;
+                }
+                Earned.Clear();
+                if (fixedUp > 0)
+                    MpLog.Log("[Multiplayer][tac] mission-end XP split: " + fixedUp + " soldier(s) corrected to " +
+                              "the host's ExperienceEarned before the battle summary is built.");
             }
         }
     }

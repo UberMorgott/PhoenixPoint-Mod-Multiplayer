@@ -68,6 +68,16 @@ namespace Multiplayer.Network.Sync
         private static readonly FieldInfo TrackerContext =
             AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_context");
 
+        // UIModuleInfoBar: private no-arg UpdatePopulation():276 and the Init(context):144 field that
+        // proves the module is live (it dereferences `_context.View` unguarded, so calling it before
+        // Init would NRE). TFTV's TopInforBar:127 postfixes exactly this method and rewrites the
+        // Anu/Nj/Syn reputation percentages from <Faction>.Diplomacy.GetDiplomacy(PhoenixFaction) —
+        // a STORED field the rail writes directly, so no native event ever fires on a client.
+        private static readonly MethodInfo InfoBarUpdatePopulation =
+            AccessTools.Method(typeof(UIModuleInfoBar), "UpdatePopulation", Type.EmptyTypes);
+        private static readonly FieldInfo InfoBarContext =
+            AccessTools.Field(typeof(UIModuleInfoBar), "_context");
+
         /// <summary>The open state's OWN contextual-ability derivation, cached per state type. Deliberately
         /// resolved by NAME on whatever state is open instead of naming screens: the two states that drive
         /// the site menu build DIFFERENT lists — UIStateNothingSelected.GetContextualAbilities:682 is the
@@ -128,6 +138,7 @@ namespace Multiplayer.Network.Sync
             var mods = view?.GeoscapeModules;
             if (mods == null) return; // no geoscape view at all (tactical / main menu) — nothing to repaint
             RefreshAgendaTracker(mods);
+            RefreshInfoBar(mods);
             RefreshSiteContextualMenu(geo, mods, view.CurrentViewState);
         }
 
@@ -162,6 +173,40 @@ namespace Multiplayer.Network.Sync
                 if (_loggedFailures.Add("PersistentHud"))
                     MpLog.LogWarning("[Multiplayer][rail] persistent-HUD refresh threw — the top-right tracker may " +
                                      "stay stale until the next screen change (logged once): " + ex);
+            }
+        }
+
+        /// <summary>Top-right resource/population strip — third citizen of the same gap: it is a MODULE,
+        /// not a GeoscapeViewState, so no <see cref="UiNativeRepaint.Table"/> row can reach it. Its
+        /// percentages come from a stored field (PartyDiplomacy._relations → Relation._diplomacy), which
+        /// the rail writes DIRECTLY, so none of the module's native subscriptions (Init:148-168) ever
+        /// fire on a client and the strip freezes at its last Init until a screen re-enter.
+        /// <c>UpdatePopulation</c>:276 is the module's own repaint that TFTV's TopInforBar:127 postfixes
+        /// to write the Anu/Nj/Syn reputation numbers, so driving it repaints them — read-direction only,
+        /// no view-state transition.</summary>
+        private static void RefreshInfoBar(GeoscapeModulesData mods)
+        {
+            if (InfoBarUpdatePopulation == null || InfoBarContext == null) return;
+            var bar = mods.ResourcesModule;
+            if (bar == null)
+            {
+                if (_loggedFailures.Add("InfoBarMissing"))
+                    MpLog.LogWarning("[Multiplayer][rail] GeoscapeModulesData.ResourcesModule is null — the " +
+                                     "top-right resource/reputation strip has no handle to repaint and will only " +
+                                     "update on a screen re-enter (logged once)");
+                return;
+            }
+            if (InfoBarContext.GetValue(bar) == null) return; // not Init'd yet — UpdatePopulation would NRE
+            try
+            {
+                // law 8: the repaint re-reads the model and can fire native UI events a capture seam hears.
+                using (SyncApplyScope.Enter()) InfoBarUpdatePopulation.Invoke(bar, null);
+            }
+            catch (Exception ex)
+            {
+                if (_loggedFailures.Add("InfoBar"))
+                    MpLog.LogWarning("[Multiplayer][rail] info-bar refresh threw — the top-right reputation " +
+                                     "percentages may stay stale until the next screen change (logged once): " + ex);
             }
         }
 

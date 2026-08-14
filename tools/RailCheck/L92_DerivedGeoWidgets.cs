@@ -257,7 +257,7 @@ namespace RailCheck
 
         /// <summary>Is <paramref name="field"/> read anywhere within <paramref name="depth"/> hops of
         /// <paramref name="root"/> through our own assembly?</summary>
-        private static bool ReadsField(MethodBase root, FieldInfo field, int depth)
+        internal static bool ReadsField(MethodBase root, FieldInfo field, int depth)
         {
             var ours = root.DeclaringType.Assembly;
             var seen = new HashSet<string>(StringComparer.Ordinal);

@@ -408,6 +408,8 @@ namespace RailCheck
             Add(laws, () => L445_NoActivationBypassesTheExecuteEpoch.Check());
             Add(laws, () => L450_ADiscoveredSessionIsOnlyEverAnEndpoint.Check());
             Add(laws, () => L451_AClientNeverRunsNativeResearchProgression.Check(game));
+            Add(laws, () => L452_TheReputationStripRepaintsOnTheRail.Check());
+            Add(laws, () => L453_ThePerSoldierXpSplitComesFromTheHostRecord.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -455,8 +457,8 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 306;
-        private const string ExpectedExecutionIdentityDigest = "675b5d3563e8f2b4b0c0d94bb83039397c07d144a7175537d53e541135219665";
+        private const int ExpectedLawRegistrations = 308;
+        private const string ExpectedExecutionIdentityDigest = "9ff3db741c1ce2c21503e63c599920e899591df8dacd1ea00a5acc5322f8d6ff";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

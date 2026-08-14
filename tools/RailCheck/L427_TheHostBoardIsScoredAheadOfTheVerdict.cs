@@ -93,13 +93,19 @@ namespace RailCheck
                                  "peer's own count and pays a different reward from the host's.";
 
             // ── (d) NOTHING IS SUPPRESSED — the rejected full-authority design, kept rejected ────────
+            // SUPPRESSION, not patching, is what is forbidden: a Prefix (which can return false) or a
+            // Transpiler can stop the client computing its own board, and that is the rejected design. A
+            // POSTFIX cannot — it runs after the client's own full computation and CORRECTS the result, which
+            // is the very shape arm (c) above requires of the reward mirror. L453 is exactly that: the
+            // per-soldier split is corrected to the host's after the client has computed its own.
             var forbidden = new[] { "GiveExperienceForObjectives", "EvaluateObjectives" };
             foreach (var t in asm.GetTypes())
                 foreach (var a in t.GetCustomAttributes(typeof(HarmonyPatch), false).OfType<HarmonyPatch>())
                 {
                     var n = a.info?.methodName;
                     if (n == null || !forbidden.Contains(n)) continue;
-                    yield return "L427 client-evaluation-suppressed: " + t.FullName + " patches " + n + ". The " +
+                    if (t.GetMethod("Prefix", All) == null && t.GetMethod("Transpiler", All) == null) continue;
+                    yield return "L427 client-evaluation-suppressed: " + t.FullName + " prefixes/transpiles " + n + ". The " +
                                  "client must keep computing its own objectives and its own XP — the host's board " +
                                  "CORRECTS that computation, it does not replace it. Suppressing it makes a second " +
                                  "truth that can disagree with the board the player is looking at, and " +
