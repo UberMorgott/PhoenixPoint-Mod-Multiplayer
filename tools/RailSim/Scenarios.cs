@@ -376,15 +376,44 @@ namespace RailSim
             // ANSWER RELAY carries a dismissal too — the host runs modal.FinishDialog off it — and until
             // 2026-08-15 it never asked the table (measured: a client dismissing the research window closed
             // the host's copy). L547 owns the invariant; this is the same property in the harness.
-            if (WindowQueueSync.MayRelayAnswer("UIStateGeoModal"))
+            if (WindowQueueSync.MayRelayAnswer("UIStateGeoModal", false))
                 yield return "a-local-dismissal-removes-only-mine: the answer relay would still send peer " +
                              "A's dismissal of a LOCAL family to the host, which answers it with " +
                              "modal.FinishDialog and loses its own copy. A LOCAL dismissal removes only the " +
                              "dismissing peer's window, by BOTH mechanisms.";
-            if (!WindowQueueSync.MayRelayAnswer("UIStateRosterDeployment"))
+            if (!WindowQueueSync.MayRelayAnswer("UIStateRosterDeployment", false))
                 yield return "a-local-dismissal-removes-only-mine: the answer relay refuses the GLOBAL " +
                              "mission family too, so the gate above is a constant and the mission flow the " +
                              "relay was written for no longer crosses at all.";
+
+            // THE SPLIT (L552, 2026-08-15). Dismissal scope and answer authority are two derivations, and
+            // this is the property that says so: the SAME LOCAL family must not travel on a dismissal and
+            // MUST travel on an authoritative answer. Fused, the gate was constant-false for every modal —
+            // no client emitted an advance at all and a client's Accept on FactionSoldierJoin (reward.Apply,
+            // host-side) did nothing. My copy still closes only on me; only the ANSWER crosses.
+            if (!WindowQueueSync.MayRelayAnswer("UIStateGeoModal", true))
+                yield return "a-local-dismissal-removes-only-mine: the answer relay refuses an AUTHORITATIVE " +
+                             "answer of the LOCAL family UIStateGeoModal. Dismissing my own copy is local, " +
+                             "but an answer that mutates shared campaign state is the HOST's to run — " +
+                             "refusing it makes the click a silent no-op.";
+            // DERIVED, NOT LISTED. The authority verdict comes off the window's PAYLOAD SHAPE — a window
+            // that names a replicated entity is a decision about an object the campaign shares — so the
+            // harness exercises the shape space, never a set of ModalTypes that would rot on the next
+            // window anyone adds.
+            if (!GeoModalMirror.NamesEntity(new GeoModalMirror.Raise
+                    { Shape = GeoModalMirror.DataShape.EntityRef, Ref = "U#1" }))
+                yield return "a-local-dismissal-removes-only-mine: a payload that NAMES a rail entity is " +
+                             "not classed as authoritative, so no answer can ever reach the host and a " +
+                             "client's Accept on a window that grants a unit is a silent no-op.";
+            if (GeoModalMirror.NamesEntity(new GeoModalMirror.Raise
+                    { Shape = GeoModalMirror.DataShape.ResearchComplete, Ref = "F#1" }))
+                yield return "a-local-dismissal-removes-only-mine: an informational payload is classed as " +
+                             "authoritative, so dismissing it relays and the host runs FinishDialog and " +
+                             "loses its own copy — the defect L547 closed.";
+            if (GeoModalMirror.AnswerMutatesSharedState(new object()))
+                yield return "a-local-dismissal-removes-only-mine: a payload type this build has never " +
+                             "seen was classed as authoritative. An unclassifiable window must get the " +
+                             "SAFE verdict, announced, never authority on the strength of ignorance.";
             WindowJournal.Reset();
         }
 

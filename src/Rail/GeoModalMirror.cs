@@ -352,6 +352,45 @@ namespace Multiplayer.Network.Sync
             !string.IsNullOrEmpty(p.Ref) &&
             (p.Shape == DataShape.EntityRef || p.Shape == DataShape.AssetDeploy);
 
+        /// <summary>PURE (RailCheck L552). DOES ANSWERING THIS WINDOW MUTATE STATE THE CAMPAIGN SHARES —
+        /// i.e. is the answer the HOST'S to run, whoever clicked it?
+        ///
+        /// DERIVED, NEVER LISTED. There is no table of ModalTypes here and there must never be one: this
+        /// method takes the window's DATA, not its name, so a hand-written per-window enumeration is not
+        /// merely discouraged, it is unexpressible in the signature (L552 arm c). A window the game or a
+        /// third-party mod adds tomorrow is classified the day it ships, with no edit here.
+        ///
+        /// THE PROPERTY, and why it is the right one: a window that NAMES A REPLICATED ENTITY is a decision
+        /// ABOUT AN OBJECT THE WHOLE CAMPAIGN OWNS, so its answer belongs to the authority that owns that
+        /// object; a window whose data is a local view DTO, a def id, or nothing at all decides nothing
+        /// anyone else holds, so its answer is presentation and stays home. <see cref="NamesEntity"/> is
+        /// already the repo's one definition of "this payload names a rail entity" — the park queue and the
+        /// host's own resolve-back check (:570) both ask it — so this adds a QUESTION, not a second table.
+        ///
+        /// TOTAL BY CONSTRUCTION. <see cref="Describe"/> answers for every modalData there is (including
+        /// null → <see cref="DataShape.None"/>, and anything it cannot express →
+        /// <see cref="DataShape.Unsupported"/>), and <see cref="NamesEntity"/> is total over
+        /// <see cref="DataShape"/>. Every reachable window therefore gets a verdict; none falls through.
+        ///
+        /// WHAT IT SEPARATES, measured against the shipped game rather than asserted:
+        ///   • YES — <c>FactionSoldierJoin</c>: modalData is a <c>GeoCharacter</c>, a rail ROOT
+        ///     (<c>DataShape.EntityRef</c>), and <c>HavenMissionUtil.cs:59</c> answers Confirm with
+        ///     <c>reward.Apply(faction, site, aircraft)</c> — a unit granted to the shared roster.
+        ///   • NO — <c>GeoResearchComplete</c>: <c>DataShape.ResearchComplete</c>, and
+        ///     <c>ResearchCompleteModalHandler</c>:2108 only navigates THIS peer's own view
+        ///     (<c>ToCutsceneState</c>/<c>ToResearchState</c>). Relaying it made the host run
+        ///     <c>FinishDialog</c> and lose its own copy — the defect L547 closed.
+        ///   • NO — <c>DiplomacyResearchBrief</c> (<c>DataShape.DiplomacyReward</c>, NULL DialogCallback in
+        ///     the shipped game) and <c>GeoPhoenixBaseOutcome</c> (<c>DataShape.None</c>, empty `case` in
+        ///     <c>ModalResultCallback</c>:798) — nothing authoritative to lose in either.
+        ///
+        /// ANSWER-ONCE NEEDS NO LEDGER. The host holds ONE window: <c>modal.FinishDialog</c> clears the query
+        /// slot and <c>WindowQueueSync.AnswerQueued</c> removes the request from the pending list BEFORE
+        /// invoking the callback, so a second peer's advance finds no window and
+        /// <c>WindowQueueSync.ValidateIdentity</c> refuses it in words. Nothing durable is minted for
+        /// this.</summary>
+        internal static bool AnswerMutatesSharedState(object modalData) => NamesEntity(Describe(modalData));
+
         /// <summary>The object a payload's <c>Ref</c> NAMES: the data object itself for
         /// <see cref="DataShape.EntityRef"/>, the asset inside the bind for
         /// <see cref="DataShape.AssetDeploy"/>. <see cref="HostBroadcast"/> resolves the derived name back to

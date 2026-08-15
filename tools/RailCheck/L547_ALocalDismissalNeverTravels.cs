@@ -38,10 +38,18 @@ namespace RailCheck
     /// ROLES SEPARATED (§C.3): (a)/(b) are role-free pure calls — the CLIENT role is the one that runs
     /// SendAdvance, and the arm asserts what it may emit; (c)/(d) are statements about the shipped assembly.
     ///
-    /// Falsify (compile-valid src mutations, each named): `MayRelayAnswer(string family) => true;` — the
-    /// literal pre-fix behaviour — → (a); `=> false` → (b); delete the `if (!MayRelayAnswer(family))` gate
-    /// from SendAdvance → (c); `=> family == "UIStateRosterDeployment" || family == "UIStateGeoMissionBrief";`
-    /// → (d).
+    /// RE-EXPRESSED 2026-08-15, NOT WEAKENED (L552). MayRelayAnswer now takes a SECOND input — whether this
+    /// window's answer mutates shared campaign state — because the family alone could not express "dismissed
+    /// locally, but the answer is the host's to run" and the fused form was constant-false for every modal.
+    /// The invariant this law owns is unchanged and its arms still execute the real predicate; they simply
+    /// pin the new input to `false`, which is the exact case this law is about: a dismissal that carries no
+    /// authority may never travel for a LOCAL family. The authority half is L552's, and arm (b) dropped
+    /// "UIStateGeoMissionBrief" because that string names no type and was never a family any window carried.
+    ///
+    /// Falsify (compile-valid src mutations, each named):
+    /// `MayRelayAnswer(string family, bool a) => true;` — the literal pre-fix behaviour — → (a);
+    /// `=> a;` → (b); delete the `if (!MayRelayAnswer(family, authoritative))` gate from SendAdvance → (c);
+    /// `=> a || family == "UIStateRosterDeployment";` → (d).
     /// </summary>
     internal static class L547_ALocalDismissalNeverTravels
     {
@@ -69,7 +77,7 @@ namespace RailCheck
                                            "UIStateSomeFamilyThatDoesNotExistYet", null })
             {
                 if (WindowJournal.ScopeOf(family) != DismissScope.Local) continue;   // (b) owns the others
-                if ((bool)mayRelay.Invoke(null, new object[] { family }))
+                if ((bool)mayRelay.Invoke(null, new object[] { family, false }))
                     yield return "L547 local-answer-travels: the answer relay would send this peer's " +
                                  "dismissal of family '" + (family ?? "<null>") + "', which the declaration " +
                                  "table declares LOCAL. The host answers a relayed advance with " +
@@ -80,7 +88,7 @@ namespace RailCheck
 
             // (b) NOT A CONSTANT `false`. The relay was written for the mission/deployment flow and must
             // keep working exactly as it does today, or this law would have deleted a feature, not a bug.
-            foreach (var family in new[] { "UIStateGeoMissionBrief", "UIStateRosterDeployment" })
+            foreach (var family in new[] { "UIStateRosterDeployment" })
             {
                 if (WindowJournal.ScopeOf(family) != DismissScope.Global)
                 {
@@ -88,7 +96,7 @@ namespace RailCheck
                                  "this arm can no longer show the relay still crosses for anything.";
                     continue;
                 }
-                if (!(bool)mayRelay.Invoke(null, new object[] { family }))
+                if (!(bool)mayRelay.Invoke(null, new object[] { family, false }))
                     yield return "L547 global-answer-blocked: the answer relay refuses family '" + family +
                                  "', which the table declares GLOBAL. Once ANYONE has acted on a mission the " +
                                  "decision is taken for everyone; blocking it here would leave the other " +

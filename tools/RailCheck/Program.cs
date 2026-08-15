@@ -453,6 +453,7 @@ namespace RailCheck
             Add(laws, () => L549_TheActingPeersOwnGestureRepaintsItsOwnHud.Check());
             Add(laws, () => L550_EveryHostOnlyPresentationChannelIsServed.Check());
             Add(laws, () => L551_TheRevealIsOneInstantForEveryPeer.Check());
+            Add(laws, () => L552_DismissalScopeAndAnswerAuthorityAreTwoDerivations.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -500,8 +501,16 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 351;
-        // Updated deliberately 2026-08-15: L551 (every peer leaves the loading screen at the same
+        private const int ExpectedLawRegistrations = 352;
+        // Updated deliberately 2026-08-15: L552 (dismissal scope and answer authority are two
+        // derivations, and no scope key is dead) was ADDED — 351 -> 352. Nothing was retired and
+        // nothing was weakened: L547 keeps the whole of its own invariant (a LOCAL family's dismissal
+        // never travels) and was only RE-EXPRESSED against MayRelayAnswer's second parameter, because
+        // the predicate it executes now takes the answer-authority question as its own input. L526 is
+        // untouched. What no law asserted was that a scope KEY resolves to a type that exists, which is
+        // how "UIStateGeoMissionBrief" — a name no assembly ships — sat in the table making every modal
+        // LOCAL and silently killing a client's Accept on FactionSoldierJoin.
+        // Earlier the same day: L551 (every peer leaves the loading screen at the same
         // INSTANT) was ADDED — 350 -> 351. Nothing was retired or amputated, and no barrier law was
         // weakened: L94/L143/L433/L513 own the BARRIER — who arms it, who may release it, that the
         // release packet is bound to the host's authority, that no peer lifts before its boundary
@@ -603,7 +612,11 @@ namespace RailCheck
         // locally re-raised): one new identity string, 349 -> 350 executed identities. No identity
         // retired. Earlier the same day with L549 (the acting peer's own gesture repaints its own
         // persistent HUD): one new identity string, 348 -> 349 executed identities.
-        private const string ExpectedExecutionIdentityDigest = "210a32b9d55246483fbff4074e5dbc1d8100fa1c4b0e580913fdb155b1feeeeb";
+        // Updated deliberately 2026-08-15 with L552 (dismissal scope and answer authority are two
+        // derivations, and no scope key is dead): one new identity string, 351 -> 352 executed
+        // identities. No identity retired. L547 keeps its own identity and all four of its arms — it was
+        // re-expressed against MayRelayAnswer's second parameter, not narrowed.
+        private const string ExpectedExecutionIdentityDigest = "d9fd6a1a5ec68f82e1dcd0398c3f7fa2690b61391887ad5595f26ec3074fa6c9";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

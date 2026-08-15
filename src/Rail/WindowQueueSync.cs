@@ -594,9 +594,44 @@ namespace Multiplayer.Network.Sync
         /// client made the HOST run <c>FinishDialog</c> and lose its own copy. §A.5: dismissal scope is a
         /// declared property of a FAMILY, so the relay asks the same table the void path asks and nothing
         /// else. The family here is <see cref="WindowJournal.FamilyOf"/> over the queued UI STATE — the very
-        /// expression the mint seam appends with.</summary>
-        internal static bool MayRelayAnswer(string family) =>
-            WindowJournal.ScopeOf(family) == DismissScope.Global;
+        /// expression the mint seam appends with.
+        ///
+        /// TWO QUESTIONS, TWO INPUTS (L552, 2026-08-15 second defect). Until that day this predicate read the
+        /// family ALONE, which fused "does my dismissal close yours" with "may my answer reach the host".
+        /// They are not the same question and they do not have the same answer: EVERY modal's family is the
+        /// single string <c>UIStateGeoModal</c> and it is LOCAL by the owner's decision, so the fused gate was
+        /// constant-false for every modal in the game — <c>SendAdvance</c> returned before sending and NO
+        /// client ever emitted an <c>OpAdvance</c> at all. The visible damage was
+        /// <c>ModalType.FactionSoldierJoin</c>, whose Confirm is <c>reward.Apply</c> on the host: a client
+        /// clicked Accept and no soldier joined, silently.
+        ///
+        /// So the relay is a DISJUNCTION of two independently derived facts, and neither may be inferred from
+        /// the other: the family's declared DISMISSAL SCOPE (<c>WindowJournal.ScopeOf</c> — the deployment
+        /// screen, whose dismissal really does close every peer's copy), OR this window's declared ANSWER
+        /// AUTHORITY (<c>GeoWindowCoverage.AnswerMutatesSharedState</c> — the answer writes shared campaign
+        /// state, so the host must run it even though nobody else's copy closes).</summary>
+        internal static bool MayRelayAnswer(string family, bool answerMutatesSharedState) =>
+            answerMutatesSharedState || WindowJournal.ScopeOf(family) == DismissScope.Global;
+
+        /// <summary>THE AUTHORITY HALF, DERIVED FROM THE WINDOW IN FRONT OF ME — no ModalType is named here
+        /// and none may be (L552). Two structural reads, both of the live state, both total:
+        ///
+        /// (1) DID THE ANSWER ALREADY RUN HERE? A mirrored copy carries a NULL <c>_dialogHandler</c> — that
+        /// is what makes it a copy — so the only way this peer's window can carry one is that something
+        /// deliberately restored the game's OWN callback into it, which is exactly what
+        /// <c>GeoModalMirror</c> does for the per-peer answer class (verbatim from
+        /// <c>UIStateGeoModal.RestoreContext</c>:36-39). If my copy answered itself, sending the answer on
+        /// would make the HOST run it a SECOND time for my click — and for a mission brief the host's
+        /// second run is <c>ModalResultCallback</c>:825 → <c>GeoMission.Cancel</c>:253, one player's "I am
+        /// busy" deleting the shared mission. This is the structural statement of the rule
+        /// <see cref="GeoWindowCoverage.IsPerPeerAnswer"/> makes by asking the game which ModalType is a
+        /// brief: it holds even when that reflective question cannot be asked at all.
+        ///
+        /// (2) DOES THE ANSWER MUTATE SHARED STATE? <see cref="GeoModalMirror.AnswerMutatesSharedState"/>,
+        /// off the window's DATA — a decision about a replicated entity is the authority's to apply.</summary>
+        internal static bool AnswerIsHostAuthoritative(UIStateGeoModal modal) =>
+            modal != null && DialogHandlerField?.GetValue(modal) == null &&
+            GeoModalMirror.AnswerMutatesSharedState(modal.ModalData);
 
         /// <summary><see cref="ValidateIdentity"/> plus the one question only a MODAL answer raises. Split so
         /// the deploy op can ask the identity half without inventing a <c>ModalResult</c> it does not have.</summary>
@@ -773,6 +808,10 @@ namespace Multiplayer.Network.Sync
         /// <summary>Once per FAMILY: a LOCAL window is dismissed at click rate all game long.</summary>
         private static readonly HashSet<string> _localScopeLogged = new HashSet<string>(StringComparer.Ordinal);
 
+        /// <summary>Once per ModalType: a window the engine could not classify is still dismissed at click
+        /// rate, and the point of the line is that it is SEEN, not that it is printed a thousand times.</summary>
+        private static readonly HashSet<string> _unclassifiedLogged = new HashSet<string>(StringComparer.Ordinal);
+
         /// <summary>Called from the client's own <c>FinishQueriedState</c>, with the state it is closing.
         /// Non-blocking on purpose: closing this peer's own window is PRESENTATION and must happen locally
         /// whatever the host does with the intent (the block-first law governs STATE mutations, and this
@@ -814,18 +853,41 @@ namespace Multiplayer.Network.Sync
                 // OWN — its event picker, its tutorial, its replenish screen, its ability prompt — or the
                 // slot was already cleared by a re-entrant ExitState (UIStateAssetDeployment:66,
                 // UIStateReplenish:69). Nothing crosses, and silently: it happens at click rate all game long.
-                if (identity == null) return;
-                // THE DECLARED DISMISSAL SCOPE, asked of the SAME table the host-minted void asks (§A.5).
-                // A LOCAL family's dismissal is this peer's own business: the window closes here and nothing
-                // crosses, so the other peers keep their copies until they close them themselves.
-                string family = WindowJournal.FamilyOf(state.GetType());
-                if (!MayRelayAnswer(family))
+                if (identity == null)
                 {
-                    if (_localScopeLogged.Add(family))
+                    // …UNLESS THE ENGINE COULD NOT CLASSIFY IT, which is a different thing and must never be
+                    // silent (L552). A window the coverage table declares SHARED but whose data 0xB7 cannot
+                    // describe has no identity, so its answer can reach nobody — if that answer was the
+                    // host's to run, the click is a no-op exactly as FactionSoldierJoin's was. The safe
+                    // behaviour (send nothing) is kept; what changes is that it ANNOUNCES itself instead of
+                    // hiding, which is how this class of defect stayed invisible until it was reported.
+                    if (GeoWindowCoverage.RuleForModal(modal.ModalType)?.Sync == WindowSync.Mirrored &&
+                        _unclassifiedLogged.Add(modal.ModalType.ToString()))
+                        MpLog.LogError("[MP][windows] '" + modal.ModalType + "' is declared MIRRORED but its " +
+                                       "data has no 0x" + SurfaceIds.GeoModalRaise.ToString("X2") + " shape, " +
+                                       "so this peer's answer NAMES NO WINDOW and cannot cross. If answering " +
+                                       "it mutates shared state, that answer is being LOST on this peer — " +
+                                       "give the payload a shape, or declare the window Gap on purpose " +
+                                       "(logged once per ModalType)");
+                    return;
+                }
+                // TWO INDEPENDENT QUESTIONS, ASKED SEPARATELY (L552). The DISMISSAL SCOPE is the declared
+                // property of the FAMILY, asked of the SAME table the host-minted void asks (§A.5): a LOCAL
+                // family's dismissal is this peer's own business — the window closes here and nothing crosses,
+                // so the other peers keep their copies until they close them themselves. The ANSWER AUTHORITY
+                // is the declared property of the MODALTYPE: FactionSoldierJoin's Confirm is reward.Apply on
+                // the host, so THAT answer must travel even though nobody else's copy closes. Deriving the
+                // second from the first is what silently killed every client advance in this build.
+                string family = WindowJournal.FamilyOf(state.GetType());
+                bool authoritative = AnswerIsHostAuthoritative(modal);
+                if (!MayRelayAnswer(family, authoritative))
+                {
+                    if (_localScopeLogged.Add(family + "|" + modal.ModalType))
                         MpLog.Log("[MP][windows] '" + modal.ModalType + "' dismissed LOCALLY — family '" +
-                                  family + "' declares dismissal scope LOCAL, so no 0x" +
-                                  SurfaceIds.GeoWindowIntent.ToString("X2") + " advance crosses and no other " +
-                                  "peer's copy is closed by this click (logged once per family)");
+                                  family + "' declares dismissal scope LOCAL and this window's answer mutates " +
+                                  "no shared state, so no 0x" + SurfaceIds.GeoWindowIntent.ToString("X2") +
+                                  " advance crosses and no other peer's copy is closed by this click " +
+                                  "(logged once per family+type)");
                     return;
                 }
                 // Esc / the close button reach FinishQueriedState through OnCancel:96 WITHOUT going through

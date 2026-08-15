@@ -475,7 +475,6 @@ namespace Multiplayer.Network.Sync
         };
 
         // ─── The THIRD axis: WHO the answer belongs to ──────────────────────
-
         /// <summary>PURE (RailCheck L351/L352). Is this window one EVERY PEER ANSWERS FOR ITSELF?
         ///
         /// THE REPORT (2026-08-08): one player declined a deployment brief and the mission vanished for the

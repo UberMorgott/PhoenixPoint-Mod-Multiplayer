@@ -54,13 +54,33 @@ namespace Multiplayer.Network.Sync
         private static string _pendingFamily;
 
         /// <summary>The declaration table, and the ONLY place a family's scope may be written. No
-        /// `if (family == …)` anywhere else in the codebase (§A.5).</summary>
+        /// `if (family == …)` anywhere else in the codebase (§A.5).
+        ///
+        /// THIS TABLE ANSWERS ONE QUESTION ONLY: does MY dismissal close YOUR copy? Practically every
+        /// window in this game is INFORMATIONAL and PER-PEER, so practically every family is LOCAL, and
+        /// that is the owner's decision (2026-08-15), not an accident of coverage. It does NOT answer
+        /// "may my ANSWER reach the host" — that is a property of what the answer MUTATES, it is declared
+        /// per <c>ModalType</c> in <c>GeoWindowCoverage.AnswerMutatesSharedState</c>, and fusing the two
+        /// is what made a client's Accept on <c>FactionSoldierJoin</c> a no-op (L552).
+        ///
+        /// EVERY KEY HERE MUST BE THE NAME OF A TYPE THAT EXISTS (L552 arm a). <see cref="FamilyOf"/> is
+        /// <c>stateType.Name</c>, so a key naming no type is a declaration no window can ever carry.
+        /// <c>"UIStateGeoMissionBrief"</c> was exactly that until 2026-08-15: no assembly ships that type,
+        /// a mission brief is a <c>UIStateGeoModal</c> like every other modal, and the entry did nothing
+        /// but make the Global arm look broader than it was.
+        ///
+        /// THE MISSION-LAUNCH PAIR — the ONLY two windows dismissed everywhere — is expressed by two
+        /// mechanisms that really do resolve at runtime:
+        ///   • THE BRIEF, by the UNICAST RAISE (<c>GeoModalMirror</c>:586-614): a mission-start
+        ///     confirmation is sent ONLY to the peer whose vehicle triggered it, so no other peer ever
+        ///     holds a copy to dismiss. Nothing beats not raising it.
+        ///   • THE DEPLOYMENT-PREPARATION SCREEN, by this table: <c>UIStateRosterDeployment</c> is a real
+        ///     state type of its own, it is the family <c>DeploymentWindowClose</c>:532 hands to
+        ///     <c>GeoModalMirror.HostVoidFamily</c>, and the host-minted void removes it from every
+        ///     peer's backlog.</summary>
         private static readonly Dictionary<string, DismissScope> FamilyScope =
             new Dictionary<string, DismissScope>(StringComparer.Ordinal)
             {
-                // The mission family is the one GLOBAL family: once ANYONE has acted on a mission the
-                // decision to deploy is taken, so it is meaningless for the others to accept or refuse.
-                { "UIStateGeoMissionBrief", DismissScope.Global },
                 { "UIStateRosterDeployment", DismissScope.Global },
             };
 
@@ -68,9 +88,10 @@ namespace Multiplayer.Network.Sync
         /// the UI STATE type the game queued — that is what the mint seam appends
         /// (<c>GeoWindowCoverageGate.Postfix</c>) and therefore what <see cref="ScopeOf"/> is keyed on. It is
         /// spelled once, here, so the mint seam and the ANSWER RELAY cannot key two different strings off the
-        /// same window: every modal is <c>UIStateGeoModal</c> whatever its <c>ModalType</c> is, and the two
-        /// GLOBAL families are states of their own (<c>UIStateGeoMissionBrief</c>,
-        /// <c>UIStateRosterDeployment</c>).</summary>
+        /// same window: every modal is <c>UIStateGeoModal</c> whatever its <c>ModalType</c> is — which is
+        /// precisely why a per-<c>ModalType</c> property (answer authority) can never be keyed on a family,
+        /// and why the one GLOBAL family has to be a state of its own
+        /// (<c>UIStateRosterDeployment</c>).</summary>
         internal static string FamilyOf(Type stateType) => stateType == null ? "<unknown>" : stateType.Name;
 
         /// <summary>Undeclared ⇒ LOCAL. A new window family needs no code at all.</summary>

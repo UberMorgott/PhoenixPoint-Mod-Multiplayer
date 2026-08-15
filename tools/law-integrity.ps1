@@ -150,7 +150,15 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Nothing retired or amputated: L154 owns the same seam's FLUSH (the change ships to the
 # CLIENTS this cycle) and never asked whether the peer that ACTED repaints itself, which is how every mark
 # site in the repo came to be an APPLY path and the host grew no research row for its own research.
-$expectedRegistrationDigest = '0f79d014bd16bd15daa555903dc8e21c604ba0610f485184adab6ec14af4a550'
+# Updated deliberately 2026-08-15: L552 ADDED (dismissal scope and answer authority are two derivations,
+# and no scope key is dead) -- 351 -> 352 registrations, one new identity string. Nothing retired.
+# The scope table declared "UIStateGeoMissionBrief", a name NO assembly ships; FamilyOf is stateType.Name
+# and every modal is a UIStateGeoModal, so the key could never be hit, the relay gate keyed on it was
+# constant-false for every modal, and no client ever emitted an advance -- a client's Accept on
+# FactionSoldierJoin (reward.Apply, host-authoritative) did nothing at all. L547 was RE-EXPRESSED, not
+# weakened: it keeps its identity and all four arms and now executes MayRelayAnswer's two-input form with
+# the authority input pinned false, which is precisely the case it owns. L526 is untouched.
+$expectedRegistrationDigest = '28dace18e40821dacff8bf6d236283232cf1129c932c446eb451f77375a9136d'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))
