@@ -425,6 +425,7 @@ namespace RailCheck
             Add(laws, () => L495_TheDrainGateAsksTheViewItIsGating.Check());
             Add(laws, () => L523_DurableIsAnswerOnceNotOrdering.Check());
             Add(laws, () => L524_OnlyAVoidRemovesAnUnreadEntry.Check());
+            Add(laws, () => L525_TheSaveGateReadsOnlyTheLocalCursor.Check());
             Add(laws, () => L498_TheInfoBarRepaintsOnlyWhenWhatItDrawsChanges.Check());
             Add(laws, () => L500_AStructuralCreateWiresOnlyAfterItsValuesLand.Check());
             Add(laws, () => L501_ARefusalNoticeIsThePlayersSentenceSaidOnce.Check());
@@ -486,8 +487,11 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 337;
-        // Updated deliberately 2026-08-15: L524 (an unread journal entry is removed only by being read or
+        private const int ExpectedLawRegistrations = 338;
+        // Updated deliberately 2026-08-15: L525 (the save gate reads only the local cursor, and an
+        // autosave always proceeds) was ADDED — 337 -> 338. Nothing was retired or amputated: the
+        // player-initiated save gate is the mod's first save gate, so no existing law lost a subject.
+        // Earlier the same day: L524 (an unread journal entry is removed only by being read or
         // by a host-minted void) was ADDED — 336 -> 337. In the same commit the BOUND arm of the inline
         // L82 was AMPUTATED, not weakened: GeoWindowCoverage.QueueCap/TrimQueue are deleted, so the arm's
         // subject no longer exists and it could only have gone premise-changed forever. L82's arbiter and
@@ -513,7 +517,7 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "3e91b682426a293af9a949cb5580d58a4dc7b0580ffa7a679ccfc88b53c0b278";
+        private const string ExpectedExecutionIdentityDigest = "90d59ab5fc6e18464789564853b92391e02e0b2ea0a11d4696045829879835e2";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

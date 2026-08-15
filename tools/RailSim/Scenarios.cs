@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Base.Serialization;
 using Multiplayer.Network.Sync;
 
 namespace RailSim
@@ -14,6 +15,36 @@ namespace RailSim
             yield return Pair("seeded-transport-is-reproducible", SeededTransportIsReproducible);
             yield return Pair("every-peer-presents-in-the-same-order", EveryPeerPresentsInTheSameOrder);
             yield return Pair("the-backlog-is-never-trimmed", TheBacklogIsNeverTrimmed);
+            yield return Pair("one-peers-backlog-never-blocks-another", OnePeersBacklogNeverBlocksAnother);
+        }
+
+        /// <summary>§A.2b / R8: the save gate reads ONLY the local cursor. Peer B sits on a backlog it has
+        /// not read; peer A, with an empty journal, must still be able to save. This is the property that
+        /// keeps the gate from being a quorum — an AFK peer blocks only their own save.</summary>
+        private static IEnumerable<string> OnePeersBacklogNeverBlocksAnother(int seed)
+        {
+            // Peer B: a fat unread backlog.
+            WindowJournal.Reset();
+            for (uint i = 1; i <= 25; i++) WindowJournal.Append(i, "UIStateGeoModal", new byte[] { 1 });
+            if (JournalSaveGate.MaySave(SaveType.ManualSave, WindowJournal.LocalJournalEmpty))
+                yield return "one-peers-backlog-never-blocks-another: peer B saved with 25 unread " +
+                             "windows. The gate is the whole reason the journal needs no persistence — " +
+                             "if it does not hold, a save can carry state the journal will not restore.";
+
+            // Peer A: its own journal, drained. Nothing about peer B is readable from here, and that is
+            // the point — the gate takes only (SaveType, localJournalEmpty).
+            WindowJournal.Reset();
+            if (!JournalSaveGate.MaySave(SaveType.ManualSave, WindowJournal.LocalJournalEmpty))
+                yield return "one-peers-backlog-never-blocks-another: peer A could not save with an EMPTY " +
+                             "journal. A gate that consults anything but the local cursor is a quorum, " +
+                             "which the no-blockers rule forbids outright.";
+
+            if (!JournalSaveGate.MaySave(SaveType.Autosave, false))
+                yield return "one-peers-backlog-never-blocks-another: an AUTOSAVE was refused with a " +
+                             "non-empty journal. An autosave always proceeds — never blocked, never " +
+                             "deferred, never draining first — and whatever is unread is lost, exactly " +
+                             "as on any ordinary session exit (§A.2c).";
+            WindowJournal.Reset();
         }
 
         /// <summary>§C.1 property 1: EVERY PEER'S PRESENTATION ORDER IS IDENTICAL. The measured P1 shape,

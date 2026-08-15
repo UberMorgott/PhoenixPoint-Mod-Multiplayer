@@ -42,7 +42,10 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
 # with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
 # registration multiset (so sparse ids and many registrations per source file remain valid).
-# Updated deliberately 2026-08-15: L524 ADDED (an unread journal entry is removed only by being read or
+# Updated deliberately 2026-08-15: L525 ADDED (the save gate reads only the local cursor, and an
+# autosave always proceeds) -- 337 -> 338 registrations, one new identity string. Nothing retired or
+# amputated: the player-initiated save gate is the mod's first save gate, so no law lost a subject.
+# Earlier the same day: L524 ADDED (an unread journal entry is removed only by being read or
 # by a host-minted void) -- 336 -> 337 registrations, one new identity string. The same commit deleted
 # GeoWindowCoverage.QueueCap/TrimQueue and AMPUTATED the five bound-* arms of the INLINE L82, whose only
 # subject those two were; L82 keeps its arbiter/seam arms and its registration, so it does not move the
@@ -62,7 +65,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Earlier the same day: L514 ADDED (the roster list repaints on the same mirrored
 # level-up), 334 -> 335; L513 ADDED (no peer lifts before its boundary releases), 333 -> 334;
 # L512 ADDED (the crew strip repaints on a mirrored level-up), 332 -> 333.
-$expectedRegistrationDigest = '890f83ea5bb1151ea9576c156e6347eccbb7f4804bdbcae955908aa3fe346a52'
+$expectedRegistrationDigest = '16726ae2c2012e0677fb9a9838fea8794ac7a3f73d166cab4490ab91c71c09da'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))
