@@ -152,26 +152,31 @@ namespace Multiplayer.Network.Sync
         /// that never reaches the list would key nothing). Never throws into game code.</summary>
         internal static void Stamp(GeoscapeViewStateSwitchRequest request)
         {
-            if (request == null) return;
-            try
-            {
-                var key = new OrderKey
-                {
-                    Ordinal = RailOrdinal.ForNewWindow(),
-                    QueuedAt = Time.realtimeSinceStartup,
-                };
-                _stamps.Remove(request); // a re-queued instance restarts its own settle
-                _stamps.Add(request, key);
-                // BORN OUTSIDE AN APPLY = PROVISIONAL. The value above is only "after everything seen so
-                // far" — good enough to sort with right now, but not the key any other peer will use. The
-                // cause of a window raised in the sim leaves in the NEXT envelope, and that envelope's
-                // ordinal is exactly what a client inherits while applying it, so the next mint back-fills
-                // this key with it. Inside an apply the ordinal is already the shared one: leave it alone.
-                if (RailOrdinal.Current == 0)
-                    RailOrdinal.Provisional(ordinal => key.Ordinal = ordinal);
-            }
+            try { StampAt(request, Time.realtimeSinceStartup); }
             catch (Exception ex)
             { MpLog.LogWarning("[MP][windows] order stamp failed — this window falls back to insert order: " + ex.Message); }
+        }
+
+        /// <summary>The stamp itself, with the CLOCK INJECTED so RailCheck L507 executes the real one —
+        /// <c>Time.realtimeSinceStartup</c> is an engine ECall that throws outside a player, and a law that
+        /// cannot call this would be asserting the back-fill by reading IL instead of by observing it.</summary>
+        internal static void StampAt(GeoscapeViewStateSwitchRequest request, float now)
+        {
+            if (request == null) return;
+            var key = new OrderKey
+            {
+                Ordinal = RailOrdinal.ForNewWindow(),
+                QueuedAt = now,
+            };
+            _stamps.Remove(request); // a re-queued instance restarts its own settle
+            _stamps.Add(request, key);
+            // BORN OUTSIDE AN APPLY = PROVISIONAL. The value above is only "after everything seen so
+            // far" — good enough to sort with right now, but not the key any other peer will use. The
+            // cause of a window raised in the sim leaves in the NEXT envelope, and that envelope's
+            // ordinal is exactly what a client inherits while applying it, so the next mint back-fills
+            // this key with it. Inside an apply the ordinal is already the shared one: leave it alone.
+            if (RailOrdinal.Current == 0)
+                RailOrdinal.Provisional(ordinal => key.Ordinal = ordinal);
         }
 
         /// <summary>THE COMPARATOR, pure and named so RailCheck executes the real one. Priority first and
@@ -536,7 +541,7 @@ namespace Multiplayer.Network.Sync
         /// <summary>An UNSTAMPED request sorts first among its priority peers and is never held: it was
         /// restored from the save (<c>RestoreData</c> bypasses <c>QueryStateSwitch</c>), i.e. it is older
         /// than anything this session minted.</summary>
-        private static uint OrdinalOf(GeoscapeViewStateSwitchRequest request) =>
+        internal static uint OrdinalOf(GeoscapeViewStateSwitchRequest request) =>
             request != null && _stamps.TryGetValue(request, out var s) ? s.Ordinal : 0u;
 
         private static float QueuedAt(GeoscapeViewStateSwitchRequest request) =>
