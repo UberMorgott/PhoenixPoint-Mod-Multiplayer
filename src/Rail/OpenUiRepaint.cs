@@ -42,7 +42,7 @@ namespace Multiplayer.Network.Sync
         private static bool _dirty;
         // §B.4: the global bool above STAYS and serves the ~63 kindless sites and all structural
         // create/destroy. The scoped pair is BESIDE it, never instead of it — a kindless mark repaints
-        // everything. Nothing NARROWS on these yet; Task 4 is what reads the paths.
+        // everything. FlushIfDirty resolves the pair into _dirty exactly once, at batch end (§B.5).
         private static bool _scopedDirty;
         private static readonly System.Collections.Generic.HashSet<string> _touchedPaths =
             new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
@@ -452,6 +452,37 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>
+        /// DOES THIS SURFACE OWE A REPAINT FOR THESE TOUCHED PATHS? Pure, named and internal so RailCheck
+        /// and RailSim execute the real decision with no live screen — the whole reason the property
+        /// "a surface whose declared prefixes were untouched did NOT repaint" is testable at all.
+        ///
+        /// EVERY UNCERTAIN ANSWER IS "REPAINT": an unknown surface name, an undeclared surface (which is
+        /// every surface this assembly has never heard of, INCLUDING another mod's own panels), a null path
+        /// in the set, or an empty declaration all return true. Declaration is opt-in to SCOPE, never
+        /// opt-in to reactivity — a forgotten surface degrades to today's behaviour, never to stale data.
+        ///
+        /// L541 executes all of that; the declarations themselves live in
+        /// <see cref="UiNativeRepaint.DeclaredPrefixes"/>.
+        /// </summary>
+        internal static bool SurfaceRepaints(string surfaceName,
+                                             System.Collections.Generic.ICollection<string> touchedPaths)
+        {
+            if (touchedPaths == null || touchedPaths.Count == 0) return false; // nothing changed at all
+            if (surfaceName == null) return true;                              // no surface = repaint
+            string[] prefixes;
+            if (!UiNativeRepaint.DeclaredPrefixes.TryGetValue(surfaceName, out prefixes) ||
+                prefixes == null || prefixes.Length == 0)
+                return true;                                                   // UNDECLARED = repaint
+            foreach (var path in touchedPaths)
+            {
+                if (path == null) return true;                                 // unknown path = repaint
+                foreach (var prefix in prefixes)
+                    if (prefix != null && path.StartsWith(prefix, StringComparison.Ordinal)) return true;
+            }
+            return false;
+        }
+
+        /// <summary>
         /// EVERYTHING THE STRIP DRAWS, AS ONE STRING — the rebuild key for <see cref="RefreshAgendaTracker"/>.
         /// Read straight off <c>InitialSetup</c>:144-174, row source by row source, so nothing displayed can
         /// change without changing this (REACTIVITY is a hard mandate here, not an optimisation):
@@ -779,9 +810,10 @@ namespace Multiplayer.Network.Sync
         /// path (structural create/destroy, a preparation edit, a durable choice) falls straight through to
         /// the unconditional arm, which is exactly what the ~63 kindless call sites already do (§B.4).
         ///
-        /// NOTHING IS NARROWED HERE. <see cref="FlushIfDirty"/> treats a scoped mark exactly like a global
-        /// one — it repaints everything — so this task lands the CARRIER with the DECISION unchanged. Task 4
-        /// is what makes a declared surface consult the paths.
+        /// NOTHING IS DECIDED HERE. <see cref="FlushIfDirty"/> asks
+        /// <see cref="SurfaceRepaints"/> ONCE at batch end whether the open surface's declared prefixes were
+        /// touched; a surface with no declaration — every surface but the declared few, including another
+        /// mod's panels — repaints on everything, exactly as before (§B.3, §B.7).
         ///
         /// The declared-irrelevance gate is repeated rather than delegated: the two-argument overload owes
         /// L60 a DIRECT call to MarkHudDirty on its declined branch, and a shared helper would hide it from
@@ -943,9 +975,22 @@ namespace Multiplayer.Network.Sync
             // Task 12 terminal teardown is callback-free and retryable independently of its already-durable
             // tombstone. A transient carrier exception therefore heals on the next ordinary sync tick.
             DurableSourceRevalidationEngine.RetryTerminalTeardown(DurableInboxSession.ActiveStore);
-            // A SCOPED mark is a mark. Until Task 4 gives a surface a declaration to be measured
-            // against, _scopedDirty is read here and nowhere else, and it means exactly what _dirty means.
-            if (!_dirty && !_scopedDirty)
+            // §B.5 — MARK DURING THE BATCH, EVALUATE ONCE AT BATCH END. Two-phase mark/evaluate is what
+            // avoids a glitch mid-batch; this is the evaluate, and it runs at exactly the point the global
+            // bool is already evaluated. It resolves the scoped pair INTO _dirty, so the early-out below
+            // stays the single gate it has always been.
+            if (!_dirty && _scopedDirty)
+            {
+                _scopedDirty = false;
+                var surface = GenericApplier.GeoLevel()?.View?.CurrentViewState?.GetType().Name;
+                bool owes = SurfaceRepaints(surface, _touchedPaths);
+                _touchedPaths.Clear();
+                // The persistent HUD spans view states and is in no declaration, so it always hears about a
+                // change — the same split MarkHudDirty already makes for a declined KIND (L60).
+                if (owes) _dirty = true;
+                else _hudDirty = true;
+            }
+            if (!_dirty)
             {
                 // Every mark the open screen declined still owes the persistent HUD a refresh (L60,
                 // see MarkHudDirty). Same once-per-frame coalescing as the screen repaint, and it does

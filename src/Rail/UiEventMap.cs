@@ -674,6 +674,60 @@ namespace Multiplayer.Network.Sync
                 [typeof(UIStateEditSoldier)] = EveryWorldKindExcept(typeof(GeoVehicle)),
             };
 
+        /// <summary>
+        /// WHAT EACH SURFACE READS, AS STATIC RAIL PATH PREFIXES. Keyed by the view state's NAME, not its
+        /// Type — the name form is what lets a surface belonging to a mod this assembly cannot reference
+        /// (TFTV's own panels) be declared at all, and it is the same form <c>WindowOrder.MapStates</c>
+        /// already uses for the same reason (src/Rail/WindowOrder.cs:243-248).
+        ///
+        /// STATIC, NEVER INFERRED AT RUNTIME. Automatic read tracking only sees synchronous reads, so an
+        /// inferred declaration silently misses a dependency (MobX missed-dependency class, §2.5). The
+        /// declaration is written here, once, by a human who read the screen.
+        ///
+        /// NO DECLARATION ⇒ THE SURFACE REPAINTS ON EVERYTHING (<see cref="OpenUiRepaint.SurfaceRepaints"/>,
+        /// asserted by L541). Declaration is in the OPT-IN-TO-SCOPE direction ONLY; there is no way to
+        /// declare "I read nothing". A forgotten surface degrades to today's behaviour, never to stale data.
+        ///
+        /// PREFIX DEPTH IS THE WHOLE TUNING KNOB (Firebase, §2.5). A prefix that stops at a ROOT repaints on
+        /// everything under that root — a no-op declaration for that root, not a bug.
+        ///
+        /// THE ONE REAL TRAP (§B.3). The rail has TWO collection shapes and they declare differently:
+        ///   • FieldClass.EntityCollection (KEYED) — each element has its own <c>…#&lt;stableKey&gt;</c>
+        ///     subtree (DiffEngine.cs:1306-1311). A prefix is safe and meaningful at ANY depth, and
+        ///     inserting an element renames nothing because the key comes from the element's own identity.
+        ///   • FieldClass.EntityList (KEYLESS) — the WHOLE list is ONE canonical value blob AT THE FIELD
+        ///     PATH (DiffEngine.cs:1229-1232). There are no per-element paths at all, so a prefix DEEPER
+        ///     than the field name can never match and would silently subscribe to nothing. CHECK THE
+        ///     FIELD'S FieldClass BEFORE WRITING A DEEP PREFIX.
+        ///
+        /// ORDER IS CARRIED AT THE FIELD PATH: a pure reorder ships an explicit ORDER vector as a
+        /// SubKey == "" entry ON THE FIELD, so a surface that renders ORDER must declare the FIELD path.
+        ///
+        /// NO SEGMENT IS EVER AN INDEX (§B.3, Q5): DiffEngine.cs:1231 forbids element indices in the path
+        /// and aborts the field with a loud Incident rather than falling back to one (:1299-1302). So a
+        /// prefix subscription is safe on every path the rail emits.
+        /// </summary>
+        internal static readonly System.Collections.Generic.Dictionary<string, string[]> DeclaredPrefixes =
+            new System.Collections.Generic.Dictionary<string, string[]>(StringComparer.Ordinal)
+            {
+                // ONE surface to start, and the one the defect was reported on. The roots below are its
+                // AUDITED reads and nothing else — the same audit <see cref="IgnoredKinds"/> above records:
+                //   "U#" GeoCharacter — the soldier it paints (perks, progression, statuses, equipment).
+                //   "V#" GeoVehicle   — the SQUAD ROSTER this screen cycles through rides inside
+                //                       GeoVehicle.SerializationData. Dropping it is a MEASURED regression:
+                //                       2026-08-08 a dismissal on one peer left the soldier standing on
+                //                       another peer's open edit screen. It is why GeoVehicle is the one
+                //                       kind excluded from the ignore row above, and it must be here too.
+                //   "F#" GeoFaction   — EnterState:596 reads _faction.GetTotalAvailableStorage().
+                // Scoped away: "T"/"TA" the clock, "S#" site + haven ticks, "ES"/"MG"/"MK"/"ST"/"GL"/"M#".
+                // ponytail: "F#" stays at the ROOT because a faction key embeds the faction def GUID
+                // ("F#" + Def.Guid, IdentityResolver.cs:146), so no STATIC deeper prefix can match one —
+                // which means GeoFaction.Manufacture ticks still repaint this screen. Upgrade path if that
+                // is the churn worth killing: a wildcard segment in the matcher, declared as
+                // "F#*.ItemStorage". Not built speculatively — the roots above are already the safe answer.
+                { "UIStateEditSoldier", new[] { "U#", "V#", "F#" } },
+            };
+
         /// <summary>The exclusion row above, minus the kinds the screen DOES paint. Named rather than
         /// hand-listed so the exception carries its reason: <c>GeoVehicle</c> is where the squad lives.
         /// A soldier's membership of an aircraft rides inside <c>GeoVehicle.SerializationData</c>, so the

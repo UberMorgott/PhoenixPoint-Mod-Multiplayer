@@ -71,12 +71,14 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # L521 ADDED (the append is screen-independent) -- 337 -> 338
 # registrations, one new identity string. Earlier the same day: L520 ADDED (the only publication of a window is the QueryStateSwitch
 # postfix) -- 336 -> 337 registrations, one new identity string. Earlier the same day:
-# L516 ADDED (an off-screen strip never vouches for its rows -- the
+# L541 ADDED (an undeclared surface repaints on everything -- safe degradation of the per-surface
+# path-prefix declaration) -- 340 -> 341 registrations, one new identity string.
+# Earlier: L516 ADDED (an off-screen strip never vouches for its rows -- the
 # top-right activity label stopped following research on clients) -- 335 -> 336 registrations, one new
 # identity string. Earlier the same day: L514 ADDED (the roster list repaints on the same mirrored
 # level-up), 334 -> 335; L513 ADDED (no peer lifts before its boundary releases), 333 -> 334;
 # L512 ADDED (the crew strip repaints on a mirrored level-up), 332 -> 333.
-$expectedRegistrationDigest = '82677025cc0010b6db9d0b2294c054648d62e087ecdfc100ccbbb8661911faf8'
+$expectedRegistrationDigest = 'b13b72cd3f99b73555ab01f726887b4064ac8157e897379dd23d7a674ac641e7'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))
