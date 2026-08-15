@@ -65,6 +65,7 @@ namespace Multiplayer.Network.Sync
             // (personnel assignments + recruit-training sessions), which lives in TFTV statics the rail
             // cannot otherwise see and which the ModData exclusion refuses by design (AssignSync).
             AssignSync.Register();
+            AgendaTrackerSync.Register();  // "M#agenda" — 6th mod root, same symmetric registration
             // Geoscape rail surfaces ride the one inbound hook (each returns false for foreign ids):
             // the 0xAD manufacture order channel, the intent engine, and the generic value rail
             // (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the host-side intent dedup.
