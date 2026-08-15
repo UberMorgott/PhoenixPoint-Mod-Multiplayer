@@ -82,6 +82,12 @@ namespace Multiplayer.Network.Sync
         // so the row identity below is computed over exactly the rows the module would rebuild.
         private static readonly FieldInfo TrackerFaction =
             AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_faction");
+        // TEMPORARY (report 2026-08-15, host has no RESEARCH row / clients have no MANUFACTURE row).
+        // The live row list, so the diag can tell "row never built" from "row built, then torn down":
+        // UpdateData():199-203 DISPOSES any element whose UpdateData(element):270-307 returns true, i.e.
+        // whose time-left is <= TimeUnit.Zero — and TimeUnit.Invalid IS TimeSpan.MinValue.
+        private static readonly FieldInfo TrackerElements =
+            AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_currentTrackedElements");
         /// <summary>Last repaint key per strip — see <see cref="RepaintNeeded"/>. A dictionary rather than a
         /// field per strip so the SECOND caller costs a line, not a mechanism.</summary>
         private static readonly System.Collections.Generic.Dictionary<string, string> _repaintKeys =
@@ -368,7 +374,10 @@ namespace Multiplayer.Network.Sync
                         " research=" + (trackedFaction == null || trackedFaction.Research == null ||
                                         trackedFaction.Research.Current == null
                                             ? "-" : trackedFaction.Research.Current.ResearchID) +
-                        " rebuild=" + rebuild + " sig=" + (agendaSignature ?? "NULL");
+                        " rebuild=" + rebuild + " rows=" + AgendaRowCount(tracker) +
+                        " rTL=" + AgendaResearchTimeLeft(trackedFaction) +
+                        " mTL=" + AgendaManufactureTimeLeft(trackedFaction) +
+                        " sig=" + (agendaSignature ?? "NULL");
                     if (!string.Equals(diag, _lastAgendaDiag, StringComparison.Ordinal))
                     { _lastAgendaDiag = diag; MpLog.Log(diag); }
                 }
@@ -465,6 +474,49 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+
+        // TEMPORARY DIAGNOSTIC HELPERS (report 2026-08-15). The strip's ROWS do not live or die by
+        // InitialSetup alone: UpdateData():199-203 disposes every element whose per-element
+        // UpdateData(element):270-307 returns true, and that returns true exactly when the row's TIME LEFT
+        // is <= TimeUnit.Zero (with no manufacture failure reason). TimeUnit.Invalid is TimeSpan.MinValue,
+        // so an UNCOMPUTABLE time is <= Zero and tears the row down. Research time-left is Max when
+        // production is 0 (Research.cs:694-703) but ZERO when Progress01 >= 1; manufacture time-left is
+        // INVALID whenever the faction's Production income is <= 0 or the item cannot progress
+        // (ItemManufacturing.cs:405-416). Bucketed, not numeric, so the change-gated line stays quiet
+        // while a countdown ticks. No behaviour change: read-only, MpDiag-guarded at the call site.
+        private static string TimeBucket(TimeUnit t) =>
+            !t.IsValid ? "inv" : t == TimeUnit.Max ? "max" : t <= TimeUnit.Zero ? "ZERO" : "pos";
+
+        private static string AgendaRowCount(UIModuleFactionAgendaTracker tracker)
+        {
+            var rows = TrackerElements?.GetValue(tracker) as System.Collections.ICollection;
+            return rows == null ? "?" : rows.Count.ToString();
+        }
+
+        private static string AgendaResearchTimeLeft(GeoFaction faction)
+        {
+            try
+            {
+                var current = faction?.Research?.Current;
+                return current == null ? "-" : TimeBucket(faction.Research.GetTotalTimeLeft(current));
+            }
+            catch (Exception) { return "throw"; }
+        }
+
+        private static string AgendaManufactureTimeLeft(GeoFaction faction)
+        {
+            try
+            {
+                var current = faction?.Manufacture?.Current;
+                if (current == null) return "-";
+                string bucket = TimeBucket(faction.Manufacture.GetTotalTimeLeft(current));
+                // The second half of the dispose predicate: a row with a failure reason SURVIVES a
+                // non-positive time and shows the reason instead, so the bucket alone does not decide.
+                string reason = faction.Manufacture.CanFinishConstruction(current).ToString();
+                return reason == "None" ? bucket : bucket + "/" + reason;
+            }
+            catch (Exception) { return "throw"; }
+        }
 
         /// <summary>THE INFO BAR'S GATE, in L516's shape and for L516's reason: the module's LIVENESS is
         /// asked BEFORE <see cref="RepaintNeeded"/>'s memory is touched, never after. A key recorded against
