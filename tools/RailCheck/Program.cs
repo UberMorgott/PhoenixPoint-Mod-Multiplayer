@@ -452,6 +452,7 @@ namespace RailCheck
             Add(laws, () => L548_TheAgendaStripNeverRebuildsOnAProgressTick.Check());
             Add(laws, () => L549_TheActingPeersOwnGestureRepaintsItsOwnHud.Check());
             Add(laws, () => L550_EveryHostOnlyPresentationChannelIsServed.Check());
+            Add(laws, () => L551_TheRevealIsOneInstantForEveryPeer.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -499,8 +500,17 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 350;
-        // Updated deliberately 2026-08-15: L550 (every host-only PRESENTATION CHANNEL is mirrored or
+        private const int ExpectedLawRegistrations = 351;
+        // Updated deliberately 2026-08-15: L551 (every peer leaves the loading screen at the same
+        // INSTANT) was ADDED — 350 -> 351. Nothing was retired or amputated, and no barrier law was
+        // weakened: L94/L143/L433/L513 own the BARRIER — who arms it, who may release it, that the
+        // release packet is bound to the host's authority, that no peer lifts before its boundary
+        // releases — and all four were GREEN through this defect, correctly, because the barrier was
+        // doing its job. What nothing asserted was the frame AFTER the release: the host called
+        // PerformDeferredLift in the same frame it broadcast RevealAll, so it was on the geoscape
+        // 1.33–1.55 s (measured, three machines) before its clients, in their load order. L551 owns
+        // that frame and nothing else.
+        // Earlier the same day: L550 (every host-only PRESENTATION CHANNEL is mirrored or
         // locally re-raised) was ADDED — 349 -> 350. Nothing was retired or amputated: L546 owns the
         // journal half and its domain is GeoWindowCoverage.HostAuthoritativeRaisers — ModalType windows
         // that MINT a journal position — so the centre-top status bar, which mints nothing and lives
@@ -586,11 +596,14 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        // Updated deliberately 2026-08-15 with L550 (every host-only presentation channel is mirrored or
+        // Updated deliberately 2026-08-15 with L551 (every peer leaves the loading screen at the same
+        // instant): one new identity string, 350 -> 351 executed identities. No identity retired — the
+        // four barrier laws it sits behind (L94/L143/L433/L513) are untouched and still execute.
+        // Earlier the same day with L550 (every host-only presentation channel is mirrored or
         // locally re-raised): one new identity string, 349 -> 350 executed identities. No identity
         // retired. Earlier the same day with L549 (the acting peer's own gesture repaints its own
         // persistent HUD): one new identity string, 348 -> 349 executed identities.
-        private const string ExpectedExecutionIdentityDigest = "bd0d7ff81bfb76a20c16b786f857ff4632d1cb105bdefb58dff441b3a8a7d556";
+        private const string ExpectedExecutionIdentityDigest = "210a32b9d55246483fbff4074e5dbc1d8100fa1c4b0e580913fdb155b1feeeeb";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

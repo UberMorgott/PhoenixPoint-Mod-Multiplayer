@@ -2197,8 +2197,8 @@ namespace Multiplayer.Network
         public void OnRevealAll(NetworkMessage msg)
         {
             Guid boundaryId;
-            long sentTicks;
-            try { (boundaryId, sentTicks) = MessageSerializer.DeserializeRevealAll(msg.Payload); }
+            long dueHostMs;
+            try { (boundaryId, dueHostMs) = MessageSerializer.DeserializeRevealAll(msg.Payload); }
             catch (Exception e)
             {
                 MpLog.LogWarning("[Multiplayer] RevealAll rejected: malformed payload (" + e.Message + ").");
@@ -2210,19 +2210,67 @@ namespace Multiplayer.Network
                 MpLog.LogWarning("[Multiplayer] RevealAll rejected: sender/phase is not authoritative.");
                 return;
             }
-            // DIAG ONLY (no behaviour change). The host calls PerformDeferredLift in the SAME frame it
-            // broadcasts RevealAll (:2783), so every client's lift trails the host's by the wire hop plus
-            // one client frame. The wire ticks were being deserialized and DISCARDED, so that lag was the
-            // one number no log ever carried — and it is exactly the "the host got in first" complaint.
+            // THE ARRIVAL ARMS THE INSTANT; IT DOES NOT CONSUME IT (law L551). This used to call
+            // PerformDeferredLift right here, so a client lifted at t0 + hop + one of its own post-load
+            // frames while the host had already lifted at t0. The payload's second field carried the send
+            // timestamp and was deserialized and DISCARDED — the one number no log ever had. It now carries
+            // the common reveal instant on the HOST clock, which is a value, not a hint.
             if (MpDiag.On)
-                MpLog.Log("[MP][reveal] RevealAll hop: sent=" + new DateTime(sentTicks, DateTimeKind.Utc)
-                              .ToString("HH:mm:ss.fff") +
-                          " recv=" + DateTime.UtcNow.ToString("HH:mm:ss.fff") +
-                          " lagMs=" + (long)(DateTime.UtcNow - new DateTime(sentTicks, DateTimeKind.Utc))
-                              .TotalMilliseconds +
+                MpLog.Log("[MP][reveal] RevealAll: dueHostMs=" + dueHostMs +
+                          " hostNow=" + RevealClockNowMs() +
+                          " inMs=" + (dueHostMs - RevealClockNowMs()) +
                           " boundary=" + boundaryId.ToString("N").Substring(0, 8));
-            MpLog.Log("[Multiplayer] OnRevealAll received → PerformDeferredLift");
+            ScheduleReveal(dueHostMs, "RevealAll");
+        }
+
+        // ── THE COMMON REVEAL INSTANT ────────────────────────────────────────────────
+        // Set on both roles: the host when AllDone releases the barrier, every client when the RevealAll
+        // carrying that same instant lands. Expressed on the HOST clock (PingTable's Stopwatch base, the
+        // one PingTable.ObserveHostClock maps peers onto) — deliberately NOT SaveTransferCoordinator.NowMs,
+        // which is wall-clock UTC and differs machine to machine by whatever NTP last did.
+        private long _revealDueHostMs;
+        private bool _revealScheduled;
+
+        /// <summary>This peer's read of the HOST clock. A stale offset is still SHARED and is used as-is —
+        /// a drifted sample still puts every peer on one instant, while falling back to "now" puts each peer
+        /// on its own, which is the defect. Only a peer that never sampled the host clock at all gives up,
+        /// and it gives up by revealing NOW rather than stranding itself behind the curtain.</summary>
+        private long RevealClockNowMs()
+        {
+            long hostNow;
+            if (PingTable.TryHostNowMs(_engine.IsHost, out hostNow)) return hostNow;
+            if (PingTable.TryLastKnownHostNowMs(_engine.IsHost, out hostNow)) return hostNow;
+            return long.MaxValue;
+        }
+
+        /// <summary>Arm the common instant. Returns it, so the host's caller can put the very value it armed
+        /// on the wire — one number, one source, no second computation to drift from the first.</summary>
+        private long ScheduleReveal(long dueHostMs, string why)
+        {
+            if (_revealed) return dueHostMs;   // already lifted (abort, on-demand join): nothing left to time
+            if (_revealScheduled && dueHostMs >= _revealDueHostMs) return _revealDueHostMs;
+            _revealDueHostMs = dueHostMs;
+            _revealScheduled = true;
+            MpLog.Log("[Multiplayer] reveal scheduled (" + why + "): dueHostMs=" + dueHostMs +
+                      " inMs=" + (dueHostMs - RevealClockNowMs()) +
+                      " — every peer lifts at this instant, nobody earlier.");
+            return dueHostMs;
+        }
+
+        /// <summary>Fire the armed instant. Runs on EVERY peer, every frame, above every host-only return in
+        /// <see cref="Update"/>. NOT A QUORUM (P13): it asks the clock and nothing else — no roster, no
+        /// tracker, no peer — so a peer that goes silent, pauses or leaves between the release and the
+        /// instant cannot postpone anyone's lift, and a peer whose instant already passed lifts on this very
+        /// frame. The host is inside the scheme, not exempt from it, which is the whole point.</summary>
+        private void TickScheduledReveal()
+        {
+            if (!_revealScheduled || _revealed) return;
+            if (!RevealSchedule.Due(RevealClockNowMs(), _revealDueHostMs)) return;
+            _revealScheduled = false;
             PerformDeferredLift();
+            if (!_engine.IsHost) return;
+            HostReseedAfterReveal();     // rca-4: every peer entered the loaded level → re-seed now
+            HostReplayIntroCinematic();  // co-op campaign intro: AFTER the reveal, or the mirror drops it
         }
 
         // Lift the held synced reveal (native curtain we suppressed + the mod overlay roster) so the
@@ -2231,6 +2279,7 @@ namespace Multiplayer.Network
         {
             if (_revealed) return;
             _revealed = true;
+            _revealScheduled = false;   // whichever path got here, the armed instant is spent (law L551)
             _revealedAtMs = NowMs();
             _loadPhaseActive = false; // THE one release of the hold this flag names (see its declaration)
             _hostEntryHold = false; // Batch 2: reveal done → drop the entry-hold flag (next Begin re-guards on _begun)
@@ -2630,6 +2679,10 @@ namespace Multiplayer.Network
             // host-only return below, and one frame later than the SendLoadComplete that armed it.
             FlushLoadComplete();
 
+            // The common reveal instant (law L551) — on EVERY peer, above every host-only return below,
+            // because the host is bound by the instant it hands out and not exempt from it.
+            TickScheduledReveal();
+
             // Host: keep handing the start blob out, a few peers at a time (see PumpBlobQueue), and
             // serve anyone who joined at a moment we could not onboard them. Both are cheap no-ops once
             // there is nothing left to hand out.
@@ -2786,15 +2839,21 @@ namespace Multiplayer.Network
                 if (_engine.IsHost && !_revealAllSent)
                 {
                     _revealAllSent = true;
+                    // ONE INSTANT, NOT ONE MESSAGE (law L551). This used to broadcast and then call
+                    // PerformDeferredLift on the SAME frame, so the host stood on the geoscape while every
+                    // client was still a wire hop and one post-load frame away — 1.33–1.55 s of head start,
+                    // measured on three machines 2026-08-15, in the clients' load order. Instead the host
+                    // picks an instant on its OWN clock, ships it, and every peer INCLUDING ITSELF lifts
+                    // when that instant arrives (TickScheduledReveal). Not a quorum: the instant elapses by
+                    // itself, and a peer that goes silent between here and then postpones nobody.
+                    long dueHostMs = ScheduleReveal(RevealClockNowMs() +
+                                                    RevealSchedule.LeadMs(MaxLivePeerRttMs()), "AllDone");
                     MpLog.Log("[Multiplayer] AllDone → broadcast RevealAll");
                     _engine.BroadcastToAll(new NetworkMessage( // reliable
                         PacketType.RevealAll, MessageSerializer.SerializeRevealAll(
-                            _loadBoundaryId, DateTime.UtcNow.Ticks)));
+                            _loadBoundaryId, dueHostMs)));
                     MpLog.Log($"[Multiplayer] host reveal released: AllDone — every roster slot load-complete " +
                               $"(loadedClients={_loadedPeers.Count}).");
-                    PerformDeferredLift(); // host reveals at the same instant
-                    HostReseedAfterReveal(); // rca-4: every peer entered the loaded level → re-seed now
-                    HostReplayIntroCinematic(); // co-op campaign intro: AFTER the reveal, or the mirror drops it
                 }
             }
 
@@ -2995,12 +3054,28 @@ namespace Multiplayer.Network
             }
         }
 
-        /// <summary>Replay the terminal edge to a paused peer that missed the one-shot broadcast.</summary>
+        /// <summary>Replay the terminal edge to a paused peer that missed the one-shot broadcast. It carries
+        /// the instant that ALREADY passed, not a fresh one: this peer is late by definition, and L551's
+        /// inclusive Due makes a passed instant lift on the receiver's very next frame. Minting a new
+        /// deadline here would make the straggler wait a second time for nothing.</summary>
         public void ReplayRevealTo(ulong peerId)
         {
             if (!_engine.IsHost || !_revealed || _loadBoundaryId == Guid.Empty) return;
             _engine.SendToClient(peerId, new NetworkMessage(PacketType.RevealAll,
-                MessageSerializer.SerializeRevealAll(_loadBoundaryId, DateTime.UtcNow.Ticks)));
+                MessageSerializer.SerializeRevealAll(_loadBoundaryId, _revealDueHostMs)));
+        }
+
+        /// <summary>The worst round trip this session actually MEASURES, over the live clients only. A peer
+        /// that never answered a probe reports -1 and contributes nothing; a departed one is not in the map
+        /// at all, so nobody who left can widen the lead they no longer wait for.</summary>
+        private int MaxLivePeerRttMs()
+        {
+            int max = -1;
+            var clients = _engine.Session?.Clients;
+            if (clients != null)
+                foreach (var peer in clients.Keys)
+                    max = Math.Max(max, _engine.Session.Ping.GetPingMs(peer));
+            return max;
         }
 
         private static Timing GetTiming()

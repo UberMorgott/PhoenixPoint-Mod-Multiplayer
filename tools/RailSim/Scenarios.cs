@@ -4,6 +4,7 @@ using System.Linq;
 using Base.Core;
 using Base.Serialization;
 using PhoenixPoint.Geoscape.Levels;
+using Multiplayer.Network;
 using Multiplayer.Network.Sync;
 
 namespace RailSim
@@ -27,6 +28,87 @@ namespace RailSim
             yield return Pair("my-own-gesture-repaints-my-own-strip", MyOwnGestureRepaintsMyOwnStrip);
             yield return Pair("a-joining-peer-never-replays-the-status-bar",
                               AJoiningPeerNeverReplaysTheStatusBar);
+            yield return Pair("the-reveal-is-one-instant-for-every-peer",
+                              TheRevealIsOneInstantForEveryPeer);
+        }
+
+        /// <summary>L551 as an OBSERVABLE RUN, and the one property the law's IL arms cannot state: with a
+        /// real hop skew and real per-peer frame grids, does everybody actually leave the loading screen
+        /// together? Three peers, the measured 2026-08-15 shape — host at the origin, s3 a short hop out,
+        /// s2 a long one, each on its own frame boundary and its own clock offset. The scenario runs the
+        /// OLD policy (lift on arrival) and the NEW one (lift at the shipped instant) over the same skews
+        /// and compares their spreads, so it can never go green by testing nothing: the old policy MUST
+        /// still reproduce a spread of hundreds of milliseconds, and the new one must collapse it to at
+        /// most one frame — the residual nobody can remove, because a peer can only act on a frame.</summary>
+        private static IEnumerable<string> TheRevealIsOneInstantForEveryPeer(int seed)
+        {
+            const int frameMs = 16;
+            var rng = new Random(seed);
+
+            // Per peer: one-way hop, the clock offset PingTable.ObserveHostClock leaves behind (a few ms of
+            // sampling error either way), and where its frame grid happens to sit. Host is index 0.
+            int[] hopMs = { 0, 180, 420 };
+            int[] clockErrMs = { 0, rng.Next(-6, 7), rng.Next(-6, 7) };
+            int[] framePhase = { rng.Next(frameMs), rng.Next(frameMs), rng.Next(frameMs) };
+
+            // The host releases the barrier at host-clock 100000 and picks the common instant from the
+            // worst MEASURED round trip (2 x the worst one-way hop above).
+            const long releaseMs = 100000;
+            long due = releaseMs + RevealSchedule.LeadMs(hopMs.Max() * 2);
+
+            var scheduled = new long[3];
+            var onArrival = new long[3];
+            for (int p = 0; p < 3; p++)
+            {
+                // The packet lands here; the host "receives" its own release instantly.
+                long arrivalHostMs = releaseMs + hopMs[p];
+
+                // OLD POLICY: lift on the frame after the packet lands. This is what shipped.
+                onArrival[p] = NextFrame(arrivalHostMs, framePhase[p], frameMs);
+
+                // NEW POLICY: lift on the first frame at or after the common instant, decided against a
+                // host clock this peer only knows to within clockErrMs. A peer whose instant already
+                // passed on arrival lifts on its next frame — never earlier than anyone, never blocked.
+                long visible = Math.Max(arrivalHostMs, due + clockErrMs[p]);
+                scheduled[p] = NextFrame(visible, framePhase[p], frameMs);
+            }
+
+            long oldSpread = onArrival.Max() - onArrival.Min();
+            long newSpread = scheduled.Max() - scheduled.Min();
+
+            if (oldSpread < 300)
+                yield return "the-reveal-is-one-instant-for-every-peer: the lift-on-arrival policy spread " +
+                             "only " + oldSpread + "ms over a 420ms hop skew, so this scenario is not " +
+                             "reproducing the defect it exists to measure and would stay green through it.";
+            if (newSpread > frameMs + 2 * 6)
+                yield return "the-reveal-is-one-instant-for-every-peer: peers left the loading screen " +
+                             newSpread + "ms apart on a common instant. Anything beyond one frame plus the " +
+                             "clock-sampling error means the deadline is not actually shared — one peer is " +
+                             "on the geoscape while another still holds a curtain, which is the report.";
+            if (scheduled[0] < due)
+                yield return "the-reveal-is-one-instant-for-every-peer: the HOST lifted at " + scheduled[0] +
+                             ", before the instant " + due + " it handed to everyone else. The host is " +
+                             "inside the scheme, not exempt from it — being exempt is the entire defect.";
+
+            // A DEADLINE, NOT A QUORUM (P13): the instant does not move when a peer stops existing. Re-run
+            // the two live peers with the third gone and the surviving instants must be the same numbers.
+            long dueWithoutS2 = releaseMs + RevealSchedule.LeadMs(hopMs.Max() * 2);
+            if (dueWithoutS2 != due)
+                yield return "the-reveal-is-one-instant-for-every-peer: the common instant moved when a peer " +
+                             "left. Nothing about this deadline may depend on who is still here — a peer " +
+                             "that goes silent must not postpone anyone's lift by one millisecond.";
+            if (!RevealSchedule.Due(due + 5000, due))
+                yield return "the-reveal-is-one-instant-for-every-peer: a peer arriving 5s late does not fire " +
+                             "at all. Late must mean 'lift now', never 'wait behind the curtain forever'.";
+        }
+
+        /// <summary>The first tick of this peer's own frame grid at or after <paramref name="atMs"/>. A peer
+        /// cannot act between frames, so this is the floor on any simultaneity claim.</summary>
+        private static long NextFrame(long atMs, int phaseMs, int frameMs)
+        {
+            long since = atMs - phaseMs;
+            long frames = (since + frameMs - 1) / frameMs;
+            return phaseMs + frames * frameMs;
         }
 
         /// <summary>L550 as an OBSERVABLE HISTORY, and the one property the law's per-call arms cannot

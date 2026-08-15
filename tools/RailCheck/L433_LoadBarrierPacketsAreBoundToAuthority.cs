@@ -38,7 +38,7 @@ namespace RailCheck
                 yield return "L433 stale-reveal: a RevealAll from an older boundary releases the current one.";
             var revealPayload = MessageSerializer.SerializeRevealAll(boundary, 7L);
             var revealRoundTrip = MessageSerializer.DeserializeRevealAll(revealPayload);
-            if (revealRoundTrip.boundaryId != boundary || revealRoundTrip.serverTicks != 7L)
+            if (revealRoundTrip.boundaryId != boundary || revealRoundTrip.revealDueHostMs != 7L)
                 yield return "L433 reveal-boundary-codec-lossy: RevealAll does not preserve its boundary id.";
 
             var asm = typeof(SaveTransferCoordinator).Assembly;

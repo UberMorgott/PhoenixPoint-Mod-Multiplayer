@@ -595,18 +595,22 @@ namespace Multiplayer.Network.MessageLayer
 
         // ─── RevealAll (second barrier: synchronized geoscape reveal) ────────────────
         // Boundary identity makes a delayed reliable/UDP duplicate unable to release the next load.
-        public static byte[] SerializeRevealAll(Guid boundaryId, long serverTicks)
+        // The second field is the COMMON REVEAL INSTANT on the host's PingTable clock (law L551) — the
+        // instant every peer including the host lifts at. It used to be the send timestamp, which the
+        // receiver deserialized and discarded, which is why the host's 1.33–1.55 s head start was
+        // invisible in every log for the life of the mod.
+        public static byte[] SerializeRevealAll(Guid boundaryId, long revealDueHostMs)
         {
             using (var ms = new MemoryStream())
             using (var bw = new BinaryWriter(ms))
             {
                 bw.Write(boundaryId.ToByteArray());
-                bw.Write(serverTicks);
+                bw.Write(revealDueHostMs);
                 return ms.ToArray();
             }
         }
 
-        public static (Guid boundaryId, long serverTicks) DeserializeRevealAll(byte[] data)
+        public static (Guid boundaryId, long revealDueHostMs) DeserializeRevealAll(byte[] data)
         {
             using (var br = new BinaryReader(new MemoryStream(data ?? Array.Empty<byte>())))
                 return (new Guid(br.ReadBytes(16)), br.ReadInt64());

@@ -42,7 +42,18 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
 # with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
 # registration multiset (so sparse ids and many registrations per source file remain valid).
-# Updated deliberately 2026-08-15: L550 ADDED (every host-only PRESENTATION CHANNEL is mirrored or
+# Updated deliberately 2026-08-15: L551 ADDED (every peer leaves the loading screen at the SAME
+# INSTANT: the host used to call PerformDeferredLift in the same frame it broadcast RevealAll, so it
+# stood on the geoscape 1.33-1.55 s before its clients, in the clients' load order -- measured on three
+# machines. The reveal is now a DEADLINE the host ships and every peer including itself lifts at, with
+# the lead derived from the measured worst live-peer RTT and clamped [300,2500] ms) -- 350 -> 351
+# registrations, one new identity string. Nothing retired and no barrier law weakened: L94/L143/L433/
+# L513 own the barrier itself -- who arms it, who may release it, that the release packet is bound to
+# the host's authority, that no peer lifts before its boundary releases -- and all four were GREEN
+# through this defect, correctly, because the barrier was doing its job. Nothing in the repo asserted
+# what happened on the frame AFTER the release. L433's codec arm was renamed with the payload field
+# (serverTicks -> revealDueHostMs) and asserts the same round trip.
+# Earlier the same day: L550 ADDED (every host-only PRESENTATION CHANNEL is mirrored or
 # locally re-raised: GeoLogNotice.HostOnlyChannels is executed against the SHIPPED ASSEMBLY -- a
 # ClientDriven row must have a real IL call to its declared native presenter, a row served from mirrored
 # state must not be opted out in RailMeta, nothing may call the host-only GeoscapeLog.AddEntry, and the
@@ -139,7 +150,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Nothing retired or amputated: L154 owns the same seam's FLUSH (the change ships to the
 # CLIENTS this cycle) and never asked whether the peer that ACTED repaints itself, which is how every mark
 # site in the repo came to be an APPLY path and the host grew no research row for its own research.
-$expectedRegistrationDigest = '4799ab082800ff6f531973cdf22e5a3e5cf2fc5dd740587714fa17aec3652e1a'
+$expectedRegistrationDigest = '0f79d014bd16bd15daa555903dc8e21c604ba0610f485184adab6ec14af4a550'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))
