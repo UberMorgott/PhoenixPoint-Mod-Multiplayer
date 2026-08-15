@@ -48,59 +48,64 @@ namespace Multiplayer.Network.Sync
         /// ManufacturableItem.RelatedItemDef.Guid; Facility → GeoSite.SiteId + GeoPhoenixFacility.FacilityId;
         /// Vehicle (travel/exploration) → IdentityResolver's "V#<id>@<ownerGuid>" root ref.
         /// Returns null for an unrecognized TrackedObject shape (row is left unsynced, native computation applies).</summary>
-        internal static string RowKey(object trackedObject)
+        internal static string RowKey(object trackedObject, out string trackerType)
         {
             switch (trackedObject)
             {
                 case ResearchElement research:
+                    trackerType = "Research";
                     return "Research:" + research.ResearchID;
                 case ItemManufacturing.ManufactureQueueItem queueItem:
                 {
                     var def = queueItem.ManufacturableItem?.RelatedItemDef;
+                    trackerType = def == null ? null : "Manufacturing";
                     return def == null ? null : "Manufacturing:" + def.Guid;
                 }
                 case GeoPhoenixFacility facility:
+                    trackerType = "Facility";
                     return "Facility:" + facility.PxBase?.Site?.SiteId + ":" + facility.FacilityId;
                 case GeoVehicle vehicle:
+                    trackerType = vehicle.Travelling ? "AircraftTravel" : "AircraftExploration";
                     return (vehicle.Travelling ? "AircraftTravel:" : "AircraftExploration:")
                         + IdentityResolver.RootRef(vehicle);
                 default:
+                    trackerType = null;
                     return null;
             }
         }
-    }
 
-    /// <summary>Host-side capture: mirrors every row the widget's own UpdateData computed into
-    /// AgendaTrackerSync.State.Rows. UpdateData(UIFactionDataTrackerElement) runs on every peer
-    /// (local UI, not patched out) — guard on IsHost so clients never write. __result true means
-    /// the row finished/disposed this tick (UIModuleFactionAgendaTracker.cs:304-308); stop mirroring
-    /// it. element.CurrentTimeLeft is set by element.UpdateData(...) inside the native method body
-    /// (UIModuleFactionAgendaTracker.cs:303, UIFactionDataTrackerElement.cs:85) before this postfix
-    /// runs, so it already reflects the value just computed.</summary>
-    [HarmonyPatch(typeof(UIModuleFactionAgendaTracker), "UpdateData", new[] { typeof(UIFactionDataTrackerElement) })]
-    internal static class AgendaRowCapturePatch
-    {
-        private static void Postfix(UIFactionDataTrackerElement element, bool __result)
+        /// <summary>Host-side capture: mirrors every row the widget's own UpdateData computed into
+        /// AgendaTrackerSync.State.Rows. UpdateData(UIFactionDataTrackerElement) runs on every peer
+        /// (local UI, not patched out) — guard on IsHost so clients never write. __result true means
+        /// the row finished/disposed this tick (UIModuleFactionAgendaTracker.cs:304-308); stop mirroring
+        /// it. element.CurrentTimeLeft is set by element.UpdateData(...) inside the native method body
+        /// (UIModuleFactionAgendaTracker.cs:303, UIFactionDataTrackerElement.cs:85) before this postfix
+        /// runs, so it already reflects the value just computed.</summary>
+        [HarmonyPatch(typeof(UIModuleFactionAgendaTracker), "UpdateData", new[] { typeof(UIFactionDataTrackerElement) })]
+        internal static class AgendaRowCapturePatch
         {
-            var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
-
-            string key = AgendaTrackerSync.RowKey(element.TrackedObject);
-            if (key == null) return;
-
-            if (__result)
+            private static void Postfix(UIFactionDataTrackerElement element, bool __result)
             {
-                // Row finished/disposed this tick — stop mirroring it.
-                AgendaTrackerSync.State.Rows.Remove(key);
-                return;
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+
+                string key = RowKey(element.TrackedObject, out string trackerType);
+                if (key == null) return;
+
+                if (__result)
+                {
+                    // Row finished/disposed this tick — stop mirroring it.
+                    State.Rows.Remove(key);
+                    return;
+                }
+
+                State.Rows[key] = new AgendaRow
+                {
+                    TrackerType = trackerType,
+                    Label = element.TrackedName != null ? element.TrackedName.text : null,
+                    RemainingSeconds = (int)element.CurrentTimeLeft.TimeSpan.TotalSeconds,
+                };
             }
-
-            AgendaTrackerSync.State.Rows[key] = new AgendaRow
-            {
-                TrackerType = key.Substring(0, key.IndexOf(':')),
-                Label = element.TrackedName != null ? element.TrackedName.text : null,
-                RemainingSeconds = (int)element.CurrentTimeLeft.TimeSpan.TotalSeconds,
-            };
         }
     }
 }
