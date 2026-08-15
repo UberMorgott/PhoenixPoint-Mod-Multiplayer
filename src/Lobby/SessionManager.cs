@@ -452,7 +452,7 @@ namespace Multiplayer.Network
             // A peer that went silent inside the deployment prep screen never runs its ExitState, so the join
             // button it published would point at a door nobody is standing in until the reload boundary.
             Multiplayer.Network.Sync.DeployPrep.OnPeerGone(steamId);
-            MpLog.LogWarning($"[Multiplayer] Peer {steamId} ({client.PlayerName}) PAUSED: {reason}. " +
+            MpLog.LogWarning($"[Multiplayer] Peer {steamId} PAUSED: {reason}. " +
                              "Roster row kept — it resumes its seat when it comes back.");
             if (_engine.IsHost)
             {
@@ -472,7 +472,7 @@ namespace Multiplayer.Network
         {
             if (!_clients.TryGetValue(steamId, out var client) || !client.IsPaused) return;
             client.IsPaused = false;
-            MpLog.Log($"[Multiplayer] Peer {steamId} ({client.PlayerName}) RESUMED.");
+            MpLog.Log($"[Multiplayer] Peer {steamId} RESUMED.");
             // The return edge closes this absence: whatever was announced about it is spent, and the
             // peer's NEXT departure has to reach everyone's screen again.
             _departureAnnounced.Rearm(steamId);
