@@ -386,6 +386,7 @@ namespace Multiplayer.Network.Sync
         // always one round-trip old) and re-emits forever — the rhythmic walk cost this rail already paid.
         private static readonly Dictionary<string, uint> _rootTouchedSeq = new Dictionary<string, uint>(StringComparer.Ordinal);
         private static readonly Dictionary<string, int> _crcHeals = new Dictionary<string, int>(StringComparer.Ordinal); // "<peer>|<root>" → re-emits spent
+        private static readonly Dictionary<string, uint> _crcBehindLogged = new Dictionary<string, uint>(StringComparer.Ordinal); // "<peer>|<root>" → touch-seq already logged as behind
         private static bool _crcWalk;   // inside RootCrc: the walk must ship NOTHING and touch no tick state
         // INBOUND CRC BUDGET (N=50 mandate). HandleCrcReport answers each report with a SYNCHRONOUS full
         // subtree walk on the packet drain — unbudgeted, on the main thread, once per report. The client
@@ -432,6 +433,7 @@ namespace Multiplayer.Network.Sync
             _prevRoots.Clear(); _prevRootTypes.Clear(); _rootsSeeded = false;
             _kindIds.Clear(); _kinds.Clear();
             _rootTouchedSeq.Clear(); // the seq stream restarts, so recorded touch-seqs would over-gate
+            _crcBehindLogged.Clear();
             _reportWritten = false;
             ForgetIncidentCounts();  // a new session re-earns its verdict from its own walks
         }
@@ -600,7 +602,22 @@ namespace Multiplayer.Network.Sync
                                    "' which the host no longer has — destroy not mirrored, that client is diverged");
                 return;
             }
-            if (_rootTouchedSeq.TryGetValue(rootKey, out var touched) && touched > clientSeq) return; // behind, not diverged
+            if (_rootTouchedSeq.TryGetValue(rootKey, out var touched) && touched > clientSeq)
+            {
+                // Behind, not diverged — and INVISIBLE until now. A ForceReemit for peer A bumps this root's
+                // touch-seq, so peer B's in-flight report about the SAME divergence lands here and dies silently:
+                // B is healed by A's broadcast but never re-verified, and its heal counter never advances, so it
+                // can never escalate to "STILL diverged". Log it once per (peer, root, touch-seq) so the CRC
+                // backstop's repair is provable from one log instead of inferred from what is missing.
+                if (!_crcBehindLogged.TryGetValue(tag, out var loggedAt) || loggedAt != touched)
+                {
+                    _crcBehindLogged[tag] = touched;
+                    MpLog.Log("[Multiplayer][rail] CRC backstop: peer " + peerId + " report for root '" + rootKey +
+                              "' skipped as BEHIND (root touched at seq " + touched + " > reported seq " + clientSeq +
+                              ") — no comparison made, no heal counted");
+                }
+                return;
+            }
             // Per-frame budget gate (see _crcInFrameMs): the walk below is the expensive part, and it is
             // the ONLY thing this method does that scales with the roster.
             if (_crcInFrame != Time.frameCount) { _crcInFrame = Time.frameCount; _crcInFrameMs = 0; }
@@ -618,6 +635,9 @@ namespace Multiplayer.Network.Sync
                                " (host " + hostCrc.ToString("X8") + " != client " + clientCrc.ToString("X8") +
                                " at quiescent seq " + clientSeq + ") — forcing a re-emit of the subtree");
                 ForceReemit(rootKey);
+                MpLog.Log("[Multiplayer][rail] CRC backstop: re-emit armed for root '" + rootKey +
+                          "' (reported by peer " + peerId + ") — every other peer's in-flight report for this " +
+                          "root now reads as BEHIND");
             }
             else if (heals == 1)
                 MpLog.LogError("[Multiplayer][rail] CRC backstop: root '" + rootKey + "' STILL diverged on peer " + peerId +
