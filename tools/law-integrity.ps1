@@ -42,10 +42,10 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
 # with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
 # registration multiset (so sparse ids and many registrations per source file remain valid).
-# Updated deliberately 2026-08-15: L512 ADDED (the crew strip repaints on a mirrored level-up) --
-# 332 -> 333 registrations, one new identity string. Earlier the same day: L511 ADDED (a mirrored
-# window is keyed by the apply that carried it), 331 -> 332.
-$expectedRegistrationDigest = 'ca56effc60e3ce738049c8efa32b62756754f962c29c561fb5a46bf0de607507'
+# Updated deliberately 2026-08-15: L513 ADDED (no peer lifts before its boundary releases) -- 333 ->
+# 334 registrations, one new identity string. Earlier the same day: L512 ADDED (the crew strip
+# repaints on a mirrored level-up), 332 -> 333.
+$expectedRegistrationDigest = '617e98b09c6caa8b0cf4f21538c50985477623acaa72836a80adc6990cb7f2ca'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

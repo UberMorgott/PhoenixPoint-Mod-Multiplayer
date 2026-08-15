@@ -1620,9 +1620,35 @@ namespace Multiplayer.Network
         /// </summary>
         public void OpenReturnBarrier()
         {
-            if (!_revealed || _barrierOpen) return; // already armed / an entry transfer owns the state
+            var why = ReturnBarrierRefusal(_revealed, _barrierOpen);
+            if (why != null)
+            {
+                // NEVER SILENT (law 1). Eight reported recurrences of "one peer's curtain came up early"
+                // produced ZERO evidence, because the two early returns that skip the arm returned without
+                // a word — and a peer that was never armed simply lifts on its own native Loaded→Playing,
+                // which looks exactly like a barrier that failed. The refusal is a legitimate outcome; being
+                // unable to tell it from a bug is not.
+                MpLog.Log("[Multiplayer] return barrier NOT armed (" + why + "): revealed=" + _revealed +
+                          " barrierOpen=" + _barrierOpen + " — this peer will lift on its own load finish.");
+                return;
+            }
             ArmSelfLoadBarrier("tac→geo return");
         }
+
+        /// <summary>WHY THE RETURN BARRIER WOULD REFUSE TO ARM — null means ARM. Pure and named so RailCheck
+        /// L513 can execute the whole truth table: every refusing input must produce a REASON, so a silent
+        /// skip is unrepresentable rather than merely discouraged.</summary>
+        internal static string ReturnBarrierRefusal(bool revealed, bool barrierOpen) =>
+            !revealed ? "the previous hold is still armed (not revealed yet)"
+            : barrierOpen ? "an entry transfer owns the barrier"
+            : null;
+
+        /// <summary>The same, for the self-load arm: null means ARM. Live co-op sessions only.</summary>
+        internal static string SelfLoadArmRefusal(bool haveEngine, bool engineActive, bool sessionStarted) =>
+            !haveEngine ? "no network engine"
+            : !engineActive ? "the network engine is not active"
+            : !sessionStarted ? "the co-op session has not started"
+            : null;
 
         /// <summary>
         /// THE SELF-LOAD ARM: every peer loads its OWN level natively and nothing ships a save, so there is no
@@ -1636,7 +1662,16 @@ namespace Multiplayer.Network
         /// </summary>
         public void ArmSelfLoadBarrier(string why)
         {
-            if (_engine == null || !_engine.IsActive || !SessionStarted) return; // live co-op sessions only
+            var refusal = SelfLoadArmRefusal(_engine != null, _engine != null && _engine.IsActive, SessionStarted);
+            if (refusal != null)
+            {
+                // Same reason as OpenReturnBarrier's refusal line above: an arm that does not happen must
+                // say so, or the peer that then lifts alone is indistinguishable from a broken barrier.
+                MpLog.Log("[Multiplayer] self-load barrier NOT armed (" + why + "): " + refusal +
+                          " — sessionStarted=" + SessionStarted + "; this peer will lift on its own " +
+                          "load finish.");
+                return;
+            }
             if (_engine.IsHost && !_loadPhaseActive)
             {
                 _loadBoundaryId = Guid.NewGuid();

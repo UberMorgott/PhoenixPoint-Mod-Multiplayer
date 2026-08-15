@@ -435,6 +435,7 @@ namespace RailCheck
             Add(laws, () => L510_TheClientLocalRngClosureIsClosed.Check(game));
             Add(laws, () => L511_AMirroredWindowIsKeyedByTheApplyThatCarriedIt.Check());
             Add(laws, () => L512_TheCrewStripRepaintsOnAMirroredLevelUp.Check());
+            Add(laws, () => L513_NoPeerLiftsBeforeItsBoundaryReleases.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -482,11 +483,11 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 333;
-        // Updated deliberately 2026-08-15: L512 (the crew strip repaints on a mirrored level-up) was
-        // ADDED — 332 → 333 registrations, one new identity string. Earlier the same day: L511 (a mirrored
-        // window is keyed by the apply that carried it), 331 → 332.
-        private const string ExpectedExecutionIdentityDigest = "c5c866735835a44c42412872a4bf13b92a659c19db9af21ada31c8ba5b6bf19d";
+        private const int ExpectedLawRegistrations = 334;
+        // Updated deliberately 2026-08-15: L513 (no peer lifts before its boundary releases) was ADDED —
+        // 333 → 334 registrations, one new identity string. Earlier the same day: L512 (the crew strip
+        // repaints on a mirrored level-up), 332 → 333.
+        private const string ExpectedExecutionIdentityDigest = "f42661ad6cffbeb16977f96382403309f2bce88f873b87caa36fda46d5213053";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
