@@ -791,6 +791,17 @@ namespace Multiplayer.Network.Sync
         /// is this state) → baseline. Different level (a tactical return, a save load) → the clients hold
         /// the PRE-transition bytes, so the walk EMITS. A boundary taken with no level at all (id 0) can
         /// promise nothing and never baselines.
+        ///
+        /// THAT LAST ROW IS THE COMMON ONE, NOT AN ANOMALY, and reading it as a defect has now cost two
+        /// investigations (the latest: owner 2026-08-15, host 13:24:07.067, a lobby-play entry). The shared
+        /// reload-entry hook <c>SaveTransferCoordinator.PrepareEntryFromBlobCrt</c>:1926 takes the boundary
+        /// BEFORE it reads the save metadata and builds the level, so <c>GeoLevel()</c> is null there BY
+        /// CONSTRUCTION and every lobby-play / save-load / on-demand-join entry stamps <c>#0</c>. The
+        /// full-graph emit that follows is the price of the guarantee, and it is NOT negotiable by "adopt
+        /// the first walked level as the boundary level": on a tactical return the boundary is ALSO taken
+        /// with no level (HostTick bails while <c>GeoLevel()</c> is null for the whole battle), so that
+        /// shortcut would baseline exactly the post-mission walk this predicate exists to stop. The
+        /// bandwidth is deliberate; the silence it replaced was the defect.
         /// </summary>
         internal static bool BaselineIsHonest(int boundaryLevelId, int walkedLevelId) =>
             boundaryLevelId != 0 && boundaryLevelId == walkedLevelId;
@@ -1002,10 +1013,26 @@ namespace Multiplayer.Network.Sync
             if (!_baselined && !honest)
                 // Never silent (law 1): a swallowed baseline left no line at all, and that silence is the
                 // whole reason it survived. The emit itself is the fall-through below.
-                MpLog.Log("[Multiplayer][rail] DiffEngine post-boundary walk EMITS instead of baselining: the " +
-                          "boundary was taken on level #" + _boundaryLevelId + " and this walk is on level #" +
-                          _cycleLevelId + ". Everything the host wrote across that transition — the mission " +
-                          "outcome above all — is NOT in what the clients loaded, so it ships as a delta.");
+                //
+                // AND IT NAMES WHICH OF THE TWO REFUSALS THIS IS, because the old single sentence read as a
+                // defect report in the case that is simply NORMAL and cost a whole investigation (owner,
+                // 2026-08-15, host 13:24:07.067 on a lobby-play entry). `#0` is not a level id: it is the
+                // sentinel ResetForReloadBoundary stamps when GeoLevel() was null at the boundary
+                // (:455) — which is STRUCTURAL for every load entry, because the shared reload-entry hook
+                // SaveTransferCoordinator.PrepareEntryFromBlobCrt:1926 takes the boundary BEFORE it has even
+                // read the save's metadata, let alone built the level.
+                MpLog.Log("[Multiplayer][rail] DiffEngine post-boundary walk EMITS instead of baselining " +
+                          (_boundaryLevelId == 0
+                              ? "— EXPECTED on a load entry: no geoscape level existed when the boundary was " +
+                                "taken (#0 is that sentinel, not an id), so there was nothing to promise the " +
+                                "clients they already hold. This walk is on level #" + _cycleLevelId + " and " +
+                                "ships the graph as a delta ON PURPOSE"
+                              : "— the boundary was taken on level #" + _boundaryLevelId + " and this walk is " +
+                                "on level #" + _cycleLevelId) +
+                          ". Everything the host wrote across that transition — the mission outcome above all, " +
+                          "completed during the geoscape load itself (GeoLevelController._missionToComplete) " +
+                          "and therefore AFTER the blob the clients loaded — is NOT in what they hold, so it " +
+                          "must ship. Baselining here is the 2026-08-05 defect (L128).");
             if (!_baselined && !wasForceFull && honest)
             {
                 _baselined = true;

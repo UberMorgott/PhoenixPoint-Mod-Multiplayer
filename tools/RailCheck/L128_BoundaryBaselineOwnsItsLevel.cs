@@ -93,7 +93,11 @@ namespace RailCheck
             if (ask(0, 9001))
                 yield return "L128 baseline-on-no-level: BaselineIsHonest baselines a boundary that was taken with " +
                              "no level at all. There was nothing to promise the clients they share, so the only " +
-                             "safe reading of that walk is a delta.";
+                             "safe reading of that walk is a delta. This is the COMMON row, not a corner case: " +
+                             "SaveTransferCoordinator.PrepareEntryFromBlobCrt:1926 takes the boundary before it " +
+                             "reads the save metadata, so every load entry stamps #0 — and a tactical return " +
+                             "does too, which is why 'adopt the first walked level' is not an optimisation but " +
+                             "the 2026-08-05 defect with extra steps.";
 
             // ── (b)+(c) the structural half: whose root set is the reference ──
             if (Program.ReadsField(boundary, prevRoots) || Program.ReadsField(boundary, seeded))
