@@ -52,7 +52,10 @@ namespace Multiplayer.Network.Sync
                 case ResearchElement research:
                     return "Research:" + research.ResearchID;
                 case ItemManufacturing.ManufactureQueueItem queueItem:
-                    return "Manufacturing:" + queueItem.ManufacturableItem?.RelatedItemDef?.Guid;
+                {
+                    var def = queueItem.ManufacturableItem?.RelatedItemDef;
+                    return def == null ? null : "Manufacturing:" + def.Guid;
+                }
                 case GeoPhoenixFacility facility:
                     return "Facility:" + facility.PxBase?.Site?.SiteId + ":" + facility.FacilityId;
                 case GeoVehicle vehicle:
