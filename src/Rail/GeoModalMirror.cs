@@ -357,6 +357,20 @@ namespace Multiplayer.Network.Sync
         internal static string NameOf(StateKind kind, ModalType modalType) =>
             kind == StateKind.Modal ? modalType.ToString() : kind.ToString();
 
+        /// <summary>THE EVENT FAMILY'S DOOR INTO THE ONE PUBLICATION PATH. EventPopup captures the host's
+        /// native event raise and builds its payload; it used to also put that payload on the wire, which
+        /// made two publishers for one queue (L520, R2). It now hands the built payload here, and this file
+        /// remains the only place a window raise is broadcast. The engine expression is the one
+        /// <see cref="HostBroadcast"/> already uses (src/Rail/GeoModalMirror.cs:381-383) — no new accessor.</summary>
+        internal static void HostBroadcastEventPayload(uint seq, byte[] encoded)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            if (SyncApplyScope.Active) return;   // law 8: an apply that reaches the view never re-broadcasts
+            engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventRaise, SyncKind.StateDelta, encoded)));
+        }
+
         /// <summary>THE NON-MODAL ARM'S HOST ENTRY, called from the coverage gate — i.e. from
         /// <c>GeoscapeViewSwitchQuery.QueryStateSwitch</c>, the ONE queue every pushed window passes through.
         /// A state that got there really was queued by the game (the <c>forceOnTop</c>/<c>replaceTop</c>

@@ -408,9 +408,11 @@ namespace Multiplayer.Network.Sync
                               vehicleRef + " (other peers do NOT see this window)");
                     return;
                 }
-                var env = SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventRaise, SyncKind.StateDelta, Encode(seq, p));
-                var msg = new NetworkMessage(PacketType.SyncEnvelope, env);
-                engine.BroadcastToAll(msg);
+                // ONE PUBLICATION PATH (L520). This method still BUILDS the event payload — that is
+                // capture, and capture is right (§A.9) — but it no longer puts it on the wire. The
+                // QueryStateSwitch postfix is the single seam that mints a journal position and publishes,
+                // so a window that leaves here would be a window with no position: a bypass by definition.
+                GeoModalMirror.HostBroadcastEventPayload(seq, Encode(seq, p));
                 MpLog.Log("[MP][events] HOST raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority +
                           " site=" + (p.SiteRef == "" ? "none" : p.SiteRef) + " vehicle=" +
                           (p.VehicleRef == "" ? "none" : p.VehicleRef) + " titleLen=" + p.Title.Length +
