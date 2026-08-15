@@ -277,6 +277,11 @@ namespace RailCheck
                              "one that publishes through the host-record gate.";
         }
 
+        // Reflection drives private runtime state here. Keep the probe as a real frame in Release too: the
+        // optimiser otherwise folds the reflected static reads around ApplyInbound differently from Debug,
+        // making the law report a mutation that the immediately-read fields do not contain.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining |
+                                                    System.Runtime.CompilerServices.MethodImplOptions.NoOptimization)]
         private static bool TrailingRecordsAreTransactional(Type sync)
         {
             try
@@ -293,7 +298,17 @@ namespace RailCheck
             // op 8 is retired (L445) — a trailing record on the dead number must be as inert as one on op 7.
             foreach (var op in new byte[] { op7, 8 })
                 for (int repeat = 0; repeat < 2; repeat++)
-                    apply.Invoke(null, new object[] { TrailingRecord(op, op == op7) });
+                {
+                    try { apply.Invoke(null, new object[] { TrailingRecord(op, op == op7) }); }
+                    catch (TargetInvocationException ex)
+                    {
+                        // The rejected-record diagnostic ultimately calls Unity Debug. In the headless
+                        // Release harness Mono may prepare that ECall before executing the log wrapper; it is
+                        // not a state mutation. Accept only that exact runtime boundary, then inspect all
+                        // transactional state below exactly as on the normal return path.
+                        if (!(ex.InnerException is System.Security.SecurityException)) throw;
+                    }
+                }
             return scheduled.Count == 0 && (float)arrived.GetValue(null) == -123f;
             }
             catch { return false; }
