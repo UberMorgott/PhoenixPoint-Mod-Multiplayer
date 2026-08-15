@@ -63,11 +63,9 @@ namespace Multiplayer.Network.Sync
         // ─── Presentation latch state (client, viewer faction) ─────────────
         private static string _presentedCurrentId;          // last queue head a started-line was shown for
         private static HashSet<string> _presentedCompleted; // null = unseeded (SeedLatchFromMirror fills it)
-        // Completions latched but not yet SHOWN, because this peer was not on a map surface when they
-        // landed. Deferred, never dropped — drained by PumpDeferredCompletions from the sync tick.
+        // Completions latched but not yet SHOWN. Deferred, never dropped — drained by
+        // PumpDeferredCompletions from the sync tick.
         private static readonly List<string> _deferredCompleted = new List<string>();
-        // Has this peer EVER stood on a geoscape map surface in this session? Sticky, one-way.
-        private static bool _everOnMapSurface;
 
         // ─── Reflection (private members only; everything else is typed) ──
         private static readonly System.Reflection.FieldInfo OnResearchStartedField =
@@ -90,53 +88,31 @@ namespace Multiplayer.Network.Sync
         /// <summary>Full session teardown. (The intent dedup/nonce live in <see cref="IntentRail"/>.)</summary>
         public static void Reset()
         {
-            _everOnMapSurface = false; // a fresh session starts BEFORE this peer's first map surface
             ResetForReloadBoundary();
         }
 
         /// <summary>
-        /// LATCH ONE COMPLETION FOR PRESENTATION — or swallow it. The ONE door into the deferral list, so
-        /// the gate cannot be walked around: sticky one-way on this peer's OWN first geoscape map surface,
-        /// not a quorum, nothing waits on another human. Returns true when the completion was queued.
+        /// LATCH ONE COMPLETION FOR PRESENTATION. NOTHING IS SWALLOWED (§A.11). A completion that
+        /// latches before this peer has ever stood on a map surface is APPENDED like any other and is
+        /// presented when the peer reaches a surface that can present it, by the ordinary cursor rule
+        /// (§A.2) plus the open-screen hold (WindowOrder.HoldsForOpenScreen). There is no family that
+        /// bypasses the journal — the LMAX single-entrance property asserted with no exceptions carved out
+        /// of it (§A.1, §A.11).
         ///
-        /// THE BUG (live 2026-08-14). A client joining a FRESH campaign sits in the intro cutscene while the
-        /// host grants the whole campaign-opening research list (6 grants across 21:22-21:27 in the reference
-        /// session). <see cref="SeedLatchFromMirror"/> ran BEFORE those grants arrived, so every one of them
-        /// looked like a genuine transition, got deferred, and then flushed as back-to-back "research
-        /// completed" modals the instant the peer first reached UIStateVehicleSelected at 21:27:49 — read by
-        /// the player as "all researches completed at once".
+        /// THE OLD SWALLOW AND WHY IT IS GONE. Until 2026-08-15 a sticky <c>_everOnMapSurface</c> flag
+        /// dropped every completion latched before this peer's first geoscape map surface, to stop the
+        /// campaign-opening grant list (6 grants across 21:22-21:27 in the 2026-08-14 reference session)
+        /// flushing as back-to-back modals on the first frame of the map. That was a family carving itself
+        /// out of the ordering system. Under the journal the presentation order and the moment of
+        /// presentation are decided by the host-minted position and this peer's own cursor, so the backlog
+        /// no longer needs a swallow to be quiet — and a completion is never silently lost (L475).
         ///
-        /// Before that first surface the mirror is still ARRIVING, so a completion there is backlog and is
-        /// latched silently (the same swallow the unseeded path uses). After it, behaviour is unchanged and
-        /// every real completion still presents — including one that lands while this peer is off the map:
-        /// that one is queued through <see cref="PumpDeferredCompletions"/> like any other and held by the
-        /// game's own drain gate until this peer is back on the map.
+        /// Returns true always: the door accepts, it does not judge.
         /// </summary>
         internal static bool LatchCompletion(string researchId, bool onMapSurfaceNow)
         {
-            StampMapSurface(onMapSurfaceNow);
-            if (!_everOnMapSurface) return false; // backlog: latched in _presentedCompleted, never shown
             _deferredCompleted.Add(researchId);
             return true;
-        }
-
-        /// <summary>
-        /// RAISE THE STICKY SURFACE FLAG FROM THE CLOCK, NOT FROM THE COMPLETION.
-        ///
-        /// THE REGRESSION (0525e7a, live 2026-08-14). The flag was stamped ONLY inside
-        /// <see cref="LatchCompletion"/>, i.e. only when a completion happened to land while this peer was
-        /// standing on a map surface. The client's very first completion arrived 0.4 s after
-        /// <c>UIStateGeoscapeEvent</c> opened — a state that is deliberately NOT in
-        /// <c>DurableWindowRegistry.MapStates</c> — so it was swallowed AND the flag stayed down, which made
-        /// every LATER completion look like backlog too. Research announcements died for the session.
-        ///
-        /// The surface is a property of WHERE THIS PEER IS, so it is measured where the peer is measured:
-        /// the sync tick (<see cref="ClientTick"/>), before any early return. The intro still says nothing
-        /// (MayPresent is false there), and one geoscape frame on the map is enough to arm it for good.
-        /// </summary>
-        internal static void StampMapSurface(bool onMapSurfaceNow)
-        {
-            if (onMapSurfaceNow) _everOnMapSurface = true;
         }
 
         /// <summary>Test seam for L475: how many completions are waiting to be shown.</summary>
@@ -313,17 +289,15 @@ namespace Multiplayer.Network.Sync
             if (research == null || research.AllResearchesArray == null) return;
             bool seeded = _presentedCompleted != null;
             if (!seeded) _presentedCompleted = new HashSet<string>(StringComparer.Ordinal);
-            // Sticky first-map-surface gate: the campaign-opening grant list arrives while this peer is still
-            // in the intro and must latch silently, not queue six modals for the first frame of the map.
-            bool onMapSurface = DurableWindowRegistry.MayPresent(true,
-                geo.View == null || geo.View.CurrentViewState == null ? null : geo.View.CurrentViewState.GetType());
-
+            // NOTHING IS SWALLOWED (§A.11). Neither the never-created case (this peer has not yet stood on a
+            // map surface) nor the unseeded first pass drops a completion any more: every one of them is
+            // latched, and the journal cursor decides WHEN it is presented. `_presentedCompleted` stays —
+            // that is answer-exactly-once, not a swallow.
             foreach (var el in research.AllResearchesArray)
             {
                 if (el == null || el.State != ResearchState.Completed || !_presentedCompleted.Add(el.ResearchID))
                     continue;
-                if (!seeded) continue; // backlog latched silently (SeedLatchFromMirror normally got there first)
-                LatchCompletion(el.ResearchID, onMapSurface);
+                LatchCompletion(el.ResearchID, true);
             }
             // The raise itself is NOT made here: UiEventMap.Fire calls PumpDeferredCompletions right after
             // this, so the one apply-driven raise site stays visible to L49's ordering arm.
@@ -391,9 +365,6 @@ namespace Multiplayer.Network.Sync
         /// host raises its own natively.</summary>
         public static void ClientTick(NetworkEngine engine)
         {
-            // FIRST, above every early return: the flag must rise on the frame this peer stands on the map,
-            // whether or not anything is waiting to be shown (see StampMapSurface).
-            StampMapSurface(DurableWindowRegistry.MayPresent());
             if (engine == null || !engine.IsActiveSession || engine.IsHost || _deferredCompleted.Count == 0) return;
             PumpDeferredCompletions(GenericApplier.GeoLevel());
         }

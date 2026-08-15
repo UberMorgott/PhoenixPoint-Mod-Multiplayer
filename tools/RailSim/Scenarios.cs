@@ -18,6 +18,42 @@ namespace RailSim
             yield return Pair("one-peers-backlog-never-blocks-another", OnePeersBacklogNeverBlocksAnother);
             yield return Pair("a-local-dismissal-removes-only-mine", ALocalDismissalRemovesOnlyMine);
             yield return Pair("a-global-dismissal-removes-it-everywhere", AGlobalDismissalRemovesItEverywhere);
+            yield return Pair("no-gap-is-permanent", NoGapIsPermanent);
+        }
+
+        /// <summary>§C.1 property 2: NO GAP IS PERMANENT. A gap self-releases on an armed timer AND is
+        /// resolved by an explicit host-minted void record. Both halves are asserted, because the timer
+        /// alone would let two peers time out differently and diverge (FIX gap-fill, §2.5), and the void
+        /// alone would let a lost void hold a peer forever — which would be a wait on another peer.</summary>
+        private static IEnumerable<string> NoGapIsPermanent(int seed)
+        {
+            WindowGap.Reset();
+            double t = 1000.0;
+            if (WindowGap.SelfReleasedAt(5, t))
+                yield return "no-gap-is-permanent: the gap released on first sight, so the host's order is " +
+                             "abandoned the instant a raise is a frame late.";
+
+            // Half the interval: still holding. The hold is what makes the host's order authoritative.
+            if (WindowGap.SelfReleasedAt(5, t + WindowGap.SelfReleaseSeconds / 2))
+                yield return "no-gap-is-permanent: the gap released after half its armed interval.";
+
+            // Past the interval: released, by itself, with no peer having done anything.
+            if (!WindowGap.SelfReleasedAt(5, t + WindowGap.SelfReleaseSeconds + 0.001))
+                yield return "no-gap-is-permanent: the gap did NOT self-release after its armed interval. " +
+                             "A drain gate that can hold forever is a wait on another peer — one player " +
+                             "must be able to drive the whole game while every other peer is AFK.";
+
+            // And the AUTHORITATIVE resolution: a void clears the position outright, timer or no timer.
+            WindowJournal.Reset();
+            WindowJournal.Append(5, "UIStateRosterDeployment", new byte[] { 5 });
+            WindowJournal.ApplyVoid(5);
+            WindowGap.Forget(5);
+            if (WindowJournal.PeekHead() != null)
+                yield return "no-gap-is-permanent: a host-minted void did not clear the gapped position. " +
+                             "The timer is the safety net; the void is the resolution, and it must be " +
+                             "explicit so two peers cannot resolve the same gap differently.";
+            WindowGap.Reset();
+            WindowJournal.Reset();
         }
 
         /// <summary>§C.1 property 4: a dismissal marked LOCAL never removed another peer's entry. Two peers,
