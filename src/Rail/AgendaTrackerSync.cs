@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Base.Core;
 using Base.Serialization.General;
 using HarmonyLib;
 using PhoenixPoint.Common.Entities.Items;
@@ -105,6 +106,30 @@ namespace Multiplayer.Network.Sync
                     Label = element.TrackedName != null ? element.TrackedName.text : null,
                     RemainingSeconds = (int)element.CurrentTimeLeft.TimeSpan.TotalSeconds,
                 };
+            }
+        }
+
+        /// <summary>Client-side apply: skips native per-row computation and applies the host-synced
+        /// row instead, when one exists. Same native method as AgendaRowCapturePatch (Postfix,
+        /// host-only) — no ordering conflict despite patching the same method, since the two are
+        /// mutually exclusive on IsHost: capture only runs when IsHost, apply only when !IsHost.</summary>
+        [HarmonyPatch(typeof(UIModuleFactionAgendaTracker), "UpdateData", new[] { typeof(UIFactionDataTrackerElement) })]
+        internal static class AgendaRowApplyPatch
+        {
+            private static bool Prefix(UIFactionDataTrackerElement element, ref bool __result)
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || engine.IsHost) return true; // host: run native
+
+                string key = RowKey(element.TrackedObject, out _);
+                if (key == null || !State.Rows.TryGetValue(key, out var row))
+                    return true; // no synced row yet (e.g. just joined) — fall back to native computation
+
+                var timeLeft = TimeUnit.FromSeconds(row.RemainingSeconds);
+                bool disposed = row.RemainingSeconds <= 0;
+                element.UpdateData(timeLeft, !disposed);
+                __result = disposed;
+                return false; // skip native computation entirely
             }
         }
     }
