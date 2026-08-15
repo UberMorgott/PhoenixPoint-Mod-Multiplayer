@@ -357,8 +357,8 @@ namespace Multiplayer.Network.Sync
         /// the ordinal of the message that caused it.
         ///
         /// ONE GATE, AND IT IS THE GAME'S. The completion is queued from inside the apply that carried it,
-        /// so <c>RailOrdinal.ForNewWindow</c> inherits the applying ordinal and every peer keys the window
-        /// identically BY CONSTRUCTION (L124/L507/L511). The screen the player opened is still protected —
+        /// so the host mints its journal position at the one capture seam and every peer keys the window
+        /// identically BY CONSTRUCTION (L521/L523). The screen the player opened is still protected —
         /// <see cref="WindowOrder.HoldsForOpenScreen"/> holds <c>UIStateGeoModal</c> at priority 99 (P13),
         /// exactly as it holds every other review window, and releases it when this peer walks back onto
         /// the map. NOT A QUORUM: the hold reads THIS peer's own view state; nothing waits on another human.

@@ -122,8 +122,7 @@ namespace RailCheck
             var member = new MembershipId("p1");
             var store = new DurableInboxStore(new HostLedger(new[]
             {
-                new InboxEntry(offer, member, InboxLifecycle.Open, default(CanonicalChoiceId), 1, 0,
-                    new HostOrderKey(1, offer.TriggerId)),
+                new InboxEntry(offer, member, InboxLifecycle.Open, default(CanonicalChoiceId), 1, 0),
             }, 1, new[] { member }));
             store.Carriers.Register(offer, DurableCarrierClass.NativeCurrent, new NoopCarrier());
             string refusal;

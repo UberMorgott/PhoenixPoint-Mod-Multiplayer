@@ -12,11 +12,10 @@ namespace RailCheck
         internal static IEnumerable<string> Check()
         {
             var a=new MembershipId("a"); var b=new MembershipId("b"); var offer=new OccurrenceId("Modal:GeoAmbushBrief","offer",new[]{"m"});
-            var prep=new OccurrenceId("DeploymentPreparing","prep",new[]{"m"}); var order=new HostOrderKey(1,offer.TriggerId);
-            var members=new[]{a,b};
+            var prep=new OccurrenceId("DeploymentPreparing","prep",new[]{"m"}); var members=new[]{a,b};
             DurableInboxStore Make()=>new DurableInboxStore(new HostLedger(new[]{
-                new InboxEntry(offer,a,InboxLifecycle.Dismissed,default(CanonicalChoiceId),2,0,order),
-                new InboxEntry(offer,b,InboxLifecycle.Open,default(CanonicalChoiceId),1,0,order)},1,members));
+                new InboxEntry(offer,a,InboxLifecycle.Dismissed,default(CanonicalChoiceId),2,0),
+                new InboxEntry(offer,b,InboxLifecycle.Open,default(CanonicalChoiceId),1,0)},1,members));
             var failed=Make(); var carrier=new Carrier(); failed.Carriers.Register(offer,DurableCarrierClass.NativeCurrent,carrier);
             failed.ValidateCandidate=_=>false; ulong rev;
             bool before=failed.TryStartDeployment(offer,prep,_=>true,out rev);
@@ -28,7 +27,9 @@ namespace RailCheck
             if(!errors.IsEmpty||wins.Any(x=>!x)||p.Length!=2||p.Any(x=>x.Lifecycle!=InboxLifecycle.Queued||!x.Predecessor.HasValue||!x.Predecessor.Value.Equals(offer))||
                 old.Any(x=>x.Lifecycle!=InboxLifecycle.Removed||x.TerminalReason!=TerminalReason.Superseded||!x.SupersededBy.HasValue||!x.SupersededBy.Value.Equals(prep)))
                 yield return "L385 start-was-not-one-atomic-linked-successor-for-all-current-epochs";
-            if(store.Ledger.CommittedRevision!=2||p.Any(x=>x.HostOrderKey.CampaignOrdinal!=2||x.HostOrderKey.TriggerId!=prep.TriggerId)||
+            // AMPUTATED 2026-08-15 (L523): the successor's HostOrderKey is gone with the second ordering
+            // system, so the arm asserts what survives — ONE committed revision for the whole transition.
+            if(store.Ledger.CommittedRevision!=2||
                 old.Any(x=>x.TombstoneRevision!=2))
                 yield return "L385 transition-did-not-use-one-revision-and-exact-authoritative-order";
             HostLedger decoded; string why;
@@ -43,7 +44,7 @@ namespace RailCheck
                 yield return "L385 different-concurrent-starts-did-not-elect-exactly-one-authoritative-successor";
             bool danglingRejected=false;
             try { new HostLedger(new[]{new InboxEntry(prep,a,InboxLifecycle.Queued,default(CanonicalChoiceId),1,0,
-                new HostOrderKey(2,prep.TriggerId),predecessor:offer)},2,members); }
+                predecessor:offer)},2,members); }
             catch(ArgumentException){danglingRejected=true;}
             if(!danglingRejected) yield return "L385 host-ledger-accepted-a-dangling-predecessor-link";
             // POSITIVE CONTROL: inheriting the predecessor dismissal would dismiss A's fresh successor.

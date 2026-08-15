@@ -19,7 +19,6 @@ using Base.Utils;
 namespace Multiplayer.Network.Sync
 {
     internal enum DurableWindowDisposition { Durable, LocalOnly }
-    internal enum DurableWindowPriority { Ordinary, Priority, Deployment }
 
     /// <summary>A closed proof of the native method that raised a candidate window.</summary>
     internal sealed class NativeRaiserToken
@@ -159,7 +158,7 @@ namespace Multiplayer.Network.Sync
                     DeploymentWindowClose.TryReenterDeferredOccurrence(raise.DeferredOccurrence.Value, missionId,
                         out deferred))
                 {
-                    WindowOrder.BindDurable(existing, deferred);
+                    WindowQueueSync.BindDurable(existing, deferred);
                     return true;
                 }
                 // A deferred occurrence selected by the explicit input owns this native gesture. If it became
@@ -368,17 +367,9 @@ namespace Multiplayer.Network.Sync
         internal static bool MayPresent(bool geoscapeStarted, Type currentViewState) =>
             geoscapeStarted && currentViewState != null && MapStates.Contains(currentViewState);
 
-        internal static DurableWindowPriority PriorityOf(OccurrenceId occurrence)
-        {
-            if (string.Equals(occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal))
-                return DurableWindowPriority.Deployment;
-            if (PriorityOccurrenceFamilies.Contains(occurrence.EventId) ||
-                string.Equals(occurrence.EventId, "mission-offer", StringComparison.Ordinal) ||
-                string.Equals(occurrence.EventId, "ambush", StringComparison.Ordinal))
-                return DurableWindowPriority.Priority;
-            return DurableWindowPriority.Ordinary;
-        }
-
+        // PriorityOf IS GONE (L523). Ranking one durable window above another was the second ordering
+        // system's comparator; the host's journal position is the only order. The family table below
+        // SURVIVES — it IDENTIFIES a mission-offer family, which is a question about what a window IS.
         private static readonly HashSet<string> PriorityOccurrenceFamilies = new HashSet<string>(StringComparer.Ordinal)
         {
             "AssetDestination", "Modal:" + ModalType.GeoAmbushBrief,
@@ -443,7 +434,7 @@ namespace Multiplayer.Network.Sync
                     StableMissionSubject(subject as GeoMission));
                 var request = LastQueuedRequest(r => r.State is UIStateGeoModal m && m.ModalType == modal &&
                     ReferenceEquals(m.ModalData, subject));
-                if (occurrence.HasValue && request != null) WindowOrder.BindDurable(request, occurrence.Value);
+                if (occurrence.HasValue && request != null) WindowQueueSync.BindDurable(request, occurrence.Value);
                 LastCapturedPriorityOccurrence = occurrence;
             }
         }
@@ -455,7 +446,7 @@ namespace Multiplayer.Network.Sync
                 var occurrence = EnqueueCapturedPriority("DeploymentPreparing", token.StableRaiserId,
                     StableMissionSubject(mission));
                 var request = LastQueuedRequest(r => r.State is UIStateRosterDeployment d && ReferenceEquals(d.Mission, mission));
-                if (occurrence.HasValue && request != null) WindowOrder.BindDurable(request, occurrence.Value);
+                if (occurrence.HasValue && request != null) WindowQueueSync.BindDurable(request, occurrence.Value);
             }
         }
 
@@ -465,7 +456,7 @@ namespace Multiplayer.Network.Sync
             {
                 var occurrence = EnqueueCapturedPriority("AssetDestination", token.StableRaiserId, token.StableRaiserId);
                 var request = LastQueuedRequest(r => r.State is UIStateAssetDeployment a && ReferenceEquals(a.DeployBind, subject));
-                if (occurrence.HasValue && request != null) WindowOrder.BindDurable(request, occurrence.Value);
+                if (occurrence.HasValue && request != null) WindowQueueSync.BindDurable(request, occurrence.Value);
             }
         }
 

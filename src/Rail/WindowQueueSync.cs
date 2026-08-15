@@ -167,6 +167,28 @@ namespace Multiplayer.Network.Sync
             OccurrenceId occurrence, Action<TerminalReason> silentRemove) =>
             DurableCarrierLease.Bind(store, occurrence, DurableCarrierClass.ModSuspended, silentRemove);
 
+        /// <summary>WHICH OCCURRENCE A NATIVE REQUEST CARRIES. Answer-once bookkeeping, moved here from
+        /// <c>WindowOrder</c> in the L523 commit: the ordering class must not know an occurrence exists,
+        /// and every consumer of this binding (already-current, confirm-open, dismiss, deployment) asks
+        /// "has this window been answered", never "which window is in front".</summary>
+        private sealed class DurableBinding { internal OccurrenceId Occurrence; }
+        private static readonly ConditionalWeakTable<GeoscapeViewStateSwitchRequest, DurableBinding> _durable =
+            new ConditionalWeakTable<GeoscapeViewStateSwitchRequest, DurableBinding>();
+
+        internal static void BindDurable(GeoscapeViewStateSwitchRequest request, OccurrenceId occurrence)
+        {
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            _durable.Remove(request); _durable.Add(request, new DurableBinding { Occurrence = occurrence });
+            TrackDurableNativeCarrier(request, occurrence);
+        }
+
+        internal static bool TryGetDurable(GeoscapeViewStateSwitchRequest request, out OccurrenceId occurrence)
+        {
+            DurableBinding binding;
+            if (request != null && _durable.TryGetValue(request, out binding)) { occurrence = binding.Occurrence; return true; }
+            occurrence = default(OccurrenceId); return false;
+        }
+
         internal static void TrackDurableNativeCarrier(GeoscapeViewStateSwitchRequest request,
             OccurrenceId occurrence)
         {
@@ -266,26 +288,7 @@ namespace Multiplayer.Network.Sync
         {
             if (original == null || !ReferenceEquals(WindowOrder.CurrentRequest(query), original)) return false;
             OccurrenceId bound;
-            return WindowOrder.TryGetDurable(original, out bound) && bound.Equals(occurrence);
-        }
-
-        internal static bool TryDurablePriorityPreemption(GeoscapeViewSwitchQuery query,
-            GeoscapeViewStateSwitchRequest current, GeoscapeViewStateSwitchRequest pending)
-        {
-            OccurrenceId ordinary, priority;
-            if (!WindowOrder.TryGetDurable(current, out ordinary) || !WindowOrder.TryGetDurable(pending, out priority) ||
-                DurableWindowRegistry.PriorityOf(ordinary) != DurableWindowPriority.Ordinary ||
-                DurableWindowRegistry.PriorityOf(priority) == DurableWindowPriority.Ordinary) return false;
-            var store = DurableInboxSession.ActiveStore;
-            if (store == null) return false;
-            EnsureDurableCarrierSession(store);
-            string local = Multiplayer.Network.ClientIdentity.PlayerGuid.ToString("D");
-            var memberships = store.Ledger.Members.Where(x =>
-                string.Equals(x.PlayerGuid, local, StringComparison.OrdinalIgnoreCase)).ToArray();
-            if (memberships.Length == 0) return false;
-            var carrier = new NativeCarrier(query, ordinary, priority, current, pending);
-            return new DurableInboxEngine(store, memberships[0], carrier).TryPreempt(ordinary, priority,
-                true, typeof(UIStateNothingSelected));
+            return TryGetDurable(original, out bound) && bound.Equals(occurrence);
         }
 
         internal static bool TryDurableResume(GeoscapeViewSwitchQuery query)
@@ -303,7 +306,7 @@ namespace Multiplayer.Network.Sync
         {
             if (_durableEnginePresentation || _durableRestoreActive) return;
             OccurrenceId occurrence; var request = WindowOrder.CurrentRequest(query);
-            if (!WindowOrder.TryGetDurable(request, out occurrence)) return;
+            if (!TryGetDurable(request, out occurrence)) return;
             var store = DurableInboxSession.ActiveStore; MembershipId member;
             if (store == null || !TryLocalMember(store, out member)) return;
             EnsureDurableCarrierSession(store);
@@ -326,7 +329,7 @@ namespace Multiplayer.Network.Sync
             if (_durableSilentExit) return;
             var query = AccessTools.Field(typeof(GeoscapeView), "_viewSwichQuery")?.GetValue(view) as GeoscapeViewSwitchQuery;
             OccurrenceId occurrence; var current = WindowOrder.CurrentRequest(query);
-            if (!WindowOrder.TryGetDurable(current, out occurrence)) return;
+            if (!TryGetDurable(current, out occurrence)) return;
             var store = DurableInboxSession.ActiveStore; MembershipId member;
             if (store == null || !TryLocalMember(store, out member)) return;
             for (int attempt = 0; attempt < 8; attempt++)
@@ -401,7 +404,7 @@ namespace Multiplayer.Network.Sync
             {
                 var view = GenericApplier.StartedGeoLevel()?.View; if (view == null) return;
                 OccurrenceId currentOccurrence;
-                if (!WindowOrder.TryGetDurable(WindowOrder.CurrentRequest(_query), out currentOccurrence) ||
+                if (!TryGetDurable(WindowOrder.CurrentRequest(_query), out currentOccurrence) ||
                     !currentOccurrence.Equals(occurrence)) return;
                 _durableSilentExit = true; try { view.FinishQueriedState(); } finally { _durableSilentExit = false; }
             }
@@ -832,7 +835,7 @@ namespace Multiplayer.Network.Sync
                 OccurrenceId occurrence;
                 var store = DurableInboxSession.ActiveStore; MembershipId member;
                 var mission = __instance?.ModalData as GeoMission;
-                if (!ReferenceEquals(request?.State, __instance) || !WindowOrder.TryGetDurable(request, out occurrence) ||
+                if (!ReferenceEquals(request?.State, __instance) || !TryGetDurable(request, out occurrence) ||
                     store == null || !TryLocalMember(store, out member) || mission == null ||
                     !DurableMissionOfferBindingMatches(store, member, occurrence,
                         DurableWindowRegistry.StableMissionSubject(mission)))

@@ -51,7 +51,7 @@ namespace RailCheck
         {
             var seed = new OccurrenceId("event", "seed", new[] { "subject" });
             return new HostLedger(new[] { new InboxEntry(seed, member, InboxLifecycle.Queued,
-                default(CanonicalChoiceId), 1, 0, new HostOrderKey(1, seed.TriggerId)) }, 1);
+                default(CanonicalChoiceId), 1, 0) }, 1);
         }
     }
 }

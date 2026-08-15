@@ -9,14 +9,16 @@ namespace Multiplayer.Network.Sync
 {
     internal static class DurableInboxCodec
     {
-        private const byte MessageSchema = 5;
-        private const byte LedgerSchema = 6;
+        // Schema 6 (L523): the host order key left the frame. Schemas 1-5 still DECODE — the two fields
+        // are read and discarded — so a save written before the second ordering system was deleted loads.
+        private const byte MessageSchema = 6;
+        private const byte LedgerSchema = 7;
         private const uint LedgerMagic = 0x34495744; // DWI4, cannot alias the first four bytes of a framed ledger
         private const uint LegacyLedgerMagic = 0x33495744; // DWI3
         private const uint LedgerTail = 0xCCA6A8BB;
         internal const byte DeploymentTransitionOp = 0x44;
         internal const byte PreparationEditOp = DeploymentTransitionOp;
-        private const byte DeploymentTransitionSchema = 1;
+        private const byte DeploymentTransitionSchema = 2;
         private const uint DeploymentTransitionTail = 0x44915AC3;
         private const uint PreparationEditTail = 0x45A15AC3;
         private const uint SourceRevalidationTail = 0x46A15AC3;
@@ -43,8 +45,6 @@ namespace Multiplayer.Network.Sync
                     WriteString(writer, reward.Value);
                 }
                 WriteString(writer, message.Membership.PlayerGuid);
-                writer.Write(message.Order.CampaignOrdinal);
-                WriteString(writer, message.Order.TriggerId);
                 writer.Write(message.LifecycleRevision);
                 writer.Write(message.TombstoneRevision);
                 writer.Write((byte)message.Lifecycle);
@@ -69,7 +69,7 @@ namespace Multiplayer.Network.Sync
                 using (var reader = new BinaryReader(stream, StrictUtf8))
                 {
                     byte schema = reader.ReadByte();
-                    if (schema != 1 && schema != 2 && schema != 3 && schema != MessageSchema)
+                    if (schema != 1 && schema != 2 && schema != 3 && schema != 5 && schema != MessageSchema)
                         throw new InvalidDataException("unknown schema");
                     var kind = (InboxMessageKind)reader.ReadByte();
                     if (!Enum.IsDefined(typeof(InboxMessageKind), kind)) throw new InvalidDataException("unknown kind");
@@ -79,7 +79,7 @@ namespace Multiplayer.Network.Sync
                     for (int i = 0; i < rewards.Length; i++)
                         rewards[i] = new CanonicalRewardItemId(ReadOccurrence(reader), ReadString(reader), ReadString(reader));
                     var membership = new MembershipId(ReadString(reader));
-                    var order = new HostOrderKey(reader.ReadUInt64(), ReadString(reader));
+                    if (schema < MessageSchema) { reader.ReadUInt64(); ReadString(reader); }   // discarded order key
                     ulong lifecycleRevision = reader.ReadUInt64();
                     ulong tombstoneRevision = reader.ReadUInt64();
                     var lifecycle = (InboxLifecycle)reader.ReadByte();
@@ -88,7 +88,7 @@ namespace Multiplayer.Network.Sync
                         ? new CanonicalChoiceId(ReadOccurrence(reader), ReadString(reader))
                         : default(CanonicalChoiceId);
                     if (stream.Position != stream.Length) throw new InvalidDataException("trailing bytes");
-                    message = new InboxMessage(kind, occurrence, result, rewards, membership, order,
+                    message = new InboxMessage(kind, occurrence, result, rewards, membership,
                         lifecycleRevision, tombstoneRevision, lifecycle, choice);
                     return true;
                 }
@@ -112,12 +112,12 @@ namespace Multiplayer.Network.Sync
                 var orderedMembers = members.OrderBy(member => member).ToArray();
                 WriteCount(writer, orderedMembers.Length);
                 foreach (var member in orderedMembers) WriteString(writer, member.PlayerGuid);
-                var ordered = entries.OrderBy(e => e.HostOrderKey).ThenBy(e => e.Occurrence).ThenBy(e => e.Membership).ToArray();
+                // CANONICAL ENCODING ORDER, not a presentation order (L523): occurrence then membership is
+                // total and role-independent, so two peers encode the same ledger to the same bytes.
+                var ordered = entries.OrderBy(e => e.Occurrence).ThenBy(e => e.Membership).ToArray();
                 WriteCount(writer, ordered.Length);
                 foreach (var entry in ordered)
                 {
-                    writer.Write(entry.HostOrderKey.CampaignOrdinal);
-                    WriteString(writer, entry.HostOrderKey.TriggerId);
                     WriteOccurrence(writer, entry.Occurrence);
                     WriteString(writer, entry.Membership.PlayerGuid);
                     writer.Write((byte)entry.Lifecycle);
@@ -167,8 +167,8 @@ namespace Multiplayer.Network.Sync
         {
             if (delta == null) throw new ArgumentNullException(nameof(delta)); byte[] body;
             using (var ms=new MemoryStream()) using(var w=new BinaryWriter(ms,StrictUtf8))
-            { WriteOccurrence(w,delta.Offer); WriteOccurrence(w,delta.Preparation); w.Write(delta.Order.CampaignOrdinal);
-              WriteString(w,delta.Order.TriggerId); w.Write(delta.TombstoneRevision); w.Write((byte)delta.Reason); body=ms.ToArray(); }
+            { WriteOccurrence(w,delta.Offer); WriteOccurrence(w,delta.Preparation);
+              w.Write(delta.TombstoneRevision); w.Write((byte)delta.Reason); body=ms.ToArray(); }
             if(body.Length>ushort.MaxValue) throw new ArgumentOutOfRangeException(nameof(delta),"deployment transition exceeds frame bound");
             using(var ms=new MemoryStream()) using(var w=new BinaryWriter(ms,StrictUtf8))
             { w.Write(DeploymentTransitionOp); w.Write(DeploymentTransitionSchema); w.Write((ushort)body.Length);
@@ -188,10 +188,10 @@ namespace Multiplayer.Network.Sync
                 var body=r.ReadBytes(length); if(body.Length!=length||r.ReadUInt32()!=Crc32.Compute(body)||
                     r.ReadUInt32()!=DeploymentTransitionTail||ms.Position!=ms.Length) throw new InvalidDataException("invalid deployment transition frame");
                 using(var bs=new MemoryStream(body,false)) using(var br=new BinaryReader(bs,StrictUtf8))
-                { var offer=ReadOccurrence(br); var prep=ReadOccurrence(br); var order=new HostOrderKey(br.ReadUInt64(),ReadString(br));
+                { var offer=ReadOccurrence(br); var prep=ReadOccurrence(br);
                   ulong revision=br.ReadUInt64(); byte raw=br.ReadByte(); if(!Enum.IsDefined(typeof(TerminalReason),raw)||bs.Position!=bs.Length)
                     throw new InvalidDataException("invalid deployment transition body");
-                  delta=new DeploymentTransitionDelta(offer,prep,order,revision,(TerminalReason)raw); return true; }
+                  delta=new DeploymentTransitionDelta(offer,prep,revision,(TerminalReason)raw); return true; }
             }} catch(Exception ex) when(ex is ArgumentException||ex is InvalidDataException||ex is EndOfStreamException||ex is IOException||ex is OverflowException)
             { refusal=ex.Message; return false; }
         }
@@ -309,7 +309,7 @@ namespace Multiplayer.Network.Sync
                     var entries = new List<InboxEntry>();
                     for (int i = 0, count = ReadCount(reader); i < count; i++)
                     {
-                        ulong ordinal = reader.ReadUInt64(); string orderTrigger = ReadString(reader);
+                        if (ledgerSchema < LedgerSchema) { reader.ReadUInt64(); ReadString(reader); }   // discarded order key
                         var occurrence = ReadOccurrence(reader);
                         var membership = new MembershipId(ReadString(reader));
                         byte rawLifecycle = reader.ReadByte();
@@ -354,7 +354,7 @@ namespace Multiplayer.Network.Sync
                         ulong preparationAuthorityRevision = ledgerSchema >= 6 ? reader.ReadUInt64() : 0;
                         entries.Add(new InboxEntry(occurrence, membership,
                             (InboxLifecycle)rawLifecycle, choice, lifecycleRevision, tombstoneRevision,
-                            new HostOrderKey(ordinal, orderTrigger), reason, checkpoint, terminalReason,
+                            reason, checkpoint, terminalReason,
                             supersededBy, predecessor, preparationRevision, preparationAuthorityRevision));
                     }
                     if (stream.Position != stream.Length) throw new InvalidDataException("trailing ledger bytes");

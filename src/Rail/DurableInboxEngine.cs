@@ -423,21 +423,21 @@ namespace Multiplayer.Network.Sync
             // ledger instead of refusing forever. Still no native mutation from a corrupt ledger — that
             // part was right, capturing a checkpoint here could pick the wrong window — so this tick
             // presents nothing and the next one runs from repaired state.
-            var openEntries = entries.Where(x => x.Lifecycle == InboxLifecycle.Open)
-                .OrderBy(x => x.HostOrderKey).ToArray();
+            var openEntries = entries.Where(x => x.Lifecycle == InboxLifecycle.Open).ToArray();
             if (openEntries.Length > 1) return RepairMultipleOpen(expected, openEntries);
-            var next = entries.Where(x => x.Lifecycle == InboxLifecycle.Queued &&
-                                          !DeploymentUsesExplicitDoor(x.Occurrence))
-                .OrderByDescending(x => DurableWindowRegistry.PriorityOf(x.Occurrence)).ThenBy(x => x.HostOrderKey).FirstOrDefault();
+            // NO SORT (L523). EntriesFor already hands back one deterministic, role-independent sequence;
+            // choosing among queued durable windows by a PRIORITY of this subsystem's own was the second
+            // ordering system deciding what the journal alone decides now.
+            var next = entries.FirstOrDefault(x => x.Lifecycle == InboxLifecycle.Queued &&
+                                                   !DeploymentUsesExplicitDoor(x.Occurrence));
             if (next == null) return TryResumeSuspended(geoscapeStarted, currentViewState);
             // Deployment preparation is an AVAILABLE persistent door, never a remote navigation command.
             // The initiator already owns its native screen; every other member keeps this queued until its
             // own PrepJoinButton gesture explicitly re-enters it. In particular, a client start cannot yank
             // the host out of a geoscape event window when that window later becomes idle.
-            var open = openEntries.FirstOrDefault();
-            if (open != null)
-                return DurableWindowRegistry.PriorityOf(next.Occurrence) > DurableWindowRegistry.PriorityOf(open.Occurrence) &&
-                    TryPreempt(open.Occurrence, next.Occurrence, geoscapeStarted, currentViewState);
+            // A window already on screen is never overtaken: the one in front stays in front until the
+            // player answers it (L523).
+            if (openEntries.Length > 0) return false;
             return CommitOpenAndPresent(next);
         }
 
@@ -507,80 +507,19 @@ namespace Multiplayer.Network.Sync
             return false;
         }
 
-        internal bool TryPreempt(OccurrenceId ordinary, OccurrenceId priority,
-            bool geoscapeStarted, Type currentViewState)
-        {
-            if (!DurableWindowRegistry.MayPresent(geoscapeStarted, currentViewState) ||
-                DurableWindowRegistry.PriorityOf(ordinary) != DurableWindowPriority.Ordinary ||
-                DurableWindowRegistry.PriorityOf(priority) == DurableWindowPriority.Ordinary) return false;
-            var expected = _store.Ledger;
-            InboxEntry ordinaryEntry, priorityEntry;
-            try { ordinaryEntry = expected.Get(ordinary, _member); priorityEntry = expected.Get(priority, _member); }
-            catch (InvalidOperationException) { return false; }
-            if (ordinaryEntry.Lifecycle != InboxLifecycle.Open || priorityEntry.Lifecycle != InboxLifecycle.Queued)
-                return false;
-            InboxWindowCheckpoint checkpoint;
-            try { checkpoint = _carrier.Capture(ordinary); } catch { checkpoint = null; }
-            if (checkpoint == null) return false; // capture failure: ordinary remains open, priority remains queued
-            ulong revision = checked(expected.CommittedRevision + 1);
-            var suspended = ordinaryEntry.Suspend(InboxSuspensionReason.PriorityPreemption, checkpoint,
-                checked(ordinaryEntry.LifecycleRevision + 1));
-            var next = expected.Replace(suspended).WithAuthority(revision, expected.Members);
-            if (!_store.Commit(expected, next)) return false;
-            bool presented;
-            try { presented = _carrier.Present(priority); } catch { presented = false; }
-            if (!presented)
-            {
-                try { _carrier.Abandon(priority); } catch { }
-                RestoreAfterFailedPresent(ordinary, checkpoint); return false;
-            }
-            var presentedLedger = _store.Ledger; InboxEntry stillQueued, stillSuspended;
-            try
-            {
-                stillQueued = presentedLedger.Get(priority, _member);
-                stillSuspended = presentedLedger.Get(ordinary, _member);
-            }
-            catch
-            {
-                try { _carrier.Abandon(priority); } catch { }
-                return false;
-            }
-            if (stillQueued.Lifecycle != InboxLifecycle.Queued ||
-                stillSuspended.Lifecycle != InboxLifecycle.Suspended ||
-                stillSuspended.SuspensionReason != InboxSuspensionReason.PriorityPreemption ||
-                !checkpoint.Equals(stillSuspended.Checkpoint))
-            {
-                try { _carrier.Abandon(priority); } catch { }
-                if (stillSuspended.Lifecycle == InboxLifecycle.Suspended && checkpoint.Equals(stillSuspended.Checkpoint))
-                    RestoreAfterFailedPresent(ordinary, checkpoint);
-                return false;
-            }
-            bool openedCommitted = false;
-            try
-            {
-                var opened = stillQueued.WithLifecycle(InboxLifecycle.Open, checked(stillQueued.LifecycleRevision + 1));
-                var committed = presentedLedger.Replace(opened)
-                    .WithAuthority(checked(presentedLedger.CommittedRevision + 1), presentedLedger.Members);
-                openedCommitted = _store.Commit(presentedLedger, committed);
-            }
-            catch { openedCommitted = false; }
-            if (openedCommitted) return true;
-            try { _carrier.Abandon(priority); } catch { }
-            RestoreAfterFailedPresent(ordinary, checkpoint);
-            return false;
-        }
+        // TryPreempt IS GONE (L523). Suspend-the-open-one-and-show-the-priority-one is an ORDERING
+        // device: it decides which window is in front, and there is exactly one of those now — the
+        // host's journal position. TryResumeSuspended stays: restoring a window suspended by an
+        // older build is recovery, not ordering.
 
         internal bool TryResumeSuspended(bool geoscapeStarted, Type currentViewState)
         {
             if (!DurableWindowRegistry.MayPresent(geoscapeStarted, currentViewState)) return false;
             var expected = _store.Ledger;
             var entries = expected.EntriesFor(_member);
-            if (entries.Any(x => DurableWindowRegistry.PriorityOf(x.Occurrence) != DurableWindowPriority.Ordinary &&
-                (x.Lifecycle == InboxLifecycle.Queued || x.Lifecycle == InboxLifecycle.Open))) return false;
             if (entries.Any(x => x.Lifecycle == InboxLifecycle.Open)) return false;
-            var suspended = entries.Where(x => x.Lifecycle == InboxLifecycle.Suspended &&
-                x.SuspensionReason == InboxSuspensionReason.PriorityPreemption)
-                .OrderBy(x => x.HostOrderKey).FirstOrDefault();
+            var suspended = entries.FirstOrDefault(x => x.Lifecycle == InboxLifecycle.Suspended &&
+                x.SuspensionReason == InboxSuspensionReason.PriorityPreemption);
             if (suspended == null) return false;
             if (!_store.IsServable(suspended.Occurrence)) return RemoveInvalidatedSuspended(suspended);
             var checkpoint = suspended.Checkpoint;
@@ -630,7 +569,7 @@ namespace Multiplayer.Network.Sync
                 if (current.Lifecycle != InboxLifecycle.Suspended || current.LifecycleRevision < suspended.LifecycleRevision) return false;
                 ulong lifecycle = checked(current.LifecycleRevision + 1);
                 var removed = new InboxEntry(current.Occurrence, current.Membership, InboxLifecycle.Removed,
-                    current.Choice, lifecycle, Math.Max(current.TombstoneRevision, lifecycle), current.HostOrderKey,
+                    current.Choice, lifecycle, Math.Max(current.TombstoneRevision, lifecycle),
                     terminalReason: TerminalReason.Invalidated, predecessor: current.Predecessor);
                 var next = expected.Replace(removed).WithAuthority(checked(expected.CommittedRevision + 1), expected.Members);
                 try { if (_store.Commit(expected, next)) return false; } catch { }
@@ -804,11 +743,11 @@ namespace Multiplayer.Network.Sync
 
     internal sealed class DeploymentTransitionDelta
     {
-        internal DeploymentTransitionDelta(OccurrenceId offer, OccurrenceId preparation, HostOrderKey order,
+        internal DeploymentTransitionDelta(OccurrenceId offer, OccurrenceId preparation,
             ulong tombstoneRevision, TerminalReason reason)
-        { Offer = offer; Preparation = preparation; Order = order; TombstoneRevision = tombstoneRevision; Reason = reason; }
+        { Offer = offer; Preparation = preparation; TombstoneRevision = tombstoneRevision; Reason = reason; }
         internal OccurrenceId Offer { get; } internal OccurrenceId Preparation { get; }
-        internal HostOrderKey Order { get; } internal ulong TombstoneRevision { get; } internal TerminalReason Reason { get; }
+        internal ulong TombstoneRevision { get; } internal TerminalReason Reason { get; }
     }
 
     internal sealed class PreparationEditDelta
@@ -850,11 +789,10 @@ namespace Multiplayer.Network.Sync
                         "offer already transitioned to " + authoritative.Occurrence.EventId + "/" + authoritative.Occurrence.TriggerId;
                     return false;
                 }
-                var successor = _store.Ledger.AllEntries.First(x => x.Occurrence.Equals(preparation));
                 if (!_store.HasTransitionDelta(offer))
                 {
                     try { _terminalDelta(new DeploymentTransitionDelta(offer, preparation,
-                        successor.HostOrderKey, terminalRevision, TerminalReason.Superseded)); }
+                        terminalRevision, TerminalReason.Superseded)); }
                     catch { local = "authoritative terminal delta failed"; return false; }
                     _store.MarkTransitionDelta(offer);
                 }
@@ -959,7 +897,7 @@ namespace Multiplayer.Network.Sync
                     winner, SharedChoicePhase.EffectPending, prepared);
                 var entries = ledger.AllEntries.Select(x => x.Occurrence.Equals(occurrence)
                     ? new InboxEntry(x.Occurrence, x.Membership, x.Lifecycle, choice,
-                        x.LifecycleRevision, x.TombstoneRevision, x.HostOrderKey,
+                        x.LifecycleRevision, x.TombstoneRevision,
                         x.SuspensionReason, x.Checkpoint, x.TerminalReason)
                     : x).ToArray();
                 var next = new HostLedger(entries, checked(ledger.CommittedRevision + 1), ledger.Members);
@@ -1009,7 +947,7 @@ namespace Multiplayer.Network.Sync
                     SharedChoicePhase.EffectPending, new[] { nativeStep });
                 var entries = ledger.AllEntries.Select(x => x.Occurrence.Equals(occurrence)
                     ? new InboxEntry(x.Occurrence, x.Membership, x.Lifecycle, choice, x.LifecycleRevision,
-                        x.TombstoneRevision, x.HostOrderKey, x.SuspensionReason, x.Checkpoint, x.TerminalReason) : x).ToArray();
+                        x.TombstoneRevision, x.SuspensionReason, x.Checkpoint, x.TerminalReason) : x).ToArray();
                 var next = new HostLedger(entries, checked(ledger.CommittedRevision + 1), ledger.Members);
                 if (_store.CommitWithCanonical(ledger, next, canonical.WithDecision(candidate))) pending = candidate;
             }

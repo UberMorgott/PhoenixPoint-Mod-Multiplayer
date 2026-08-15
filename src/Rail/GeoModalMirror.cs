@@ -678,7 +678,7 @@ namespace Multiplayer.Network.Sync
                 checkpoint.NativeDataIdentity != DurableWindowRegistry.StableMissionSubject(mission)) return null;
             var request = new GeoscapeViewStateSwitchRequest(new UIStateGeoModal(modal, handler, mission), checkpoint.NativePriority)
                 { PauseGame = true };
-            WindowOrder.BindDurable(request, occurrence); return request;
+            WindowQueueSync.BindDurable(request, occurrence); return request;
         }
 
         /// <summary>THE DEFERRAL PREDICATE, and the whole reason <see cref="ModalParkQueue"/> exists: an
@@ -866,7 +866,7 @@ namespace Multiplayer.Network.Sync
                 var occurrence = DurableWindowRegistry.MatchPriorityOccurrence(DurableInboxSession.ActiveStore,
                     "Modal:" + (ModalType)p.ModalType, p.DurableTrigger, p.DurableSubject);
                 if (occurrence.HasValue && occurrence.Value.EventId != null)
-                    WindowOrder.BindDurable(request, occurrence.Value);
+                    WindowQueueSync.BindDurable(request, occurrence.Value);
             }
             MpLog.Log("[MP][modals] raised '" + name + "' seq=" + seq + " kind=" + p.Kind + " shape=" + p.Shape +
                       " priority=" + p.Priority + " data=" + (data == null ? "none" : data.GetType().Name));

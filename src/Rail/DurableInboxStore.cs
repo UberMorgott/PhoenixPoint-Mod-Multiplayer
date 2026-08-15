@@ -90,14 +90,13 @@ namespace Multiplayer.Network.Sync
                 bool valid; try { valid = validate(_ledger); } catch { return false; }
                 if (!valid || _ledger.CommittedRevision == ulong.MaxValue) return false;
                 ulong revision = _ledger.CommittedRevision + 1;
-                var successorOrder = new HostOrderKey(revision, successor.TriggerId);
                 var terminal = offers.Select(x => new InboxEntry(x.Occurrence, x.Membership,
                     InboxLifecycle.Removed, x.Choice, Math.Max(x.LifecycleRevision + 1, revision), revision,
-                    x.HostOrderKey, terminalReason: TerminalReason.Superseded, supersededBy: successor,
+                    terminalReason: TerminalReason.Superseded, supersededBy: successor,
                     predecessor: x.Predecessor)).ToArray();
                 var retained = _ledger.AllEntries.Where(x => !x.Occurrence.Equals(offer));
                 var fresh = _ledger.Members.Select(member => new InboxEntry(successor, member,
-                    InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, successorOrder,
+                    InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0,
                     predecessor: offer));
                 var next = new HostLedger(retained.Concat(terminal).Concat(fresh), revision, _ledger.Members);
                 if (!CommitWithCanonical(_ledger, next, null)) return false;
@@ -108,23 +107,21 @@ namespace Multiplayer.Network.Sync
         internal bool InstallDeploymentTransition(DeploymentTransitionDelta delta)
         {
             if (delta == null || delta.Reason != TerminalReason.Superseded ||
-                !delta.Order.TriggerId.Equals(delta.Preparation.TriggerId, StringComparison.Ordinal) ||
                 !delta.Preparation.SubjectIds.SequenceEqual(delta.Offer.SubjectIds, StringComparer.Ordinal)) return false;
             lock (_gate)
             {
                 var existing = _ledger.AllEntries.FirstOrDefault(x => x.Predecessor.HasValue &&
                     x.Predecessor.Value.Equals(delta.Offer));
-                if (existing != null) return existing.Occurrence.Equals(delta.Preparation) &&
-                    existing.HostOrderKey.Equals(delta.Order);
+                if (existing != null) return existing.Occurrence.Equals(delta.Preparation);
                 var offers = _ledger.AllEntries.Where(x => x.Occurrence.Equals(delta.Offer)).ToArray();
-                if (offers.Length == 0 || delta.Order.CampaignOrdinal > delta.TombstoneRevision) return false;
+                if (offers.Length == 0) return false;
                 ulong localRevision = checked(Math.Max(_ledger.CommittedRevision, delta.TombstoneRevision) + 1);
                 var terminal = offers.Select(x => new InboxEntry(x.Occurrence, x.Membership, InboxLifecycle.Removed,
                     x.Choice, Math.Max(x.LifecycleRevision + 1, delta.TombstoneRevision), delta.TombstoneRevision,
-                    x.HostOrderKey, terminalReason: delta.Reason, supersededBy: delta.Preparation,
+                    terminalReason: delta.Reason, supersededBy: delta.Preparation,
                     predecessor: x.Predecessor));
                 var fresh = _ledger.Members.Select(m => new InboxEntry(delta.Preparation, m,
-                    InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, delta.Order, predecessor: delta.Offer));
+                    InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, predecessor: delta.Offer));
                 var next = new HostLedger(_ledger.AllEntries.Where(x => !x.Occurrence.Equals(delta.Offer))
                     .Concat(terminal).Concat(fresh), localRevision, _ledger.Members);
                 return CommitWithCanonical(_ledger, next, null);
@@ -209,7 +206,7 @@ namespace Multiplayer.Network.Sync
                     candidate = plan.Terminal
                         ? candidate.ReplaceOccurrence(plan.Occurrence, x => new InboxEntry(x.Occurrence, x.Membership,
                             InboxLifecycle.Removed, x.Choice, Math.Max(x.LifecycleRevision + 1, revision), revision,
-                            x.HostOrderKey, terminalReason: TerminalReason.SourceInvalidated, predecessor: x.Predecessor,
+                            terminalReason: TerminalReason.SourceInvalidated, predecessor: x.Predecessor,
                             preparationRevision: x.PreparationRevision, preparationAuthorityRevision: revision))
                         : candidate.ReplaceOccurrence(plan.Occurrence, x => x.WithPreparationRevision(pair.Item2, revision));
                 }
@@ -266,7 +263,7 @@ namespace Multiplayer.Network.Sync
                     candidate = item.Terminal
                         ? candidate.ReplaceOccurrence(item.Occurrence, x => new InboxEntry(x.Occurrence, x.Membership,
                             InboxLifecycle.Removed, x.Choice, x.LifecycleRevision + 1,
-                            delta.AuthorityRevision, x.HostOrderKey, terminalReason: TerminalReason.SourceInvalidated,
+                            delta.AuthorityRevision, terminalReason: TerminalReason.SourceInvalidated,
                             predecessor: x.Predecessor, preparationRevision: x.PreparationRevision,
                             preparationAuthorityRevision: delta.AuthorityRevision))
                         : candidate.ReplaceOccurrence(item.Occurrence,
@@ -432,7 +429,7 @@ namespace Multiplayer.Network.Sync
                 if (!expected.Contains(decision.Occurrence)) return false;
                 var entries = expected.AllEntries.Select(x => x.Occurrence.Equals(decision.Occurrence)
                     ? new InboxEntry(x.Occurrence, x.Membership, x.Lifecycle, decision.Choice,
-                        x.LifecycleRevision, x.TombstoneRevision, x.HostOrderKey,
+                        x.LifecycleRevision, x.TombstoneRevision,
                         x.SuspensionReason, x.Checkpoint, x.TerminalReason) : x).ToArray();
                 // A peer installs the host's shared decision; it must not mint a host authority revision
                 // merely because its local read/open/dismiss lifecycle has moved further meanwhile.
@@ -476,7 +473,7 @@ namespace Multiplayer.Network.Sync
                     _ledger.CommittedRevision == 0) return false;
                 var entries = _ledger.AllEntries.Select(x => x.Occurrence.Equals(pending.Occurrence)
                     ? new InboxEntry(x.Occurrence, x.Membership, x.Lifecycle, default(CanonicalChoiceId),
-                        x.LifecycleRevision, x.TombstoneRevision, x.HostOrderKey, x.SuspensionReason,
+                        x.LifecycleRevision, x.TombstoneRevision, x.SuspensionReason,
                         x.Checkpoint, x.TerminalReason) : x).ToArray();
                 _ledger = DurableInboxReducer.CloneAndValidate(new HostLedger(entries,
                     _ledger.CommittedRevision - 1, _ledger.Members));

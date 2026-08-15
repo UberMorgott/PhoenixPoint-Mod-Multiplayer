@@ -36,7 +36,7 @@ namespace RailCheck
     ///       window off its own counter.
     ///   (b) <c>apply-publishes-no-ordinal</c> — IL: the inbound dispatch opens a
     ///       <c>RailOrdinal.Applying</c> scope. Without it arm (a) buys nothing: <c>Current</c> is 0 inside
-    ///       the apply too, and the inheritance in <c>ForNewWindow</c> never fires.
+    ///       the apply too, and nothing born inside the dispatch can read the applying ordinal.
     ///   (c) <c>route-does-not-decide-the-key</c>, EXECUTED POSITIVE CONTROL — read the production
     ///       <c>RailOrdinal.Current</c> down BOTH routes for one cause: inside the apply it must be the
     ///       applying ordinal, outside it must be 0. Arms (a) and (b) are IL claims about a route; this is
@@ -58,7 +58,7 @@ namespace RailCheck
     /// Falsify:
     ///   • delete the <c>ResearchSync.PumpDeferredCompletions</c> call from <c>UiEventMap.Fire</c> → (a)
     ///     [VERIFIED RED 2026-08-15, restored GREEN]
-    ///   • make <c>RailOrdinal.ForNewWindow</c> ignore <c>Current</c> → (c)+(d)
+    ///   • make <c>RailOrdinal.Applying</c> stop publishing <c>Current</c> → (c)+(d)
     ///     [VERIFIED RED 2026-08-15, restored GREEN]
     ///   • drop the <c>using (RailOrdinal.Applying(ordinal))</c> scope in <c>SurfaceRouter.OnInbound</c> → (b)
     ///     [not executed as a mutation: removing the scope also removes the only publisher of the ordinal
@@ -98,7 +98,7 @@ namespace RailCheck
             if (!Program.Callees(inbound, mod).Any(c => Same(c, applying)))
                 yield return "L511 apply-publishes-no-ordinal: SurfaceRouter.OnInbound no longer opens a " +
                              "RailOrdinal.Applying scope, so RailOrdinal.Current is 0 during the dispatch too " +
-                             "and ForNewWindow inherits nothing. Arm (a) would stay green while every mirrored " +
+                             "and nothing inherits the apply. Arm (a) would stay green while every mirrored " +
                              "window silently fell back to this peer's own counter.";
 
             // ── (c) POSITIVE CONTROL, EXECUTED: the route is what decides what an apply publishes ───────

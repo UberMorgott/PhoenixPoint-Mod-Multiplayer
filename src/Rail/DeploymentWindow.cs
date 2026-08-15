@@ -304,7 +304,7 @@ namespace Multiplayer.Network.Sync
             var view = GenericApplier.StartedGeoLevel()?.View;
             var query = view == null ? null : WindowQueueSync.SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
             OccurrenceId bound;
-            if (query != null && WindowOrder.TryGetDurable(WindowOrder.CurrentRequest(query), out bound) &&
+            if (query != null && WindowQueueSync.TryGetDurable(WindowOrder.CurrentRequest(query), out bound) &&
                 string.Equals(bound.EventId, "DeploymentPreparing", StringComparison.Ordinal))
             {
                 InboxEntry current;
@@ -321,7 +321,7 @@ namespace Multiplayer.Network.Sync
             occurrence = default(OccurrenceId);
             var view = GenericApplier.StartedGeoLevel()?.View;
             var query = view == null ? null : WindowQueueSync.SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
-            return query != null && WindowOrder.TryGetDurable(WindowOrder.CurrentRequest(query), out occurrence) &&
+            return query != null && WindowQueueSync.TryGetDurable(WindowOrder.CurrentRequest(query), out occurrence) &&
                 string.Equals(occurrence.EventId, "DeploymentPreparing", StringComparison.Ordinal);
         }
 
@@ -517,7 +517,7 @@ namespace Multiplayer.Network.Sync
                           "queue), so serving it later would open an empty screen with a dead START MISSION " +
                           "button. The mission itself is untouched");
                 OccurrenceId durableOccurrence;
-                if (WindowOrder.TryGetDurable(pending[i], out durableOccurrence))
+                if (WindowQueueSync.TryGetDurable(pending[i], out durableOccurrence))
                     WindowQueueSync.UntrackDurableNativeCarrier(pending[i], durableOccurrence);
                 pending.RemoveAt(i);
             }

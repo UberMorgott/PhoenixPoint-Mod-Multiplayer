@@ -16,9 +16,8 @@ namespace RailCheck
         {
             var memberA = new MembershipId("a"); var memberB = new MembershipId("b");
             var occurrence = new OccurrenceId("mission", "offer-7", new[] { "site" });
-            var order = new HostOrderKey(4, occurrence.TriggerId);
             InboxEntry Entry(MembershipId member, InboxLifecycle lifecycle, ulong tombstone) =>
-                new InboxEntry(occurrence, member, lifecycle, default(CanonicalChoiceId), 5, tombstone, order,
+                new InboxEntry(occurrence, member, lifecycle, default(CanonicalChoiceId), 5, tombstone,
                     terminalReason: tombstone == 0 ? (TerminalReason?)null : TerminalReason.Invalidated);
 
             var live = new DurableInboxStore(new HostLedger(new[]
@@ -63,7 +62,7 @@ namespace RailCheck
             };
             var otherOccurrence = new OccurrenceId("event", "other", new[] { "other-subject" });
             var otherStore = new DurableInboxStore(new HostLedger(new[] { new InboxEntry(otherOccurrence, memberA,
-                InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, new HostOrderKey(1, otherOccurrence.TriggerId)) }, 8));
+                InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0) }, 8));
             int otherRemoved = 0;
             var other = WindowQueueSync.BindNativePendingCarrier(otherStore, otherOccurrence, _ => otherRemoved++);
             var completed = EventPopup.BindDeferredCarrier(otherStore, otherOccurrence, _ => otherRemoved++);
@@ -93,9 +92,9 @@ namespace RailCheck
             var legacyUnknownLedger = new HostLedger(new[]
             {
                 new InboxEntry(occurrence, memberA, InboxLifecycle.Removed, default(CanonicalChoiceId),
-                    5, 5, order),
+                    5, 5),
                 new InboxEntry(occurrence, memberB, InboxLifecycle.Removed, default(CanonicalChoiceId),
-                    5, 5, order)
+                    5, 5)
             }, 8);
             var legacyUnknown = new DurableInboxStore(legacyUnknownLedger);
             if (new DurableInboxEngine(legacyUnknown, memberA, new FakeCarrier()).RemoveAllCarriers(
@@ -138,7 +137,7 @@ namespace RailCheck
 
             var swapOccurrence = new OccurrenceId("event", "swap", new[] { "subject" });
             var swapEntry = new InboxEntry(swapOccurrence, memberA, InboxLifecycle.Queued,
-                default(CanonicalChoiceId), 1, 0, new HostOrderKey(1, swapOccurrence.TriggerId));
+                default(CanonicalChoiceId), 1, 0);
             var oldStore = new DurableInboxStore(new HostLedger(new[] { swapEntry }, 1));
             int swapRemoved = 0;
             EventPopup.BindDeferredCarrier(oldStore, swapOccurrence, _ => swapRemoved++);
@@ -196,7 +195,7 @@ namespace RailCheck
         {
             var occurrence = new OccurrenceId("event", "abandon", new[] { "subject" });
             var entry = new InboxEntry(occurrence, member, InboxLifecycle.Queued,
-                default(CanonicalChoiceId), 1, 0, new HostOrderKey(1, occurrence.TriggerId));
+                default(CanonicalChoiceId), 1, 0);
             var oldStore = new DurableInboxStore(new HostLedger(new[] { entry }, 1));
             DurableInboxSession.ActiveStore = oldStore;
             int firstRemoved = 0, lateRemoved = 0, futureRemoved = 0;

@@ -13,10 +13,9 @@ namespace RailCheck
         {
             var a = new MembershipId("a"); var b = new MembershipId("b");
             var o = new OccurrenceId("Modal:GeoAmbushBrief", "cancel-local", new[] { "mission" });
-            var order = new HostOrderKey(1, o.TriggerId);
             var store = new DurableInboxStore(new HostLedger(new[] {
-                new InboxEntry(o,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0,order),
-                new InboxEntry(o,b,InboxLifecycle.Read,default(CanonicalChoiceId),1,0,order)},1,
+                new InboxEntry(o,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0),
+                new InboxEntry(o,b,InboxLifecycle.Read,default(CanonicalChoiceId),1,0)},1,
                 new[] { a,
                     b}));
             if (!WindowQueueSync.CancelDurableMissionOffer(store,a,o) ||
@@ -26,10 +25,8 @@ namespace RailCheck
             var arbitrary = new OccurrenceId("ordinary", "not-offer", new[] { "mission" });
             var prep = new OccurrenceId("DeploymentPreparing", "not-offer-prep", new[] { "mission" });
             var arbitraryStore = new DurableInboxStore(new HostLedger(new[] {
-                new InboxEntry(arbitrary,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0,
-                    new HostOrderKey(1,arbitrary.TriggerId)),
-                new InboxEntry(prep,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0,
-                    new HostOrderKey(2,prep.TriggerId))},2,
+                new InboxEntry(arbitrary,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0),
+                new InboxEntry(prep,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0)},2,
                 new[] { a}));
             if (WindowQueueSync.CancelDurableMissionOffer(arbitraryStore,a,arbitrary) ||
                 WindowQueueSync.CancelDurableMissionOffer(arbitraryStore,a,prep) ||
@@ -37,8 +34,8 @@ namespace RailCheck
                 yield return "L384 cancel-accepted-an-arbitrary-or-preparation-occurrence";
             var o2=new OccurrenceId("Modal:GeoAmbushBrief","second",new[]{"mission"});
             var multi=new DurableInboxStore(new HostLedger(new[]{
-                new InboxEntry(o,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0,order),
-                new InboxEntry(o2,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0,new HostOrderKey(2,o2.TriggerId))},2,
+                new InboxEntry(o,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0),
+                new InboxEntry(o2,a,InboxLifecycle.Open,default(CanonicalChoiceId),1,0)},2,
                 new[]{a}));
             if(!WindowQueueSync.DurableMissionOfferBindingMatches(multi,a,o,"mission")||
                 !WindowQueueSync.DurableMissionOfferBindingMatches(multi,a,o2,"mission")||

@@ -17,13 +17,12 @@ namespace RailCheck
         {
             var a=new MembershipId("a");var b=new MembershipId("b");
             var occurrence=new OccurrenceId("DeploymentPreparing","prep-edit",new[]{"S#8","M#8"});
-            var order=new HostOrderKey(1,occurrence.TriggerId);
             var checkpoint=new InboxWindowCheckpoint("deployment","U#4","roster");
             var members=new[]{a,
                 b};
             DurableInboxStore Make()=>new DurableInboxStore(new HostLedger(new[]{
-                new InboxEntry(occurrence,a,InboxLifecycle.Open,default(CanonicalChoiceId),2,0,order),
-                new InboxEntry(occurrence,b,InboxLifecycle.Suspended,default(CanonicalChoiceId),2,0,order,
+                new InboxEntry(occurrence,a,InboxLifecycle.Open,default(CanonicalChoiceId),2,0),
+                new InboxEntry(occurrence,b,InboxLifecycle.Suspended,default(CanonicalChoiceId),2,0,
                     InboxSuspensionReason.PriorityPreemption,checkpoint)},1,members));
 
             var host=Make();var peer=Make();PreparationEditDelta emitted=null;int native=0,repaints=0;
@@ -148,12 +147,15 @@ namespace RailCheck
                 yield return "L386 ledger-schema6-did-not-roundtrip-preparation-state";
             var ledgerBytes=host.Ledger.EncodeCanonical();
             var message=new InboxMessage(InboxMessageKind.TransportAck,occurrence,
-                new CanonicalResultId(occurrence,"r"),Array.Empty<CanonicalRewardItemId>(),a,order,2,0,
+                new CanonicalResultId(occurrence,"r"),Array.Empty<CanonicalRewardItemId>(),a,2,0,
                 InboxLifecycle.Open,default(CanonicalChoiceId));
             var messageBytes=DurableInboxCodec.Encode(message);InboxMessage ignoredMessage;
             var schema4=(byte[])messageBytes.Clone();schema4[0]=4;
-            if(ledgerBytes[4]!=6||messageBytes[0]!=5||DurableInboxCodec.TryDecode(schema4,out ignoredMessage,out refusal))
-                yield return "L386 message-v5-and-ledger-v6-schemas-were-not-split-or-schema4-was-accepted";
+            // Schemas bumped 2026-08-15 with L523 (5->6 message, 6->7 ledger): the host order key left both
+            // frames. Schema 4 is still refused — the point of the arm is that the two schemas are SEPARATE
+            // numbers, so a message frame can never be decoded as a ledger frame or vice versa.
+            if(ledgerBytes[4]!=7||messageBytes[0]!=6||DurableInboxCodec.TryDecode(schema4,out ignoredMessage,out refusal))
+                yield return "L386 message-v6-and-ledger-v7-schemas-were-not-split-or-schema4-was-accepted";
 
             var context=new DurablePreparationEditContext(occurrence,17);byte[] contextBytes;
             using(var ms=new MemoryStream()){using(var w=new BinaryWriter(ms,System.Text.Encoding.UTF8,true))DurablePreparationEditContext.Write(w,context);contextBytes=ms.ToArray();}

@@ -401,7 +401,7 @@ namespace Multiplayer.Network.Sync
                             ev.Record == null ? 0 : ev.Record.TriggerCount), Occurrence = occurrence });
                     var request = DurableWindowRegistry.LastQueuedRequest(r =>
                         r.State is UIStateGeoscapeEvent ui && ReferenceEquals(ui.Event, ev));
-                    if (request != null) WindowOrder.BindDurable(request, occurrence);
+                    if (request != null) WindowQueueSync.BindDurable(request, occurrence);
                 }
                 // MISSION UNICAST: a mission start confirmation reaches only the peer whose vehicle triggered
                 // it. The host's own vehicle: no broadcast (the host already has the window natively). A
@@ -963,7 +963,7 @@ namespace Multiplayer.Network.Sync
             // 2026-08-10: UIStateGeoscapeEvent entered 4x on the host and 0x on both clients, with the wait
             // line repeating every frame for the whole session. Enrol it instead, from the raise, using the
             // SAME OccurrenceId the host builds from the same seq and subjects, so everything downstream
-            // (WindowOrder.BindDurable at :741, RestoreSuspended, the carrier leases) gets the entry it
+            // (WindowQueueSync.BindDurable at :741, RestoreSuspended, the carrier leases) gets the entry it
             // expects. Idempotent by construction: EnqueuePriorityOccurrence:243 returns false when the
             // occurrence is already present, so a re-delivered raise adds nothing.
             if (durableStore == null)
@@ -1020,7 +1020,7 @@ namespace Multiplayer.Network.Sync
             // any peer may resume at any time, first-to-act-wins, and no peer's window vetoes that.
             { PauseGame = true };
             q.QueryStateSwitch(request);
-            WindowOrder.BindDurable(request, durableOccurrence);
+            WindowQueueSync.BindDurable(request, durableOccurrence);
             MpLog.Log("[MP][events] raised '" + p.EventId + "' seq=" + seq + " priority=" + p.Priority + " site=" +
                       (site == null ? "none" : site.SiteId.ToString()) +
                       " vehicle=" + (vehicle == null ? "none" : vehicle.VehicleID.ToString()) +
@@ -1292,7 +1292,7 @@ namespace Multiplayer.Network.Sync
             var shown = WithWireTexts(data, checkpoint.Title, checkpoint.Narrative);
             var state = new UIStateGeoscapeEvent(new GeoscapeEvent(shown, context) { Record = record });
             var request = new GeoscapeViewStateSwitchRequest(state, checkpoint.NativePriority) { PauseGame = true };
-            WindowOrder.BindDurable(request, occurrence); return request;
+            WindowQueueSync.BindDurable(request, occurrence); return request;
         }
 
         /// <summary>Is the dialog showing the REAL event's choice buttons, or one of the module's own

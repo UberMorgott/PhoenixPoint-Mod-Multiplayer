@@ -225,8 +225,7 @@ namespace RailCheck
             else
             {
                 var entry = new InboxEntry(new OccurrenceId("event:X", "t", new[] { "event:X" }),
-                    new MembershipId("someone-else"), InboxLifecycle.Open, default(CanonicalChoiceId), 7, 0,
-                    new HostOrderKey(1, "t"));
+                    new MembershipId("someone-else"), InboxLifecycle.Open, default(CanonicalChoiceId), 7, 0);
                 Func<bool, InboxEntry, ulong, string> gate = (knows, e, rev) =>
                     (string)refusal.Invoke(null, new object[] { knows, e, rev });
                 if (gate(false, null, 7UL) != null)

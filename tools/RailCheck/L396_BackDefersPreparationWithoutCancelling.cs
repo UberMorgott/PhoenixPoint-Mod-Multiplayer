@@ -22,14 +22,13 @@ namespace RailCheck
             var member = new MembershipId("player");
             var occurrence = new OccurrenceId("DeploymentPreparing", "back", new[] { "S#4", "M#4" });
             var predecessor = new OccurrenceId("Modal:GeoScavengeBrief", "offer", new[] { "S#4", "M#4" });
-            var order = new HostOrderKey(1, occurrence.TriggerId);
             var members = new[] { member };
             DurableInboxStore Make(InboxLifecycle lifecycle = InboxLifecycle.Open, ulong preparation = 3) =>
                 new DurableInboxStore(new HostLedger(new[] {
                     new InboxEntry(predecessor, member, InboxLifecycle.Removed, default(CanonicalChoiceId), 1, 1,
-                        new HostOrderKey(1, predecessor.TriggerId), terminalReason: TerminalReason.Superseded,
+                        terminalReason: TerminalReason.Superseded,
                         supersededBy: occurrence),
-                    new InboxEntry(occurrence, member, lifecycle, default(CanonicalChoiceId), 2, 0, order,
+                    new InboxEntry(occurrence, member, lifecycle, default(CanonicalChoiceId), 2, 0,
                         predecessor: predecessor, preparationRevision: preparation, preparationAuthorityRevision: 1)
                 }, 1, members));
 
@@ -43,8 +42,7 @@ namespace RailCheck
                 yield return "L396 deferred-preparation-reopened-in-the-same-tick";
 
             var ack = new InboxMessage(InboxMessageKind.TransportAck, occurrence,
-                new CanonicalResultId(occurrence, "result"), Array.Empty<CanonicalRewardItemId>(), member,
-                order, 99, 0, InboxLifecycle.Open, default(CanonicalChoiceId));
+                new CanonicalResultId(occurrence, "result"), Array.Empty<CanonicalRewardItemId>(), member, 99, 0, InboxLifecycle.Open, default(CanonicalChoiceId));
             var churn = DurableInboxReducer.Apply(store.Ledger, InboxCommand.FromMessage(ack));
             if (churn.Changed || churn.Ledger.Get(occurrence, member).Lifecycle != InboxLifecycle.Deferred)
                 yield return "L396 active-transport-churn-cleared-local-deferral";
@@ -84,15 +82,13 @@ namespace RailCheck
                 otherMember };
             var perPlayer = new DurableInboxStore(new HostLedger(new[] {
                 new InboxEntry(predecessor, member, InboxLifecycle.Removed, default(CanonicalChoiceId), 1, 1,
-                    new HostOrderKey(1, predecessor.TriggerId), terminalReason: TerminalReason.Superseded,
+                    terminalReason: TerminalReason.Superseded,
                     supersededBy: occurrence),
                 new InboxEntry(predecessor, otherMember, InboxLifecycle.Removed, default(CanonicalChoiceId), 1, 1,
-                    new HostOrderKey(1, predecessor.TriggerId), terminalReason: TerminalReason.Superseded,
+                    terminalReason: TerminalReason.Superseded,
                     supersededBy: occurrence),
-                new InboxEntry(occurrence, member, InboxLifecycle.Deferred, default(CanonicalChoiceId), 3, 0,
-                    order, predecessor: predecessor),
-                new InboxEntry(occurrence, otherMember, InboxLifecycle.Deferred, default(CanonicalChoiceId), 3, 0,
-                    order, predecessor: predecessor)
+                new InboxEntry(occurrence, member, InboxLifecycle.Deferred, default(CanonicalChoiceId), 3, 0, predecessor: predecessor),
+                new InboxEntry(occurrence, otherMember, InboxLifecycle.Deferred, default(CanonicalChoiceId), 3, 0, predecessor: predecessor)
             }, 3, twoMembers));
             if (!DeploymentWindowClose.TryReenterDeferredForMission(perPlayer, member, "M#4", out rebound) ||
                 perPlayer.Ledger.Get(occurrence, member).Lifecycle != InboxLifecycle.Queued ||
@@ -112,9 +108,9 @@ namespace RailCheck
             var secondPredecessor = new OccurrenceId("Modal:GeoScavengeBrief", "offer-second", new[] { "M#4" });
             var ambiguousEntry = new InboxEntry(secondOccurrence,
                 member, InboxLifecycle.Deferred, default(CanonicalChoiceId), 2, 0,
-                new HostOrderKey(2, "second"), predecessor: secondPredecessor);
+                predecessor: secondPredecessor);
             var secondOffer = new InboxEntry(secondPredecessor, member, InboxLifecycle.Removed,
-                default(CanonicalChoiceId), 1, 1, new HostOrderKey(2, secondPredecessor.TriggerId),
+                default(CanonicalChoiceId), 1, 1,
                 terminalReason: TerminalReason.Superseded, supersededBy: secondOccurrence);
             var ambiguous = new DurableInboxStore(new HostLedger(Make(InboxLifecycle.Deferred).Ledger.AllEntries
                 .Concat(new[] { secondOffer, ambiguousEntry }), 3, members));
@@ -136,7 +132,7 @@ namespace RailCheck
             var checkpoint = new InboxWindowCheckpoint("deployment", "U#7", "roster");
             var checkpointBase = Make().Ledger;
             var checkpointOpen = new InboxEntry(occurrence, member, InboxLifecycle.Open,
-                default(CanonicalChoiceId), 2, 0, order, checkpoint: checkpoint, predecessor: predecessor,
+                default(CanonicalChoiceId), 2, 0, checkpoint: checkpoint, predecessor: predecessor,
                 preparationRevision: 3, preparationAuthorityRevision: 1);
             var checkpointStore = new DurableInboxStore(new HostLedger(checkpointBase.AllEntries.Select(x =>
                 x.Occurrence.Equals(occurrence) ? checkpointOpen : x), checkpointBase.CommittedRevision,
@@ -214,12 +210,11 @@ namespace RailCheck
             var ordinary = new OccurrenceId("OrdinaryNotice", "after-prep", new[] { "notice" });
             var mixed = new DurableInboxStore(new HostLedger(new[] {
                 new InboxEntry(predecessor, member, InboxLifecycle.Removed, default(CanonicalChoiceId), 1, 1,
-                    new HostOrderKey(1, predecessor.TriggerId), terminalReason: TerminalReason.Superseded,
+                    terminalReason: TerminalReason.Superseded,
                     supersededBy: occurrence),
                 new InboxEntry(occurrence, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 2, 0,
-                    new HostOrderKey(1, occurrence.TriggerId), predecessor: predecessor),
-                new InboxEntry(ordinary, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0,
-                    new HostOrderKey(2, ordinary.TriggerId))
+                    predecessor: predecessor),
+                new InboxEntry(ordinary, member, InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0)
             }, 2, members));
             var mixedCarrier = new ProbeCarrier();
             if (!new DurableInboxEngine(mixed, member, mixedCarrier)

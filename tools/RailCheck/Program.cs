@@ -355,7 +355,6 @@ namespace RailCheck
             Add(laws, () => L391_ALifecycleRevisionNeverRunsBackward.Check());
             Add(laws, () => L395_TerminalRemovalReachesEveryCarrier.Check());
             Add(laws, () => L396_BackDefersPreparationWithoutCancelling.Check());
-            Add(laws, () => L380_APriorityWindowSuspendsBeforeItPreempts.Check());
             Add(laws, () => L382_AChoiceLockRetainsEveryPlayersWindow.Check());
             Add(laws, () => L384_ACancelledOfferStaysLocal.Check());
             Add(laws, () => L385_AStartCreatesOneSharedPreparation.Check());
@@ -370,7 +369,6 @@ namespace RailCheck
             Add(laws, () => L403_TheLobbyStartsItselfAndACancelUnreadiesWhoPressedIt.Check());
             Add(laws, () => L404_AMissionStartConfirmationIsAnsweredPerPeerAndNeverFrozen.Check());
             Add(laws, () => L405_AConfirmedMissionStartLaunchesExactlyOnce.Check());
-            Add(laws, () => L406_AConfirmPutsThePreparationWindowFirstForEveryPeer.Check());
             Add(laws, () => L407_PostMissionResupplyIsFirstAndAsksOnAnEdge.Check());
             Add(laws, () => L408_AFailedPrepareLeavesTheLocalCampaignsIdentity.Check());
             Add(laws, () => L409_ASharedAnswerChargesTheWalletOnce.Check());
@@ -425,7 +423,7 @@ namespace RailCheck
             Add(laws, () => L491_AGetterMintedTwinResolvesOntoItsLiveOwner.Check());
             Add(laws, () => L497_TheCrewBarsRepaintOnAMirroredStat.Check());
             Add(laws, () => L495_TheDrainGateAsksTheViewItIsGating.Check());
-            Add(laws, () => L496_OnePresentationPolicyForAWindowEveryPeerGets.Check());
+            Add(laws, () => L523_DurableIsAnswerOnceNotOrdering.Check());
             Add(laws, () => L498_TheInfoBarRepaintsOnlyWhenWhatItDrawsChanges.Check());
             Add(laws, () => L500_AStructuralCreateWiresOnlyAfterItsValuesLand.Check());
             Add(laws, () => L501_ARefusalNoticeIsThePlayersSentenceSaidOnce.Check());
@@ -487,8 +485,14 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 338;
-        // Updated deliberately 2026-08-15: L522 (a client never sorts a window queue) was ADDED and L507
+        private const int ExpectedLawRegistrations = 336;
+        // Updated deliberately 2026-08-15: L523 (durable means answered exactly once, not ordered) was
+        // ADDED and THREE laws were RETIRED in the same commit — 338 -> 336. L496 asserted that the two
+        // presentation gates AGREE instead of that there is one gate, i.e. it legitimised the duplicate
+        // (R7). L380 (a priority window suspends before it preempts) and L406 (a confirm puts the
+        // preparation window first) were laws ABOUT the second ordering system: suspend/resume preemption
+        // and DurableWindowRegistry.PriorityOf are deleted, so both premises are gone and neither can be
+        // re-pointed. Earlier the same day: L522 (a client never sorts a window queue) was ADDED and L507
         // (the provisional WINDOW ordinal is back-filled) was RETIRED in the same commit — the count is
         // unchanged at 338, the identity SET is not. L507's whole subject was WindowOrder.Stamp/StampAt and
         // the per-request order key they wrote; those members are deleted, the client no longer sorts at
@@ -503,7 +507,7 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "e35d6b4e36133e6bf83d31dd72bc78d35b2bd8643131c4acdb93eedbb4db7c22";
+        private const string ExpectedExecutionIdentityDigest = "94f4a4d79d64e88d041b71e0ad2af1b427e86c2e9a013b0e36e6336fcf1a78ef";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

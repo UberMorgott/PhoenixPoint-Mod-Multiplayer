@@ -94,26 +94,6 @@ namespace Multiplayer.Network.Sync
         }
     }
 
-    internal readonly struct HostOrderKey : IEquatable<HostOrderKey>, IComparable<HostOrderKey>
-    {
-        internal readonly ulong CampaignOrdinal;
-        internal readonly string TriggerId;
-        internal HostOrderKey(ulong campaignOrdinal, string triggerId)
-        {
-            CampaignOrdinal = campaignOrdinal;
-            TriggerId = InboxIdentity.Required(triggerId, nameof(triggerId));
-        }
-        public bool Equals(HostOrderKey other) => CampaignOrdinal == other.CampaignOrdinal &&
-            string.Equals(TriggerId, other.TriggerId, StringComparison.Ordinal);
-        public override bool Equals(object obj) => obj is HostOrderKey other && Equals(other);
-        public override int GetHashCode() => InboxIdentity.Hash(CampaignOrdinal, TriggerId);
-        public int CompareTo(HostOrderKey other)
-        {
-            int value = CampaignOrdinal.CompareTo(other.CampaignOrdinal);
-            return value != 0 ? value : string.Compare(TriggerId, other.TriggerId, StringComparison.Ordinal);
-        }
-    }
-
     internal readonly struct CanonicalChoiceId : IEquatable<CanonicalChoiceId>, IComparable<CanonicalChoiceId>
     {
         internal readonly OccurrenceId Occurrence;
@@ -336,21 +316,18 @@ namespace Multiplayer.Network.Sync
         internal CanonicalResultId ResultId { get; }
         internal IReadOnlyList<CanonicalRewardItemId> RewardIds { get; }
         internal MembershipId Membership { get; }
-        internal HostOrderKey Order { get; }
         internal ulong LifecycleRevision { get; }
         internal ulong TombstoneRevision { get; }
         internal InboxLifecycle Lifecycle { get; }
         internal CanonicalChoiceId ChoiceId { get; }
 
         internal InboxMessage(InboxMessageKind kind, OccurrenceId occurrence, CanonicalResultId resultId,
-            IEnumerable<CanonicalRewardItemId> rewardIds, MembershipId membership, HostOrderKey order,
+            IEnumerable<CanonicalRewardItemId> rewardIds, MembershipId membership,
             ulong lifecycleRevision, ulong tombstoneRevision, InboxLifecycle lifecycle, CanonicalChoiceId choiceId)
         {
             if (!Enum.IsDefined(typeof(InboxMessageKind), kind)) throw new ArgumentOutOfRangeException(nameof(kind));
             if (!Enum.IsDefined(typeof(InboxLifecycle), lifecycle)) throw new ArgumentOutOfRangeException(nameof(lifecycle));
             if (!resultId.Occurrence.Equals(occurrence)) throw new ArgumentException("foreign result namespace", nameof(resultId));
-            if (!string.Equals(order.TriggerId, occurrence.TriggerId, StringComparison.Ordinal))
-                throw new ArgumentException("foreign order namespace", nameof(order));
             if (choiceId.Value != null && !choiceId.Occurrence.Equals(occurrence))
                 throw new ArgumentException("foreign choice namespace", nameof(choiceId));
             var rewards = (rewardIds ?? throw new ArgumentNullException(nameof(rewardIds))).ToArray();
@@ -364,7 +341,6 @@ namespace Multiplayer.Network.Sync
             ResultId = resultId;
             RewardIds = new ReadOnlyCollection<CanonicalRewardItemId>(rewards);
             Membership = membership;
-            Order = order;
             LifecycleRevision = lifecycleRevision;
             TombstoneRevision = tombstoneRevision;
             Lifecycle = lifecycle;
@@ -381,7 +357,6 @@ namespace Multiplayer.Network.Sync
         internal ulong LifecycleRevision { get; }
         internal ulong TombstoneRevision { get; }
         internal TerminalReason? TerminalReason { get; }
-        internal HostOrderKey HostOrderKey { get; }
         internal InboxSuspensionReason SuspensionReason { get; }
         internal InboxWindowCheckpoint Checkpoint { get; }
         internal OccurrenceId? SupersededBy { get; }
@@ -389,16 +364,14 @@ namespace Multiplayer.Network.Sync
         internal ulong PreparationRevision { get; }
         internal ulong PreparationAuthorityRevision { get; }
         internal InboxEntry(OccurrenceId occurrence, MembershipId membership, InboxLifecycle lifecycle,
-            CanonicalChoiceId choice, ulong lifecycleRevision, ulong tombstoneRevision, HostOrderKey hostOrderKey,
+            CanonicalChoiceId choice, ulong lifecycleRevision, ulong tombstoneRevision,
             InboxSuspensionReason suspensionReason = InboxSuspensionReason.None,
             InboxWindowCheckpoint checkpoint = null, TerminalReason? terminalReason = null,
             OccurrenceId? supersededBy = null, OccurrenceId? predecessor = null,
             ulong preparationRevision = 0, ulong preparationAuthorityRevision = 0)
         {
-            if (!string.Equals(hostOrderKey.TriggerId, occurrence.TriggerId, StringComparison.Ordinal))
-                throw new ArgumentException("foreign order namespace", nameof(hostOrderKey));
             Occurrence = occurrence; Membership = membership; Lifecycle = lifecycle; Choice = choice;
-            LifecycleRevision = lifecycleRevision; TombstoneRevision = tombstoneRevision; HostOrderKey = hostOrderKey;
+            LifecycleRevision = lifecycleRevision; TombstoneRevision = tombstoneRevision;
             if (terminalReason.HasValue && !Enum.IsDefined(typeof(TerminalReason), terminalReason.Value))
                 throw new ArgumentOutOfRangeException(nameof(terminalReason));
             if (terminalReason.HasValue && (lifecycle != InboxLifecycle.Removed || tombstoneRevision == 0))
@@ -423,22 +396,22 @@ namespace Multiplayer.Network.Sync
         internal InboxEntry WithLifecycle(InboxLifecycle lifecycle, ulong revision) =>
             lifecycle == InboxLifecycle.Suspended
                 ? new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision,
-                    HostOrderKey, SuspensionReason, Checkpoint, predecessor: Predecessor,
+                    SuspensionReason, Checkpoint, predecessor: Predecessor,
                     preparationRevision: PreparationRevision, preparationAuthorityRevision: PreparationAuthorityRevision)
-                : new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision, HostOrderKey,
+                : new InboxEntry(Occurrence, Membership, lifecycle, Choice, revision, TombstoneRevision,
                     terminalReason: TerminalReason, supersededBy: SupersededBy, predecessor: Predecessor,
                     preparationRevision: PreparationRevision, preparationAuthorityRevision: PreparationAuthorityRevision);
         internal InboxEntry Suspend(InboxSuspensionReason reason, InboxWindowCheckpoint checkpoint, ulong revision) =>
             new InboxEntry(Occurrence, Membership, InboxLifecycle.Suspended, Choice, revision, TombstoneRevision,
-                HostOrderKey, reason, checkpoint, predecessor: Predecessor,
+                reason, checkpoint, predecessor: Predecessor,
                 preparationRevision: PreparationRevision, preparationAuthorityRevision: PreparationAuthorityRevision);
         internal InboxEntry Defer(ulong revision) =>
             new InboxEntry(Occurrence, Membership, InboxLifecycle.Deferred, Choice, revision, TombstoneRevision,
-                HostOrderKey, checkpoint: Checkpoint, predecessor: Predecessor,
+                checkpoint: Checkpoint, predecessor: Predecessor,
                 preparationRevision: PreparationRevision, preparationAuthorityRevision: PreparationAuthorityRevision);
         internal InboxEntry RestoreDeferred(ulong revision) =>
             new InboxEntry(Occurrence, Membership, InboxLifecycle.Open, Choice, revision, TombstoneRevision,
-                HostOrderKey, checkpoint: Checkpoint, predecessor: Predecessor,
+                checkpoint: Checkpoint, predecessor: Predecessor,
                 preparationRevision: PreparationRevision, preparationAuthorityRevision: PreparationAuthorityRevision);
         internal InboxEntry WithPreparationRevision(ulong revision, ulong authorityRevision = 0) =>
             new InboxEntry(Occurrence, Membership,
@@ -446,7 +419,7 @@ namespace Multiplayer.Network.Sync
                     ? InboxLifecycle.Queued : Lifecycle,
                 Choice, Lifecycle == InboxLifecycle.Deferred && revision > PreparationRevision
                     ? checked(LifecycleRevision + 1) : LifecycleRevision, TombstoneRevision,
-                HostOrderKey, SuspensionReason, Checkpoint, TerminalReason, SupersededBy, Predecessor,
+                SuspensionReason, Checkpoint, TerminalReason, SupersededBy, Predecessor,
                 revision, authorityRevision == 0 ? PreparationAuthorityRevision : authorityRevision);
     }
 
@@ -460,10 +433,6 @@ namespace Multiplayer.Network.Sync
             var copy = (entries ?? throw new ArgumentNullException(nameof(entries))).ToArray();
             if (copy.GroupBy(e => Tuple.Create(e.Occurrence, e.Membership)).Any(g => g.Count() != 1))
                 throw new ArgumentException("duplicate ledger entry", nameof(entries));
-            if (copy.GroupBy(e => e.Occurrence).Any(g => g.Select(e => e.HostOrderKey).Distinct().Count() != 1))
-                throw new ArgumentException("occurrence has inconsistent host order", nameof(entries));
-            if (copy.Any(e => e.HostOrderKey.CampaignOrdinal > committedRevision))
-                throw new ArgumentException("host order exceeds committed revision", nameof(entries));
             foreach (var successorGroup in copy.Where(e => e.Predecessor.HasValue).GroupBy(e => e.Occurrence))
             {
                 var predecessors = successorGroup.Select(e => e.Predecessor.Value).Distinct().ToArray();
@@ -493,7 +462,10 @@ namespace Multiplayer.Network.Sync
         internal IReadOnlyList<InboxEntry> AllEntries => _entries;
         internal IReadOnlyCollection<MembershipId> Members => _members;
         internal IReadOnlyList<InboxEntry> EntriesFor(MembershipId member) => new ReadOnlyCollection<InboxEntry>(
-            _entries.Where(e => e.Membership.Equals(member)).OrderBy(e => e.HostOrderKey).ThenBy(e => e.Occurrence).ToArray());
+            // NOT A PRESENTATION ORDER (L523). The ledger answers "has this been answered", never "what
+            // comes next"; Occurrence is a stable, role-independent enumeration key so two peers walking
+            // the same ledger walk it the same way. Presentation order is the host journal position.
+            _entries.Where(e => e.Membership.Equals(member)).OrderBy(e => e.Occurrence).ToArray());
         internal bool Contains(OccurrenceId occurrence) => _entries.Any(e => e.Occurrence.Equals(occurrence));
         internal InboxEntry Get(OccurrenceId occurrence, MembershipId member) =>
             _entries.Single(e => e.Occurrence.Equals(occurrence) && e.Membership.Equals(member));
@@ -530,9 +502,8 @@ namespace Multiplayer.Network.Sync
             {
                 if (_occurrences.Contains(occurrence)) return false;
                 var committedRevision = checked(CommittedRevision + 1);
-                var order = new HostOrderKey(committedRevision, occurrence.TriggerId);
                 var additions = _members.Select(member => new InboxEntry(occurrence, member,
-                    InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0, order)).ToArray();
+                    InboxLifecycle.Queued, default(CanonicalChoiceId), 1, 0)).ToArray();
                 var ledger = new HostLedger(Ledger.AllEntries.Concat(additions), committedRevision, _members);
                 _occurrences.Add(occurrence);
                 Ledger = ledger;
@@ -568,7 +539,7 @@ namespace Multiplayer.Network.Sync
                     if (revision <= entry.TombstoneRevision) return entry;
                     changed = true;
                     return new InboxEntry(entry.Occurrence, entry.Membership, InboxLifecycle.Removed,
-                        entry.Choice, Math.Max(entry.LifecycleRevision, revision), revision, entry.HostOrderKey,
+                        entry.Choice, Math.Max(entry.LifecycleRevision, revision), revision,
                         terminalReason: reason, predecessor: entry.Predecessor);
                 });
                 if (!changed) return false;

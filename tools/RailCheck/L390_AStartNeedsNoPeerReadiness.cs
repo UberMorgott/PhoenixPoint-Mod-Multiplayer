@@ -21,14 +21,14 @@ namespace RailCheck
             var member=new MembershipId("afk"); var offer=new OccurrenceId("Modal:GeoAmbushBrief","o",new[]{"m"});
             var prep=new OccurrenceId("DeploymentPreparing","p",new[]{"m"});
             var store=new DurableInboxStore(new HostLedger(new[]{new InboxEntry(offer,member,InboxLifecycle.Open,
-                default(CanonicalChoiceId),1,0,new HostOrderKey(1,offer.TriggerId))},1,
+                default(CanonicalChoiceId),1,0)},1,
                 new[]{member}));
             var carrier=new Carrier(); store.Carriers.Register(offer,DurableCarrierClass.NativeCurrent,carrier); int deltas=0; string refusal;
             if(!new DurableMissionOfferEngine(store,_=>deltas++).TryStart(offer,prep,_=>true,out refusal)||
                 carrier.Removed!=1||deltas!=1||refusal!=null)
                 yield return "L390 committed-start-did-not-close-and-repaint-terminal-predecessor";
             var retryStore=new DurableInboxStore(new HostLedger(new[]{new InboxEntry(offer,member,InboxLifecycle.Open,
-                default(CanonicalChoiceId),1,0,new HostOrderKey(1,offer.TriggerId))},1,
+                default(CanonicalChoiceId),1,0)},1,
                 new[]{member}));
             var flaky=new Carrier{Throws=1}; retryStore.Carriers.Register(offer,DurableCarrierClass.NativeCurrent,flaky);
             int retryDeltas=0; var retryEngine=new DurableMissionOfferEngine(retryStore,d=>retryDeltas++);
@@ -38,11 +38,13 @@ namespace RailCheck
             if(!retryEngine.TryStart(offer,prep,_=>true,out refusal)||retryDeltas!=1||flaky.Removed!=1||
                 retryStore.Carriers.Count(offer)!=0)
                 yield return "L390 bounded-teardown-retry-reemitted-delta-or-did-not-remove-carrier";
-            var terminal=retryStore.Ledger.Get(offer,member); var successor=retryStore.Ledger.Get(prep,member);
-            var delta=new DeploymentTransitionDelta(offer,prep,successor.HostOrderKey,terminal.TombstoneRevision,TerminalReason.Superseded);
+            var terminal=retryStore.Ledger.Get(offer,member);
+            var delta=new DeploymentTransitionDelta(offer,prep,terminal.TombstoneRevision,TerminalReason.Superseded);
             DeploymentTransitionDelta decoded; string decodeWhy; if(!DurableInboxCodec.TryDecodeDeploymentTransition(
                 DurableInboxCodec.EncodeDeploymentTransition(delta),out decoded,out decodeWhy)||!decoded.Offer.Equals(offer)||
-                !decoded.Preparation.Equals(prep)||!decoded.Order.Equals(successor.HostOrderKey)||
+                // AMPUTATED 2026-08-15 (L523): DeploymentTransitionDelta.Order is gone with the second
+                // ordering system; the round-trip still proves offer, preparation and reason survive it.
+                !decoded.Preparation.Equals(prep)||
                 decoded.Reason!=TerminalReason.Superseded)
                 yield return "L390 authoritative-occurrence-terminal-delta-did-not-roundtrip";
             var inner=DurableInboxCodec.EncodeDeploymentTransition(delta);

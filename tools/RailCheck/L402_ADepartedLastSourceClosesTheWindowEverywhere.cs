@@ -69,10 +69,9 @@ namespace RailCheck
 
             // ── outcome: last source gone closes it for EVERY membership, with the carrier torn down ──
             var members = new[] { new MembershipId("host"), new MembershipId("client") };
-            var order = new HostOrderKey(1, deployment.TriggerId);
             var ledger = new HostLedger(new[] {
-                new InboxEntry(deployment, members[0], InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0, order),
-                new InboxEntry(deployment, members[1], InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0, order)
+                new InboxEntry(deployment, members[0], InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0),
+                new InboxEntry(deployment, members[1], InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0)
             }, 1, members);
             var onlySource = new DeploymentSourceSnapshot(new Dictionary<string, IEnumerable<string>> {
                 [vehicle] = new[] { "U#1" } });

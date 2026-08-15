@@ -29,7 +29,6 @@ namespace RailCheck
             var a = new MembershipId("a"); var b = new MembershipId("b");
             var c = new MembershipId("c"); var d = new MembershipId("d");
             var occurrence = new OccurrenceId("DeploymentPreparing", "depart", new[] { "S#7", "M#7" });
-            var order = new HostOrderKey(1, occurrence.TriggerId);
             var checkpoint = new InboxWindowCheckpoint("deployment", "U#1", "read");
             var members = new[] {
                 a,
@@ -37,11 +36,11 @@ namespace RailCheck
                 c,
                 d };
             DurableInboxStore Make() => new DurableInboxStore(new HostLedger(new[] {
-                new InboxEntry(occurrence, a, InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0, order),
-                new InboxEntry(occurrence, b, InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0, order),
-                new InboxEntry(occurrence, c, InboxLifecycle.Suspended, default(CanonicalChoiceId), 2, 0, order,
+                new InboxEntry(occurrence, a, InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0),
+                new InboxEntry(occurrence, b, InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0),
+                new InboxEntry(occurrence, c, InboxLifecycle.Suspended, default(CanonicalChoiceId), 2, 0,
                     InboxSuspensionReason.PriorityPreemption, checkpoint),
-                new InboxEntry(occurrence, d, InboxLifecycle.Deferred, default(CanonicalChoiceId), 2, 0, order)
+                new InboxEntry(occurrence, d, InboxLifecycle.Deferred, default(CanonicalChoiceId), 2, 0)
             }, 1, members));
             var before = new DeploymentSourceSnapshot(new Dictionary<string, IEnumerable<string>> {
                 ["V#1"] = new[] { "U#1", "U#2" }, ["V#2"] = new[] { "U#3" } });
@@ -160,14 +159,13 @@ namespace RailCheck
                 yield return "L388 client-local-ledger-revision-was-confused-with-host-authority-watermark";
 
             var sibling = new OccurrenceId("DeploymentPreparing", "depart-sibling", new[] { "S#7", "M#7" });
-            var siblingOrder = new HostOrderKey(1, sibling.TriggerId);
             var batchMembers = members.Take(2).ToArray();
             DurableInboxStore BatchStore() => new DurableInboxStore(new HostLedger(new[] {
-                new InboxEntry(occurrence,a,InboxLifecycle.Open,default(CanonicalChoiceId),2,0,order),
-                new InboxEntry(occurrence,b,InboxLifecycle.Queued,default(CanonicalChoiceId),2,0,order),
-                new InboxEntry(sibling,a,InboxLifecycle.Suspended,default(CanonicalChoiceId),2,0,siblingOrder,
+                new InboxEntry(occurrence,a,InboxLifecycle.Open,default(CanonicalChoiceId),2,0),
+                new InboxEntry(occurrence,b,InboxLifecycle.Queued,default(CanonicalChoiceId),2,0),
+                new InboxEntry(sibling,a,InboxLifecycle.Suspended,default(CanonicalChoiceId),2,0,
                     InboxSuspensionReason.PriorityPreemption,checkpoint),
-                new InboxEntry(sibling,b,InboxLifecycle.Deferred,default(CanonicalChoiceId),2,0,siblingOrder)
+                new InboxEntry(sibling,b,InboxLifecycle.Deferred,default(CanonicalChoiceId),2,0)
             },1,batchMembers));
             var plans = new[] { new SourceRevalidationPlan(occurrence,"V#1",before,after,false),
                 new SourceRevalidationPlan(sibling,"V#1",before,after,false) };
@@ -264,7 +262,7 @@ namespace RailCheck
                 yield return "L388 client-generation-saturation-evicted-a-potentially-buffered-token";
             DepartureGenerationRail.Clear(); GenericApplier.ClearDepartureWatermarks();
 
-            var maxPrepEntry=new InboxEntry(occurrence,a,InboxLifecycle.Open,default(CanonicalChoiceId),2,0,order,
+            var maxPrepEntry=new InboxEntry(occurrence,a,InboxLifecycle.Open,default(CanonicalChoiceId),2,0,
                 preparationRevision:ulong.MaxValue);
             var maxPrep=new DurableInboxStore(new HostLedger(new[]{maxPrepEntry},1,
                 new[]{a}));
@@ -273,13 +271,13 @@ namespace RailCheck
             if(maxPrep.InstallSourceRevalidationBatch(maxDelta,out refusal)||maxPrep.Ledger.CommittedRevision!=1)
                 yield return "L388 preparation-max-boundary-wrapped-or-partially-committed";
             var maxLocal=new DurableInboxStore(new HostLedger(new[]{new InboxEntry(occurrence,a,
-                InboxLifecycle.Open,default(CanonicalChoiceId),2,0,order)},ulong.MaxValue,
+                InboxLifecycle.Open,default(CanonicalChoiceId),2,0)},ulong.MaxValue,
                 new[]{a}));
             if(maxLocal.InstallSourceRevalidationBatch(new SourceRevalidationBatchDelta(2,"V#1",1,new[]{
                 new SourceRevalidationItem(occurrence,false,1,0)}),out refusal))
                 yield return "L388 local-ledger-max-boundary-wrapped";
             var maxLifecycle=new DurableInboxStore(new HostLedger(new[]{new InboxEntry(occurrence,a,
-                InboxLifecycle.Open,default(CanonicalChoiceId),ulong.MaxValue,0,order)},1,
+                InboxLifecycle.Open,default(CanonicalChoiceId),ulong.MaxValue,0)},1,
                 new[]{a}));
             if(maxLifecycle.InstallSourceRevalidationBatch(new SourceRevalidationBatchDelta(2,"V#1",1,new[]{
                 new SourceRevalidationItem(occurrence,true,0,0)}),out refusal)||

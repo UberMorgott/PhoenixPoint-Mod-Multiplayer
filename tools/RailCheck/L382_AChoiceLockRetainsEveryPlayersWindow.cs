@@ -17,9 +17,9 @@ namespace RailCheck
             var o = new OccurrenceId("event", "raise:382", new[] { "site" });
             var winner = new MembershipId("winner"); var loser = new MembershipId("loser");
             var entries = new[] {
-                new InboxEntry(o, winner, InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0, new HostOrderKey(1, o.TriggerId)),
+                new InboxEntry(o, winner, InboxLifecycle.Open, default(CanonicalChoiceId), 2, 0),
                 new InboxEntry(o, loser, InboxLifecycle.Suspended, default(CanonicalChoiceId), 3, 0,
-                    new HostOrderKey(1, o.TriggerId), InboxSuspensionReason.PriorityPreemption,
+                    InboxSuspensionReason.PriorityPreemption,
                     new InboxWindowCheckpoint("choices", "", "2")) };
             var store = new DurableInboxStore(new HostLedger(entries, 3, new[] {
                 winner,

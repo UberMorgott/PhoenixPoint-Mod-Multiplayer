@@ -42,7 +42,11 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
 # with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
 # registration multiset (so sparse ids and many registrations per source file remain valid).
-# Updated deliberately 2026-08-15: L522 ADDED (a client never sorts a window queue) and L507 RETIRED
+# Updated deliberately 2026-08-15: L523 ADDED (durable means answered exactly once, not ordered) and
+# THREE laws RETIRED -- 338 -> 336 registrations, identity set changed. L496 (it legitimised a duplicate
+# presentation gate, R7), L380 (a priority window suspends before it preempts) and L406 (a confirm puts
+# the preparation window first) all assert the second ordering system this commit deletes. Earlier the
+# same day: L522 ADDED (a client never sorts a window queue) and L507 RETIRED
 # (the provisional window ordinal is back-filled -- its subject, WindowOrder.Stamp/StampAt and the
 # per-request order key, is deleted). 338 registrations either side; the identity SET changed, which is
 # exactly what this digest is for. Earlier the same day:
@@ -54,7 +58,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Earlier the same day: L514 ADDED (the roster list repaints on the same mirrored
 # level-up), 334 -> 335; L513 ADDED (no peer lifts before its boundary releases), 333 -> 334;
 # L512 ADDED (the crew strip repaints on a mirrored level-up), 332 -> 333.
-$expectedRegistrationDigest = '52d09269fdd957916169d378c88086e1656d2ed4da7297ea4b23e4e9f56edb1b'
+$expectedRegistrationDigest = 'a3172dc9c9696206b3b66296ec2750952cf444ebeae3f77047151dfa13209e3b'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

@@ -57,7 +57,7 @@ namespace RailCheck
     ///
     /// Falsify (each verified RED, then restored):
     ///   • drop the ordinal from the envelope, or stop minting in EncodeEnvelope → ordinal-not-on-the-wire
-    ///   • make RailOrdinal.ForNewWindow ignore Current                         → local-window-inherits-nothing
+    ///   • make RailOrdinal.Applying stop publishing Current                    → apply-publishes-no-ordinal
     ///   • drop the RailOrdinal.Applying scope from SurfaceRouter.OnInbound     → apply-publishes-no-ordinal
     ///   • drop the ReadyToDequeue gate from the drain prefix                      → stamp-not-at-the-chokepoint
     ///   • drop PlayIntroCinematic from ApplyCoopCampaignParams                   → intro-not-suppressed
@@ -100,29 +100,29 @@ namespace RailCheck
                              "stream. A 0xB6 raise and a 0xAC batch are then incomparable again and modal order " +
                              "falls back to local arrival order, which is the 2026-08-05 report verbatim.";
 
-            // ─── ARM B: EXECUTED — a window born inside an apply INHERITS its cause's ordinal ───
-            // This is the crux: the client's research modal is produced locally by the value-rail apply and
-            // has no message of its own. Without inheritance it carries no key at all.
+            // ─── ARM B: RE-EXPRESSED 2026-08-15 with L523 ───
+            // It used to execute RailOrdinal.ForNewWindow — the WINDOW entry point, whose Mint() back-filled
+            // the whole pending provisional list with ONE ordinal, so the host's research and the host's
+            // event tied. That member is DELETED: a window's order is the host's journal position now, not a
+            // key any peer derives locally. What survives here is the part that is still true and still
+            // load-bearing for the rail itself — the apply scope publishes the ordinal being applied, and a
+            // receiver never mints below what it has already seen.
             const uint applying = 4242u;
             uint insideScope;
-            using (RailOrdinal.Applying(applying)) insideScope = RailOrdinal.ForNewWindow();
-            uint outsideScope = RailOrdinal.ForNewWindow();
+            using (RailOrdinal.Applying(applying)) insideScope = RailOrdinal.Current;
             if (insideScope != applying)
-                yield return "L124 local-window-inherits-nothing: a window born while ordinal " + applying +
-                             " is being applied takes " + insideScope + " instead. The research-complete modal " +
-                             "the 0xAC batch produces then has no ordering key, and no re-sort can place it " +
-                             "against the mirrored raises it must interleave with.";
-            if (outsideScope == applying || outsideScope == 0)
-                yield return "L124 local-window-inherits-nothing: outside an apply ForNewWindow returned " +
-                             outsideScope + " — it must mint a fresh value ahead of everything seen or sent, " +
-                             "not reuse the last applied ordinal (two unrelated windows would tie forever).";
-            // Observe must never let this peer mint BELOW something the host already stamped, or a locally
-            // born window sorts ahead of messages it provably followed.
+                yield return "L124 apply-publishes-no-ordinal: inside an apply of ordinal " + applying +
+                             " RailOrdinal.Current reads " + insideScope + ". Nothing born during a dispatch " +
+                             "can then be attributed to the message that caused it.";
+            if (RailOrdinal.Current != 0)
+                yield return "L124 apply-publishes-no-ordinal: outside every apply RailOrdinal.Current is " +
+                             RailOrdinal.Current + ", not 0 — a leaked scope makes an unrelated later value " +
+                             "look caused by a message it never rode.";
             RailOrdinal.Observe(1000000u);
-            if (RailOrdinal.ForNewWindow() <= 1000000u)
-                yield return "L124 local-window-inherits-nothing: after observing ordinal 1000000 this peer still " +
-                             "mints " + RailOrdinal.ForNewWindow() + ". A window it raises itself would sort " +
-                             "ahead of host messages that already arrived.";
+            if (RailOrdinal.Mint() <= 1000000u)
+                yield return "L124 local-window-inherits-nothing: after observing ordinal 1000000 this peer " +
+                             "still mints below it. A value it mints itself would sort ahead of host messages " +
+                             "that already arrived.";
             RailOrdinal.Reset();
 
             // ─── ARMS C, D and G RETIRED 2026-08-15 with L522 ───

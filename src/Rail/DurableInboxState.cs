@@ -20,7 +20,7 @@ namespace Multiplayer.Network.Sync
             {
                 var entry = ledger.AllEntries[i];
                 entries[i] = new InboxEntry(entry.Occurrence, entry.Membership, entry.Lifecycle, entry.Choice,
-                    entry.LifecycleRevision, entry.TombstoneRevision, entry.HostOrderKey,
+                    entry.LifecycleRevision, entry.TombstoneRevision,
                     entry.SuspensionReason, entry.Checkpoint, entry.TerminalReason,
                     entry.SupersededBy, entry.Predecessor, entry.PreparationRevision,
                     entry.PreparationAuthorityRevision);
