@@ -130,18 +130,12 @@ namespace Multiplayer.Network.Sync
         private static float _nextTickAt;
         private static bool _cycleUrgent;   // a FlushNow is outstanding — see RunSlice / UrgentSliceBudgetMs
         private static bool _urgentPending; // that flush landed MID-cycle — see FlushNow / RunSlice
-        private static float _cycleStartedAt;
 
-        /// <summary>WALL seconds the last completed cycle took, BeginCycle → DiffAndEmit. Not a perf
-        /// counter (RailCost owns that): it is the PUBLISH LAG of every value this walk carries, and
-        /// <see cref="TimeAnchor"/> is the one consumer that must price it, because a clock latched at
-        /// BeginCycle and delivered a whole walk later lands the client's clock exactly this far in the
-        /// past — a bias no drift check can see, since both sides then agree with the anchor. Deliberately
-        /// NOT cleared by BeginWalkState: the latch happens INSIDE BeginCycle (IdentityResolver.Roots), so
-        /// zeroing it there would zero the very number the latch is about to read. It is last-value-wins,
-        /// which is all it has to be — a stale duration misprices exactly one latch, and the consumer
-        /// clamps it anyway.</summary>
-        internal static float LastCycleSeconds { get; private set; }
+        // LastCycleSeconds (WALL seconds of the last cycle, BeginCycle -> DiffAndEmit) is GONE with its one
+        // consumer: it was the PUBLISH LAG the clock anchor priced itself at, and that pricing was the defect
+        // (2026-08-15) — the host cannot observe the flight, and its estimate of it, rate x this and capped,
+        // became a permanent 1440 game-second client lead. Flight compensation now lives on the RECEIVER, on
+        // a delay that peer measures itself (TimeAnchor.NoteBatchReceived). RailCost still owns walk cost.
         private static float _nextPerfLogAt;
         private static bool _reportWritten;
         private static Timing _armedTiming;                                                 // N3, see ArmChangeDrivenFlush
@@ -443,9 +437,6 @@ namespace Multiplayer.Network.Sync
         public static void ResetForReloadBoundary()
         {
             AbandonCycle();
-            LastCycleSeconds = 0f;      // a peer that was HOST before this boundary must not price the next
-                                        // latch (as host again, or as the seed of its own client DTO) off a
-                                        // walk that belonged to a level it no longer has
             _snapshot = new Dictionary<string, Entry>(StringComparer.Ordinal);
             _sentKinds.Clear();
             // _prevRoots is deliberately KEPT. It is the root set of the level the CLIENTS still hold — they
@@ -875,7 +866,6 @@ namespace Multiplayer.Network.Sync
             _cycleRoots = new List<KeyValuePair<string, object>>();
             foreach (var r in IdentityResolver.Roots(geo)) _cycleRoots.Add(r);
             _cycleNext = 0; _cycleFrames = 0; _cycleWalkMs = 0; _maxSliceMs = 0;
-            _cycleStartedAt = Time.realtimeSinceStartup;
         }
 
         /// <summary>THE PER-FRAME BUDGET DECISION, kept pure so RailCheck L154 can execute it case by case
@@ -920,7 +910,6 @@ namespace Multiplayer.Network.Sync
             // it. See FlushNow: that hand-off is the whole fix for the one-shot geoscape gestures.
             _cycleUrgent = _urgentPending;
             _urgentPending = false;
-            LastCycleSeconds = Time.realtimeSinceStartup - _cycleStartedAt;
             DiffAndEmit(engine, (long)Math.Round(_cycleWalkMs), _maxSliceMs, _cycleFrames, roots);
         }
 

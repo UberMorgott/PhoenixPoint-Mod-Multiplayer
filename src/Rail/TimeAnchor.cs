@@ -55,6 +55,7 @@ namespace Multiplayer.Network.Sync
         private static float _latchedAt;        // local realtime of the latch — the host-side prediction base
         private static TimingInstanceData _clientDto;
         private static float _appliedAt;        // local realtime of the last apply — the client-side prediction base
+        private static float _batchReceivedAt;  // local realtime the CURRENT delta batch reached the drain — see NoteBatchReceived
         private static float _nextChurnLogAt;
         private static int _latchesSinceLog;
 
@@ -70,19 +71,46 @@ namespace Multiplayer.Network.Sync
         internal const float ChurnWindowSeconds = 10f;
         internal const int ChurnThreshold = 4;
 
-        /// <summary>Ceiling on the publish-lag compensation below, and it is not a taste value: the drift
-        /// checks on BOTH sides allow <c>max(5 s, rate × 0.5)</c> of disagreement, so a compensation held
-        /// strictly under <c>rate × 0.5</c> can never by itself make <see cref="Drifted"/> or
-        /// <see cref="EnforceDrift"/> fire. Above it the anchor would start re-latching against its own
-        /// correction — the exact churn the alarm exists to confess. 0.4 leaves the margin.</summary>
+        /// <summary>Ceiling on the flight compensation, and it is not a taste value: the drift checks on BOTH
+        /// sides allow <c>max(5 s, rate × 0.5)</c> of disagreement, so a compensation held strictly under
+        /// <c>rate × 0.5</c> can never by itself make <see cref="Drifted"/> or <see cref="EnforceDrift"/>
+        /// fire. Above it the anchor would start re-latching against its own correction — the exact churn the
+        /// alarm exists to confess. 0.4 leaves the margin. It is now a CLAMP and no longer a price: the
+        /// compensation is the client's own MEASURED receipt→apply delay (<see cref="ApplyIfTouched"/>),
+        /// which is milliseconds, and this only stops a GC hitch or a stalled drain from turning into a
+        /// clock jump.</summary>
         private const double MaxPublishLagSeconds = 0.4;
 
         /// <summary>The clock collapsed into its own save DTO: the entire anchor in StartTime, accrual zeroed.
         /// The host latches this and the client seeds with it, so the members that never ride (OwnNow) start
         /// out equal on both peers instead of at a default the client would silently keep.
         ///
-        /// StartTime is the host's clock AS IT WILL READ WHEN THE ANCHOR IS PUBLISHED, not as it reads now,
-        /// and that difference is the whole of symptom (a) — "the exploration spinner has not finished
+        /// StartTime IS THE HOST'S RAW <c>Now</c>. It used to be "the host's clock as it will read when the
+        /// anchor is published", i.e. <c>Now + rate x lag</c> — and after ~10 attempts at tuning that term it
+        /// is the term itself that was the defect, so it is gone (2026-08-15). THE MEASUREMENT that ends the
+        /// argument: a live session held <c>dGame=1440.000</c> for 102 s across repeated re-latches, and
+        /// 1440.000 is exactly <c>3600.00 x 0.4</c> — the geoscape rate times <see cref="MaxPublishLagSeconds"/>,
+        /// with the 714.551 re-anchor the same product against an uncapped ~0.1985 s cycle. The compensation
+        /// priced a WHOLE publish cycle (0.4 s, the cap) against an actual flight of ~20 ms, at 3600x
+        /// amplification: it was not a correction, it was the bias, minted by the host and applied faithfully
+        /// by every client.
+        ///
+        /// AND IT NEVER CONVERGED, because the published value was floored at the previous one
+        /// (<c>Math.Max(candidate, previousPublished)</c>): a one-way ratchet, structurally unable to move a
+        /// client backward, so the LARGEST lead ever published became permanent. The ratchet is gone with the
+        /// lead — its documented job was republishing <c>Now + rate x lag</c> across a resume, and there is no
+        /// such term to republish. What is left cannot ratchet, so the sawtooth L429 forbids
+        /// (<c>+1101.6 s</c> then <c>-573.9 s</c> 0.3 s apart, same log) has no source here: every anchor is
+        /// the host's own clock reading, and a later one that reads LOWER is applied as it is.
+        ///
+        /// FLIGHT COMPENSATION LIVES ON THE RECEIVER (<see cref="ApplyIfTouched"/>), priced on the delay that
+        /// peer can actually MEASURE — its own receipt→apply — instead of on a host-side estimate of a
+        /// duration the host cannot observe. ponytail: the host-walk and network legs stay uncompensated;
+        /// estimating them needs a wire timestamp and TimeAnchor deliberately rides the game's own DTO, which
+        /// has no field for one. Add a ping/pong estimator only when in-game says the residual is visible —
+        /// and note that the old term was an over-estimate of that same residual by a factor of ~20.
+        ///
+        /// The original symptom (a) — "the exploration spinner has not finished
         /// filling when the host already completes the exploration" (3-instance session 2026-08-04 23:22).
         /// The latch happens at <c>DiffEngine.BeginCycle</c> (IdentityResolver.Roots asks HostDto), the
         /// delta ships a WHOLE WALK later, and the client then anchors on RECEIPT — so the client's level
@@ -93,100 +121,41 @@ namespace Multiplayer.Network.Sync
         /// contain not one TimeAnchor line while the bias was there the whole time. Measured that session:
         /// a host apply reached the clients' appliers 112 ms later (23:28:48.714 host → 23:28:48.826
         /// client-2), against 16-24 ms for a direct order-channel message on the same loopback — so the
-        /// walk, not the network, is what the clock was losing.
-        /// The correction is therefore the host's OWN publish lag, which the host can measure exactly
-        /// (<see cref="DiffEngine.LastCycleSeconds"/>) and which needs nothing new on the wire.
-        ///
-        /// PRICED AT THE RATE FROM BEFORE THE LATCH, and pricing it at the LIVE one was a second bug of its
-        /// own (3-instance session 2026-08-12): every host PAUSE rewound each client's geoscape clock by up
-        /// to ~636 game-seconds, a sawtooth the resume then yanked back, and <see cref="Rebase"/> dragged
-        /// every timed updateable backward with it. The old reasoning — "a paused clock does not advance in
-        /// flight, so a pause latch needs no compensation" — is true only in the HOST's frame. It is the
-        /// CLIENT's clock that runs during the flight, at the rate it still believes in because the pause
-        /// has not reached it yet (M2's client sim is deliberately not frozen, <see cref="ClientSimGate"/>),
-        /// so it arrives at <c>Now + rate x lag</c> and the uncompensated anchor drags it back by exactly
-        /// that. Measured latch→apply that session: 176.7/174.7/123.4/115.4/100.6/88.6/79.3/75.3/67.6/59.6/
-        /// 34.2/26.2 ms, the two clients within 2-12 ms of each other — so it is the walk, not the link, and
-        /// ~3600 game-s per real-s is what turns 176 ms into 636 s.
-        /// <c>_hostDto.Scale</c> IS that pre-latch rate, and it is the own scale rather than
-        /// <c>EffectiveScale</c> on purpose: Timing's Paused setter never touches <c>_scale</c> (decompile
-        /// Base.Core/Timing.cs:99-129), so the last published DTO still carries the RUNNING scale through a
-        /// pause — which also leaves the RESUME latch pricing the same <c>rate x lag</c> it already priced,
-        /// i.e. the path that works is untouched. The invariant is then "every anchor reads
-        /// <c>host Now + rate x lag</c>", held across the whole pause, so a re-latch while paused (drift, a
-        /// speed click) re-states the same value instead of fighting the offset. The parent factor is local
-        /// clock machinery and is read live, as in <see cref="ClientRate"/>. Only the very first latch has
-        /// no prior rate; there the live one is the best available and the clock is not mid-transition
-        /// anyway. RailCheck L429 asserts the pre-latch read; L100 arm D still owns the live fallback.
-        /// ponytail: the one-way NETWORK leg (16-24 ms loopback, more on a real link) stays uncompensated —
-        /// estimating it needs a wire timestamp, and TimeAnchor deliberately rides the game's own DTO,
-        /// which has no field to put one in. Add the ping/pong estimator only when in-game says the
-        /// residual is still visible.</summary>
+        /// walk, not the network, is what the clock was losing — and the receiver is where that stretch ends,
+        /// so it is the receiver that gets to price it.</summary>
         private static TimingInstanceData Canonical(Timing t)
         {
-            double lag = Math.Min(DiffEngine.LastCycleSeconds, MaxPublishLagSeconds);
-            double rate = PriorEffectiveRate(_hostDto != null, _hostDto != null && _hostDto.Paused,
-                                             _hostDto == null ? 0.0 : _hostDto.Scale,
-                                             ParentScale(t), t.EffectiveScale);
-            double candidate = PredictPublishedSeconds(t.Now.TimeSpan.TotalSeconds, rate, lag);
-            double publishedSeconds = MonotonePublishedSeconds(candidate,
-                _hostDto == null ? candidate : _hostDto.StartTime.TimeSpan.TotalSeconds);
-            var published = TimeUnit.FromTimeSpan(TimeSpan.FromSeconds(publishedSeconds));
+            var now = t.Now;   // RAW host truth. No lead, no floor — see the summary above.
             return new TimingInstanceData
             {
                 Paused = t.Paused,
                 Scale = t.Scale,
-                StartTime = published,
-                StartFixedTime = published,
+                StartTime = now,
+                StartFixedTime = now,
                 OwnNow = TimeUnit.Zero,
                 OwnFixedNow = TimeUnit.Zero,
             };
         }
 
-        /// <summary>Rate the receivers uniformly held before this latch. A paused prior anchor advances 0.</summary>
-        internal static double PriorEffectiveRate(bool hasPrior, bool priorPaused, double priorScale,
-                                                  double parentScale, double liveFallback)
-            => hasPrior ? (priorPaused ? 0.0 : priorScale * parentScale) : liveFallback;
-
-        /// <summary>Pure numeric anchor model used by the pause/resume regression.</summary>
-        internal static double PredictPublishedSeconds(double hostNow, double priorRate, double lagSeconds)
-            => hostNow + Math.Max(0.0, priorRate * Math.Min(lagSeconds, MaxPublishLagSeconds));
+        /// <summary>The flight compensation, PURE and priced where it is paid: the receiving peer's own
+        /// measured receipt→apply delay times the rate ITS clock ran at during that delay. Clamped to
+        /// <see cref="MaxPublishLagSeconds"/> against a hitch and floored at 0 against a clock that ran
+        /// backwards, and NOTHING ELSE — in particular no <c>Math.Max</c> against a previous value: an anchor
+        /// that reads lower than the last one must be able to pull this peer BACK, which is precisely what
+        /// the deleted ratchet made structurally impossible.</summary>
+        internal static double CompensatedAnchorSeconds(double anchorSeconds, double rate, double receiptDelaySeconds)
+            => anchorSeconds + rate * Math.Min(Math.Max(0.0, receiptDelaySeconds), MaxPublishLagSeconds);
 
         internal static double HostPredictionError(double hostNow, double truthAtLatch, double rate,
                                                    double elapsed)
             => Math.Abs(hostNow - (truthAtLatch + rate * elapsed));
 
-        /// <summary>THE RATCHET IS THE RESUME COMPENSATION, so do not expire it while paused — db1a202 did,
-        /// and this comment is the revert (2026-08-15). The tempting report is
-        /// <c>[MP][clockphase] dGame=1136.426 dReal=paused scale=0.00</c>: a client's level clock frozen 1136
-        /// GAME seconds ahead of the paused host's. It reads like a defect and is not one. It is 0.4 REAL
-        /// seconds — <c>MaxPublishLagSeconds</c> amplified by ~2841 game-s per real-s — and it is the honest
-        /// answer, because the client's clock is NOT frozen in flight (<see cref="ClientSimGate"/>) and so
-        /// genuinely reached that value before the pause leaf landed.
-        ///
-        /// Follow it to the RESUME and the ratchet's job appears. A resume latch prices rate 0 (its prior
-        /// anchor is the PAUSE DTO, whose <c>Paused=true</c> makes <see cref="PriorEffectiveRate"/> answer 0),
-        /// so its own candidate is a bare host <c>Now</c>. What republishes <c>Now + rate x lag</c> across the
-        /// resume is THIS floor, and nothing else. Take it away and the client — still paused for the whole
-        /// flight, so it cannot advance — resumes from the host's pre-flight value and runs 1136 game-s
-        /// BEHIND forever, under the <c>rate x 0.5</c> = 1420 tolerance both drift checks use, i.e. exactly
-        /// the client-is-behind bias the compensation was written for (symptom (a)). The lead is not removed
-        /// by expiring the ratchet, only MOVED from the paused phase, where both clocks are stopped and no
-        /// interval is being timed against it, into the running phase, where they are.
-        ///
-        /// It also costs a SAWTOOTH of the 2026-08-12 shape L429 exists to forbid: the settle latch is a
-        /// second <see cref="Rebase"/> within the same pause, so every pause became +1136 then -1136 one
-        /// second apart, each dragging every timed updateable through <c>RescheduleForTiming</c>, where
-        /// before it was one apply that moved the clock by ~0. L429 stayed GREEN throughout — it asserts the
-        /// PRICING term reads the pre-latch rate and says nothing about this floor.
-        ///
-        /// The exploration symptom that was blamed for it ("ends at &lt;t&gt; which the local clock is already
-        /// past — a STALE start") cannot come from here either: that comparison runs on the PER-ACTOR clock
-        /// (<c>GenericApplier.ReseedExploration</c>, <c>v.Timing</c>), which <see cref="Rebase"/> deliberately
-        /// cannot move — it preserves <c>OwnNow</c> so child clocks are untouched — and d6605a6 had already
-        /// fixed it. So the number has no consumer: it is a <c>ClockPhaseDiag</c> reading, not a defect.</summary>
-        internal static double MonotonePublishedSeconds(double candidate, double previousPublished)
-            => Math.Max(candidate, previousPublished);
+        // The RATCHET that used to live here (MonotonePublishedSeconds = Math.Max(candidate,
+        // previousPublished)) is DELETED with the lead it existed to preserve. Its documented job was
+        // republishing "Now + rate x lag" across a resume latch, and there is no such term any more; what it
+        // actually bought was a clock that could only ever be pushed FORWARD, so the largest lead ever
+        // published stuck (dGame=1440.000 held 102 s across repeated re-latches) and the anchor could not
+        // correct a client down even when the host read lower. See Canonical.
 
         /// <summary>Has the host's real clock left the anchor's own prediction? Catches every jump that is
         /// not a pause/speed change — save-load, time skip, any native re-anchor — and, over long unchanged
@@ -343,6 +312,13 @@ namespace Multiplayer.Network.Sync
                 if (p.Scheduler != null) { p.Scheduler.RescheduleForTiming(t); break; }
         }
 
+        /// <summary>Client: stamp the moment a delta batch reached the network drain. The ONLY measurable
+        /// piece of the anchor's flight — decode, reassembly and every leaf apply of that batch happen
+        /// between this stamp and <see cref="ApplyIfTouched"/> at its end, and the clock advanced through all
+        /// of it. Called from <c>GenericApplier.ApplyDelta</c>, i.e. the batch that carries the anchor is the
+        /// batch that is priced; there is no cross-batch state to go stale.</summary>
+        internal static void NoteBatchReceived() => _batchReceivedAt = Time.realtimeSinceStartup;
+
         /// <summary>Client: the "TA" root object — the scratch DTO the generic applier writes leaves into.
         /// Seeded from the client's OWN clock in the same canonical shape so a partial anchor (only the
         /// members that actually changed ride) always layers onto a valid base rather than onto zeros —
@@ -378,16 +354,28 @@ namespace Multiplayer.Network.Sync
             // no measurement has produced yet (ClockPhaseDiag exists because of it) — inventing one here
             // would re-hide the quantity behind a guess. Sign: POSITIVE = the clock is pushed FORWARD, i.e.
             // this peer was behind the host.
+            //
+            // THE FLIGHT IS PRICED HERE, and only here. The anchor on the wire is the host's RAW clock
+            // (Canonical): the host cannot observe how long its value took to reach this peer, and its
+            // estimate of that — rate x publish-lag-cap — was the 1440.000 game-second permanent lead. This
+            // peer CAN observe the tail of that stretch: NoteBatchReceived stamps the network drain, this
+            // runs at the end of the same batch, so the delay below is measured, not modelled, and it is
+            // milliseconds rather than the 0.4 s cap. Priced at ClientRate — the rate THIS clock ran at
+            // while it waited — and with no floor against the previous value, so an anchor that reads lower
+            // pulls this peer back instead of ratcheting it forward forever.
             var t = geo.Timing;
             double rate = ClientRate(t);
-            double jump = _clientDto.StartTime.TimeSpan.TotalSeconds - t.Now.TimeSpan.TotalSeconds;
+            double receiptDelay = _batchReceivedAt > 0f ? Time.realtimeSinceStartup - _batchReceivedAt : 0.0;
+            double target = CompensatedAnchorSeconds(_clientDto.StartTime.TimeSpan.TotalSeconds, rate, receiptDelay);
+            double jump = target - t.Now.TimeSpan.TotalSeconds;
             var inv = CultureInfo.InvariantCulture;
             MpLog.Log("[Multiplayer][rail] TimeAnchor: anchor apply moved this peer's level clock by " +
                       jump.ToString("F1", inv) + " s of game time (" +
                       (rate > 0.0 ? (jump / rate).ToString("F3", inv) + " s real" : "paused") +
-                      ", rate=" + rate.ToString("F2", inv) + ", sinceLastApply=" +
+                      ", rate=" + rate.ToString("F2", inv) + ", recvToApply=" +
+                      receiptDelay.ToString("F3", inv) + " s, sinceLastApply=" +
                       ClientAnchorAgeSeconds.ToString("F1", inv) + " s)");
-            Rebase(t, _clientDto.StartTime);
+            Rebase(t, TimeUnit.FromTimeSpan(TimeSpan.FromSeconds(target)));
             _appliedAt = Time.realtimeSinceStartup;
         }
 

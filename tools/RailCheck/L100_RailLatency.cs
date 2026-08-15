@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using Base.Core;
 using Multiplayer.Network.Sync;
 
 namespace RailCheck
@@ -31,9 +30,9 @@ namespace RailCheck
     ///
     /// HALF 2 — THE STALE ANCHOR, and it is the half that hides. <c>TimeAnchor</c> latches the host clock at
     /// <c>DiffEngine.BeginCycle</c> (IdentityResolver.Roots asks <c>HostDto</c>), ships it a whole walk
-    /// later, and the client anchors it ON RECEIPT — so the client's level clock lands on a host reading one
-    /// publish lag old and STAYS there, because latches are events (pause / speed / drift) and not a
-    /// heartbeat. Measured that session: a host apply reached the clients' appliers 112 ms later
+    /// later, and the client anchors it ON RECEIPT — so an uncompensated client's level clock lands on a
+    /// host reading one flight old and STAYS there, because latches are events (pause / speed / drift) and
+    /// not a heartbeat. Measured 2026-08-04: a host apply reached the clients' appliers 112 ms later
     /// (23:28:48.714 → 23:28:48.826), i.e. ~5x the network leg. Every derived progress bar then renders
     /// behind, which is the spinner: site exploration is CLOSED-FORM on the clock
     /// (<c>GeoActorProgressionVisualController.Progression</c>, re-derived every frame from a mirrored
@@ -42,11 +41,22 @@ namespace RailCheck
     /// client against its own anchor derivation, never against the host, so all three logs of that session
     /// contain not one TimeAnchor line while the bias was present throughout. A silent swallow with no line
     /// to grep, which is this repo's dominant bug class and the reason it gets a law rather than a comment.
-    /// Arms C-E hold the correction in place: the anchor must price the host's OWN measured publish lag
-    /// (<c>DiffEngine.LastCycleSeconds</c>), at a RATE rather than at a constant, and the lag must actually
-    /// be measured rather than left at whatever a reset put there. Arm D used to read "at the LIVE rate,
-    /// because a paused clock does not advance in flight" — reasoning in the host's frame, and wrong in the
-    /// client's: L429 owns which rate, this arm only owns that there is one.
+    ///
+    /// WHERE THE COMPENSATION LIVES CHANGED, AND THE ARMS MOVED WITH IT (2026-08-15). Arms C-D used to say
+    /// "<c>TimeAnchor.Canonical</c> prices the host's own publish lag (<c>DiffEngine.LastCycleSeconds</c>) at
+    /// a rate". That correction was HOST-AUTHORED, and the host cannot observe the flight: pricing a whole
+    /// publish cycle (the 0.4 s cap) against a real flight of ~20 ms at ~3600 game-s/real-s minted a
+    /// CONSTANT client lead of <c>3600.00 x 0.4 = 1440.000</c> game seconds, held 102 s across repeated
+    /// re-latches in a live session — the same client-vs-host clock error this law exists to forbid, with
+    /// the sign flipped. So the anchor now publishes RAW host <c>Now</c> and the receiver pays for its own
+    /// flight: <c>ApplyIfTouched</c> prices the delay IT measures (network drain → end of the batch that
+    /// carried the anchor, <c>TimeAnchor.NoteBatchReceived</c>) at the rate ITS clock ran at
+    /// (<c>ClientRate</c>). The arms are NOT weaker for moving — they now EXECUTE the compensation instead
+    /// of only witnessing an IL call: arm C demands the receiver read a MEASURED delay and that a delay of
+    /// zero cost exactly zero correction, arm D demands the correction scale with both the rate and the
+    /// delay (a constant is wrong at every geoscape speed but one), and arm E demands the clamp bind. The
+    /// old arm E ("the lag is measured, not remembered") is retired with its subject: <c>LastCycleSeconds</c>
+    /// had no consumer left and is deleted rather than left as a number a law pretends to guard.
     ///
     /// Arm F is the one that keeps the cure from becoming the disease. The compensation biases the host's
     /// own drift prediction by <c>rate x lag</c>, and BOTH drift checks fire above <c>max(5 s, rate x 0.5)</c>
@@ -57,11 +67,13 @@ namespace RailCheck
     ///
     /// NON-VACUITY: every subject must resolve or the law says so and asserts nothing else. Falsify:
     /// put <c>TickInterval</c> back to 0.5 f → <c>cadence-idle</c>; set it to 0 → <c>cadence-unfloored</c>;
-    /// delete the publish-lag term from <c>TimeAnchor.Canonical</c> → <c>anchor-unpriced</c>; price it at a
-    /// constant instead of <c>Timing.EffectiveScale</c> → <c>anchor-unrated</c>; stop assigning
-    /// <c>LastCycleSeconds</c> in <c>RunSlice</c> → <c>lag-unmeasured</c>; raise
+    /// make <c>ApplyIfTouched</c> rebase on the raw anchor instead of <c>CompensatedAnchorSeconds</c> →
+    /// <c>anchor-unpriced</c> (verified RED 2026-08-15, restored GREEN); stop stamping the receipt in
+    /// <c>ApplyDelta</c> → <c>anchor-unpriced</c>; drop the rate factor from
+    /// <c>CompensatedAnchorSeconds</c> → <c>anchor-unrated</c>; drop its clamp → <c>clamp-gone</c>; raise
     /// <c>MaxPublishLagSeconds</c> to 0.5 → <c>compensation-outbids-drift</c>; delete <c>Drifted</c> or
-    /// <c>EnforceDrift</c> → <c>premise-drift-check-gone</c>.
+    /// <c>EnforceDrift</c> → <c>premise-drift-check-gone</c>; stop calling <c>Rebase</c> from
+    /// <c>ApplyIfTouched</c> → <c>premise-changed</c>.
     /// </summary>
     internal static class L100_RailLatency
     {
@@ -84,19 +96,24 @@ namespace RailCheck
         internal static IEnumerable<string> Check()
         {
             var tickF = typeof(DiffEngine).GetField("TickInterval", AllMembers);
-            var lagP = typeof(DiffEngine).GetProperty("LastCycleSeconds", AllMembers);
-            var runSlice = typeof(DiffEngine).GetMethod("RunSlice", AllMembers);
-            var canonical = typeof(TimeAnchor).GetMethod("Canonical", AllMembers);
+            var apply = typeof(TimeAnchor).GetMethod("ApplyIfTouched", AllMembers);
+            var compensate = typeof(TimeAnchor).GetMethod("CompensatedAnchorSeconds", AllMembers);
+            var noteRecv = typeof(TimeAnchor).GetMethod("NoteBatchReceived", AllMembers);
+            var clientRate = typeof(TimeAnchor).GetMethod("ClientRate", AllMembers);
+            var applyDelta = typeof(GenericApplier).GetMethod("ApplyDelta", AllMembers);
             var maxLagF = typeof(TimeAnchor).GetField("MaxPublishLagSeconds", AllMembers);
-            var effScale = typeof(Timing).GetProperty("EffectiveScale", BindingFlags.Public | BindingFlags.NonPublic |
-                                                                       BindingFlags.Instance);
-            if (tickF == null || lagP == null || runSlice == null || canonical == null || maxLagF == null)
+            if (tickF == null || apply == null || compensate == null || noteRecv == null || clientRate == null ||
+                applyDelta == null || maxLagF == null)
             {
-                yield return "L100 unresolved: DiffEngine.TickInterval / LastCycleSeconds / RunSlice / " +
-                             "TimeAnchor.Canonical / MaxPublishLagSeconds did not all resolve — neither the " +
-                             "rail's cadence nor the clock's publish lag is checked by anything";
+                yield return "L100 unresolved: DiffEngine.TickInterval / TimeAnchor.ApplyIfTouched / " +
+                             "CompensatedAnchorSeconds / NoteBatchReceived / ClientRate / " +
+                             "GenericApplier.ApplyDelta / MaxPublishLagSeconds did not all resolve — neither " +
+                             "the rail's cadence nor the clock's flight compensation is checked by anything";
                 yield break;
             }
+            double maxLag = Convert.ToDouble(maxLagF.GetRawConstantValue());
+            Func<double, double, double, double> comp =
+                (a, r, d) => (double)compensate.Invoke(null, new object[] { a, r, d });
 
             // ── arm A: the rail may not park between cycles.
             double tick = Convert.ToDouble(tickF.GetRawConstantValue());
@@ -116,40 +133,55 @@ namespace RailCheck
                              "back-to-back cadence safe on a degenerate graph, so removing it is not the same " +
                              "change as lowering it";
 
-            // ── arm C: the anchor prices its own publish lag.
-            var lagGet = lagP.GetGetMethod(nonPublic: true);
-            if (lagGet == null || !CallsMethod(canonical, lagGet))
-                yield return "L100 anchor-unpriced: TimeAnchor.Canonical does not read DiffEngine.LastCycleSeconds. " +
-                             "The latch happens at BeginCycle and the delta ships a whole walk later (measured " +
-                             "112 ms, 2026-08-04 23:28:48.714 host apply → 23:28:48.826 client apply), and the " +
-                             "client anchors on RECEIPT — so without the correction every client's clock sits one " +
-                             "publish lag in the past until the next rate change, and every progress bar derived " +
-                             "from it renders behind. EnforceDrift cannot see this: it checks the client against " +
-                             "its own anchor derivation, not against the host";
+            // ── the guard the arms below are worth nothing without: the correction has to reach the clock.
+            var rebase = typeof(TimeAnchor).GetMethod("Rebase", AllMembers);
+            if (rebase == null || !CallsMethod(apply, rebase))
+            {
+                yield return "L100 premise-changed: TimeAnchor.ApplyIfTouched no longer moves the level clock " +
+                             "through Rebase, so whatever it computes lands nowhere and arms C-E would pass over " +
+                             "a correction with no consumer. Find where the anchor is applied now and move this " +
+                             "law's subject there before trusting its green (L190 owns the same call for its own " +
+                             "reason — the jump has to be visible on the peer it jerks)";
+                yield break;
+            }
 
-            // ── arm D: ...at a rate at all. WHICH rate is L429's (the live one survives as the
-            // first-latch fallback, which is what keeps this arm's subject resolvable).
-            var scaleGet = effScale?.GetGetMethod(nonPublic: true);
-            if (scaleGet == null)
-                yield return "L100 premise-changed: Base.Core.Timing.EffectiveScale did not resolve — " +
-                             "the rate the publish-lag correction must be priced at no longer exists, so arm D " +
-                             "asserts nothing";
-            else if (!CallsMethod(canonical, scaleGet))
-                yield return "L100 anchor-unrated: TimeAnchor.Canonical computes its publish-lag correction without " +
-                             "reading Timing.EffectiveScale. The correction is game time, the lag is real time, and " +
-                             "the only thing relating them is a rate — priced at a constant it is wrong at every " +
-                             "geoscape speed but one. EffectiveScale is the first-latch fallback, the only latch " +
-                             "with no prior rate to price against; which rate the other latches use is L429's arm";
+            // ── arm C: the RECEIVER prices its own flight, off a delay it MEASURED.
+            if (!CallsMethod(apply, compensate) || !CallsMethod(applyDelta, noteRecv))
+                yield return "L100 anchor-unpriced: TimeAnchor.ApplyIfTouched does not rebase through " +
+                             "CompensatedAnchorSeconds, or GenericApplier.ApplyDelta never stamps the receipt " +
+                             "(NoteBatchReceived) it is priced from. The latch happens at BeginCycle, the delta " +
+                             "ships a whole walk later (measured 112 ms, 2026-08-04 23:28:48.714 host apply → " +
+                             ".826 client apply) and the client anchors on RECEIPT — uncorrected, every client's " +
+                             "clock sits one flight in the past until the next rate change and every derived " +
+                             "progress bar renders behind. EnforceDrift cannot see it: it checks the client " +
+                             "against its own anchor derivation, not against the host. The HOST must not pay it " +
+                             "instead — it cannot observe the flight, and its estimate of it was the constant " +
+                             "1440.000 game-second lead this arm was moved to prevent";
+            if (comp(1000.0, 3600.0, 0.0) != 1000.0)
+                yield return "L100 anchor-unpriced: CompensatedAnchorSeconds moves the clock on a ZERO measured " +
+                             "delay, i.e. it mints a correction rather than pricing one. A peer that applied the " +
+                             "anchor the instant it arrived owes exactly nothing";
 
-            // ── arm E: the lag is measured, not remembered.
-            var lagSet = lagP.GetSetMethod(nonPublic: true);
-            if (lagSet == null || !CallsMethod(runSlice, lagSet))
-                yield return "L100 lag-unmeasured: DiffEngine.RunSlice does not assign LastCycleSeconds — the value " +
-                             "the anchor prices is then frozen at whatever a reset left behind, so the correction " +
-                             "is theatre that still passes arm C";
+            // ── arm D: ...at a RATE, and proportionally to the measured delay.
+            if (!CallsMethod(apply, clientRate))
+                yield return "L100 anchor-unrated: ApplyIfTouched does not read ClientRate, so the correction is " +
+                             "not priced at the rate THIS clock ran at while it waited. The delay is real time, " +
+                             "the correction is game time, and the only thing relating them is a rate — priced " +
+                             "at a constant it is wrong at every geoscape speed but one";
+            if (comp(1000.0, 3600.0, 0.01) != 1036.0 || comp(1000.0, 1800.0, 0.01) != 1018.0 ||
+                comp(1000.0, 3600.0, 0.02) != 1072.0)
+                yield return "L100 anchor-unrated: CompensatedAnchorSeconds is not rate x delay — doubling the " +
+                             "rate or the delay did not double the correction. Executed rather than inferred from " +
+                             "an IL call, because an IL call proves only that a number was read";
+
+            // ── arm E: the clamp binds, so a hitch cannot become a clock jump.
+            if (comp(1000.0, 3600.0, 10.0) != 1000.0 + 3600.0 * maxLag || comp(1000.0, 3600.0, -5.0) != 1000.0)
+                yield return "L100 clamp-gone: CompensatedAnchorSeconds does not clamp the measured delay to " +
+                             "MaxPublishLagSeconds (and to 0 below). A GC hitch or a stalled drain would then " +
+                             "ride into the level clock at ~3600 game-s per real-s, and arm F's whole margin " +
+                             "argument is about a bound that no longer exists";
 
             // ── arm F: the correction may not outbid the drift threshold it biases.
-            double maxLag = Convert.ToDouble(maxLagF.GetRawConstantValue());
             if (!(maxLag < DriftRateCoefficient))
                 yield return "L100 compensation-outbids-drift: TimeAnchor.MaxPublishLagSeconds is " + maxLag +
                              ", not below the drift threshold's rate coefficient " + DriftRateCoefficient +

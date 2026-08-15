@@ -96,9 +96,9 @@ namespace RailCheck
                              "violations before snapshot gates; --update could bless a broken rule as GREEN.";
 
             if (!Program.LawExecutionIsValid(330, 330,
-                    "2a83c59487eb464f699be573eb80d288b306ba6c04ae0cd406c0c87a903018da") ||
+                    "de9d2f987b0f13481a4334b54bda1233cb46ad48e7c04373d53d60f91fbeafee") ||
                 Program.LawExecutionIsValid(330, 329,
-                    "2a83c59487eb464f699be573eb80d288b306ba6c04ae0cd406c0c87a903018da") ||
+                    "de9d2f987b0f13481a4334b54bda1233cb46ad48e7c04373d53d60f91fbeafee") ||
                 Program.LawExecutionIsValid(330, 330, "wrong") ||
                 !Program.NoLawViolations(0) || Program.NoLawViolations(1))
                 yield return "L193 positive-control: execution identity or zero-violation decisions no " +

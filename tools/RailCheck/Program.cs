@@ -393,7 +393,7 @@ namespace RailCheck
             Add(laws, () => L426_ABattleStartKeyIsNeverAnOrdinal.Check());
             Add(laws, () => L427_TheHostBoardIsScoredAheadOfTheVerdict.Check());
             Add(laws, () => L428_ADivergenceReportNamesItsField.Check());
-            Add(laws, () => L429_ThePublishLagIsPricedAtThePreLatchRate.Check());
+            Add(laws, () => L429_TheAnchorPublishesHostTruth.Check());
             Add(laws, () => L430_ASwallowedClickAlwaysHasAnExit.Check());
             Add(laws, () => L431_AnItemsAddressIsReadBeforeTheHitNotAfter.Check());
             Add(laws, () => L432_EveryLogUsesTheOneDoor.Check());
@@ -480,7 +480,10 @@ namespace RailCheck
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
         private const int ExpectedLawRegistrations = 330;
-        private const string ExpectedExecutionIdentityDigest = "2a83c59487eb464f699be573eb80d288b306ba6c04ae0cd406c0c87a903018da";
+        // Updated deliberately 2026-08-15: L429 was RENAMED (ThePublishLagIsPricedAtThePreLatchRate →
+        // TheAnchorPublishesHostTruth) when the clock's flight compensation moved from the host to the
+        // receiver. Same count, same set of numbers, one identity string changed.
+        private const string ExpectedExecutionIdentityDigest = "de9d2f987b0f13481a4334b54bda1233cb46ad48e7c04373d53d60f91fbeafee";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

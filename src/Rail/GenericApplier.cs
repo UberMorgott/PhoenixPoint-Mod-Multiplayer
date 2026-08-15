@@ -233,6 +233,10 @@ namespace Multiplayer.Network.Sync
 
         private static void ApplyDelta(NetworkEngine engine, byte[] payload)
         {
+            // Receipt stamp for the clock: everything from here to TimeAnchor.ApplyIfTouched at the end of
+            // this batch is delay THIS peer can measure, and it is the only part of the anchor's flight
+            // anybody can (the host's own estimate of the rest was the permanent 1440 game-s lead).
+            TimeAnchor.NoteBatchReceived();
             var geo = StartedGeoLevel();
             if (geo == null) { MissedNoLevel(); return; } // mid-load — see MissedNoLevel for what that costs
 
