@@ -47,20 +47,24 @@ namespace Multiplayer.Network.Sync
     /// Once <see cref="SettleExpired"/> is true it stays true forever, so the drain resumes unconditionally
     /// and the worst case for any window is one <see cref="SettleSeconds"/> delay, once.
     ///
-    /// THE CEILING, STATED RATHER THAN HIDDEN. Every peer that receives a window agrees with every other
-    /// peer that receives it, because both read the same host-minted key. The HOST agrees too for every
-    /// family whose window and whose message are produced in the SAME call — the mirrored raises (0xB6
-    /// events, 0xB7 modals, 0xBA cutscenes, 0xBB outcomes, 0xBF marketplace), where the broadcast postfix
-    /// mints exactly the ordinal <see cref="RailOrdinal.ForNewWindow"/> handed the window a moment earlier.
-    /// It does NOT yet agree for a window whose cause rides the PERIODIC value rail: research-complete is
-    /// the one today. The host raises that modal natively at completion, a whole diff cycle before the 0xAC
-    /// batch carrying the research field goes out, so it claims the same provisional ordinal as a raise that
-    /// beat that batch to the wire and the tie falls back to the host's own insert order — while the clients
-    /// order it by the batch that actually produced it. Host and clients can therefore still swap those two.
-    /// ponytail: closing it means the host must not present a window until the message carrying its cause is
-    /// on the wire (a real design change: the host would have to defer its own modals). Do it when a live
-    /// session shows the host/client swap actually mattering — the peer-to-peer half, which is what the
-    /// 2026-08-05 report measured between two clients, is closed here.
+    /// THE HOST AGREES TOO, BECAUSE ITS OWN KEY IS PROVISIONAL UNTIL THE WIRE SETTLES IT. Every peer that
+    /// receives a window agrees with every other peer that receives it, because both read the same
+    /// host-minted key. For a family whose window and whose message are produced in the SAME call — the
+    /// mirrored raises (0xB6 events, 0xB7 modals, 0xBA cutscenes, 0xBB outcomes, 0xBF marketplace) — the
+    /// broadcast postfix mints exactly the ordinal <see cref="RailOrdinal.ForNewWindow"/> handed the window
+    /// a moment earlier, so the host matched already. The gap was the window whose cause rides the PERIODIC
+    /// value rail (research-complete): the host raises that modal natively at completion, a whole diff cycle
+    /// before the 0xAC batch carrying the research field goes out, so it USED to claim the same unminted
+    /// value as a raise that beat that batch to the wire, the tie fell back to the host's own insert order,
+    /// and host and clients could swap those two.
+    ///
+    /// So a stamp taken OUTSIDE an apply is now registered as PROVISIONAL and the next
+    /// <c>RailOrdinal.Mint</c> — the one encoder, i.e. the envelope that actually carries the cause out —
+    /// back-fills it with the ordinal it just minted. That is precisely the ordinal a client publishes while
+    /// applying that envelope, and therefore precisely the key its locally-born window inherits: symmetric
+    /// by construction rather than by cadence. Bounded by the existing <see cref="SettleSeconds"/> — an
+    /// envelope is minted every DiffEngine tick, so the back-fill lands inside the settle it is racing.
+    /// Nothing waits on another PEER here (P13): the predicate is this peer's own encoder running.
     ///
     /// COST, STATED: in a co-op session every queued window opens up to 150 ms later than native. Solo is
     /// untouched (the prefix returns immediately without an active session), and an UNSTAMPED request —
@@ -151,12 +155,20 @@ namespace Multiplayer.Network.Sync
             if (request == null) return;
             try
             {
-                _stamps.Remove(request); // a re-queued instance restarts its own settle
-                _stamps.Add(request, new OrderKey
+                var key = new OrderKey
                 {
                     Ordinal = RailOrdinal.ForNewWindow(),
                     QueuedAt = Time.realtimeSinceStartup,
-                });
+                };
+                _stamps.Remove(request); // a re-queued instance restarts its own settle
+                _stamps.Add(request, key);
+                // BORN OUTSIDE AN APPLY = PROVISIONAL. The value above is only "after everything seen so
+                // far" — good enough to sort with right now, but not the key any other peer will use. The
+                // cause of a window raised in the sim leaves in the NEXT envelope, and that envelope's
+                // ordinal is exactly what a client inherits while applying it, so the next mint back-fills
+                // this key with it. Inside an apply the ordinal is already the shared one: leave it alone.
+                if (RailOrdinal.Current == 0)
+                    RailOrdinal.Provisional(ordinal => key.Ordinal = ordinal);
             }
             catch (Exception ex)
             { MpLog.LogWarning("[MP][windows] order stamp failed — this window falls back to insert order: " + ex.Message); }

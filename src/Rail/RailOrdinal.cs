@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Multiplayer.Network.Sync
 {
@@ -35,12 +36,40 @@ namespace Multiplayer.Network.Sync
         private static uint _next = 1;
         private static uint _current;   // 0 = not inside an apply
 
+        /// <summary>PROVISIONAL KEYS AWAITING THE ORDINAL THAT WILL CARRY THEIR CAUSE. A window this peer
+        /// raises OUTSIDE any apply (research-complete, raised natively in the sim) has no message of its
+        /// own yet — its cause leaves in the NEXT envelope, and that is the ordinal every client will
+        /// inherit when it applies it. Registering the key here and back-filling it at the next
+        /// <see cref="Mint"/> makes host and client agree BY CONSTRUCTION instead of by coincidence.
+        /// Bounded: only stamps taken during an active session register, an envelope is minted every diff
+        /// tick, and the list is capped anyway.</summary>
+        private static readonly List<Action<uint>> _provisional = new List<Action<uint>>(8);
+
+        /// <summary>Register a back-fill for a key stamped outside an apply. Never called from inside one —
+        /// there the ordinal is already authoritative (<see cref="ForNewWindow"/> inherits it).</summary>
+        internal static void Provisional(Action<uint> backfill)
+        {
+            if (backfill == null) return;
+            lock (_provisional)
+            {
+                if (_provisional.Count >= 64) _provisional.RemoveAt(0);
+                _provisional.Add(backfill);
+            }
+        }
+
         /// <summary>HOST/SENDER: take the next ordinal for one outbound envelope. Called from the ONE
-        /// encoder, so a new surface cannot forget to carry it.</summary>
+        /// encoder, so a new surface cannot forget to carry it. Also the moment every provisional window
+        /// key learns its real ordinal — see <see cref="_provisional"/>.</summary>
         internal static uint Mint()
         {
             uint o = _next;
             _next = o + 1;
+            Action<uint>[] waiting = null;
+            lock (_provisional)
+                if (_provisional.Count > 0) { waiting = _provisional.ToArray(); _provisional.Clear(); }
+            if (waiting != null)
+                foreach (var backfill in waiting)
+                    try { backfill(o); } catch { }   // never throw into the encoder
             return o;
         }
 
@@ -88,6 +117,7 @@ namespace Multiplayer.Network.Sync
         {
             _next = 1;
             _current = 0;
+            lock (_provisional) _provisional.Clear();
         }
     }
 }
