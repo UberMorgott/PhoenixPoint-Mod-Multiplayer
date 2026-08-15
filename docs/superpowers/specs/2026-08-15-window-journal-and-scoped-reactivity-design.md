@@ -356,9 +356,45 @@ It asserts, and turns RED when any of these breaks:
 **What must NEVER be logged.** There is no automated law on log content, so this is discipline:
 never log secrets or credentials, never log a Steam auth ticket or session token, and do not dump
 whole payload blobs on a hot path. Steam IDs and peer ids already appear in logs (e.g. the CRC
-backstop line at `src/Rail/DiffEngine.cs:606-608`) and are acceptable. **OPEN QUESTION (Q7)**:
-whether Steam persona names / avatars introduced in 0.9.15-beta are subject to a stricter rule —
-not decided; do not add new persona-name logging until it is.
+backstop line at `src/Rail/DiffEngine.cs:606-608`) and are acceptable.
+
+**DECIDED (was Q7) — HARD RULE: a log line identifies a player by NUMBER, never by NAME.**
+
+A `multiplayer.log` is pasted into bug reports and handed to strangers. It must not say who was
+playing. Therefore:
+- **NEVER** pass a Steam persona name or a player-chosen nickname to `MpLog.Log/LogWarning/LogError`.
+  In this codebase that value is `ClientInfo.PlayerName` (`src/Lobby/SessionManager.cs:1722-1723`),
+  populated from the joiner's own `join.Nickname` (`:815`, `:1393`, `:1467`).
+- **ALWAYS** identify a peer by its slot number. `Session.LocalSlotIndex` already exists and is
+  already the logged form — `slot=` at `src/SaveTransfer/SaveTransferCoordinator.cs:2145`, `:2176`,
+  `:2183`, and `s{SlotIndex}` at `:2404-2405`. Match that style; the host is `host`.
+  Steam IDs stay permitted (they are account handles, not display names) and are already logged.
+
+**Sites to fix — the complete current list.** Only two `MpLog` calls interpolate a player name today:
+- `src/Lobby/SessionManager.cs:455` —
+  `MpLog.LogWarning($"[Multiplayer] Peer {steamId} ({client.PlayerName}) PAUSED: {reason}. …")`
+- `src/Lobby/SessionManager.cs:475` —
+  `MpLog.Log($"[Multiplayer] Peer {steamId} ({client.PlayerName}) RESUMED.")`
+Both drop the `({client.PlayerName})` clause and keep `{steamId}`, gaining a slot number if one is
+in hand. Anyone adding a log line near `_lastKnownNames` (`:506-507`, `:530-532`) or the leaver
+nickname (`:1431`) must apply the same rule.
+
+**IN-GAME TEXT IS NOT A LOG AND KEEPS NAMES.** `SessionLifecycle.FormatLeaveNotice` /
+`FormatConnectionLostNotice` / `FormatReconnectedNotice` / `FormatCountdownCancelledNotice`
+(`src/Lobby/SessionLifecycle.cs:36-58`) are player-facing notices — a player must see *who* left.
+Same for the lobby roster and the Steam-invite row label (`src/Transport/SteamInvite.cs:25`, `:40`)
+and the gate panel (`src/Lobby/NetworkGatePanel.cs:426`, `:447`). Do not "fix" these.
+
+**Law — PROPOSED, and it must meet the normal bar.** `L432` already proves the mod can assert
+properties of the logging door by IL analysis (`tools/RailCheck/L432_EveryLogUsesTheOneDoor.cs:59-82`
+walks every method for direct `Debug.Log*` calls). A content law would assert: *no call to an
+`MpLog` method takes `ClientInfo.PlayerName` (or a local loaded from it) as an argument.* That is an
+argument-origin trace, which is strictly harder than L432's callee-name check. **Write it only if it
+can carry an executable guard and a compile-valid `src/` semantic mutation kill like any other law
+(§7.5); if it cannot, leave the rule as documented discipline rather than shipping a law that cannot
+fail.** Do not add it to `tools/vacuity-exempt.txt` under any circumstances.
+
+**Avatars** are images, never text, and never reach a log; no rule needed beyond "do not dump blobs".
 
 ### 2.5 Prior art — each of these is a DESIGN CONSTRAINT, not trivia
 
@@ -429,13 +465,40 @@ Consequence, from the LMAX/Kafka constraints in §2.5: there is exactly ONE orde
 claiming a position in it is the ONLY way a window can exist. Any code path that can present a
 window without a journal position is a bypass and must be closed (§A.7).
 
-**A.2 — Append-only journal, per-peer read cursor.**
-The journal is APPEND-ONLY. Each peer has its OWN read cursor. A peer who is not looking accumulates
-everything and loses nothing. **Nobody ever waits for another peer** — no quorum, no consensus gate,
-no ready-vote, no wait on a human ACTION. (Waiting on a LOAD that ends by itself remains allowed and
-is how the curtain/reveal barrier legitimately works — see §7.)
+**A.2 — Append-only journal, per-peer read cursor, READ ⇒ DELETED.**
+The journal is APPEND-ONLY at the tail. Each peer has its OWN read cursor. A peer who is not looking
+accumulates everything and loses nothing. **Nobody ever waits for another peer** — no quorum, no
+consensus gate, no ready-vote, no wait on a human ACTION. (Waiting on a LOAD that ends by itself
+remains allowed and is how the curtain/reveal barrier legitimately works — see §7.)
 
-**A.3 — Lifetime: the whole session, across the tactical boundary.**
+**A peer's entry is DELETED the moment that peer has READ it.** Read ⇒ gone. This is the whole
+retention policy: there is no cap, no tail-trim, no time-based staleness, no LRU, no compaction pass.
+The journal's length is therefore bounded by what the local player has not yet looked at, which is
+bounded by how long that player ignores their windows — a quantity the player controls. Deletion is
+PER-PEER: a GLOBAL dismissal still needs the explicit host-minted void record of §A.5, because that
+removes an entry a peer has NOT read.
+
+**A.2b — DECIDED (was Q1): the journal is NOT persisted, and a save requires an empty journal.**
+
+- **No persistence.** A savegame contains ZERO journal entries. Carrying journal state across a game
+  exit/restart is explicitly OUT OF SCOPE — **do not build it**. There is no codec for the journal,
+  no `SerializationData` field, no restore path. This is the ponytail rung: the feature nobody asked
+  for is the feature never written.
+- **A player may not SAVE until their own journal is empty.** Every entry read (§A.2) ⇒ deleted ⇒
+  journal empty ⇒ save permitted. The gate reads ONLY the LOCAL peer's cursor. It therefore waits on
+  the local human reading their own windows and on NOTHING else — not on another peer, not on
+  another human's action, not on a network round-trip. **This is not a quorum and must never become
+  one** (§7.6): a peer who is AFK blocks only their OWN save, and every other peer saves freely.
+  A law asserting this gate reads no remote peer state is required (§8, item 6).
+- **Reconnect loses the backlog, by design.** A peer that disconnects and rejoins receives only
+  entries appended AFTER its reconnect. Everything from before is gone for it. This is INTENDED and
+  is not a defect — do not add a catch-up replay, and do not log it as an anomaly.
+- **Consequence for §A.6:** with read ⇒ delete and no persistence, the 4096 safety bound described
+  below is unnecessary. Keep the once-per-session error line as a runaway-raiser canary only.
+- **REMAINING (Q8) — autosaves.** A save the player did not request cannot wait on a human reading a
+  window. Evidence gathered, decision deferred to the user (§6).
+
+**A.3 — Lifetime: the session only, across the tactical boundary, never across a restart.**
 The journal is owned by the MOD and survives the whole session INCLUDING the tactical boundary; the
 native queue is its MIRROR wherever a screen exists. Constraint clarified by the user: peers are
 never split across layers — either ALL players are in tactical or ALL are on the geoscape. There is
@@ -463,14 +526,14 @@ place a family's scope may be written; no `if (family == …)` anywhere else.
 
 **A.6 — Removals reconciled with the single global order.**
 - The `QueueCap = 64` tail-trim (`src/Rail/GeoWindowCoverage.cs:586`, `:620-635`) is **REMOVED**.
-  Dropping the NEWEST directly contradicts accumulation. Replacement: the journal is unbounded in
-  the normal case, with a **hard safety bound of 4096 entries**; on breach, log ONE
+  Dropping the NEWEST directly contradicts accumulation. **DECIDED (was Q1): the replacement is not
+  a bigger cap, it is §A.2's read ⇒ delete.** The journal has NO cap and NO trim of any kind. Its
+  length is bounded by what the local player has not yet read.
+  A **runaway-raiser canary** stays, and only that: if the local unread count crosses 4096, log ONE
   `MpLog.LogError("[Multiplayer][windows] …")` line (once per session, `_crcBehindLogged`-style
-  once-per-key, §2.4) and stop APPENDING while continuing to serve the existing backlog. Never
-  silently drop an accepted entry. Rationale for a bound at all: a runaway raiser must not exhaust
-  memory; rationale for it being far above any real session: 64 was reached by normal play.
-  **OPEN QUESTION (Q1)**: whether 4096 is the right number — it is a documented guess, not a
-  measurement. Measure a long session's journal length before treating it as final.
+  once-per-key, §2.4) and **keep appending**. The canary NEVER drops an entry and never stops the
+  append — it exists to make a raiser loop visible in a log, nothing more. Never silently drop an
+  accepted entry. (An entry is dropped only by being read, or by a host-minted void.)
 - `DeploymentWindow.DropUnservableQueued` (`src/Rail/DeploymentWindow.cs:490-524`) currently removes
   per-peer and asymmetrically, from a GAME-state predicate, with no broadcast
   (`src/Rail/WindowQueueSync.cs:203-214`) and an early return when `view == null` (`:505`).
@@ -509,16 +572,71 @@ The recurrence mechanism in §2.2 is that one concern is served by two or three 
 The rule going forward: **for each window family, exactly ONE of BLOCK-and-serve or
 CAPTURE-and-publish, chosen once and applied to both roles.** The `SyncApplyScope.Active` escape
 that conditionally reopens a block (`src/Rail/ClientSimGate.cs:365`) is a symptom of the mixture; it
-may only survive if it is the single strategy for that family. Concretely for the two known families
-(**OPEN QUESTION (Q2)** — which of the two strategies each family ends on is NOT decided here;
-decide it from the code and record the decision in `docs/laws.md` and the commit body):
-- event: today BLOCK on client (`src/Rail/ClientSimGate.cs:361-370`) + CAPTURE on host
-  (`src/Rail/EventPopup.cs:336-414`) + a doubled host broadcast
-  (`src/Rail/GeoWindowCoverage.cs:663-676` vs `src/Rail/EventPopup.cs:411`) — the doubled broadcast
-  MUST collapse to one regardless of which strategy wins;
-- research: today BLOCK on client (`src/Rail/ClientSimGate.cs:558`) + CAPTURE-by-observation on host
-  (`src/Rail/ResearchSync.cs:555-564`) + REPLAY of the private native handler
-  (`src/Rail/ResearchSync.cs:389`) — three strategies must become one.
+may only survive if it is the single strategy for that family.
+
+**DECIDED (was Q2): CAPTURE-and-publish, at the generic `QueryStateSwitch` postfix. Same answer for
+BOTH families, and for every family that does not exist yet.** The answer does not differ, and the
+reason it cannot differ is a property of the code, not a convenience.
+
+*The decisive evidence — one seam already covers every window kind.*
+`GeoWindowCoverageGate` is a **postfix on `GeoscapeViewSwitchQuery.QueryStateSwitch`**
+(`src/Rail/GeoWindowCoverage.cs:660-663`) — the one queue every pushed geoscape window passes
+through. Its own doc states the property in the file: it is "about the queue as a whole and neither
+of them about any single window kind — it makes the answer to 'does the other peer see this?' exist
+for every kind **including ones that do not exist yet**" (`:645-648`). It is a postfix precisely so
+"the window must queue exactly as it always did on both peers whatever the verdict is" (`:656`).
+That is capture-then-reconcile at a GENERIC callback seam — the RimWorld MP property in §2.5, and
+the ONLY strategy that can absorb a window raised by a mod we do not control. Since TFTV raises its
+windows through `OpenModal` / `QueryStateSwitch` like everything else, TFTV's windows are captured
+here for free. §A.11 puts TFTV's windows explicitly IN SCOPE for the journal, which removes any
+remaining freedom here: a BLOCK strategy would have to enumerate TFTV's raise sites, and enumerating
+call sites in a mod we do not control is exactly what §2.5 says cannot be done.
+
+*What BLOCK costs, measured at the seams that exist today.* The research family is the worked
+example of the price. Blocking the client and then serving the window ourselves forces the mod to
+**REPLAY a private native handler by reflection**: `ResearchSync.cs:389` invokes
+`AccessTools.Method(typeof(GeoscapeView), "OnFactionResearchCompleted")` (bound at `:86-87`) and
+`:395` invokes `AccessTools.Method(typeof(GeoscapeLog), "Faction_ResearchCompleted")` (`:88-89`) —
+two private methods, reached reflectively, whose arguments the mod must reconstruct
+(`el.Faction, el`, `:388-389`), and whose failures are swallowed into `LogWarning` (`:391`, `:397`).
+Every native signature change breaks this silently. CAPTURE needs none of it: on the host the window
+is raised natively and queued at priority 99 by `GeoscapeView.OnFactionResearchCompleted:1980 →
+OpenModal(…,99)`, and it reaches the capture postfix by simply existing in the queue.
+
+*What is NOT a window strategy and must stop being counted as one.* The two `ClientSimGate` blocks
+are **SIMULATION-authority gates, not window strategies**, and they STAY:
+- `GeoscapeEventRaiseGate` (`src/Rail/ClientSimGate.cs:354-370`) prefixes
+  `GeoscapeEventSystem.OnGeoscapeEvent` and blocks the client from MINTING an authoritative event
+  record — "that mints an authoritative record on a projector client (law 3) which the diff rail can
+  never correct" (`:341-343`);
+- `ClientResearchGate` (`:557-571`) prefixes `GeoFaction.UpdateResearch` and
+  `GeoAlienFaction.UpdateResearch` and blocks the client from COMPLETING research locally.
+Neither blocks a window. They block a client from authoring state the host owns, which the
+authoritative-host architecture (§2.1) requires independently of any window decision. The
+`SyncApplyScope.Active` escape at `ClientSimGate.cs:364` survives for the same reason — it lets a
+rail APPLY legitimately reach the sim funnel. It is no longer "a symptom of the mixture" once the
+window strategy is separated from the sim gate; it is the sim gate's own correctness condition.
+
+*Consequences — what this FORBIDS.*
+1. **No mod-served window raise.** `ResearchSync.PumpDeferredCompletions`'s reflective replay
+   (`src/Rail/ResearchSync.cs:373-400`, the two `MethodInfo`s at `:86-89`) is DELETED. A client
+   presents a window by draining its journal cursor, never by re-invoking a private native handler.
+2. **No second capture path.** `EventPopup.HostBroadcast`'s explicit 0xB6 broadcast
+   (`src/Rail/EventPopup.cs:411-413`) and `GeoModalMirror.HostBroadcastQueued` at the postfix
+   (`src/Rail/GeoWindowCoverage.cs:672`) collapse to ONE — the postfix. This is item 1 of §8 and
+   must land BEFORE the journal append (R2).
+3. **No new family-specific raise patch, ever.** A new window family needs no code (§A.5) precisely
+   because the capture seam is family-agnostic. A patch on a specific window's raise site is a
+   regression to the mixed state and must be rejected in review.
+4. **`ResearchSync.cs:555-564` is not a capture and never was** — it is a log-only postfix on
+   `Research.CompleteResearch`, declared "OBSERVABILITY ONLY" (`:543-551`). Keep it as a log line;
+   do not grow it into a publication path.
+
+*Law required.* One law per family is the wrong shape — it would need a new law per new family.
+Write ONE law: **the only host publication of a window is the `QueryStateSwitch` postfix**, i.e. no
+other method in the mod assembly broadcasts a window-raise surface, and no method reflectively
+invokes a native window-raise handler. Assert "there is one mechanism", never "the mechanisms agree"
+(R7). Roles separated (§C.3). Record the decision and its mutation kill in `docs/laws.md`.
 
 **A.10 — The centre-of-screen "enter deployment preparation" button.**
 When a mission entry is globally dismissed because another player acted on it, the remaining peers
@@ -528,15 +646,91 @@ widget.** The implementer MUST first locate a suitable existing widget/prefab/st
 (`E:\DEV\PhoenixPoint\refs\TFTV-src`), cite it `file:line`, and instantiate or clone it.
 **A hand-rolled overlay is NOT authorised by this spec.** If no native widget can be adapted, that
 is an escalation, not a licence to build one — report it and stop.
-**OPEN QUESTION (Q3)**: which native widget. Not researched; do not guess.
 
-**A.11 — The never-created case stays as-is.**
-A research completion latched before this peer has ever stood on a map surface is swallowed
-(`src/Rail/ResearchSync.cs:117-121`, `:320`, `_everOnMapSurface`, L475's invariant). The journal
-does NOT change this in this work. **OPEN QUESTION (Q4)**: whether an append-only journal should
-make this case disappear entirely (the entry would simply sit unread until the peer arrives). It
-plausibly should, but nothing was audited about what L475 would then assert. Do not change it
-opportunistically.
+**DECIDED (was Q3): `UIModuleConfirmation`, reached at `GeoscapeModulesData.ConfirmationModule`.**
+
+*The widget.* `PhoenixPoint.Geoscape.View.ViewModules.UIModuleConfirmation : MonoBehaviour`
+(decompile `PhoenixPoint.Geoscape.View.ViewModules\UIModuleConfirmation.cs:11`). It is a
+centre-of-screen dialog: a full-screen `Overlay` GameObject (`:43`) behind a centred `Dialog`
+GameObject (`:46`), with `Title` (`:37`), `ConfirmationMsg` (`:22`), an optional `Cost` element
+(`:40`), and two `PhoenixGeneralButton`s — `OkButton` (`:25`) and `CancelButton` (`:28`).
+
+*Exact signature to SHOW it* (`:72`):
+```csharp
+public void Init(object data, ConfirmationCallback confirmCallback, LocalizedTextBind confirmationMsg,
+                 LocalizedTextBind title = null, ResourcePack cost = null,
+                 LocalizedTextBind okTextLoc = null, LocalizedTextBind cancelTextLoc = null)
+```
+`Init` itself does the showing — `Dialog.SetActive(true)` is its first statement (`:74`).
+The callback type is `delegate void ConfirmationCallback(ConfirmationCallbackResult result, object data)`
+(`:13`) with `ConfirmationCallbackResult { ConfirmationOK, ConfirmationCancel }` (`:15-19`).
+
+*Exact HIDE.* `Close()` (`:105-110`) — nulls `_data`, clears `ConfirmCallback`, `Dialog.SetActive(false)`.
+`Cancel()` (`:100-103`) fires the callback with `ConfirmationCancel` and then closes. A click on
+either button routes through the private `Confirm(res)` (`:94-98`), which invokes the callback and
+calls `Close()` — so **the dialog closes itself; the mod must not hide it manually** after a click.
+The button wiring is done once in `Awake` (`:56-70`), and `Awake` also starts it hidden
+(`Dialog.SetActive(false)`, `:59`) — so the module is always present and only the `Dialog` toggles.
+There is nothing to instantiate and no prefab to clone.
+
+*How to REACH it.* `Base.UI\GeoscapeModulesData.cs:50` — `public UIModuleConfirmation ConfirmationModule;`
+i.e. `context.View.GeoscapeModules.ConfirmationModule`. This is the same `GeoscapeModulesData` handle
+the mod already passes around (`src/Rail/OpenUiRepaint.cs:175`).
+
+*Vanilla precedent for a centre-screen prompt raised from code* —
+`PhoenixPoint.Geoscape.View.ViewModules\UIModuleMutationSection.cs:299`:
+`_parentModule.Context.View.GeoscapeModules.ConfirmationModule.Init(MutationUsed, OnRepairItem, ConfirmationMessage, ConfirmationTitle, repairCost);`
+Further vanilla holders: `UIModuleBionics.cs:115` and `UIModuleMutate.cs:105`
+(`Confirmation = context.View.GeoscapeModules.ConfirmationModule;`), and the interface contract
+`PhoenixPoint.Geoscape.View.ViewControllers.AugmentationScreen\IAugmentationUIModule.cs:10`.
+
+*The literal-text problem, already solved in this mod.* `Init` takes `LocalizedTextBind`, not
+`string`, so a raw label cannot be passed directly. The mod's established answer is
+`new LocalizedTextBind(text, doNotLocalize: true)`, which `Localize()` returns verbatim
+(`Base.UI\LocalizedTextBind.cs:37-41`); the pattern is already in use at
+`src/Rail/EventPopup.cs:1061` with its rationale at `:1028-1029`. **No new mechanism is needed.**
+
+*The honest caveat — state it, do not soften it.* Phoenix Point ships **no single-button
+centre-screen widget**. `UIModuleConfirmation` is a two-button OK/Cancel dialog, and it is the
+closest native element. Adapting it to one button means deactivating `CancelButton.gameObject`
+(`:28`) for this one use. That is a native-widget adaptation, not a hand-rolled overlay, and it is
+authorised. If the implementer prefers, keeping BOTH buttons is also legitimate — OK enters
+deployment preparation, Cancel dismisses the prompt — and needs no adaptation at all.
+**Prefer the two-button form; it is the zero-adaptation option.**
+
+*What the OK button must call.* Entering deployment preparation is
+`GeoscapeView.ToDeploymentState` (decompile `GeoscapeView.cs:596`), the transition that raises
+`UIStateRosterDeployment` — the state this repo already names as the pre-mission squad/deployment
+screen at `src/Rail/WindowOrder.cs:228`. Verify the signature at the symbol before calling it.
+
+*What this FORBIDS.* No `new GameObject()` overlay, no custom Canvas, no cloned button row, no
+third-party UI. Any diff that constructs UI rather than calling `ConfirmationModule.Init` fails this
+section.
+
+**A.11 — DECIDED (was Q4): the never-created case is REMOVED. Every window family is journalled.**
+
+The `_everOnMapSurface` swallow (`src/Rail/ResearchSync.cs:117-121`, `:320`) **goes away**. A
+research completion that latches before this peer has ever stood on a map surface is APPENDED to the
+journal like any other entry and is presented when the peer reaches a surface that can present it,
+by the ordinary cursor rule (§A.2). Nothing is swallowed and nothing is special-cased.
+
+The ruling is broader than the question that was asked, and it is the load-bearing part:
+**there is no family that bypasses the journal.** Research-completion notices, pandoran evolution
+summaries, TFTV's own tutorial and notification windows, and everything else all belong to it. This
+is the same statement as the LMAX single-entrance property in §A.1 — claiming a journal position is
+the only way a window can exist — now asserted with no exceptions carved out of it.
+
+*Interaction with §A.9.* TFTV-raised windows being explicitly IN SCOPE is what closes the
+capture-vs-block argument: a BLOCK strategy would require enumerating the raise sites of a mod we do
+not control, which §2.5 records as impossible. CAPTURE at the family-agnostic `QueryStateSwitch`
+postfix (`src/Rail/GeoWindowCoverage.cs:660-663`) absorbs them without naming them.
+
+*`L475` must be RE-EXPRESSED, never weakened and never deleted.* It guards the latch today. Under
+the new invariant it must assert the replacement property — that a completion arriving with no map
+surface is APPENDED rather than dropped — with its own executable guard and its own compile-valid
+`src/` semantic mutation kill (§7.5). **Deleting `L475` to make the change pass is forbidden**; the
+invariant it protects (a completion is never silently lost) is strictly stronger under the journal,
+so the law gets stronger too. Record the re-expression and the kill in `docs/laws.md`.
 
 ### B. Scoped reactivity
 
@@ -560,11 +754,61 @@ to stale data. Declaration is in the OPT-IN-TO-SCOPE direction ONLY; there is no
 Prefix DEPTH is the whole tuning knob (Firebase, §2.5): a prefix that stops at the root repaints on
 everything and is not a bug, just a no-op declaration. Paths must address list elements by STABLE ID,
 never by index (RFC 6902, §2.5) — an index path churns on insert and silently mis-scopes.
-**OPEN QUESTION (Q5)**: whether the current rail path format
-(`S#76.SerializationData.HavenData.AssignedResearchId`) is already stable-ID-addressed for every
-list it traverses, or whether some segments are index-based. NOT audited. Verify before relying on
-prefix matching for any list-bearing path; if index segments exist, either normalise them or leave
-those surfaces undeclared (which is safe by B.3).
+**DECIDED (was Q5): the rail is STABLE-ID addressed everywhere. NO segment is a positional index.
+Prefix subscriptions are safe on every path the rail emits.**
+
+*The path grammar, read from `DiffEngine.VisitEntity`:*
+
+| Segment | Composition | Anchor |
+|---|---|---|
+| root | `IdentityResolver.RootRef` — `"S#" + s.SiteId`, `"V#" + v.VehicleID + OwnerQualifier(...)` | `src/Rail/IdentityResolver.cs:138-144` |
+| nested struct/object | `path + "." + f.Name` | `src/Rail/DiffEngine.cs:1221` |
+| keyed collection element | `path + "." + f.Name + "#" + key`, `key = IdentityResolver.KeyOf(e)` | `src/Rail/DiffEngine.cs:1308`, key at `:1242` |
+| leaf field | `(path, fieldIdx, subKey)` triple, joined for the local snapshot only as `SnapKey` | `src/Rail/DiffEngine.cs:1094-1095` |
+
+*Why no index can appear.* `DiffEngine.cs:1231` states the rule in the file: **"law 2 forbids element
+indices in the path"**. It is enforced, not merely asserted:
+- `IdentityResolver.KeyOf(o)` (`src/Rail/IdentityResolver.cs:42`) derives a key from the ID-probe
+  table `{ "SiteId", "VehicleID", "ResearchID", "FacilityId", "Id", "Def" }` (`:38`), formatted by
+  `FormatKeyValue` (`:97-103`), which returns a `BaseDef`'s `Guid`, a non-empty string, or a
+  non-negative int — and **null** otherwise.
+- A null key sets `keyless = true` (`DiffEngine.cs:1243`) and the whole field is then **ABORTED with
+  a loud `Incident`** (`:1299-1302`) — "unkeyable/duplicate element keys — blob rebuild would husk
+  the elements". Duplicate keys abort it too (`:1279-1281`). There is **no index fallback anywhere**:
+  the failure mode is a visible refusal, never a positional path.
+
+*The two collection shapes, and what each means for a prefix declaration:*
+1. **`FieldClass.EntityCollection`** (keyed) — each element gets its own `…#<stableKey>` subtree
+   (`:1306-1311`). Prefix matching is safe and meaningful at any depth. Insertion at any position
+   renames NOTHING, because the key is derived from the element's own identity, not its slot.
+2. **`FieldClass.EntityList`** (keyless elements) — the **WHOLE list is one canonical value blob at
+   the FIELD path** (`:1229-1232`, `AddEntityListEntry`). There are no per-element paths at all.
+   ⇒ **A declaration must stop at the field path for these.** A prefix deeper than the field name
+   can never match, and would silently subscribe to nothing. This is the one real trap in B.3 and
+   the implementer must check the field's `FieldClass` before writing a deep prefix.
+
+*Ordering is carried separately, at the field path.* A pure reorder of a keyed ordered collection
+changes no element value and no key set, so `AddKeyOrder` ships an explicit ORDER vector as a
+`SubKey == ""` entry on the field (`src/Rail/DiffEngine.cs:1304-1305`, `:1388-1400`, rationale
+`:1261-1268`). ⇒ **a surface that renders ORDER must declare the FIELD path**, not the element
+paths; declaring only `…#<key>` prefixes will miss reorders.
+
+*`subKey` is an identity, never an index.* It is a `string` (`src/Rail/DiffEngine.cs:104`), produced
+for dictionary entries as `GeoItemCodec.SubKey(de.Key)` — the dictionary KEY (`:1206`, entry built
+`:1213`) — and `""` for every non-dictionary leaf (`:1325`) and for the ORDER/census carriers
+(`:1358`, `:1400`). It is consumed unchanged at `GenericApplier.ApplyEntry`
+(`src/Rail/GenericApplier.cs:275`, `:278`). A dictionary deletion ships
+`RailMeta.DictTombstone` against that same key (`:991`).
+
+*What this FORBIDS and PERMITS.*
+- **PERMITTED:** static path-prefix declarations on any rail path, including through keyed
+  collections. R4 is retired — index churn cannot occur.
+- **FORBIDDEN:** a declared prefix deeper than an `EntityList` field path (it matches nothing);
+  a declaration that assumes element order is visible in element paths (it is not — see the ORDER
+  vector above); any code that reconstructs a path by element position.
+- **Law required:** assert that no rail path segment is produced from a loop index — i.e. the
+  `keyless` arm still reaches `Incident` and has no blob/index fallback. This is a real invariant
+  with an existing enforcement point (`DiffEngine.cs:1283-1302`) and needs a semantic mutation kill.
 
 **B.4 — The global bool STAYS.**
 It serves the ~63 kindless `OpenUiRepaint.MarkDirty()` sites (AssignSync 9, PersonnelSync 15,
@@ -582,13 +826,69 @@ the batch-end evaluate; keep them.
 A repaint MUST NOT mutate replicated state, so a repaint can never generate rail traffic
 (RimWorld `InInterface` vs `Ticking`, §2.5).
 
-**B.7 — The engine must know WHICH SURFACE each player is on**, derived universally rather than
-case-by-case; peers on the same surface repaint together. **OPEN QUESTION (Q6)**: the universal
-derivation. The obvious candidate is the live view-state Type already used as the key of
-`UiNativeRepaint.TryRepaint`'s 17-entry Table (`src/Rail/OpenUiRepaint.cs:~985`), but nothing was
-audited about whether that Type is available for a peer OTHER than the local one, i.e. whether the
-surface a REMOTE player is on is replicated at all today. Resolve this from code before designing
-the wire format; do not assume it is already replicated.
+**B.7 — DECIDED (was Q6): the surface is `view.CurrentViewState.GetType()`, it is LOCAL-ONLY today,
+and it stays local-only. No peer's surface is replicated, and none needs to be.**
+
+*(a) The universal derivation already exists and is already the de-facto standard.*
+`GeoscapeView.CurrentViewState` (decompile `GeoscapeView.cs:193`) is ONE accessor covering EVERY
+geoscape surface. The mod reaches it as `GenericApplier.GeoLevel()?.View?.CurrentViewState` and
+already does so from **13 files** — `OpenUiRepaint.cs:748`, `:820`, `:972`; `WindowOrder.cs:313-322`
+(`CurrentViewStateOf`, the null-safe wrapper, with the one-frame-null hazard documented at `:298`);
+`EventPopup.cs:861`, `:1483`; `ResearchSync.cs:322`, `:440`; `EquipSync.cs:228`, `:356`;
+`ManufactureSync.cs:519`; `MissionSync.cs:1094`, `:1128`, `:1591`; `MarketplaceSync.cs:471`;
+`DurableWindowRegistry.cs:409`; `LevelTeardown.cs:101-103`.
+**Use `WindowOrder.CurrentViewStateOf` (`src/Rail/WindowOrder.cs:313-322`) — do not add a 14th
+accessor.** No `GeoscapeModulesData` involvement: that type holds module references
+(`Base.UI\GeoscapeModulesData.cs:50` is `ConfirmationModule`), not the current state.
+
+The only discriminator the geoscape accessor cannot supply is the LAYER: in tactical there is no
+`GeoscapeView` and `GenericApplier.GeoLevel()` returns null
+(`src/Rail/GenericApplier.cs:130-136`). So the universal derivation is the pair
+**(layer, view-state Type)**, where layer is `GeoLevel() == null`. Per §A.3 all peers are always on
+the same layer, so this is a total function with no gaps.
+
+*The documented DUPLICATE pair is CONFIRMED — one by Type, one by name — and must collapse.*
+- `DurableWindowRegistry.MapStates` = `HashSet<Type>` `{ UIStateNothingSelected,
+  UIStateVehicleSelected, UIStateInitial }` (`src/Rail/DurableWindowRegistry.cs:334-335`), compared
+  **by Type** in `MayPresent(bool, Type)` (`:368-369`, `MapStates.Contains(currentViewState)`).
+- `WindowOrder.MapStates` = `HashSet<string>` over the SAME three states
+  (`src/Rail/WindowOrder.cs:245-248`), compared **by NAME** in `HoldsForOpenScreen` (`:355-359`,
+  `!MapStates.Contains(currentViewState.Name)`).
+Two spellings of one set is the two-ordering-systems mistake in miniature (§B.8). **Collapse to
+ONE**, and collapse to the **NAME** form: `WindowOrder.cs:243-244` records the deliberate reason —
+"DECLARED AS THE MAP AND NOT AS THE SCREENS, so an unknown state HOLDS rather than interrupts", and
+a name set can also name a state from a mod whose Type this assembly cannot reference (which §A.11
+now requires for TFTV). The by-Type copy in `DurableWindowRegistry` is the one that goes.
+`HeldTransitionStates` (`WindowOrder.cs:226-229`) is already name-based and stays as-is.
+
+*(b) NO peer's surface is replicated today. This is a verified negative, not an assumption.*
+Every one of the 13 `CurrentViewState` readers above is a LOCAL read in `src/Rail`, `src/Lobby` or
+`src/SaveTransfer`. **There is no encoder, no `PacketType`, and no rail root carrying a view state**
+— `src/Net/PacketType.cs` has no such kind, and no `CurrentViewState` reader exists anywhere under
+`src/Net`. The closest thing that IS replicated per-peer is LOAD PROGRESS, not surface:
+`LoadProgress = 0x1A` and `RosterProgress = 0x1D` (`src/Net/PacketType.cs:27`, `:30`), which feed
+the curtain/reveal barrier (`RosterProgressTracker`, §7.6) — a load that ends by itself, never a
+surface.
+
+*(c) A single universal derivation IS achievable, and replication is NOT needed. Decision: do not
+replicate.* B.7's requirement — "peers on the same surface repaint together" — is satisfied without
+any peer knowing another peer's surface. Each peer receives the same rail batch, derives its OWN
+surface locally with the same function, and matches it against the same declaration table. Two peers
+on the same surface therefore repaint identically **because the inputs and the function are the
+same**, not because either learned anything about the other. Adding a wire field would be state that
+only ever re-derives a value the receiver can compute for free — and it would violate B.6 in spirit
+by making presentation a producer of network traffic.
+
+*If a future need forces replication, the cost is known.* The natural carrier is the existing
+`Heartbeat = 0x06` / `HeartbeatAck = 0x07` (`src/Net/PacketType.cs:12-13`), sent every
+`HeartbeatIntervalMs = PingTable.CadenceMs` (`src/Lobby/SessionManager.cs:131`, send at `:223-226`)
+— a **~1 s cadence, UNRELIABLE** (`:221-222`: "Sent UNRELIABLE: a retransmitted probe measures the
+retransmit, not the path"). So the rate would be ~1 Hz per peer, on an existing packet, not a new
+hot path. **This is recorded as a cost estimate, not an authorisation to build it.**
+
+*What this FORBIDS.* No new packet type for surface. No surface field on any existing message. No
+per-frame surface derivation cached across frames (the value can be null for a single frame —
+`WindowOrder.cs:298`; re-derive, do not memoize). No second `MapStates`.
 
 **B.8 — Delete the hand-rolled signatures as prefixes land.**
 `"agenda"`/`AgendaSignature` (`src/Rail/OpenUiRepaint.cs:~465`), `"infobar"`/`InfoBarKey` (`:514`),
@@ -670,7 +970,11 @@ SEPARATED, so a host-only fault (which is exactly P1) can appear.
   mission-outcome BYPASS in §A.8 is in scope.
 - Not per-widget opt-in sync. That was v1 and it was abandoned; tModLoader documents the failure
   mode (§2.5). Universal-by-default stays.
-- Not changing `_everOnMapSurface` (§A.11).
+- ~~Not changing `_everOnMapSurface`~~ — **superseded by the Q4 decision**: the swallow is removed
+  and `L475` is re-expressed (§A.11).
+- Not persisting the journal in the savegame, and not carrying journal state across a restart
+  (§A.2b).
+- Not replicating any peer's current surface (§B.7).
 - Not building custom UI. Native widgets only (§A.10, §7).
 - Not a broad refactor "while we are in there". Barotrauma and Project Zomboid are the warning:
   get the TWO seams right once, touch nothing else.
@@ -690,26 +994,73 @@ SEPARATED, so a host-only fault (which is exactly P1) can appear.
 - **R3 — Prefix depth too shallow.** A declaration that stops at the root silently reverts a surface
   to repaint-on-everything. It is safe but invisible. Mitigation: the harness property C.1.3 must be
   written per declared surface, so a useless declaration shows up as an untested surface.
-- **R4 — Index-based path segments** (Q5) would make prefix matching mis-scope on list insert.
-- **R5 — Removing the queue cap** exposes an unbounded accumulation to any runaway raiser. Mitigated
-  by the 4096 safety bound (Q1) and the once-per-session error line.
+- ~~**R4 — Index-based path segments**~~ — **RETIRED by the Q5 decision** (§B.3): no rail path
+  segment is an index, and the keyless arm aborts loudly (`src/Rail/DiffEngine.cs:1283-1302`) rather
+  than falling back to one. The residual risk is different and smaller: a prefix declared DEEPER
+  than an `EntityList` field path matches nothing and silently subscribes to nothing.
+- **R5 — Removing the queue cap.** Mitigated by read ⇒ delete (§A.2): the backlog is bounded by what
+  the local player has not looked at. The 4096 canary line (§A.6) makes a runaway raiser visible
+  without ever dropping an entry.
+- **R8 — The empty-journal save gate becoming a blocker.** It must read ONLY the local cursor. If it
+  ever consults another peer's state it is a quorum and violates §7.6. A law must assert this
+  (§A.2b). Q8 (autosaves) is the unresolved half of this risk.
 - **R6 — Concurrent agents.** Agents editing this repo in parallel sweep each other's commits and
   collide on law numbers (recorded in project memory). See §7.
 - **R7 — A law written to legitimise a duplicate.** `L496` did exactly this. Any new law that
   asserts "both mechanisms agree" instead of "there is one mechanism" is wrong by construction and
   must be rejected in review.
 
-## 6. OPEN QUESTIONS (unresolved — do NOT invent answers)
+## 6. OPEN QUESTIONS
+
+Q1–Q7 are **CLOSED**. Each is now a decision written into its own section — read the section, not
+this table. Q8 is the one thing genuinely still open, and it is the user's call.
+
+### 6.1 Still open
 
 | # | Question | Where it bites |
 |---|---|---|
-| **Q1** | Is 4096 the right journal safety bound? It is a documented guess, not a measurement. Measure a long session before treating it as final. | §A.6 |
-| **Q2** | For the event family and the research family, which single strategy wins — BLOCK-and-serve or CAPTURE-and-publish? Not decided. Decide from the code, record in `docs/laws.md` and the commit body. | §A.9 |
-| **Q3** | Which NATIVE widget provides the centre-of-screen "enter deployment preparation" button? Not researched. Must be found in the decompile or TFTV and cited `file:line` before any UI code is written. | §A.10 |
-| **Q4** | Should the append-only journal make the `_everOnMapSurface` never-created case disappear? Plausible, but nothing was audited about what L475 would then assert. Not in scope; do not change opportunistically. | §A.11 |
-| **Q5** | Is the rail path format stable-ID-addressed for every list segment, or are some segments index-based? NOT audited. Prefix matching on a list-bearing path is unsafe until this is answered. | §B.3 |
-| **Q6** | How is "which surface a player is on" derived universally, and is a REMOTE peer's surface replicated at all today? Not audited. | §B.7 |
-| **Q7** | Are Steam persona names / avatars (added 0.9.15-beta) subject to a stricter no-log rule? Not decided. Do not add new persona-name logging until it is. | §2.4 |
+| **Q8** | **AUTOSAVES vs the empty-journal save gate.** §A.2b forbids SAVING until the local journal is empty. That is safe for a save the player asked for. An AUTOSAVE is not asked for and cannot wait on a human reading a window. Which way does it go? NOT decided — the user decides. | §A.2b |
+
+**Evidence gathered for Q8 (so the decision needs no further digging):**
+- `SaveType` distinguishes the kinds: `Base.Serialization\SaveType.cs:8` declares `Autosave`
+  (alongside `Quicksave`), so an autosave is *identifiable* at the seam — a gate can tell the two
+  apart without heuristics.
+- **One common autosave entry point:** `PhoenixSaveManager.AutosaveGame()`, signature
+  `public IEnumerator<NextUpdate> AutosaveGame()`
+  (`PhoenixPoint.Common.Saves\PhoenixSaveManager.cs:414`). It stamps
+  `SaveType.Autosave` (`:430`) and deletes the previous autosave (`:433`, `:439-441`).
+- **Exactly four vanilla autosave triggers**, all in `PhoenixPoint.Geoscape.Levels\GeoLevelController.cs`,
+  all of the form `Timing.Current.CallSafe(SaveManager.AutosaveGame(), ex)`:
+  `:701`, `:1236`, `:1328`, `:1424` (each followed by `ShowAutosaveError` on failure — `:706`,
+  `:1239`, `:1332`, `:1429`).
+- The mod has **no save gate today** — nothing in `src/` patches or refuses a save.
+
+**The option space (do not pick one without the user):**
+1. **Exempt autosaves** — the gate applies to manual/quick saves only. An autosave may capture a
+   non-empty journal; since the journal is not persisted (§A.2b), those unread entries are simply
+   lost on reload. Smallest change; silently loses windows.
+2. **Suppress the autosave** while the journal is non-empty (skip the four call sites, retry at the
+   next trigger). Loses no window; the player can lose an autosave they never knew was skipped.
+3. **Drain-then-save** — treat the autosave as a signal to present the backlog, then save. Closest
+   to "no window is lost, no save is lost", but it pushes windows at the player at a moment the game
+   chose, which cuts against §A.4 (only DISPLAY is postponed, and it is postponed by the *player's*
+   position, not by a save).
+
+**What would settle it:** a statement from the user of which loss is acceptable — a lost autosave, a
+lost window, or an interrupted moment. This is a product judgement, not a code fact; no further
+source reading will decide it.
+
+### 6.2 Closed — where each decision now lives
+
+| # | Decision | Section |
+|---|---|---|
+| **Q1** | No cap and no trim: an entry is DELETED once read; the journal is not persisted; a save requires an empty local journal; 4096 survives only as a runaway-raiser log canary. | §A.2, §A.2b, §A.6 |
+| **Q2** | CAPTURE-and-publish at the generic `QueryStateSwitch` postfix — same answer for BOTH families and for families that do not exist yet. The `ClientSimGate` blocks are SIM-authority gates, not window strategies, and stay. | §A.9 |
+| **Q3** | `UIModuleConfirmation` via `GeoscapeModulesData.ConfirmationModule`. No native single-button widget exists; the two-button form is the zero-adaptation option. | §A.10 |
+| **Q4** | The `_everOnMapSurface` swallow is REMOVED. No family bypasses the journal, TFTV's windows included. `L475` is re-expressed, never weakened. | §A.11 |
+| **Q5** | Stable-ID addressed everywhere; no index segments exist and the keyless arm aborts loudly rather than falling back. One trap: an `EntityList` field is a single blob at the FIELD path. R4 retired. | §B.3 |
+| **Q6** | `view.CurrentViewState.GetType()` via `WindowOrder.CurrentViewStateOf`. No peer's surface is replicated today and none will be — each peer derives its own. The duplicate `MapStates` pair collapses to the NAME form. | §B.7 |
+| **Q7** | Log the peer NUMBER (`slot=`), never a persona name. Two sites to fix. In-game notices keep names. A content law only if it can carry a real guard and kill. | §2.4 |
 
 ---
 
@@ -797,7 +1148,10 @@ Follow §2.4 exactly. Summary of the rules that bind an implementer:
   when the repeat is per (key, generation). Clear your tally at the reload boundary the way
   `GenericApplier.ResetForReloadBoundary` does (`src/Rail/GenericApplier.cs:95-96`).
 - **Never log** secrets, credentials, Steam auth tickets or session tokens; do not dump whole
-  payload blobs on a hot path. See Q7 for persona names.
+  payload blobs on a hot path.
+- **Never log a player's NAME.** Identify a peer by slot number (`slot=`, the existing form at
+  `src/SaveTransfer/SaveTransferCoordinator.cs:2145`) or by Steam ID — never `ClientInfo.PlayerName`.
+  Player-facing in-game notices are exempt and keep names. Full rule and the two sites to fix: §2.4.
 
 ### 7.4 Verification — never claim it without reporting the command AND its output
 
@@ -886,12 +1240,11 @@ Each item states the files it touches, the law(s) it needs, and its verification
 touch `src/` or `tools/RailCheck` are SERIAL (§7.7). Item 0 is read-only and may run in parallel
 with nothing else pending.
 
-**0. Resolve the open questions that block later items (READ-ONLY).**
-- Files: none. Answers Q2 (§A.9), Q3 (§A.10), Q5 (§B.3), Q6 (§B.7).
-- Laws: none.
-- Verification: a report citing `file:line` for every answer, from the decompile / TFTV / mod source.
-  Q3 must name a concrete native widget or escalate. **Q1, Q4 and Q7 do not block anything and stay
-  open.**
+**0. Resolve the open questions that block later items — ✅ DONE 2026-08-15.**
+- Q1 → §A.2/§A.2b/§A.6 · Q2 → §A.9 · Q3 → §A.10 · Q4 → §A.11 · Q5 → §B.3 · Q6 → §B.7 · Q7 → §2.4.
+- **Nothing here blocks any item below.** The one remaining open question, **Q8 (autosaves vs the
+  empty-journal save gate)**, blocks ONLY item 6 and is the user's decision — its evidence is
+  already gathered in §6.1, so no further research is needed before asking.
 
 **1. Collapse the doubled host broadcast (R2).**
 - Files: `src/Rail/GeoWindowCoverage.cs:663-676`, `src/Rail/EventPopup.cs:411`.
@@ -899,11 +1252,14 @@ with nothing else pending.
 - Verification: build + `dotnet run -c Debug --project tools/RailCheck` GREEN at 336/336; mutation
   kill for the new/changed law recorded in `docs/laws.md`.
 
-**2. Collapse block-vs-capture to one strategy per family (§A.9, needs Q2).**
-- Files: `src/Rail/ClientSimGate.cs:361-370`, `:558`, `src/Rail/EventPopup.cs:336-414`,
-  `src/Rail/ResearchSync.cs:389`, `:555-564`.
-- Laws: one law per family asserting a single strategy — "for family F there is exactly one of
-  block-and-serve or capture-and-publish". Not "the two agree" (R7).
+**2. Collapse block-vs-capture to CAPTURE-and-publish (§A.9 — decided).**
+- Files: `src/Rail/ResearchSync.cs:373-400` (delete the reflective replay) and `:86-89` (delete the
+  two `MethodInfo`s); `src/Rail/EventPopup.cs:411-413` (the second broadcast, folded into item 1).
+  **Do NOT touch** `src/Rail/ClientSimGate.cs:354-370` or `:557-571` — those are sim-authority gates
+  and stay (§A.9). `src/Rail/ResearchSync.cs:555-564` stays as an observability-only log line.
+- Laws: ONE law, not one per family — "the only host publication of a window is the
+  `QueryStateSwitch` postfix, and no method reflectively invokes a native window-raise handler".
+  Assert one mechanism, never "the two agree" (R7).
 - Verification: RailCheck GREEN; semantic mutation kill; a live 3-instance run showing the window
   still appears on every peer.
 
@@ -936,12 +1292,17 @@ with nothing else pending.
 - Verification: RailCheck GREEN at the adjusted law count (`tools/law-count.txt` updated); mutation
   kill; net-negative diff reported in the commit body.
 
-**6. Remove the tail-trim cap; add the safety bound (§A.6, Q1).**
-- Files: `src/Rail/GeoWindowCoverage.cs:586`, `:620-635`.
-- Laws: "no code path removes the NEWEST journal entry"; and the safety-bound breach logs once and
-  stops appending rather than dropping.
-- Verification: RailCheck GREEN; mutation kill; harness run appending > bound and asserting no
-  accepted entry was dropped.
+**6. Remove the tail-trim cap; read ⇒ delete; the save gate (§A.2, §A.2b, §A.6 — decided).
+BLOCKED on Q8 for the autosave arm only; the rest may land.**
+- Files: `src/Rail/GeoWindowCoverage.cs:586`, `:620-635` (delete `QueueCap`/`TrimQueue`); the journal
+  itself (read ⇒ delete); the save gate — see §6.1 for the four vanilla autosave call sites and the
+  one common entry point, and ASK THE USER before gating any of them.
+- Laws: (a) "no code path removes an UNREAD journal entry except a host-minted void"; (b) the 4096
+  canary logs once and **keeps appending**; (c) **the save gate reads only the LOCAL cursor** — it
+  must not touch any remote peer's state (R8, §7.6).
+- Verification: RailCheck GREEN; mutation kill; harness run appending past 4096 and asserting no
+  entry was dropped and the append continued; a two-peer harness case proving peer B's unread
+  backlog does not affect peer A's ability to save.
 
 **7. Dismissal scope as a declared property; host-minted void records (§A.5, A.6).**
 - Files: the family declaration table (new, smallest possible — a static array/dictionary, not a
@@ -975,8 +1336,8 @@ with nothing else pending.
 - Verification: seeded run reproducible from the seed; all five C.1 properties asserted; plus one
   recorded-trace replay from a real session (C.2).
 
-**11. Scoped reactivity (§B.1–B.8). Needs Q5 and Q6; may land after item 10 so its properties are
-testable.**
+**11. Scoped reactivity (§B.1–B.8). Q5 and Q6 are decided — read §B.3 and §B.7 before starting.
+May land after item 10 so its properties are testable.**
 - Files: `src/Rail/GenericApplier.cs:272-278`, `:1272`, `:323`, `:508`; `src/Rail/UiEventMap.cs:75-190`;
   `src/Rail/OpenUiRepaint.cs:728`, `:746`, `:893`, `:959`, `:158`, plus the signature deletions at
   `:215`, `:303`, `:~375`, `:~465`, `:514` and the `RefreshInfoBar` ordering fix at `:514`/`:~524`.
@@ -1024,7 +1385,11 @@ testable.**
   `src/Rail/ClientSimGate.cs:361-370`). Mixing both on one concern is the recurrence mechanism
   documented in §2.2; §A.9 forbids it.
 - **journal** — the new append-only, host-ordered stream of pending windows with a per-peer read
-  cursor (§A). It replaces both existing ordering systems.
+  cursor (§A). It replaces both existing ordering systems. Retention: an entry is DELETED once that
+  peer has read it (§A.2); the journal is never written to a savegame (§A.2b).
+- **surface** (derivation) — `view.CurrentViewState.GetType()`, obtained through
+  `WindowOrder.CurrentViewStateOf` (`src/Rail/WindowOrder.cs:313-322`). Local-only: no peer's
+  surface is replicated (§B.7).
 - **void record** — an explicit, host-minted entry that removes a GLOBALLY-dismissed window from
   every peer's backlog and closes it if open (§A.5). Explicit by design: an implicit per-peer timeout
   diverges (FIX gap-fill, §2.5).
