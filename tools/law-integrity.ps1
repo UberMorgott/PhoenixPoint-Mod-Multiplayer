@@ -120,7 +120,15 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Earlier the same day: L514 ADDED (the roster list repaints on the same mirrored
 # level-up), 334 -> 335; L513 ADDED (no peer lifts before its boundary releases), 333 -> 334;
 # L512 ADDED (the crew strip repaints on a mirrored level-up), 332 -> 333.
-$expectedRegistrationDigest = '232041df0222f922bb77f6b3352e7bf4ee44c0c100db4ec57cb763b14933253f'
+# Updated deliberately 2026-08-15: L549 ADDED (the acting peer's own gesture repaints its own persistent
+# HUD: IL pins that DiffEngine.FlushOnHostGesture -- N3's third arm, the ONE host-local gesture seam every
+# capture family inherits from IntentRail.ShouldRunNative -- reaches OpenUiRepaint.MarkLocalGesture, that
+# ResearchSync.CaptureIntent still rides that seam, and that FlushIfDirty has a HUD-only branch to land the
+# flag in; the mark state machine is EXECUTED in both directions) -- 348 -> 349 registrations, one new
+# identity string. Nothing retired or amputated: L154 owns the same seam's FLUSH (the change ships to the
+# CLIENTS this cycle) and never asked whether the peer that ACTED repaints itself, which is how every mark
+# site in the repo came to be an APPLY path and the host grew no research row for its own research.
+$expectedRegistrationDigest = 'd276d663bf056537a9cf5e5dbe3e9177f9e13e6cdf5d6a0a2b5afd35956e3a83'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

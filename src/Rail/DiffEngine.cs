@@ -728,8 +728,16 @@ namespace Multiplayer.Network.Sync
         public static void FlushOnHostGesture()
         {
             var engine = NetworkEngine.Instance;
-            if (engine != null && engine.IsHost && engine.IsActiveSession && !SyncApplyScope.Active)
-                FlushNow();
+            if (engine == null || !engine.IsHost || !engine.IsActiveSession || SyncApplyScope.Active) return;
+            FlushNow();
+            // AND THE MISSING HALF, at the same one seam (L549). FlushNow repaints the CLIENTS — their
+            // appliers mark dirty — while the ACTING peer marked nothing, because every mark site in the
+            // repo is an apply path. IntentRail.HandleInbound has paired the two lines since 2026-07-26
+            // for the host applying a REMOTE intent; the host's OWN gesture never got the pair, so a
+            // research it started itself grew no row on its own top-right strip. The HUD half only: this
+            // seam is entered by every capture family on every invocation, so a full-screen mark here
+            // would re-enter the open view state at NPC-gesture rate (see MarkLocalGesture).
+            OpenUiRepaint.MarkLocalGesture();
         }
 
         /// <summary>

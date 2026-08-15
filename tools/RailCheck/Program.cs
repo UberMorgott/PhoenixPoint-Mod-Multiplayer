@@ -450,6 +450,7 @@ namespace RailCheck
             Add(laws, () => L546_AHostMintedPositionIsPublishedOrStated.Check());
             Add(laws, () => L547_ALocalDismissalNeverTravels.Check());
             Add(laws, () => L548_TheAgendaStripNeverRebuildsOnAProgressTick.Check());
+            Add(laws, () => L549_TheActingPeersOwnGestureRepaintsItsOwnHud.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -497,8 +498,14 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 348;
-        // Updated deliberately 2026-08-15: L548 (a progress-only delta never rebuilds the top-right agenda
+        private const int ExpectedLawRegistrations = 349;
+        // Updated deliberately 2026-08-15: L549 (the acting peer's own gesture repaints its own persistent
+        // HUD) was ADDED — 348 -> 349. Nothing was retired or amputated: L154 owns the host-local gesture
+        // seam's FLUSH (the change ships to the clients this cycle) and L492/L516/L548 own what the agenda
+        // strip may be torn down FOR — none of them asked whether the peer that ACTED ever marks its own
+        // UI, which is how every mark site in the repo came to be an APPLY path and the host grew no
+        // research row for a research it started itself.
+        // Earlier the same day: L548 (a progress-only delta never rebuilds the top-right agenda
         // strip) was ADDED — 347 -> 348. Nothing was retired or amputated: L492 owns "the strip rebuilds when
         // its rows change" and executes AgendaNeedsRebuild with hand-written strings, so it never asked WHICH
         // key the runtime hands that gate — which is how §B.8 keying the teardown on ScopeKey (a generation
@@ -571,7 +578,9 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "afbd3b0fd2e39819318c947d31cc7cccc40d020989acffa80af0619eb4d5230e";
+        // Updated deliberately 2026-08-15 with L549 (the acting peer's own gesture repaints its own
+        // persistent HUD): one new identity string, 348 -> 349 executed identities. No identity retired.
+        private const string ExpectedExecutionIdentityDigest = "f7b474c842153120976d5a035ba0c751007173360bac02c98c0885370b475ffa";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

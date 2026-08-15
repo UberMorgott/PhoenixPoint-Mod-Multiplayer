@@ -851,6 +851,32 @@ namespace Multiplayer.Network.Sync
         private static void MarkHudDirty() { _hudDirty = true; }
 
         /// <summary>
+        /// THE ACTING PEER'S OWN GESTURE (L549). Every other mark site in this file's caller set is an
+        /// APPLY path — <see cref="GenericApplier"/>, <c>IntentRail.HandleInbound</c> — so a peer repainted
+        /// its persistent HUD for everybody's change except the one it made itself. Reported on the host
+        /// 2026-08-15: it started a research and the top-right agenda strip grew no research row until
+        /// something re-Init'd the module, because <c>UIModuleFactionAgendaTracker</c> subscribes to no
+        /// research event of its own (Awake:82-91) and its rows are built in <c>InitialSetup</c> alone.
+        ///
+        /// Raised from the ONE host-local gesture seam (<c>DiffEngine.FlushOnHostGesture</c>), so research,
+        /// manufacture, facilities and vehicles are all covered by the same line — the client half needs
+        /// nothing, because a client's own gesture is blocked and lands as the host's echo, which marks.
+        ///
+        /// THE HUD HALF ONLY, DELIBERATELY. That seam is entered by every capture family on every
+        /// invocation — <c>VehicleSync.CaptureTravel</c> sees EVERY faction's departure on the planet
+        /// before any owner test — so a pathless <see cref="MarkDirty()"/> here would bump every declared
+        /// scope and re-enter the open view state at NPC-traffic rate, which is the L492/L548 teardown
+        /// bought back. The strips gate themselves: the agenda strip on its ROW IDENTITY, the others on
+        /// their declared scope, so an unmoved model costs one signature build.
+        /// ponytail: no path is carried, so the SCOPE-gated strips (info bar, crew, roster) still wait for
+        /// a rail path; upgrade path is to pass the gesture's own path once a seam knows it.
+        /// </summary>
+        public static void MarkLocalGesture() => MarkHudDirty();
+
+        /// <summary>Test seam for L549: does the persistent HUD owe a refresh?</summary>
+        internal static bool HudRepaintOwed => _hudDirty;
+
+        /// <summary>
         /// A DESTROYED SOLDIER MUST NOT STAY UNDER SOMEBODY'S CURSOR. Reported 2026-08-08: a client
         /// dismissed a soldier, every peer's model converged (host `intent APPLIED op=fire`, both clients
         /// `structural destroy 'U#4' applied`) — and the acting client's edit screen kept painting the dead

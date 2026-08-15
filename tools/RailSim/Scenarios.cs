@@ -22,6 +22,48 @@ namespace RailSim
             yield return Pair("an-untouched-surface-does-not-repaint", AnUntouchedSurfaceDoesNotRepaint);
             yield return Pair("a-progress-tick-never-tears-down-the-agenda-strip",
                               AProgressTickNeverTearsDownTheAgendaStrip);
+            yield return Pair("my-own-gesture-repaints-my-own-strip", MyOwnGestureRepaintsMyOwnStrip);
+        }
+
+        /// <summary>L549 as an OBSERVABLE HISTORY, and the direction L548's history does not cover: there
+        /// the changes ARRIVE, here the peer makes them ITSELF. A host queues a research, then a
+        /// manufacture, then nothing. Each self-initiated gesture must leave the persistent HUD owing a
+        /// refresh — the flag every apply path raises and no local gesture used to — and the strip's own
+        /// teardown gate must still fire exactly twice, once per real change of the SET OF ROWS. A peer
+        /// whose own action repaints nothing until it walks out of the screen and back is the postulate-1
+        /// defect reported on the host 2026-08-15.</summary>
+        private static IEnumerable<string> MyOwnGestureRepaintsMyOwnStrip(int seed)
+        {
+            OpenUiRepaint.Reset();
+            var gestures = new[]
+            {
+                "manufacture=-|research=RES_A|vehicles=|facilities=",   // the host starts a research
+                "manufacture=Gun|research=RES_A|vehicles=|facilities=", // …then queues a manufacture
+                "manufacture=Gun|research=RES_A|vehicles=|facilities=", // …then a gesture the strip does not draw
+            };
+
+            int unmarked = 0, teardowns = 0;
+            foreach (var rows in gestures)
+            {
+                OpenUiRepaint.MarkLocalGesture();          // the acting peer's own capture seam
+                if (!OpenUiRepaint.HudRepaintOwed) unmarked++;
+                if (OpenUiRepaint.AgendaNeedsRebuild(true, rows)) teardowns++;
+            }
+            OpenUiRepaint.Reset();
+
+            if (unmarked != 0)
+                yield return "my-own-gesture-repaints-my-own-strip: " + unmarked + " of the acting peer's own " +
+                             "gestures left the persistent HUD un-owed. Every mark site in this repo is an " +
+                             "APPLY path, so the peer that pressed the button is the one peer whose " +
+                             "already-open strip is never refreshed — the host starting a research and seeing " +
+                             "no research row.";
+            if (teardowns != 2)
+                yield return "my-own-gesture-repaints-my-own-strip: the strip was torn down " + teardowns +
+                             " times across 3 self-initiated gestures, of which exactly TWO changed the SET OF " +
+                             "ROWS (the first paint and the manufacture). A third teardown means the mark now " +
+                             "rebuilds the strip for any gesture at all — the L492/L548 flicker on the acting " +
+                             "peer this time; a missing one means the mark reaches the HUD and the strip " +
+                             "ignores it.";
         }
 
         /// <summary>L548 as an OBSERVABLE HISTORY. A run of rail batches on a client: a manufacture
