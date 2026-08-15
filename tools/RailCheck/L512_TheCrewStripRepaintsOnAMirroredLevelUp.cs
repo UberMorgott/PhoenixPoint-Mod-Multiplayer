@@ -39,10 +39,12 @@ namespace RailCheck
     ///       <c>UIModuleVehicleSelection.SetCrew(IEnumerable&lt;GeoCharacter&gt;, int)</c> (:401) and
     ///       <c>_currentVehicle</c> (:153). Native UI reused, never hand-drawn — so a renamed or
     ///       re-signatured native member must report itself rather than silently repaint nothing.
-    ///   (c) <c>cross-not-in-the-key</c>, EXECUTED — the production <c>OpenUiRepaint.CrewSlotKey</c> must
-    ///       return a DIFFERENT key when <c>LevelProgression.HasNewLevel</c> flips, with everything else
-    ///       equal. This is the defect itself: a key that ignores the cross would leave the repaint gate
-    ///       closed on exactly the change the player is waiting for.
+    ///   (c) <c>cross-not-in-the-key</c>, EXECUTED — a touched <c>GeoCharacter</c> leaf (the cross is one:
+    ///       <c>LevelProgression.HasNewLevel</c>, rooted at "U#") must MOVE the strip's
+    ///       <c>OpenUiRepaint.ScopeKey</c>. Since §B.8/L543 the strip is keyed on its DECLARED prefixes and
+    ///       not on a hand-rolled <c>CrewSlotKey</c>, so the claim is executed one layer up — but it is the
+    ///       same defect: a key that ignores the cross leaves the repaint gate closed on exactly the change
+    ///       the player is waiting for.
     ///   (d) <c>strip-repaints-on-nothing</c>, POSITIVE CONTROL, EXECUTED — the same production gate
     ///       (<c>OpenUiRepaint.RepaintNeeded</c>) must return FALSE for an unchanged key. <c>SetCrew</c>
     ///       recreates its elements, and a rail flush lands ~10 times a second, so a repaint that always
@@ -71,8 +73,7 @@ namespace RailCheck
     /// Falsify:
     ///   • delete the <c>RefreshVehicleCrew</c> call from <c>RefreshPersistentHud</c> → (a)
     ///     [VERIFIED RED 2026-08-15, restored GREEN]
-    ///   • drop <c>HasNewLevel</c> from <c>OpenUiRepaint.CrewSlotKey</c> → (c)
-    ///     [VERIFIED RED 2026-08-15, restored GREEN]
+    ///   • drop "U#" from this surface's row in <c>UiNativeRepaint.DeclaredPrefixes</c> → (c)
     ///   • move the <c>RefreshPersistentHud</c> call out of <c>RepaintOpenGeoscapeScreen</c> and into
     ///     <c>Repaint</c> → (a2) [VERIFIED RED 2026-08-15, restored GREEN]
     ///   • make <c>RepaintNeeded</c> always return true → (d)
@@ -150,22 +151,24 @@ namespace RailCheck
                              "which is the right call and is exactly why a renamed native member has to be loud.";
 
             // ── (c) EXECUTED: the green cross is in the repaint key ─────────────────────────────────────
-            var off = FormatterServices.GetUninitializedObject(typeof(LevelProgression)) as LevelProgression;
-            var on = FormatterServices.GetUninitializedObject(typeof(LevelProgression)) as LevelProgression;
-            if (off == null || on == null)
-            {
-                yield return "L512 premise-changed: a bare LevelProgression could not be minted, so the executed " +
-                             "arms below did not run. Re-ground the harness rather than trusting them.";
-                yield break;
-            }
-            on.HasNewLevel = true;
-            string keyOff = OpenUiRepaint.CrewSlotKey("Chen", 1, off, 0);
-            string keyOn = OpenUiRepaint.CrewSlotKey("Chen", 1, on, 0);
+            // The hand-rolled CrewSlotKey is GONE (§B.8, L543): the strip is now keyed on ScopeKey, a
+            // generation that advances exactly when a path under one of the prefixes the strip DECLARED was
+            // touched. So the same claim is executed one layer up — a GeoCharacter leaf (LevelProgression
+            // .HasNewLevel is one: docs/rail-baseline.txt LevelProgression covered=3/3, rooted at "U#" by
+            // IdentityResolver.cs:145) must MOVE this strip's key.
+            const string crewSurface = "UIModuleVehicleSelection";
+            OpenUiRepaint.Reset();
+            string keyOff = OpenUiRepaint.ScopeKey(crewSurface);
+            OpenUiRepaint.BumpScopeGenerations(
+                new[] { "U#7.Progression.LevelProgression.HasNewLevel" });
+            string keyOn = OpenUiRepaint.ScopeKey(crewSurface);
             if (string.Equals(keyOff, keyOn, StringComparison.Ordinal))
-                yield return "L512 cross-not-in-the-key: a soldier with HasNewLevel set produces the SAME crew " +
-                             "key ('" + keyOn + "') as one without it, so the repaint gate stays closed on the " +
-                             "exact change the player is waiting for. The green level-up cross is painted in one " +
-                             "place only (AircraftCrewController.SetCrew:140) and nothing else re-runs it.";
+                yield return "L512 cross-not-in-the-key: a touched GeoCharacter leaf produced the SAME crew " +
+                             "key ('" + keyOn + "') as an untouched one, so the repaint gate stays closed on " +
+                             "the exact change the player is waiting for. The green level-up cross is painted " +
+                             "in one place only (AircraftCrewController.SetCrew:140) and nothing else re-runs " +
+                             "it. Most likely cause: \"U#\" was dropped from this surface's row in " +
+                             "UiNativeRepaint.DeclaredPrefixes.";
 
             // ── (d) POSITIVE CONTROL, EXECUTED: an unchanged key does NOT repaint ───────────────────────
             const string strip = "L512-probe";

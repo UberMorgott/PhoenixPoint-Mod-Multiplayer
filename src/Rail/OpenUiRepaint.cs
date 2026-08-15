@@ -47,6 +47,9 @@ namespace Multiplayer.Network.Sync
         private static readonly System.Collections.Generic.HashSet<string> _touchedPaths =
             new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
         private static bool _hudDirty;
+        /// <summary>This batch contained a mark with NO path, so no declared prefix can be matched against
+        /// it and every HUD scope must advance. Consumed by <see cref="BumpScopeGenerations"/>.</summary>
+        private static bool _bumpAllScopes;
         private static int _deferredFrames;
         private static bool _deferLogged;
         private static int _marksSinceFlush;
@@ -75,10 +78,6 @@ namespace Multiplayer.Network.Sync
         // NATIVE one, so it resolves long before the module is live.
         private static readonly FieldInfo TrackerContext =
             AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_context");
-        // The faction InitialSetup:144 reads — asked of the module rather than assumed to be ViewerFaction,
-        // so the signature below is computed over exactly the rows the module would rebuild.
-        private static readonly FieldInfo TrackerFaction =
-            AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_faction");
         /// <summary>Last repaint key per strip — see <see cref="RepaintNeeded"/>. A dictionary rather than a
         /// field per strip so the SECOND caller costs a line, not a mechanism.</summary>
         private static readonly System.Collections.Generic.Dictionary<string, string> _repaintKeys =
@@ -172,12 +171,16 @@ namespace Multiplayer.Network.Sync
             // state that re-Inits the module (UIStateNothingSelected.EnterState:104) brought the strip back —
             // the reported "enter Research and come back and it appears". GeoscapeModulesData holds the
             // module by reference whether it is active or not, so the handle can never go quiet on us.
+            // FIRST, before any module is refreshed: advance every declared strip's generation ONCE for
+            // this batch (§B.5 two-phase mark/evaluate), so the four strips below all see one consistent
+            // world instead of a half-advanced one.
+            BumpScopeGenerations(_touchedPaths);
             var geo = GenericApplier.GeoLevel();
             var view = geo?.View;
             var mods = view?.GeoscapeModules;
             if (mods == null) return; // no geoscape view at all (tactical / main menu) — nothing to repaint
             RefreshAgendaTracker(mods);
-            RefreshInfoBar(geo, mods);
+            RefreshInfoBar(mods);
             RefreshSiteContextualMenu(geo, mods, view.CurrentViewState);
             RefreshVehicleCrew(mods);
             RefreshRosterSlots(mods);
@@ -218,7 +221,7 @@ namespace Multiplayer.Network.Sync
                 if (!roster.gameObject.activeInHierarchy) return;
                 var slots = roster.Slots;
                 if (slots == null || slots.Count == 0) return;
-                if (!RepaintNeeded("roster", RosterSignature(slots))) return;
+                if (!RepaintNeeded("roster", ScopeKey("UIModuleGeoRoster"))) return;
                 // law 8: the native paint can fire UI events a capture seam hears.
                 using (SyncApplyScope.Enter())
                     foreach (var slot in slots)
@@ -230,31 +233,6 @@ namespace Multiplayer.Network.Sync
                 if (_loggedFailures.Add("RosterSlots"))
                     MpLog.LogWarning("[Multiplayer][rail] roster-list repaint threw — the level-up cross and " +
                                      "soldier data may stay stale until a screen re-enter (logged once): " + ex);
-            }
-        }
-
-        /// <summary>EVERY ROSTER SLOT AS THE LIST DRAWS IT, through the same <see cref="CrewSlotKey"/> the crew
-        /// strip uses — one key shape for both surfaces of the same flag. Null forces the repaint, so an
-        /// unreadable model costs a redundant paint and never a stale cross.</summary>
-        private static string RosterSignature(System.Collections.Generic.IList<GeoRosterItem> slots)
-        {
-            try
-            {
-                var sb = new System.Text.StringBuilder();
-                foreach (var slot in slots)
-                {
-                    var c = slot == null ? null : slot.Character;
-                    sb.Append(c == null ? "-" : CrewSlotKey(c.DisplayName, c.OccupingSpace, c.LevelProgression,
-                        c.CharacterStats == null ? -1 : c.CharacterStats.Corruption.IntValue)).Append(',');
-                }
-                return sb.ToString();
-            }
-            catch (Exception ex)
-            {
-                if (_loggedFailures.Add("RosterSignature"))
-                    MpLog.LogWarning("[Multiplayer][rail] roster-list signature threw — the list falls back to " +
-                                     "repainting on every flush (logged once): " + ex);
-                return null;
             }
         }
 
@@ -284,8 +262,8 @@ namespace Multiplayer.Network.Sync
         ///   • the crew panel must be ACTIVE IN HIERARCHY — a module whose state is not up is switched off
         ///     by the game itself (UIModuleBehavior.SetStateID:34), and <c>SetCrew</c> would re-activate
         ///     the panel, so this also stops the repaint from revealing a strip the game hid;
-        ///   • <see cref="CrewSignature"/> must have changed, through the same one gate the other strips
-        ///     use (<see cref="RepaintNeeded"/>).
+        ///   • the strip's DECLARED prefixes must have moved — <see cref="ScopeKey"/>, through the same one
+        ///     gate the other strips use (<see cref="RepaintNeeded"/>).
         /// </summary>
         private static void RefreshVehicleCrew(GeoscapeModulesData mods)
         {
@@ -306,7 +284,7 @@ namespace Multiplayer.Network.Sync
                 var vehicle = VehicleSelectionCurrent.GetValue(module) as GeoVehicle;
                 // Not ours = the module drew DisableCrew():407, and SetCrew would switch the panel back on.
                 if (vehicle == null || !vehicle.IsOwnedByViewer) return;
-                if (!RepaintNeeded("crew", CrewSignature(vehicle))) return;
+                if (!RepaintNeeded("crew", ScopeKey("UIModuleVehicleSelection"))) return;
                 // law 8: the native paint re-subscribes stat events and can fire UI events a capture seam hears.
                 using (SyncApplyScope.Enter())
                     VehicleSelectionSetCrew.Invoke(module, new object[] { vehicle.Units, vehicle.MaxCharacterSpace });
@@ -318,47 +296,6 @@ namespace Multiplayer.Network.Sync
                                      "and crew changes may stay stale until a screen re-enter (logged once): " + ex);
             }
         }
-
-        /// <summary>EVERYTHING <c>AircraftCrewController.SetCrew</c> PAINTS AND THE STAT ECHO DOES NOT, AS ONE
-        /// STRING — read off :100-152 slot by slot: the crew SET and its order, each character's display name,
-        /// occupied space, level, corruption, and <c>LevelProgression.HasNewLevel</c> (the green cross itself),
-        /// plus the vehicle's slot count. Health/stamina/corruption BARS are deliberately absent: they are
-        /// <c>BaseStat</c>s and repaint natively through RailTypes.EchoStatChange → RefreshCrewBars, so
-        /// including them would rebuild the whole strip on every point of damage. Returns null when the model
-        /// cannot be read; null forces the repaint, so an unreadable model costs at worst a flicker and never
-        /// a stale cross (REACTIVITY is a hard mandate).</summary>
-        private static string CrewSignature(GeoVehicle vehicle)
-        {
-            try
-            {
-                var sb = new System.Text.StringBuilder();
-                sb.Append(vehicle.MaxCharacterSpace).Append('|');
-                foreach (var c in vehicle.Units)
-                    sb.Append(c == null ? "-" : CrewSlotKey(c.DisplayName, c.OccupingSpace, c.LevelProgression,
-                        c.CharacterStats == null ? -1 : c.CharacterStats.Corruption.IntValue)).Append(',');
-                return sb.ToString();
-            }
-            catch (Exception ex)
-            {
-                if (_loggedFailures.Add("CrewSignature"))
-                    MpLog.LogWarning("[Multiplayer][rail] crew-strip signature threw — the strip falls back to " +
-                                     "repainting on every flush (logged once): " + ex);
-                return null;
-            }
-        }
-
-        /// <summary>ONE CREW SLOT AS THE STRIP DRAWS IT. Separated from <see cref="CrewSignature"/> so RailCheck
-        /// L512 can execute the level-up half without a live <c>GeoVehicle</c> (a Unity object whose
-        /// <c>MaxCharacterSpace</c> dereferences its def). <c>HasNewLevel</c> — the green cross — is read
-        /// BEFORE <c>Level</c> and <c>Level</c> is asked only when the def is there, because the level is
-        /// DERIVED (<c>Def.GetLevel(Experience)</c>) and an unresolvable def must not cost the cross its
-        /// key.</summary>
-        internal static string CrewSlotKey(string name, int space,
-                                           PhoenixPoint.Common.Entities.Characters.LevelProgression level,
-                                           int corruption) =>
-            (name ?? "?") + "@" + space + "@" +
-            (level == null ? "-" : (level.HasNewLevel ? "!" : "") + (level.Def == null ? "?" : level.Level.ToString())) +
-            "@" + corruption;
 
         /// <summary>Top-right activity strip. The flag makes UpdateData() take its InitialSetup branch
         /// (UIModuleFactionAgendaTracker.cs:186-190 → :144), i.e. the module's own full rebuild from
@@ -390,17 +327,16 @@ namespace Multiplayer.Network.Sync
                 // EQUAL and skipped the rebuild. The row then sat stale until something ELSE in the signature
                 // moved, which is exactly "manufacturing updates, research does not".
                 // The two strips added the same day guard this way already (RefreshVehicleCrew:304,
-                // RefreshRosterSlots:212); the agenda strip was the one that did not. The info bar is not in
-                // this class of defect: InfoBarKey carries a one-second floor, so its key can never stay
-                // equal for longer than the module's own native poll.
+                // RefreshRosterSlots:212); the agenda strip was the one that did not. The info bar is now
+                // guarded the same way by InfoBarNeedsRefresh — its old one-second Time.realtimeSinceStartup
+                // floor, which used to paper over the same ordering, went with InfoBarKey (§B.8).
                 // THE FLICKER (client, reported 2026-08-14). InitialSetup DESTROYS and re-creates every row,
                 // and this ran on EVERY flush — measured at `marks=10`, i.e. ~10 rail batches a second, so the
                 // strip visibly blinked. A rebuild is only owed when the SET OF ROWS changed; the per-element
                 // time text is refreshed by the plain UpdateData below (and by the module's own 1 Hz poll),
                 // which touches no GameObject lifecycle.
                 bool onScreen = tracker.gameObject.activeInHierarchy;
-                bool rebuild = AgendaNeedsRebuild(onScreen,
-                    AgendaSignature(TrackerFaction?.GetValue(tracker) as GeoFaction));
+                bool rebuild = AgendaNeedsRebuild(onScreen, ScopeKey("UIModuleFactionAgendaTracker"));
                 if (!onScreen) return; // switched off: nothing to paint, and nothing was remembered either
                 // law 8: the rebuild re-reads the model and can fire native UI events a capture seam hears.
                 using (SyncApplyScope.Enter())
@@ -417,9 +353,10 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>Does the strip owe a full rebuild? True on the first call of a session, on any change to
-        /// <see cref="AgendaSignature"/>, and whenever the signature could not be read (null = rebuild, the
-        /// safe direction). Its own memory, so L492 can drive it without a live tracker.
+        /// <summary>Does the strip owe a full rebuild? True on the first call of a session and on any change
+        /// to its <see cref="ScopeKey"/>, i.e. whenever a path under one of the prefixes the strip DECLARED
+        /// was touched; a null key rebuilds, the safe direction. Its own memory, so L492 can drive it
+        /// without a live tracker.
         ///
         /// <paramref name="stripOnScreen"/> IS A GATE ON THE QUESTION, NOT ON THE ANSWER (L516, report
         /// 2026-08-15). <see cref="RepaintNeeded"/> REMEMBERS every key it is handed, so a strip that is
@@ -429,6 +366,14 @@ namespace Multiplayer.Network.Sync
         /// whole point is that <see cref="RepaintNeeded"/> is never reached.</summary>
         internal static bool AgendaNeedsRebuild(bool stripOnScreen, string signature) =>
             stripOnScreen && RepaintNeeded("agenda", signature);
+
+        /// <summary>THE INFO BAR'S GATE, in L516's shape and for L516's reason: the module's LIVENESS is
+        /// asked BEFORE <see cref="RepaintNeeded"/>'s memory is touched, never after. A key recorded against
+        /// a bar that was not yet Init'd is a key BURNED — the first refresh after the bar comes up compares
+        /// EQUAL and skips the repaint it owed. <c>&amp;&amp;</c> and not <c>&amp;</c>: short-circuit is what
+        /// keeps <see cref="RepaintNeeded"/> from being evaluated at all for a dead bar.</summary>
+        internal static bool InfoBarNeedsRefresh(bool barLive, string key) =>
+            barLive && RepaintNeeded("infobar", key);
 
         /// <summary>
         /// THE ONE REPAINT-IF-CHANGED GATE, for every persistent-HUD strip. A rail flush lands ~10 times a
@@ -449,6 +394,49 @@ namespace Multiplayer.Network.Sync
                           !string.Equals(key, previous, StringComparison.Ordinal);
             _repaintKeys[strip] = key;
             return needed;
+        }
+
+        /// <summary>
+        /// THE REPLACEMENT FOR THE HAND-ROLLED SIGNATURES (§B.8). A persistent-HUD strip used to compute
+        /// its own read-set as a string — AgendaSignature, InfoBarKey, CrewSignature, RosterSignature,
+        /// CrewSlotKey — which is a read-set written BACKWARDS, i.e. the v1 per-widget sync this project
+        /// abandoned, and which InfoBarKey itself admitted was incomplete by adding a 1-second
+        /// Time.realtimeSinceStartup floor.
+        ///
+        /// The strip now asks the SAME question the screens ask: did anything I DECLARED change? Its key
+        /// is a generation number that moves exactly when one of its declared prefixes was touched, so
+        /// <see cref="RepaintNeeded"/>'s memory semantics — and therefore L492's flicker fix and L516's
+        /// visibility-before-memory ordering — are preserved unchanged.
+        /// </summary>
+        private static readonly System.Collections.Generic.Dictionary<string, int> _scopeGeneration =
+            new System.Collections.Generic.Dictionary<string, int>(StringComparer.Ordinal);
+
+        /// <summary>The strip's current key: stable while nothing it declared moved, different the moment
+        /// something did. Pure with respect to its own memory — it reads, never writes.</summary>
+        internal static string ScopeKey(string declaredName)
+        {
+            int generation;
+            return declaredName + "#" +
+                   (_scopeGeneration.TryGetValue(declaredName, out generation) ? generation : 0);
+        }
+
+        /// <summary>Advance the generation of every declared name whose prefixes this batch touched. Runs
+        /// ONCE per flush, at batch end (§B.5), before any module is refreshed — two-phase mark/evaluate,
+        /// so no strip sees a half-advanced world. Writes only <see cref="_scopeGeneration"/>, so
+        /// enumerating the declaration table while doing it is safe.</summary>
+        internal static void BumpScopeGenerations(
+            System.Collections.Generic.ICollection<string> touchedPaths)
+        {
+            bool all = _bumpAllScopes;
+            _bumpAllScopes = false;
+            if (!all && (touchedPaths == null || touchedPaths.Count == 0)) return;
+            foreach (var name in UiNativeRepaint.DeclaredPrefixes.Keys)
+            {
+                if (!all && !SurfaceRepaints(name, touchedPaths)) continue;
+                int generation;
+                _scopeGeneration[name] =
+                    (_scopeGeneration.TryGetValue(name, out generation) ? generation : 0) + 1;
+            }
         }
 
         /// <summary>
@@ -482,61 +470,6 @@ namespace Multiplayer.Network.Sync
             return false;
         }
 
-        /// <summary>
-        /// EVERYTHING THE STRIP DRAWS, AS ONE STRING — the rebuild key for <see cref="RefreshAgendaTracker"/>.
-        /// Read straight off <c>InitialSetup</c>:144-174, row source by row source, so nothing displayed can
-        /// change without changing this (REACTIVITY is a hard mandate here, not an optimisation):
-        ///   • manufacture head — <c>Manufacture.Current.ManufacturableItem.RelatedItemDef</c> (the row label
-        ///     is that def's display name);
-        ///   • research head — <c>Research.Current.ResearchID</c>;
-        ///   • every vehicle the strip lists — the row exists iff <c>GetCurrentActionTime &gt; 0</c>, which
-        ///     VehicleActionsViewService:177-188 defines as exploring-or-travelling, and its label/icon are
-        ///     the vehicle NAME plus those same two flags;
-        ///   • every facility row — repairing, or building with a non-zero construction time, keyed by def
-        ///     and state.
-        /// NOT included, deliberately: the per-row TIME LEFT. It is the one thing a rebuild does NOT paint —
-        /// <c>UpdateData(element)</c>:271 does, on every call, rebuild or not.
-        /// Returns null when the model cannot be read; null forces the rebuild, so an unreadable model can
-        /// only ever cost a flicker, never a stale strip.
-        /// </summary>
-        private static string AgendaSignature(GeoFaction faction)
-        {
-            if (faction == null) return null;
-            try
-            {
-                var sb = new System.Text.StringBuilder();
-                var head = faction.Manufacture?.Current?.ManufacturableItem?.RelatedItemDef;
-                sb.Append(head == null ? "-" : head.name).Append('|')
-                  .Append(faction.Research?.Current?.ResearchID ?? "-").Append('|');
-                foreach (var v in faction.Vehicles)
-                {
-                    if (v == null || (!v.Travelling && !v.IsExploringSite)) continue;
-                    sb.Append(v.Name).Append(v.Travelling ? "@t," : "@x,");
-                }
-                sb.Append('|');
-                if (faction is GeoPhoenixFaction phoenix)
-                    foreach (var b in phoenix.Bases)
-                    {
-                        if (b?.Layout == null) continue;
-                        foreach (var f in b.Layout.Facilities)
-                        {
-                            if (f == null) continue;
-                            if (f.IsRepairing) sb.Append(f.Def == null ? "?" : f.Def.name).Append("@r,");
-                            else if (f.IsBuilding && f.ConstructionTime != TimeUnit.Zero)
-                                sb.Append(f.Def == null ? "?" : f.Def.name).Append("@b,");
-                        }
-                    }
-                return sb.ToString();
-            }
-            catch (Exception ex)
-            {
-                if (_loggedFailures.Add("AgendaSignature"))
-                    MpLog.LogWarning("[Multiplayer][rail] agenda-strip signature threw — the top-right strip " +
-                                     "falls back to rebuilding on every flush (logged once): " + ex);
-                return null;
-            }
-        }
-
         /// <summary>Top-right resource/population strip — third citizen of the same gap: it is a MODULE,
         /// not a GeoscapeViewState, so no <see cref="UiNativeRepaint.Table"/> row can reach it. Its
         /// percentages come from a stored field (PartyDiplomacy._relations → Relation._diplomacy), which
@@ -545,10 +478,9 @@ namespace Multiplayer.Network.Sync
         /// <c>UpdatePopulation</c>:276 is the module's own repaint that TFTV's TopInforBar:127 postfixes
         /// to write the Anu/Nj/Syn reputation numbers, so driving it repaints them — read-direction only,
         /// no view-state transition.</summary>
-        private static void RefreshInfoBar(GeoLevelController geo, GeoscapeModulesData mods)
+        private static void RefreshInfoBar(GeoscapeModulesData mods)
         {
             if (InfoBarUpdatePopulation == null || InfoBarContext == null) return;
-            if (!RepaintNeeded("infobar", InfoBarKey(geo))) return;
             var bar = mods.ResourcesModule;
             if (bar == null)
             {
@@ -558,7 +490,10 @@ namespace Multiplayer.Network.Sync
                                      "update on a screen re-enter (logged once)");
                 return;
             }
-            if (InfoBarContext.GetValue(bar) == null) return; // not Init'd yet — UpdatePopulation would NRE
+            // LIVENESS BEFORE MEMORY (L516's ordering, L543's arm c). `_context` is null until
+            // UIModuleInfoBar.Init:144, and UpdatePopulation:276-288 dereferences `_context.View` unguarded
+            // (decompiled/AssemblyCSharp/.../UIModuleInfoBar.cs:110 field, :144 assignment, :278 first read).
+            if (!InfoBarNeedsRefresh(InfoBarContext.GetValue(bar) != null, ScopeKey("UIModuleInfoBar"))) return;
             try
             {
                 // law 8: the repaint re-reads the model and can fire native UI events a capture seam hears.
@@ -569,64 +504,6 @@ namespace Multiplayer.Network.Sync
                 if (_loggedFailures.Add("InfoBar"))
                     MpLog.LogWarning("[Multiplayer][rail] info-bar refresh threw — the top-right reputation " +
                                      "percentages may stay stale until the next screen change (logged once): " + ex);
-            }
-        }
-
-        /// <summary>
-        /// EVERYTHING THE INFO BAR DRAWS, AS ONE STRING — the repaint key for <see cref="RefreshInfoBar"/>,
-        /// through the same <see cref="RepaintNeeded"/> gate the agenda strip uses.
-        ///
-        /// THE NATIVE HALF IS EXACT. <c>UIModuleInfoBar.UpdatePopulation</c>:276-288 reads three values and
-        /// nothing else — <c>WorldPopulation</c>, <c>GameOverWorldPopulation</c>,
-        /// <c>StartingWorldPopulation</c> off the view — so those three ARE the native draw.
-        ///
-        /// THE POSTFIX HALF IS COVERED BY MODEL, NOT BY MOD. Everything TFTV's <c>TopInforBar</c>:127 paints
-        /// on top is read from first-party state, so the key reads that state generically and names no mod,
-        /// no def and no type of theirs: the three diplomacy values (:176/:180/:183
-        /// <c>&lt;Faction&gt;.Diplomacy.GetDiplomacy(PhoenixFaction)</c> — the STORED field the rail writes
-        /// directly, which is why this repaint exists at all) and the alien base list by type def name
-        /// (:146-161, the nest/lair/citadel counts behind the ODI meter).
-        ///
-        /// AND A ONE-SECOND FLOOR, WHICH IS THE HONEST PART. A key over a panel a THIRD-PARTY postfix draws
-        /// can never be complete — TFTV also reads the three "Discovered" diplomacy GameTags (:200/:211/:219,
-        /// and <c>GameTagsProviderList</c> exposes no count to key on), an event-system variable, a void-omen
-        /// check and an event record's chosen answer, and chasing those would mean naming their defs here,
-        /// i.e. exactly the bespoke per-panel patch this consolidation exists to stop. The floor bounds that
-        /// gap absolutely
-        /// instead of pretending it away: the strip repaints at least once a second no matter what, which is
-        /// the module's own native poll rate, so nothing this key does not model can ever be staler than it
-        /// is in vanilla — while the 10 Hz flush rate stops driving a sprite load and a Transform.Find walk.
-        /// Returns null when the model cannot be read; null repaints.
-        /// ponytail: a coarse clock term, not a modelled input. Drop it the day the strip's remaining
-        /// inputs are all first-party and cheap to read.
-        /// </summary>
-        private static string InfoBarKey(GeoLevelController geo)
-        {
-            var view = geo == null ? null : geo.View;
-            if (view == null) return null;
-            try
-            {
-                var sb = new System.Text.StringBuilder();
-                sb.Append(view.WorldPopulation).Append('/').Append(view.GameOverWorldPopulation)
-                  .Append('/').Append(view.StartingWorldPopulation).Append('|');
-                var phoenix = geo.PhoenixFaction;
-                foreach (var f in geo.Factions)
-                {
-                    if (f == null || f.Diplomacy == null || ReferenceEquals(f, phoenix)) continue;
-                    sb.Append(f.Diplomacy.GetDiplomacy(phoenix)).Append(',');
-                }
-                sb.Append('|');
-                if (geo.AlienFaction != null)
-                    foreach (var b in geo.AlienFaction.Bases)
-                        sb.Append(b == null || b.AlienBaseTypeDef == null ? "?" : b.AlienBaseTypeDef.name).Append(',');
-                return sb.Append('|').Append((int)Time.realtimeSinceStartup).ToString();
-            }
-            catch (Exception ex)
-            {
-                if (_loggedFailures.Add("InfoBarKey"))
-                    MpLog.LogWarning("[Multiplayer][rail] info-bar repaint key threw — the strip falls back to " +
-                                     "repainting on every flush (logged once): " + ex);
-                return null;
             }
         }
 
@@ -762,7 +639,12 @@ namespace Multiplayer.Network.Sync
         /// <summary>Close of a remote mirror-apply batch (client) or a host-side post-intent reseed.
         /// Coalesced to one re-enter per frame by <see cref="FlushIfDirty"/> — cheaper than re-entering
         /// per chunk on a multi-packet resend.</summary>
-        public static void MarkDirty() { _dirty = true; _marksSinceFlush++; }
+        /// <remarks>A PATHLESS mark also bumps EVERY declared HUD scope (<see cref="_bumpAllScopes"/>).
+        /// The persistent-HUD strips are gated on <see cref="ScopeKey"/> since the hand-rolled signatures
+        /// died (§B.8), and a key that never moves is a strip that never repaints — so the ~63 kindless
+        /// sites, which carry nothing to match a declared prefix against, must keep repainting everything
+        /// here too, exactly as the old signatures did when the model under them changed.</remarks>
+        public static void MarkDirty() { _dirty = true; _bumpAllScopes = true; _marksSinceFlush++; }
 
         /// <summary>
         /// The same mark, carrying WHICH KIND changed — so the OPEN screen can decline a change that
@@ -794,6 +676,8 @@ namespace Multiplayer.Network.Sync
                 if (_loggedSkips.Add(screen.GetType().Name + ":" + kind.Name))
                     MpLog.Log("[MP][uirepaint] SKIP " + kind.Name + " on " + screen.GetType().Name +
                               " — kind declared irrelevant to this screen (logged once per kind per screen)");
+                // No path to match a declared prefix against, so the HUD strips fall back to repainting.
+                _bumpAllScopes = true;
                 MarkHudDirty();
                 return;
             }
@@ -833,6 +717,11 @@ namespace Multiplayer.Network.Sync
                 if (_loggedSkips.Add(screen.GetType().Name + ":" + kind.Name))
                     MpLog.Log("[MP][uirepaint] SKIP " + kind.Name + " on " + screen.GetType().Name +
                               " — kind declared irrelevant to this screen (logged once per kind per screen)");
+                // The SCREEN declined the kind; the HUD strips did not, and they have their own
+                // declarations — so the path is still recorded for them. It cannot re-dirty the screen:
+                // _scopedDirty stays clear here, and the screen's own SurfaceRepaints question filters
+                // this path by the screen's own declared prefixes.
+                _touchedPaths.Add(path);
                 MarkHudDirty();
                 return;
             }
@@ -948,6 +837,7 @@ namespace Multiplayer.Network.Sync
             _scopedDirty = false;
             _touchedPaths.Clear();
             _hudDirty = false;
+            _bumpAllScopes = false;
             _deferredFrames = 0;
             _deferLogged = false;
             _marksSinceFlush = 0;
@@ -956,6 +846,7 @@ namespace Multiplayer.Network.Sync
             _loggedSkips.Clear();
             // …and a dead session's strips must not vouch for the next one's: empty = repaint once each.
             _repaintKeys.Clear();
+            _scopeGeneration.Clear();
             // Next session's first refresh must not read a dead session's site refs as a fresh edge.
             _exploringSites.Clear();
         }
@@ -984,7 +875,9 @@ namespace Multiplayer.Network.Sync
                 _scopedDirty = false;
                 var surface = GenericApplier.GeoLevel()?.View?.CurrentViewState?.GetType().Name;
                 bool owes = SurfaceRepaints(surface, _touchedPaths);
-                _touchedPaths.Clear();
+                // NOT cleared here: the HUD strips read the set through BumpScopeGenerations, which runs
+                // inside RefreshPersistentHud below. Clearing it before they run is what would burn the
+                // batch for them — the set is dropped only after the repaint that consumed it.
                 // The persistent HUD spans view states and is in no declaration, so it always hears about a
                 // change — the same split MarkHudDirty already makes for a declined KIND (L60).
                 if (owes) _dirty = true;
@@ -996,6 +889,7 @@ namespace Multiplayer.Network.Sync
                 // see MarkHudDirty). Same once-per-frame coalescing as the screen repaint, and it does
                 // not touch a single widget the drag/typing defer below exists to protect.
                 if (_hudDirty) { _hudDirty = false; RefreshPersistentHud(); }
+                _touchedPaths.Clear();
                 return;
             }
             if (LocalInputInFlight())
@@ -1016,9 +910,11 @@ namespace Multiplayer.Network.Sync
             _deferredFrames = 0;
             _dirty = false;
             _scopedDirty = false;
-            _touchedPaths.Clear();
             _hudDirty = false; // RepaintOpenGeoscapeScreen opens with the HUD refresh itself
             RepaintOpenGeoscapeScreen();
+            // AFTER the repaint, never before: RefreshPersistentHud (the first thing
+            // RepaintOpenGeoscapeScreen does) reads the set to advance the strips' generations.
+            _touchedPaths.Clear();
         }
 
         /// <summary>The local user has UNCOMMITTED input in flight. Asked of input state, not of screens:

@@ -36,14 +36,17 @@ namespace RailCheck
     ///       the next session's first paint is skipped against a dead session's rows.
     ///   (f) <c>gate-unwired</c> — IL: <c>RefreshAgendaTracker</c> must reach the decision through
     ///       <c>AgendaNeedsRebuild</c>, not compare something of its own.
-    ///   (g) <c>signature-blind-to-*</c> — IL: <c>AgendaSignature</c> must read all FOUR row sources
-    ///       <c>InitialSetup</c>:150-174 builds rows from — <c>ItemManufacturing.Current</c>,
-    ///       <c>Research.Current</c>, <c>GeoFaction.Vehicles</c>, <c>GeoPhoenixFaction.Bases</c>. A signature
-    ///       blind to one of them is a strip permanently stale in that row kind, which is worse than the
-    ///       flicker it replaced and would be invisible to arms (a)-(e).
+    ///   (g) <c>declaration-blind-to-*</c> — the strip's DECLARED PREFIXES must cover all FOUR row sources
+    ///       <c>InitialSetup</c>:150-174 builds rows from — <c>ItemManufacturing.Current</c> and
+    ///       <c>Research.Current</c> (both descend from <c>GeoFaction</c> → "F#"),
+    ///       <c>GeoFaction.Vehicles</c> ("V#") and <c>GeoPhoenixFaction.Bases</c> (a <c>GeoPhoenixBase</c>
+    ///       IS a <c>GeoSite</c> → "S#"). Until §B.8/L543 this was an IL read-set check on the hand-rolled
+    ///       <c>AgendaSignature</c>; the builder is gone and the same claim is now made where the read-set
+    ///       is DECLARED. A declaration blind to one source is a strip permanently stale in that row kind,
+    ///       which is worse than the flicker it replaced and would be invisible to arms (a)-(e).
     ///
-    /// Falsify: drop the signature and rebuild unconditionally → (c); return a constant → (b); stop reading
-    /// the vehicle list → (g); delete the reset line → (e).
+    /// Falsify: drop the signature and rebuild unconditionally → (c); return a constant → (b); drop "V#"
+    /// from the tracker's row in <c>UiNativeRepaint.DeclaredPrefixes</c> → (g); delete the reset line → (e).
     /// </summary>
     internal static class L492_TheAgendaStripRebuildsOnlyWhenItsRowsChange
     {
@@ -82,12 +85,21 @@ namespace RailCheck
             const BindingFlags Any = BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public;
             var refresh = typeof(OpenUiRepaint).GetMethod("RefreshAgendaTracker", Any);
             var gate = typeof(OpenUiRepaint).GetMethod("AgendaNeedsRebuild", Any);
-            var signature = typeof(OpenUiRepaint).GetMethod("AgendaSignature", Any);
-            if (refresh == null || gate == null || signature == null)
+            if (refresh == null || gate == null)
             {
-                yield return "L492 premise-changed: OpenUiRepaint.RefreshAgendaTracker / .AgendaNeedsRebuild / " +
-                             ".AgendaSignature did not resolve, so this law cannot see the repaint it guards. " +
+                yield return "L492 premise-changed: OpenUiRepaint.RefreshAgendaTracker / .AgendaNeedsRebuild " +
+                             "did not resolve, so this law cannot see the repaint it guards. " +
                              "Re-point it before believing any verdict above.";
+                yield break;
+            }
+            string[] declared;
+            if (!UiNativeRepaint.DeclaredPrefixes.TryGetValue("UIModuleFactionAgendaTracker", out declared) ||
+                declared == null || declared.Length == 0)
+            {
+                yield return "L492 premise-changed: UIModuleFactionAgendaTracker has no row in " +
+                             "UiNativeRepaint.DeclaredPrefixes, so arm (g) cannot check the strip's read-set. " +
+                             "An undeclared surface repaints on everything, which is safe but is the L492 " +
+                             "flicker back at flush rate — declare it rather than leaving it out.";
                 yield break;
             }
             if (!References(refresh, gate))
@@ -97,39 +109,40 @@ namespace RailCheck
 
             foreach (var source in new[]
             {
-                Row("ItemManufacturing.Current", typeof(ItemManufacturing).GetProperty("Current"),
-                    "the manufacture row"),
-                Row("Research.Current", typeof(Research).GetProperty("Current"), "the research row"),
-                Row("GeoFaction.Vehicles", typeof(GeoFaction).GetProperty("Vehicles"),
+                Row("ItemManufacturing.Current", typeof(ItemManufacturing), "F#", "the manufacture row"),
+                Row("Research.Current", typeof(Research), "F#", "the research row"),
+                Row("GeoFaction.Vehicles", typeof(GeoFaction), "V#",
                     "every aircraft travel/exploration row"),
-                Row("GeoPhoenixFaction.Bases", typeof(GeoPhoenixFaction).GetProperty("Bases"),
+                Row("GeoPhoenixFaction.Bases", typeof(GeoPhoenixFaction), "S#",
                     "every facility build/repair row"),
             })
             {
-                if (source.Getter == null)
+                if (source.Owner == null)
                 {
-                    yield return "L492 premise-changed: " + source.Name + " has no readable getter, so the " +
-                                 "signature's coverage of " + source.What + " cannot be checked.";
+                    yield return "L492 premise-changed: " + source.Name + "'s owning game type did not resolve, " +
+                                 "so the declaration's coverage of " + source.What + " cannot be checked.";
                     continue;
                 }
-                if (!References(signature, source.Getter))
-                    yield return "L492 signature-blind-to-" + source.Name + ": AgendaSignature never reads " +
-                                 source.Name + ", which UIModuleFactionAgendaTracker.InitialSetup:150-174 builds " +
-                                 source.What + " from. Every change there would compare EQUAL, the rebuild would " +
-                                 "be skipped, and that row kind would sit stale on an open screen for as long as " +
-                                 "nothing else in the strip moved.";
+                if (Array.IndexOf(declared, source.Prefix) >= 0) continue;
+                yield return "L492 declaration-blind-to-" + source.Name + ": the agenda strip does not declare " +
+                             "\"" + source.Prefix + "\", the rail root " + source.Name + " lands under, and " +
+                             "UIModuleFactionAgendaTracker.InitialSetup:150-174 builds " + source.What + " from " +
+                             "it. Every change there would leave the strip's ScopeKey EQUAL, the rebuild would " +
+                             "be skipped, and that row kind would sit stale on an open screen for as long as " +
+                             "nothing else in the strip moved.";
             }
         }
 
         private struct RowSource
         {
             internal string Name;
-            internal MethodBase Getter;
+            internal Type Owner;
+            internal string Prefix;
             internal string What;
         }
 
-        private static RowSource Row(string name, PropertyInfo p, string what) =>
-            new RowSource { Name = name, Getter = p?.GetGetMethod(nonPublic: true), What = what };
+        private static RowSource Row(string name, Type owner, string prefix, string what) =>
+            new RowSource { Name = name, Owner = owner, Prefix = prefix, What = what };
 
         /// <summary>Does <paramref name="m"/>'s IL mention <paramref name="callee"/>? The raw token scan
         /// L107/L475 use only works INSIDE one assembly: a call into the game assembly is a MemberRef with a

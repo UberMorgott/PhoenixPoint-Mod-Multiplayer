@@ -726,6 +726,28 @@ namespace Multiplayer.Network.Sync
                 // is the churn worth killing: a wildcard segment in the matcher, declared as
                 // "F#*.ItemStorage". Not built speculatively — the roots above are already the safe answer.
                 { "UIStateEditSoldier", new[] { "U#", "V#", "F#" } },
+
+                // The persistent-HUD strips. They belong to no view state (that is the premise of
+                // RefreshPersistentHud), so they are declared by MODULE name and keyed through
+                // OpenUiRepaint.ScopeKey. Each set is the strip's OWN reads, converted from the signature
+                // builder that §B.8 deleted — the conversion, row source by row source:
+                //   UIModuleFactionAgendaTracker (was AgendaSignature, InitialSetup:144-174):
+                //     Manufacture.Current + Research.Current live on GeoFaction -> "F#"; the aircraft
+                //     action rows are GeoVehicle -> "V#"; the facility rows hang off GeoPhoenixBase, which
+                //     IS a GeoSite (PhoenixPoint.Geoscape.Entities.Sites.GeoPhoenixBase) -> "S#".
+                //   UIModuleInfoBar (was InfoBarKey, UpdatePopulation:276-288 + TFTV TopInforBar:127):
+                //     the three diplomacy values are <Faction>.Diplomacy, a FactionDiplomacy that DESCENDS
+                //     from GeoFaction (docs/rail-baseline.txt:527/561/594) -> "F#"; world population and
+                //     the alien-base list are sites/havens -> "S#".
+                //   UIModuleVehicleSelection (was CrewSignature): the vehicle -> "V#", its crew -> "U#".
+                //   UIModuleGeoRoster (was RosterSignature): the slots' characters -> "U#".
+                // "F#" is on BOTH top-right strips deliberately, and it is the half the plan's draft rows
+                // omitted: dropping it would leave the research head and the reputation percentages — the
+                // two defects these repaints were written for — stale on every peer.
+                { "UIModuleFactionAgendaTracker", new[] { "F#", "S#", "V#" } },
+                { "UIModuleInfoBar",              new[] { "F#", "S#" } },
+                { "UIModuleVehicleSelection",     new[] { "V#", "U#" } },
+                { "UIModuleGeoRoster",            new[] { "U#" } },
             };
 
         /// <summary>The exclusion row above, minus the kinds the screen DOES paint. Named rather than

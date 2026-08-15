@@ -444,6 +444,7 @@ namespace RailCheck
             Add(laws, () => L540_MarkOnlyOnValueInequality.Check());
             Add(laws, () => L541_AnUndeclaredSurfaceRepaintsOnEverything.Check());
             Add(laws, () => L542_TheKindlessSitesStillRepaintEverything.Check());
+            Add(laws, () => L543_NoHandRolledSignatureSurvives.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -491,8 +492,12 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 342;
-        // Updated deliberately 2026-08-15: L542 (the kindless mark sites still repaint everything) was
+        private const int ExpectedLawRegistrations = 343;
+        // Updated deliberately 2026-08-15: L543 (no hand-rolled read-set survives beside a declared
+        // prefix set) was ADDED — 342 -> 343. Nothing was retired or amputated: L492, L498, L512 and
+        // L514 keep every arm they had, with the four that IL-scanned a deleted signature builder
+        // re-pointed at the DECLARATION that replaced it — same claim, same failure names' intent, one
+        // mechanism instead of two. Earlier the same day: L542 (the kindless mark sites still repaint everything) was
         // ADDED — 341 -> 342. Nothing was retired or amputated: L38 was deliberately NOT extended. Its
         // scan is scoped to UiEventMap.Fire and widening it would change what an already-green law means;
         // L542 covers the ~63 kindless MarkDirty() sites that live OUTSIDE Fire, so the two laws partition
@@ -535,7 +540,7 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "c8c029937403936df20b3c16875b0daef31485d5254978091d5d2bd3e978cf78";
+        private const string ExpectedExecutionIdentityDigest = "6ba6abca160610d4bdfc4265f39e65ee406b2fa55ccfdb73f73775a31972341e";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

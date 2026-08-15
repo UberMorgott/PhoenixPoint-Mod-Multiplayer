@@ -29,10 +29,11 @@ namespace RailCheck
     ///       exactly what <c>GeoRosterItem.Init</c>:211 calls. Native UI reused, never hand-drawn, and the
     ///       notification GameObject is never poked directly — so a renamed native member must be loud
     ///       rather than silently repaint nothing.
-    ///   (c) <c>cross-not-in-the-list-key</c>, EXECUTED — the production <c>OpenUiRepaint.CrewSlotKey</c>,
-    ///       which <c>RosterSignature</c> builds this list's repaint key from, must answer differently when
-    ///       <c>HasNewLevel</c> flips. Shared with L512 on purpose: ONE key shape for both surfaces of one
-    ///       flag means the two can never disagree about whether the cross moved.
+    ///   (c) <c>cross-not-in-the-list-key</c>, EXECUTED — a touched <c>GeoCharacter</c> leaf (the cross is
+    ///       one: <c>HasNewLevel</c>, rooted at "U#") must MOVE this list's <c>OpenUiRepaint.ScopeKey</c>.
+    ///       Since §B.8/L543 the list is keyed on its DECLARED prefixes, not on a hand-rolled
+    ///       <c>RosterSignature</c>/<c>CrewSlotKey</c>. Shared with L512 on purpose: ONE mechanism for both
+    ///       surfaces of one flag means the two can never disagree about whether the cross moved.
     ///   (d) <c>list-repaints-on-nothing</c>, POSITIVE CONTROL, EXECUTED — the same production gate
     ///       (<c>OpenUiRepaint.RepaintNeeded</c>) must refuse an UNCHANGED key. The whole roster is dozens
     ///       of slots and the flush lands ~10 times a second.
@@ -89,20 +90,22 @@ namespace RailCheck
                              "toggled by hand — which is why a renamed native member has to be loud.";
 
             // ── (c) EXECUTED: the cross is in the key this list gates on ────────────────────────────────
-            var off = LevelStub(false);
-            var on = LevelStub(true);
-            if (off == null || on == null)
-            {
-                yield return "L514 premise-changed: a bare LevelProgression could not be minted, so the " +
-                             "executed arms below did not run. Re-ground the harness rather than trusting them.";
-                yield break;
-            }
-            string keyOff = OpenUiRepaint.CrewSlotKey("Chen", 1, off, 0);
-            string keyOn = OpenUiRepaint.CrewSlotKey("Chen", 1, on, 0);
+            // The hand-rolled CrewSlotKey/RosterSignature are GONE (§B.8, L543); the list is keyed on
+            // ScopeKey, a generation that advances exactly when a path under one of the prefixes this list
+            // DECLARED was touched. Same claim, one layer up: a GeoCharacter leaf (HasNewLevel is one,
+            // rooted at "U#" by IdentityResolver.cs:145) must MOVE the list's key. Shared with L512 on
+            // purpose — one mechanism for both surfaces of one flag.
+            const string rosterSurface = "UIModuleGeoRoster";
+            OpenUiRepaint.Reset();
+            string keyOff = OpenUiRepaint.ScopeKey(rosterSurface);
+            OpenUiRepaint.BumpScopeGenerations(
+                new[] { "U#7.Progression.LevelProgression.HasNewLevel" });
+            string keyOn = OpenUiRepaint.ScopeKey(rosterSurface);
             if (string.Equals(keyOff, keyOn, StringComparison.Ordinal))
-                yield return "L514 cross-not-in-the-list-key: a soldier with HasNewLevel set produces the SAME " +
-                             "slot key ('" + keyOn + "') as one without it, so the roster repaint gate stays " +
-                             "closed on exactly the change the player is waiting for.";
+                yield return "L514 cross-not-in-the-list-key: a touched GeoCharacter leaf produced the SAME " +
+                             "slot key ('" + keyOn + "') as an untouched one, so the roster repaint gate stays " +
+                             "closed on exactly the change the player is waiting for. Most likely cause: " +
+                             "\"U#\" was dropped from this surface's row in UiNativeRepaint.DeclaredPrefixes.";
 
             // ── (d) POSITIVE CONTROL, EXECUTED: an unchanged key does NOT repaint ───────────────────────
             const string probe = "L514-probe";
@@ -133,16 +136,6 @@ namespace RailCheck
                              "longer reaches UpdateLocations, which is where the level-up notification is " +
                              "switched on — so the per-slot paint this law drives would refresh everything " +
                              "EXCEPT the indicator it exists for.";
-        }
-
-        /// <summary>A bare <c>LevelProgression</c> with only the flag set — no def, no owner, no Unity.</summary>
-        private static PhoenixPoint.Common.Entities.Characters.LevelProgression LevelStub(bool hasNewLevel)
-        {
-            var l = System.Runtime.Serialization.FormatterServices.GetUninitializedObject(
-                typeof(PhoenixPoint.Common.Entities.Characters.LevelProgression))
-                as PhoenixPoint.Common.Entities.Characters.LevelProgression;
-            if (l != null) l.HasNewLevel = hasNewLevel;
-            return l;
         }
     }
 }

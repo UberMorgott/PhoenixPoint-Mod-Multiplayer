@@ -28,15 +28,18 @@ namespace RailCheck
     /// mechanism, and a THIRD strip must cost a key function, not a mechanism.
     ///
     /// REACTIVITY IS STILL THE HARD MANDATE, so the arms below run BOTH ways: an unchanged key must skip and
-    /// a changed or unreadable key must repaint. `InfoBarKey` covers the native draw exactly
-    /// (`UpdatePopulation`:276-288 reads three values and nothing else) plus the first-party state the
-    /// postfix reads on top, and carries a one-second floor for what a third-party postfix draws that no
-    /// key of ours can name — see the method's own doc. The floor is why arm (e) checks the key changes
-    /// over time rather than asserting it is stable.
+    /// a changed or unreadable key must repaint. Since §B.8/L543 the bar's key is not a hand-rolled
+    /// `InfoBarKey` string — that read-set-written-backwards, one-second `Time.realtimeSinceStartup` floor
+    /// and all, is deleted — but `OpenUiRepaint.ScopeKey("UIModuleInfoBar")`, a generation that moves when a
+    /// path under one of the bar's DECLARED prefixes was touched. Arm (e) therefore checks the DECLARATION
+    /// covers every source the bar draws, instead of IL-scanning a builder that no longer exists.
     ///
     /// THE ARMS (all EXECUTED over the real methods):
-    ///   (a) <c>gate-unwired</c> — `RefreshInfoBar` actually calls `RepaintNeeded`. Without this the key
-    ///       function could be perfect and never consulted.
+    ///   (a) <c>gate-unwired</c> — `RefreshInfoBar` actually calls `InfoBarNeedsRefresh`, and that routes
+    ///       through `RepaintNeeded`. Without this the key could be perfect and never consulted. The
+    ///       indirection is L543's ordering fix: the module's LIVENESS is asked before the memory is
+    ///       touched, so a key recorded against a bar that is not yet Init'd cannot burn the refresh it
+    ///       owes.
     ///   (b) <c>unchanged-repaints</c> — the same key twice: the second call skips.
     ///   (c) <c>changed-skipped</c>, THE REACTIVITY HALF — a CHANGED key repaints, and a NULL key (model
     ///       unreadable) repaints. A gate that answered "skip" once seeded would satisfy (b) and freeze the
@@ -44,10 +47,12 @@ namespace RailCheck
     ///   (d) <c>strips-share-one-key</c> — two different strips passing the SAME key must both repaint. The
     ///       consolidation replaced a single `_agendaSignature` field, and a shared slot would make one
     ///       strip's repaint swallow the other's.
-    ///   (e) <c>key-blind-to-<i>source</i></c> — the key reads the three values `UpdatePopulation` draws,
-    ///       the diplomacy value the postfix draws, and the alien base list behind its meter. A key that
-    ///       stopped reading one of them would go green on every other arm while that half of the strip
-    ///       froze.
+    ///   (e) <c>declaration-blind-to-<i>source</i></c> — the bar DECLARES the rail roots the three values
+    ///       `UpdatePopulation` draws land under ("S#": world population is counted off the sites/havens),
+    ///       the diplomacy value the postfix draws ("F#": `FactionDiplomacy` descends from `GeoFaction`,
+    ///       docs/rail-baseline.txt:527/561/594) and the alien base list behind its meter ("S#"). A
+    ///       declaration missing one of them would go green on every other arm while that half of the
+    ///       strip froze.
     ///   (f) <c>agenda-off-the-shared-gate</c> — `AgendaNeedsRebuild` still routes through `RepaintNeeded`,
     ///       so the two strips cannot drift back into two mechanisms.
     ///
@@ -56,7 +61,7 @@ namespace RailCheck
     ///   • make `RepaintNeeded` return true unconditionally → (b)
     ///   • make it return false unconditionally, or drop the null arm → (c)
     ///   • key `RepaintNeeded` on the key alone instead of (strip, key) → (d)
-    ///   • drop any covered source from `InfoBarKey` → (e)
+    ///   • drop "F#" or "S#" from the bar's row in `UiNativeRepaint.DeclaredPrefixes` → (e)
     ///   • give `AgendaNeedsRebuild` its own field again → (f)
     /// </summary>
     internal static class L498_TheInfoBarRepaintsOnlyWhenWhatItDrawsChanges
@@ -68,12 +73,12 @@ namespace RailCheck
         {
             var gate = typeof(OpenUiRepaint).GetMethod("RepaintNeeded", Any);
             var refresh = typeof(OpenUiRepaint).GetMethod("RefreshInfoBar", Any);
-            var key = typeof(OpenUiRepaint).GetMethod("InfoBarKey", Any);
+            var live = typeof(OpenUiRepaint).GetMethod("InfoBarNeedsRefresh", Any);
             var agenda = typeof(OpenUiRepaint).GetMethod("AgendaNeedsRebuild", Any);
-            if (gate == null || refresh == null || key == null || agenda == null)
+            if (gate == null || refresh == null || live == null || agenda == null)
             {
                 yield return "L498 premise-changed: OpenUiRepaint.RepaintNeeded / .RefreshInfoBar / " +
-                             ".InfoBarKey / .AgendaNeedsRebuild did not resolve. The one repaint-if-changed " +
+                             ".InfoBarNeedsRefresh / .AgendaNeedsRebuild did not resolve. The one repaint-if-changed " +
                              "gate has been renamed, removed, or split back into a mechanism per strip, so " +
                              "every arm below would pass vacuously — and both failure directions are silent: " +
                              "a strip that repaints ten times a second says nothing in the log, and neither " +
@@ -83,8 +88,10 @@ namespace RailCheck
             var mod = typeof(OpenUiRepaint).Assembly;
 
             // ── (a) the gate is actually consulted ─────────────────────────────────────────────────────
-            if (!Program.Callees(refresh, mod).Any(c => Same(c, gate)))
-                yield return "L498 gate-unwired: RefreshInfoBar does not call RepaintNeeded, so it runs on " +
+            if (!Program.Callees(refresh, mod).Any(c => Same(c, live)) ||
+                !Program.Callees(live, mod).Any(c => Same(c, gate)))
+                yield return "L498 gate-unwired: RefreshInfoBar does not reach RepaintNeeded through " +
+                             "InfoBarNeedsRefresh, so it runs on " +
                              "EVERY rail flush — about ten times a second on a live geoscape — and drives " +
                              "every postfix hung on UIModuleInfoBar.UpdatePopulation at that rate. That is " +
                              "the 2026-08-15 audit finding verbatim: the agenda strip got its key in be95ff9 " +
@@ -119,22 +126,31 @@ namespace RailCheck
                              "other's, which is a stale strip produced by the very consolidation meant to " +
                              "make a third one cheap.";
 
-            // ── (e) the key reads everything the strip draws ───────────────────────────────────────────
-            foreach (var source in Sources())
-            {
-                if (source.Getter == null)
+            // ── (e) the DECLARATION covers everything the strip draws ──────────────────────────────────
+            string[] declared;
+            if (!UiNativeRepaint.DeclaredPrefixes.TryGetValue("UIModuleInfoBar", out declared) ||
+                declared == null || declared.Length == 0)
+                yield return "L498 premise-changed: UIModuleInfoBar has no row in " +
+                             "UiNativeRepaint.DeclaredPrefixes, so the coverage arm cannot run. An undeclared " +
+                             "surface repaints on everything — safe, but that is the ten-times-a-second " +
+                             "refresh this law exists to stop; declare it rather than leaving it out.";
+            else
+                foreach (var source in Sources())
                 {
-                    yield return "L498 premise-changed: " + source.Name + " did not resolve on the game type, " +
-                                 "so the coverage arm for it cannot run. Re-ground it against the current " +
-                                 "decompile rather than dropping the source.";
-                    continue;
+                    if (source.Getter == null)
+                    {
+                        yield return "L498 premise-changed: " + source.Name + " did not resolve on the game " +
+                                     "type, so the coverage arm for it cannot run. Re-ground it against the " +
+                                     "current decompile rather than dropping the source.";
+                        continue;
+                    }
+                    if (Array.IndexOf(declared, source.Prefix) >= 0) continue;
+                    yield return "L498 declaration-blind-to-" + source.Name + ": the info bar does not declare " +
+                                 QUOTE + source.Prefix + QUOTE + ", the rail root it lands under, so " +
+                                 source.What + " can change without moving the bar's ScopeKey and the strip " +
+                                 "keeps drawing the old number until something else moves. Every other arm " +
+                                 "stays green while that half of the bar is frozen.";
                 }
-                if (References(key, source.Getter)) continue;
-                yield return "L498 key-blind-to-" + source.Name + ": InfoBarKey never reads it, so " +
-                             source.What + " can change without changing the key and the strip keeps drawing " +
-                             "the old number until something else moves. Every other arm stays green while " +
-                             "that half of the bar is frozen.";
-            }
 
             // ── (f) the agenda strip still rides the same gate ─────────────────────────────────────────
             if (!Program.Callees(agenda, mod).Any(c => Same(c, gate)))
@@ -144,34 +160,46 @@ namespace RailCheck
                              "is always the one that silently stops matching the first.";
         }
 
-        private sealed class Source { internal string Name; internal MethodInfo Getter; internal string What; }
+        private const string QUOTE = "\"";
+
+        private sealed class Source
+        {
+            internal string Name;
+            internal MethodInfo Getter;
+            /// <summary>The rail-root prefix this drawn value lands under, so the coverage arm is a
+            /// statement about the DECLARATION rather than about a deleted string builder.</summary>
+            internal string Prefix;
+            internal string What;
+        }
 
         /// <summary>The values the bar actually draws — the three <c>UpdatePopulation</c>:276-288 reads, plus
         /// the first-party state TFTV's <c>TopInforBar</c>:127 postfix draws on top of them.</summary>
         private static IEnumerable<Source> Sources()
         {
-            yield return Get(typeof(GeoscapeView), "WorldPopulation",
+            yield return Get(typeof(GeoscapeView), "WorldPopulation", "S#",
                 "the live world population, i.e. the bar's own fill and its percentage text");
-            yield return Get(typeof(GeoscapeView), "GameOverWorldPopulation",
+            yield return Get(typeof(GeoscapeView), "GameOverWorldPopulation", "S#",
                 "the doom threshold the bar marks and names in its tooltip");
-            yield return Get(typeof(GeoscapeView), "StartingWorldPopulation",
+            yield return Get(typeof(GeoscapeView), "StartingWorldPopulation", "S#",
                 "the denominator both of the bar's two ratios are taken against");
             yield return new Source
             {
                 Name = "PartyDiplomacy.GetDiplomacy",
                 Getter = typeof(PartyDiplomacy).GetMethod("GetDiplomacy", Any, null,
                     new[] { typeof(IDiplomaticParty) }, null),
+                Prefix = "F#",
                 What = "each faction's standing toward Phoenix — the reputation percentages, and the STORED " +
                        "field the rail writes directly, which is the whole reason this repaint exists",
             };
-            yield return Get(typeof(GeoAlienFaction), "Bases",
+            yield return Get(typeof(GeoAlienFaction), "Bases", "S#",
                 "the alien base list the infestation meter is counted from");
         }
 
-        private static Source Get(Type owner, string property, string what) => new Source
+        private static Source Get(Type owner, string property, string prefix, string what) => new Source
         {
             Name = owner.Name + "." + property,
             Getter = owner.GetProperty(property, Any)?.GetGetMethod(nonPublic: true),
+            Prefix = prefix,
             What = what,
         };
 
