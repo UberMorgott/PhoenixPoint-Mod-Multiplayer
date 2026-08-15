@@ -119,6 +119,11 @@ namespace Multiplayer.Network.Sync
             int at = _unread.Count;
             while (at > 0 && _unread[at - 1].Pos > pos) at--;
             _unread.Insert(at, new JournalEntry { Pos = pos, Family = family, Payload = payload });
+            // The line recorded-trace replay reads (§C.2, tools/RailSim/TraceReplay.cs). The concatenation
+            // is INSIDE the MpDiag.On guard on purpose: this runs at rail-batch rate.
+            if (MpDiag.On)
+                MpLog.Log("[Multiplayer][windows] journal pos=" + pos + " family=" + (family ?? "none") +
+                          " unread=" + _unread.Count);
             if (_unread.Count >= RunawayCanaryAt && !_canaryLogged)
             {
                 _canaryLogged = true;

@@ -58,14 +58,17 @@ namespace RailSim
             int seed = 1;
             var si = Array.IndexOf(args, "--seed");
             if (si >= 0 && si + 1 < args.Length) int.TryParse(args[si + 1], out seed);
-            try { return Run(seed); }
+            string trace = null;
+            var ti = Array.IndexOf(args, "--trace");
+            if (ti >= 0 && ti + 1 < args.Length) trace = args[ti + 1];
+            try { return Run(seed, trace); }
             catch (Exception ex) { Console.Error.WriteLine("RailSim CRASHED: " + ex); return 2; }
         }
 
         // NoInlining for the same reason RailCheck.Program.Run has it: the JIT resolves a method's type
         // references on entry, so every game type must stay out of Main until the resolver is installed.
         [MethodImpl(MethodImplOptions.NoInlining)]
-        private static int Run(int seed)
+        private static int Run(int seed, string trace)
         {
             // UnityEngine.Debug's default handler is a native icall — outside the player it throws
             // SecurityException, so the rail's own warnings would abort the run. Swap in a sink, exactly
@@ -85,6 +88,14 @@ namespace RailSim
                                  ex.Message.Replace("\r", "").Replace("\n", " ") + "). A scenario that " +
                                  "threw proved NOTHING and is not a pass.");
                 }
+            }
+            // §C.2: the recorded-trace replay runs as one more scenario whenever a trace is named, so real
+            // traffic and generated traffic are judged by the same verdict line.
+            if (trace != null)
+            {
+                ran++;
+                try { failures.AddRange(TraceReplay.Replay(trace, seed)); }
+                catch (Exception ex) { failures.Add("trace-replay CRASHED: " + ex.Message); }
             }
             if (failures.Count > 0)
             {
