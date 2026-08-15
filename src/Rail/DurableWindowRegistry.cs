@@ -330,9 +330,6 @@ namespace Multiplayer.Network.Sync
             ModalType.BehemothAttackBrief, ModalType.InfestedHavenBrief,
         };
 
-        private static readonly HashSet<Type> MapStates = new HashSet<Type>
-        { typeof(UIStateNothingSelected), typeof(UIStateVehicleSelected), typeof(UIStateInitial) };
-
         internal static DurableWindowDisposition RouterDisposition(string family)
         {
             if (family == null || !RouterFamilies.TryGetValue(family, out var result))
@@ -364,8 +361,17 @@ namespace Multiplayer.Network.Sync
             ModalType.PandoranRevealResult, ModalType.AlienResearchBrief,
         };
 
+        // ONE MapStates, in WindowOrder, by NAME (§B.7, L543 arm e). Declared as the MAP and not as the
+        // SCREENS, so an unknown state HOLDS rather than interrupts — and a name set can also name a state
+        // belonging to a mod whose Type this assembly cannot reference.
+        // UIStateLoading IS THE ONE DIFFERENCE and it is NOT a weakening: WindowOrder's set names it
+        // because a loading screen has "no player and no screen to protect", so a QUEUED window need not be
+        // held. PRESENTING a durable window into a loading screen is a different question and the answer
+        // stays NO (L378 executes it) — the entry keeps its place in the ledger and presents on the map.
         internal static bool MayPresent(bool geoscapeStarted, Type currentViewState) =>
-            geoscapeStarted && currentViewState != null && MapStates.Contains(currentViewState);
+            geoscapeStarted && currentViewState != null &&
+            currentViewState != typeof(UIStateLoading) &&
+            WindowOrder.IsMapState(currentViewState.Name);
 
         // PriorityOf IS GONE (L523). Ranking one durable window above another was the second ordering
         // system's comparator; the host's journal position is the only order. The family table below

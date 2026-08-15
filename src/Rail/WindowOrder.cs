@@ -126,6 +126,11 @@ namespace Multiplayer.Network.Sync
             "UIStateLoading",           // no player and no screen to protect
         };
 
+        /// <summary>The single MapStates question, so the set itself stays private and there is exactly
+        /// one copy in the assembly (§B.7, L543 arm e).</summary>
+        internal static bool IsMapState(string viewStateName) =>
+            viewStateName != null && MapStates.Contains(viewStateName);
+
         /// <summary>PURE, and RailCheck L161 executes it. TRUE = keep this request in the queue this frame.
         ///
         /// WHY THE HOLD EXISTS AT ALL, and why it is a co-op-only rule. In vanilla every full-screen section

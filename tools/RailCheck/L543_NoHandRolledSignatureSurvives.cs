@@ -94,6 +94,34 @@ namespace RailCheck
                              "mod has hung on the info bar is paid on each refresh (TFTV's TopInforBar:127 " +
                              "does string Transform.Find lookups, a LINQ walk of the alien bases and a " +
                              "sprite load).";
+
+            // (e) ONE MapStates, AND IT IS THE NAME FORM (§B.7). Two spellings of one set is the
+            // two-ordering-systems mistake in miniature. The NAME form survives for two reasons written
+            // into the code itself: WindowOrder.cs records that the set is "DECLARED AS THE MAP AND NOT AS
+            // THE SCREENS, so an unknown state HOLDS rather than interrupts", and a name set can also name
+            // a state belonging to a mod whose Type this assembly cannot reference — which is required now
+            // that TFTV's windows are in scope for the journal.
+            var mapStatesHolders = typeof(OpenUiRepaint).Assembly.GetTypes()
+                .SelectMany(t => t.GetFields(BindingFlags.Static | BindingFlags.Instance |
+                                             BindingFlags.Public | BindingFlags.NonPublic |
+                                             BindingFlags.DeclaredOnly)
+                                  .Where(f => f.Name == "MapStates")
+                                  .Select(f => new { Type = t.Name, f.FieldType }))
+                .OrderBy(x => x.Type, StringComparer.Ordinal).ToList();
+            if (mapStatesHolders.Count != 1)
+                yield return "L543 two-mapstates: " + mapStatesHolders.Count + " type(s) declare a " +
+                             "MapStates set (" +
+                             string.Join(", ", mapStatesHolders.Select(h => h.Type).ToArray()) +
+                             "). Exactly one may. Two spellings of one set — one by Type, one by NAME — " +
+                             "is the two-ordering-systems mistake in miniature, and the by-Type copy is " +
+                             "the one that goes.";
+            else if (mapStatesHolders[0].FieldType != typeof(HashSet<string>))
+                yield return "L543 mapstates-is-type-keyed: the surviving MapStates on " +
+                             mapStatesHolders[0].Type + " is a " + mapStatesHolders[0].FieldType.Name +
+                             ", not a HashSet<string>. The NAME form is the one that survives: an unknown " +
+                             "state must HOLD rather than interrupt, and a name set can name a state from " +
+                             "a mod whose Type this assembly cannot reference.";
+
             OpenUiRepaint.Reset();
         }
     }
