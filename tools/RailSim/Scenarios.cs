@@ -19,6 +19,63 @@ namespace RailSim
             yield return Pair("a-local-dismissal-removes-only-mine", ALocalDismissalRemovesOnlyMine);
             yield return Pair("a-global-dismissal-removes-it-everywhere", AGlobalDismissalRemovesItEverywhere);
             yield return Pair("no-gap-is-permanent", NoGapIsPermanent);
+            yield return Pair("an-untouched-surface-does-not-repaint", AnUntouchedSurfaceDoesNotRepaint);
+        }
+
+        /// <summary>§C.1 property 3 — the property no existing law can express, and the acceptance
+        /// criterion for the whole of section B. An OBSERVABLE HISTORY: a run of rail batches produces a
+        /// list of repaint decisions per surface, and the surface whose declared prefixes were never
+        /// touched must appear with ZERO repaints while the surface that was touched appears with some.
+        ///
+        /// The reported defect in one line: an unrelated peer's MANUFACTURING tick repainted the
+        /// soldier-edit screen, and that screen's repaint routes to a DESTRUCTIVE native refresh which
+        /// resets the soldier model and restarts its animation.</summary>
+        private static IEnumerable<string> AnUntouchedSurfaceDoesNotRepaint(int seed)
+        {
+            const string editSoldier = "UIStateEditSoldier";
+            const string probeOther = "UIStateRailSimProbeOther";
+
+            string[] savedEdit, savedOther;
+            UiNativeRepaint.DeclaredPrefixes.TryGetValue(editSoldier, out savedEdit);
+            UiNativeRepaint.DeclaredPrefixes.TryGetValue(probeOther, out savedOther);
+            UiNativeRepaint.DeclaredPrefixes[editSoldier] = new[] { "U#" };
+            UiNativeRepaint.DeclaredPrefixes[probeOther] = new[] { "S#" };
+
+            // A run of batches, in the order and shape a real session produces them: a manufacturing tick
+            // and a site tick, neither of which is a soldier, plus one genuine soldier progression change.
+            var batches = new[]
+            {
+                new[] { "S#76.SerializationData.HavenData.AssignedResearchId" },
+                new[] { "S#76.SerializationData.HavenData.Population" },
+                new[] { "S#12.SerializationData.Manufacture.Current" },
+                new[] { "U#4.SerializationData.Progression.Experience" },
+                new[] { "S#12.SerializationData.Manufacture.Current" },
+            };
+
+            int editRepaints = 0, otherRepaints = 0;
+            foreach (var batch in batches)
+            {
+                if (OpenUiRepaint.SurfaceRepaints(editSoldier, batch)) editRepaints++;
+                if (OpenUiRepaint.SurfaceRepaints(probeOther, batch)) otherRepaints++;
+            }
+
+            if (savedEdit == null) UiNativeRepaint.DeclaredPrefixes.Remove(editSoldier);
+            else UiNativeRepaint.DeclaredPrefixes[editSoldier] = savedEdit;
+            if (savedOther == null) UiNativeRepaint.DeclaredPrefixes.Remove(probeOther);
+            else UiNativeRepaint.DeclaredPrefixes[probeOther] = savedOther;
+
+            if (editRepaints != 1)
+                yield return "an-untouched-surface-does-not-repaint: the soldier-edit surface repainted " +
+                             editRepaints + " times across 5 batches, of which exactly ONE touched a 'U#' " +
+                             "path. Four of those batches were another peer's site and manufacturing " +
+                             "ticks, and repainting that screen for them is what resets the soldier model " +
+                             "and restarts its animation.";
+
+            if (otherRepaints != 4)
+                yield return "an-untouched-surface-does-not-repaint: the 'S#'-declaring surface repainted " +
+                             otherRepaints + " times, not 4. Scoping must not have become a blanket " +
+                             "refusal — a surface whose declared prefixes WERE touched must repaint every " +
+                             "time, and a stale screen is a defect, not a cosmetic issue.";
         }
 
         /// <summary>§C.1 property 2: NO GAP IS PERMANENT. A gap self-releases on an armed timer AND is
