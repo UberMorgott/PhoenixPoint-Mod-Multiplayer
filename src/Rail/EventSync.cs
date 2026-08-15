@@ -565,6 +565,16 @@ namespace Multiplayer.Network.Sync
             }
             int index = ev.EventData?.Choices == null ? -1 : ev.EventData.Choices.IndexOf(choice);
             var record = ev.Record ?? EventPopup.LiveRecord(ev.EventID, null);
+            // NOT OURS TO ARBITRATE (host reward page, 2026-08-15). An event the game auto-completed at
+            // trigger is already Completed when the host clicks, so the durable Validate below can only ever
+            // refuse — and a Refusal closes the window and blocks native, which is exactly the path that
+            // draws the reward page (SelectChoice short-circuits on IsCompleted -> SetClosingEncounter ->
+            // ShowReward). A record that is no longer open was never this seam's to arbitrate: hand the click
+            // back to the game. The lost-race case stays safe — EventCompleteArbiter is the backstop that
+            // stubs the reward and prevents a second charge/grant.
+            if (record != null &&
+                Validate(record.State, index, ev.EventData?.Choices?.Count ?? 0) != null)
+                return HostLocalAnswer.NotDurable;
             bool accepted;
             bool handled = TryDurableOrdinaryAnswer(occurrence, winner, ev.EventID, index,
                 ev.EventData?.Choices?.Count ?? 0, record, ev, choice, module.Context.ViewerFaction, out accepted);
