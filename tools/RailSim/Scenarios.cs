@@ -16,6 +16,75 @@ namespace RailSim
             yield return Pair("every-peer-presents-in-the-same-order", EveryPeerPresentsInTheSameOrder);
             yield return Pair("the-backlog-is-never-trimmed", TheBacklogIsNeverTrimmed);
             yield return Pair("one-peers-backlog-never-blocks-another", OnePeersBacklogNeverBlocksAnother);
+            yield return Pair("a-local-dismissal-removes-only-mine", ALocalDismissalRemovesOnlyMine);
+            yield return Pair("a-global-dismissal-removes-it-everywhere", AGlobalDismissalRemovesItEverywhere);
+        }
+
+        /// <summary>§C.1 property 4: a dismissal marked LOCAL never removed another peer's entry. Two peers,
+        /// same journal position; peer A reads (= dismisses) it; peer B must still hold it.</summary>
+        private static IEnumerable<string> ALocalDismissalRemovesOnlyMine(int seed)
+        {
+            // Peer A.
+            WindowJournal.Reset();
+            WindowJournal.Append(1, "UIStateGeoModal", new byte[] { 1 });
+            JournalEntry read;
+            WindowJournal.TryRead(out read);
+            int aRemaining = WindowJournal.UnreadCount;
+
+            // Peer B — a separate journal generation, and NOTHING peer A did reaches it. That isolation IS
+            // the property: a LOCAL dismissal is a per-peer delete with no wire form at all.
+            WindowJournal.Reset();
+            WindowJournal.Append(1, "UIStateGeoModal", new byte[] { 1 });
+            int bRemaining = WindowJournal.UnreadCount;
+
+            if (aRemaining != 0)
+                yield return "a-local-dismissal-removes-only-mine: peer A still holds " + aRemaining +
+                             " entries after reading its only one. Read ⇒ deleted, locally.";
+            if (bRemaining != 1)
+                yield return "a-local-dismissal-removes-only-mine: peer B holds " + bRemaining +
+                             " entries, not 1. Peer A's dismissal reached peer B — the default scope is " +
+                             "LOCAL and only the mission family is GLOBAL, so an ordinary window a peer " +
+                             "closes must remain for everyone else.";
+
+            if (WindowJournal.ScopeOf("UIStateGeoModal") != DismissScope.Local)
+                yield return "a-local-dismissal-removes-only-mine: UIStateGeoModal is not declared LOCAL. " +
+                             "Default is LOCAL and an UNDECLARED family IS local — a new window family " +
+                             "needs no code at all (§A.5).";
+            WindowJournal.Reset();
+        }
+
+        /// <summary>§C.1 property 5: a GLOBAL dismissal removed it everywhere. Modelled as the host-minted
+        /// void applied to a peer that had NOT read it — the only mechanism that can remove an unread
+        /// entry.</summary>
+        private static IEnumerable<string> AGlobalDismissalRemovesItEverywhere(int seed)
+        {
+            if (WindowJournal.ScopeOf("UIStateRosterDeployment") != DismissScope.Global)
+                yield return "a-global-dismissal-removes-it-everywhere: the mission family is not declared " +
+                             "GLOBAL. It is the ONE global family: once anyone has acted on a mission the " +
+                             "decision to deploy is taken, and it is meaningless for the others to accept " +
+                             "or refuse.";
+
+            WindowJournal.Reset();
+            WindowJournal.Append(1, "UIStateRosterDeployment", new byte[] { 1 });
+            WindowJournal.Append(2, "UIStateGeoModal", new byte[] { 2 });
+            bool removed = WindowJournal.ApplyVoid(1);
+            if (!removed || WindowJournal.UnreadCount != 1)
+                yield return "a-global-dismissal-removes-it-everywhere: the void left " +
+                             WindowJournal.UnreadCount + " entries and reported removed=" + removed +
+                             ". A host-minted void removes an entry a peer has NOT read — that is the only " +
+                             "mechanism that can, and it is explicit precisely because an implicit per-peer " +
+                             "timeout makes two peers diverge.";
+            var head = WindowJournal.PeekHead();
+            if (head == null || head.Pos != 2)
+                yield return "a-global-dismissal-removes-it-everywhere: after voiding position 1 the head " +
+                             "is " + (head == null ? "<null>" : head.Pos.ToString()) + ", not 2. A void " +
+                             "must remove exactly the named position and disturb no other.";
+
+            if (WindowJournal.ApplyVoid(999))
+                yield return "a-global-dismissal-removes-it-everywhere: a void for a position this peer " +
+                             "never held reported success. It must be a no-op — a reconnecting peer " +
+                             "legitimately receives voids for entries it never got (§A.2b).";
+            WindowJournal.Reset();
         }
 
         /// <summary>§A.2b / R8: the save gate reads ONLY the local cursor. Peer B sits on a backlog it has

@@ -426,6 +426,7 @@ namespace RailCheck
             Add(laws, () => L523_DurableIsAnswerOnceNotOrdering.Check());
             Add(laws, () => L524_OnlyAVoidRemovesAnUnreadEntry.Check());
             Add(laws, () => L525_TheSaveGateReadsOnlyTheLocalCursor.Check());
+            Add(laws, () => L526_AnUndeclaredFamilyIsLocal.Check());
             Add(laws, () => L498_TheInfoBarRepaintsOnlyWhenWhatItDrawsChanges.Check());
             Add(laws, () => L500_AStructuralCreateWiresOnlyAfterItsValuesLand.Check());
             Add(laws, () => L501_ARefusalNoticeIsThePlayersSentenceSaidOnce.Check());
@@ -487,8 +488,11 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 338;
-        // Updated deliberately 2026-08-15: L525 (the save gate reads only the local cursor, and an
+        private const int ExpectedLawRegistrations = 339;
+        // Updated deliberately 2026-08-15: L526 (dismissal scope is a declared property of a family,
+        // never a special case) was ADDED — 338 -> 339. Nothing was retired or amputated: the scope table
+        // and the host-minted void are new subjects, and DropUnservableQueued keeps every arm it had.
+        // Earlier the same day: L525 (the save gate reads only the local cursor, and an
         // autosave always proceeds) was ADDED — 337 -> 338. Nothing was retired or amputated: the
         // player-initiated save gate is the mod's first save gate, so no existing law lost a subject.
         // Earlier the same day: L524 (an unread journal entry is removed only by being read or
@@ -517,7 +521,7 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "90d59ab5fc6e18464789564853b92391e02e0b2ea0a11d4696045829879835e2";
+        private const string ExpectedExecutionIdentityDigest = "6c258e632d8e51bc9c9e4747a136d07259464c67ceed61002eec372399e61f68";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

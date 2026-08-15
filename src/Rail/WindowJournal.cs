@@ -152,6 +152,16 @@ namespace Multiplayer.Network.Sync
             return false;
         }
 
+        /// <summary>The lowest UNREAD position of <paramref name="family"/>, or 0 when this peer holds none.
+        /// The host needs it to name the position a void voids: it dismisses a WINDOW (a live native request)
+        /// and a void names a POSITION. Lookup only — it removes nothing.</summary>
+        internal static uint FindUnread(string family)
+        {
+            for (int i = 0; i < _unread.Count; i++)
+                if (string.Equals(_unread[i].Family, family, StringComparison.Ordinal)) return _unread[i].Pos;
+            return 0;
+        }
+
         internal static int UnreadCount => _unread.Count;
 
         /// <summary>THE SAVE PREDICATE (§A.2b). Reads ONLY this peer's own cursor: no roster, no peer

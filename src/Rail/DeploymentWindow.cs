@@ -490,6 +490,11 @@ namespace Multiplayer.Network.Sync
         /// screen was holding it.</summary>
         internal static void DropUnservableQueued()
         {
+            // NATIVE-QUEUE HYGIENE ONLY (§A.6). This predicate reads GAME state, and evaluating it per-peer
+            // is asymmetric by construction — one peer's Servable() answer is not another's. A JOURNAL entry
+            // is removed only by being read or by a host-minted void; the HOST evaluates Servable() and mints
+            // that void (GeoModalMirror.HostVoidFamily → HostMintVoid). A client MUST NOT remove a journal
+            // entry from its own evaluation, and this method must never touch WindowJournal (L526 arm d).
             var view = View();
             // NO VIEW, NO QUEUE — a proof, not an optimisation. The pending list is
             // GeoscapeViewSwitchQuery._viewStateSwitchRequests:15, and the query itself is constructed
@@ -519,6 +524,12 @@ namespace Multiplayer.Network.Sync
                 OccurrenceId durableOccurrence;
                 if (WindowQueueSync.TryGetDurable(pending[i], out durableOccurrence))
                     WindowQueueSync.UntrackDurableNativeCarrier(pending[i], durableOccurrence);
+                // ON THE HOST ONLY, and expressed as a RECORD, not as a local removal: the dropped window
+                // belongs to a family whose dismissal scope may be GLOBAL, and then every peer's unread entry
+                // for it must go too — the host says so once instead of each peer deciding for itself. The
+                // family is the state's own type name, never a literal compared here (L526 arm c), and
+                // HostVoidFamily no-ops for a LOCAL family and on a client.
+                GeoModalMirror.HostVoidFamily(pending[i].State.GetType().Name);
                 pending.RemoveAt(i);
             }
         }

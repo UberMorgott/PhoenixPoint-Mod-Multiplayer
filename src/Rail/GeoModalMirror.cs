@@ -413,6 +413,77 @@ namespace Multiplayer.Network.Sync
             return engine != null && engine.IsActiveSession && engine.IsHost && !SyncApplyScope.Active;
         }
 
+        /// <summary>THE HOST-MINTED VOID (§A.5). A GLOBAL dismissal removes an entry from every peer's
+        /// UNPRESENTED backlog. Explicit by design: without a void record, two peers time out differently and
+        /// diverge (FIX gap-fill, §2.5). Only the host mints one; a client applies what it is sent.</summary>
+        internal static void HostMintVoid(uint journalPos, string family)
+        {
+            if (!HostMayPublish()) return;
+            if (WindowJournal.ScopeOf(family) != DismissScope.Global)
+            {
+                MpLog.LogWarning("[MP][windows] refused to void position " + journalPos + " for family '" +
+                                 (family ?? "<null>") + "': its declared dismissal scope is LOCAL. A LOCAL " +
+                                 "dismissal removes only the dismissing peer's own entry");
+                return;
+            }
+            var engine = NetworkEngine.Instance;
+            if (engine == null) return;
+            uint seq = Seq.Next(SurfaceIds.GeoModalRaise);
+            engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
+                SyncProtocol.EncodeEnvelope(SurfaceIds.GeoModalRaise, SyncKind.StateDelta,
+                                            EncodeVoid(seq, journalPos))));
+            ApplyVoidLocally(journalPos);
+            MpLog.Log("[MP][windows] HOST voided journal position " + journalPos + " (family '" + family +
+                      "', scope GLOBAL) seq=" + seq);
+        }
+
+        /// <summary>THE HOST'S CALL SITE HELPER: void whatever unread position this family holds, if the
+        /// family is GLOBAL and this peer is the host. It exists so a dismissal site (a native-queue sweep,
+        /// an answered window) never has to touch <see cref="WindowJournal"/> itself — a site that evaluates
+        /// GAME state per peer must not be able to remove a journal entry, only to ask the host to void
+        /// one (L526 arm d).</summary>
+        internal static void HostVoidFamily(string family)
+        {
+            if (!HostMayPublish() || WindowJournal.ScopeOf(family) != DismissScope.Global) return;
+            uint pos = WindowJournal.FindUnread(family);
+            if (pos != 0) HostMintVoid(pos, family);
+        }
+
+        /// <summary>[seq:u32][kind:u8 = 2][journalPos:u32] and nothing else — a void names a position, not a
+        /// window. Kind 2 is free on this surface: <see cref="StateKind"/> ends at 1.</summary>
+        private static byte[] EncodeVoid(uint seq, uint journalPos)
+        {
+            using (var ms = new MemoryStream())
+            using (var w = new BinaryWriter(ms, Encoding.UTF8))
+            {
+                w.Write(seq);
+                w.Write((byte)2);
+                w.Write(journalPos);
+                return ms.ToArray();
+            }
+        }
+
+        /// <summary>Remove it from the backlog. Same code on host and client — the host applies its own void
+        /// through here so both roles converge on ONE implementation rather than on two that must agree.
+        ///
+        /// AN ALREADY-OPEN COPY closes through the game's own door, and that door is already wired: the
+        /// repaint below re-runs the open geoscape screen, which sweeps the unservable window out of the
+        /// native queue (src/Rail/OpenUiRepaint.cs:969 → DeploymentWindowClose.DropUnservableQueued) and
+        /// closes an open brief with <c>view.ResetViewState()</c> + <c>view.FinishQueriedState()</c>
+        /// (src/Rail/DeploymentWindow.cs:462-470, reached from src/Rail/UiEventMap.cs:456). No second close
+        /// path is minted here.</summary>
+        internal static void ApplyVoidLocally(uint journalPos)
+        {
+            bool removed = WindowJournal.ApplyVoid(journalPos);
+            WindowGap.Forget(journalPos);
+            // REACTIVITY (hard mandate): the backlog changed, so the open screen must repaint without the
+            // player leaving and re-entering. Kindless arm — a void carries no rail path.
+            OpenUiRepaint.MarkDirty();
+            if (!removed)
+                MpLog.Log("[MP][windows] void for position " + journalPos + " found nothing unread — this " +
+                          "peer had already read it or never received it");
+        }
+
         internal static void HostBroadcast(StateKind kind, ModalType modalType, object modalData, int priority)
         {
             var engine = NetworkEngine.Instance;
@@ -609,6 +680,16 @@ namespace Multiplayer.Network.Sync
             if (engine == null || engine.IsHost) return true;
             try
             {
+                // kind 2 = VOID. It names a position and carries nothing else, so it must be read before the
+                // raise decoder, whose fields it does not have. [seq:u32][kind:u8 = 2][pos:u32] = 9 bytes.
+                if (payload != null && payload.Length == 9 && payload[4] == 2)
+                {
+                    uint voidSeq = BitConverter.ToUInt32(payload, 0);
+                    if (!Seq.ShouldApply(SurfaceIds.GeoModalRaise, voidSeq)) return true;
+                    ApplyVoidLocally(BitConverter.ToUInt32(payload, 5));
+                    Seq.Mark(SurfaceIds.GeoModalRaise, voidSeq);
+                    return true;
+                }
                 var p = Decode(payload, out uint seq);
                 // A re-delivered raise is a SECOND window, not a stale value — the strictly-greater guard is
                 // what makes this surface idempotent (law 7), and it is marked only after the window is up.
