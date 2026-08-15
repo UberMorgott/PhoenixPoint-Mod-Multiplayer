@@ -1021,6 +1021,36 @@ namespace Multiplayer.Network.Sync
                         "could not name (a report carries one hash for the whole subtree)");
         }
 
+        /// <summary>
+        /// DID THIS LEAF ACTUALLY CHANGE? A mark is raised by a value that DIFFERS, never by "a write
+        /// happened" (§B.2, Bevy set_if_neq / DOTS chunk versions). Marking on write is the direct cause of
+        /// the reported symptom: an unrelated peer's manufacturing tick rewrites leaves with the values
+        /// they already hold, the applier marks, and the open soldier-edit screen rebuilds — resetting the
+        /// model and restarting the animation.
+        ///
+        /// COMPARED BY VALUE OR BY BYTES, NEVER BY REFERENCE. The game mutates state in place, so
+        /// reference memoization is useless here (reselect FAQ, §2.5) — two references being equal says
+        /// nothing about whether the contents moved.
+        ///
+        /// PURE and internal so RailCheck executes the real one with no game.
+        /// </summary>
+        internal static bool LeafChanged(object before, object after)
+        {
+            if (before == null || after == null) return !ReferenceEquals(before, after);
+            var a = before as byte[];
+            var b = after as byte[];
+            if (a != null && b != null)
+            {
+                if (a.Length != b.Length) return true;
+                for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return true;
+                return false;
+            }
+            // Equals, not ==: a boxed value type compares by value here, and a string compares by
+            // content. A reference type with no Equals override degrades to reference equality, which is
+            // the SAFE direction — it reports "changed" and costs a repaint, never a stale screen.
+            return !before.Equals(after);
+        }
+
         private static void ApplyEntry(NetworkEngine engine, GeoLevelController geo, byte kindId, string path, ushort fieldIdx,
                                        string subKey, byte[] value, HashSet<object> touched)
         {
@@ -1108,6 +1138,17 @@ namespace Multiplayer.Network.Sync
                 return; // no-op entry: not applied, not touched, no repaint
             }
             NameTheDivergedField(path, field, subKey);
+
+            // §B.2: SNAPSHOT BEFORE THE WRITE, so the mark below can ask whether the value actually
+            // DIFFERS rather than whether a write happened. ONLY FieldClass.Leaf is snapshotable: a leaf
+            // apply REPLACES the entity's reference (see the ownership note above), while every container
+            // class (LeafList / EntityList / EntityCollection / LeafDict / GeoItemDict) is mutated THROUGH
+            // the very reference this snapshot holds — before and after would be the same object and a
+            // REAL change would read as "unchanged". Containers therefore keep marking unconditionally:
+            // REACTIVITY is a hard mandate, a redundant repaint is cheap and a stale screen is a defect.
+            bool comparable = field.Class == FieldClass.Leaf && field.CanRead;
+            object beforeValue = null;
+            if (comparable) { try { beforeValue = field.GetValue(entity); } catch { comparable = false; } }
 
             try
             {
@@ -1269,7 +1310,15 @@ namespace Multiplayer.Network.Sync
                     default:
                         return; // Descend never carries values
                 }
-                touched.Add(entity);
+                object afterValue = null;
+                if (comparable) { try { afterValue = field.GetValue(entity); } catch { comparable = false; } }
+                // §B.2: only a value that DIFFERS raises a mark. A non-snapshotable class, or an
+                // unreadable field (either read threw), compares as changed and marks — the safe
+                // direction, because an unreadable model may cost a repaint but may never cost a
+                // stale screen.
+                if (!comparable || LeafChanged(beforeValue, afterValue)) touched.Add(entity);
+                // NOT repaint marks and deliberately unconditional: the order channel and the scoped
+                // backfill acknowledgement are owed by the ENTRY landing, not by the value moving.
                 MarkOrderChange(geo, path, entity, field.Name);
                 if (_pendingScoped.Count > 0 || _pendingFullAt >= 0f) NoteScopedAnswer(path);
             }

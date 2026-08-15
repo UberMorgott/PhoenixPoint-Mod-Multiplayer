@@ -42,7 +42,12 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
 # with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
 # registration multiset (so sparse ids and many registrations per source file remain valid).
-# Updated deliberately 2026-08-15: L526 ADDED (dismissal scope is a declared property of a family,
+# Updated deliberately 2026-08-15: L540 ADDED (a mark is raised by a value that DIFFERS, never by "a
+# write happened": GenericApplier.LeafChanged is EXECUTED in both directions on boxed values and on
+# blobs, distinct byte arrays with identical contents compare UNCHANGED, and null-vs-value degrades to
+# CHANGED) -- 339 -> 340 registrations, one new identity string. Nothing retired or amputated:
+# value-inequality change detection at the applier's mark site is a new subject no existing law owned.
+# Earlier the same day: L526 ADDED (dismissal scope is a declared property of a family,
 # never a special case: undeclared and null are LOCAL, the mission family is GLOBAL, no method outside
 # WindowJournal decides a scope from a mission state name, DropUnservableQueued never reaches
 # WindowJournal.ApplyVoid, and GeoModalMirror.HostMintVoid exists) -- 338 -> 339 registrations, one
@@ -71,7 +76,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Earlier the same day: L514 ADDED (the roster list repaints on the same mirrored
 # level-up), 334 -> 335; L513 ADDED (no peer lifts before its boundary releases), 333 -> 334;
 # L512 ADDED (the crew strip repaints on a mirrored level-up), 332 -> 333.
-$expectedRegistrationDigest = 'f21ff29348c2bf68c2ff663f21de1a3ee09a620599f2e0a11e6d2fd8097b1231'
+$expectedRegistrationDigest = '82677025cc0010b6db9d0b2294c054648d62e087ecdfc100ccbbb8661911faf8'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

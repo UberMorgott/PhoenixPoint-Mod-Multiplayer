@@ -441,6 +441,7 @@ namespace RailCheck
             Add(laws, () => L520_TheOnlyPublicationIsTheQueryPostfix.Check());
             Add(laws, () => L521_TheAppendIsScreenIndependent.Check());
             Add(laws, () => L522_AClientNeverSortsAWindowQueue.Check());
+            Add(laws, () => L540_MarkOnlyOnValueInequality.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -488,8 +489,11 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 339;
-        // Updated deliberately 2026-08-15: L526 (dismissal scope is a declared property of a family,
+        private const int ExpectedLawRegistrations = 340;
+        // Updated deliberately 2026-08-15: L540 (a mark is raised by a value that DIFFERS, never by "a
+        // write happened") was ADDED — 339 -> 340. Nothing was retired or amputated: value-inequality
+        // change detection at the applier's mark site is a new subject, and no existing law owned it.
+        // Earlier the same day: L526 (dismissal scope is a declared property of a family,
         // never a special case) was ADDED — 338 -> 339. Nothing was retired or amputated: the scope table
         // and the host-minted void are new subjects, and DropUnservableQueued keeps every arm it had.
         // Earlier the same day: L525 (the save gate reads only the local cursor, and an
@@ -521,7 +525,7 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "6c258e632d8e51bc9c9e4747a136d07259464c67ceed61002eec372399e61f68";
+        private const string ExpectedExecutionIdentityDigest = "a49ba37aeb8c4d4f9acd3d6d6336c935e92c2693d948308decebfad996aaf574";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
