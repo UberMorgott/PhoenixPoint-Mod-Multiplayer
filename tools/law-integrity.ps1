@@ -208,7 +208,12 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # undeclared family LOCAL, L547 still forbids a LOCAL dismissal travelling, L552 still keeps dismissal
 # scope and ANSWER AUTHORITY two derivations. WindowJournal.FamilyScope keeps its single row for the one
 # window that carries no describable payload at all.
-$expectedRegistrationDigest = '08e7dfa599090b75deeba7b3038c9b324f8f639240b3b843653797c7a0dd19a4'
+# Updated deliberately 2026-08-16: L558 ADDED (the agenda tracker mod root "M#agenda" is registered on
+# both peers from SyncEngine's constructor, same as MistSync/DeployCountdown/DeployPrep/AssignSync, and
+# the client apply patch AgendaTrackerSync.AgendaRowApplyPatch.Prefix actually reads AgendaState.Rows
+# instead of short-circuiting the native computation as a silent no-op). Tasks 1-5 landed the feature
+# (src/Rail/AgendaTrackerSync.cs); nothing retired.
+$expectedRegistrationDigest = 'd01f37ca15fa1252eac6891fc6a78eed151d45aad19e9f90c2a86aa7e90502d0'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

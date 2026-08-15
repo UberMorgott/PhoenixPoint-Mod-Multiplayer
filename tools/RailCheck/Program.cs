@@ -459,6 +459,7 @@ namespace RailCheck
             Add(laws, () => L555_ADescribableWindowIsNeverAHole.Check());
             Add(laws, () => L557_NoPeerReadsARollupItsOwnRailStaled.Check());
             Add(laws, () => L556_AnAnsweredSharedWindowClosesEverywhere.Check());
+            Add(laws, () => L558_AgendaTrackerRootIsRegisteredBothSides.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -506,7 +507,17 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 357;
+        private const int ExpectedLawRegistrations = 358;
+        // Updated deliberately 2026-08-16: L558 (the agenda tracker root is registered, both sides, and
+        // the client apply patch actually reads it) was ADDED — 357 -> 358. Nothing was retired and
+        // nothing was weakened. Tasks 1-5 landed the "M#agenda" mod-root sync feature (src/Rail/
+        // AgendaTrackerSync.cs) so every peer paints the HOST'S computed remaining-time instead of
+        // independently recomputing it; this law guards the two facts that would make that feature a
+        // silent no-op if either regressed: (a) SyncEngine's constructor actually calls
+        // AgendaTrackerSync.Register (the root reaches both peers the same way every other mod root
+        // does), and (b) AgendaTrackerSync.AgendaRowApplyPatch.Prefix — the client-side patch that skips
+        // native per-row computation — actually reads AgendaState.Rows rather than short-circuiting
+        // without ever consulting the synced state.
         // Updated deliberately 2026-08-15: L557 (no peer reads a rollup its own rail silently staled) was
         // ADDED — 356 -> 357. Nothing was retired and nothing was weakened. It is NOT a second sim-gating
         // law: L506 and ClientSimGate keep every arm they had, and this law agrees with them that the
@@ -684,7 +695,7 @@ namespace RailCheck
         // one new identity string. No identity retired. L506 keeps its own identity and every arm — the
         // hourly tick stays refused on a client; what L557 adds runs BESIDE that refusal and invokes only
         // methods the caller supplies no information to, so it advances no simulation.
-        private const string ExpectedExecutionIdentityDigest = "9665f73a89a7c82821fd0370d85110e7bfbe44eed605bd6fe0696fd7485a0c80";
+        private const string ExpectedExecutionIdentityDigest = "d8aa89ec0acca081f5c4d078dcd6ef416679bac283ef897bdb9785c23d395111";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
