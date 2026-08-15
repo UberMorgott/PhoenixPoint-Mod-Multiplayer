@@ -67,7 +67,11 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # same day: L522 ADDED (a client never sorts a window queue) and L507 RETIRED
 # (the provisional window ordinal is back-filled -- its subject, WindowOrder.Stamp/StampAt and the
 # per-request order key, is deleted). 338 registrations either side; the identity SET changed, which is
-# exactly what this digest is for. Earlier the same day:
+# exactly what this digest is for. Updated deliberately 2026-08-15:
+# L542 ADDED (the kindless mark sites still repaint everything) -- 341 -> 342 registrations, one new
+# identity string. L38 was deliberately NOT extended: its scan is scoped to UiEventMap.Fire and
+# widening it would change what an already-green law means, so L542 owns the ~63 kindless MarkDirty()
+# sites outside Fire and the two laws partition the claim. Earlier the same day:
 # L521 ADDED (the append is screen-independent) -- 337 -> 338
 # registrations, one new identity string. Earlier the same day: L520 ADDED (the only publication of a window is the QueryStateSwitch
 # postfix) -- 336 -> 337 registrations, one new identity string. Earlier the same day:
@@ -78,7 +82,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Earlier the same day: L514 ADDED (the roster list repaints on the same mirrored
 # level-up), 334 -> 335; L513 ADDED (no peer lifts before its boundary releases), 333 -> 334;
 # L512 ADDED (the crew strip repaints on a mirrored level-up), 332 -> 333.
-$expectedRegistrationDigest = 'b13b72cd3f99b73555ab01f726887b4064ac8157e897379dd23d7a674ac641e7'
+$expectedRegistrationDigest = '6e92180becc789751175efa7db7ceaa8a1c7fddcb5b1e07ffb667642ff9be42d'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

@@ -95,11 +95,11 @@ namespace RailCheck
                 yield return "L193 law-failure-can-be-baselined: Run no longer refuses executable law " +
                              "violations before snapshot gates; --update could bless a broken rule as GREEN.";
 
-            if (!Program.LawExecutionIsValid(341, 341,
-                    "62fce54866bde25163ef9fad189f84bbd55cd06fbda8e0afe4641ac42c2bce2f") ||
-                Program.LawExecutionIsValid(341, 340,
-                    "62fce54866bde25163ef9fad189f84bbd55cd06fbda8e0afe4641ac42c2bce2f") ||
-                Program.LawExecutionIsValid(341, 341, "wrong") ||
+            if (!Program.LawExecutionIsValid(342, 342,
+                    "c8c029937403936df20b3c16875b0daef31485d5254978091d5d2bd3e978cf78") ||
+                Program.LawExecutionIsValid(342, 341,
+                    "c8c029937403936df20b3c16875b0daef31485d5254978091d5d2bd3e978cf78") ||
+                Program.LawExecutionIsValid(342, 342, "wrong") ||
                 !Program.NoLawViolations(0) || Program.NoLawViolations(1))
                 yield return "L193 positive-control: execution identity or zero-violation decisions no " +
                              "longer reject their falsifying rows.";
