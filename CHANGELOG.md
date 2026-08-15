@@ -3,6 +3,24 @@
 Player-facing notes for each release. Releases before `0.9.5-beta` are documented on the
 [GitHub releases page](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/releases).
 
+## 0.9.17-beta
+
+A tactical-co-op patch on top of `0.9.16-beta`. Every player must update before joining the
+same session.
+
+### Tactical missions
+
+- **Terminal interactions now remain authoritative during multiplayer missions.** Resnapshots
+  reconcile linked actor/console statuses as one graph instead of removing one half while the
+  other half is still being processed. This fixes hacking and other paired interactions being
+  cancelled or becoming unavailable on guests.
+- **Automatic ability consequences no longer become duplicate guest commands.** Only an explicit
+  player order may originate from a guest; status, turn and interaction consequences are published
+  once by the host. This prevents terminal completion from racing or being rejected as a second
+  command.
+- **A broken linked status cannot stall a frame with hundreds of retries.** Graph repair stops as
+  soon as it makes no progress, reports the remaining mismatch, and retains a small safety bound.
+
 ## 0.9.16-beta
 
 A patch release on top of `0.9.15-beta`. Same mod, same install — replace the `Multiplayer` folder
