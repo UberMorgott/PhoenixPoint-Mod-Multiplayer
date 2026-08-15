@@ -96,8 +96,10 @@ namespace Multiplayer.Network.Sync
                                 ResearchSync.PresentFromMirror(geo);
                                 // The RAISE, from inside the apply and nowhere earlier — L49's ordering arm:
                                 // a research-complete window drawn before the 0xAC deltas that unlock its
-                                // follow-ups shows an empty "new researches" group. Deferred (never
-                                // dropped) when this peer is not on a map surface; the sync tick drains it.
+                                // follow-ups shows an empty "new researches" group. Queued HERE and nowhere
+                                // else in the normal case, which is what keys the window to the message
+                                // that carried it (RailOrdinal.Current != 0) — the game's own drain gate
+                                // then holds it if this peer is inside a screen (L496/L511).
                                 ResearchSync.PumpDeferredCompletions(geo);
                                 ResearchSync.RepaintResearchUi();
                             }

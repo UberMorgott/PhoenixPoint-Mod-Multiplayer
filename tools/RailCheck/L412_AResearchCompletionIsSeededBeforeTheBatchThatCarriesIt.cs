@@ -29,9 +29,13 @@ namespace RailCheck
     /// TWO THINGS THEREFORE HAVE TO STAY TRUE, and this law asserts exactly those two:
     ///   (a) <c>GenericApplier.ApplyDelta</c> seeds the latch BEFORE it fires <c>UiEventMap.Fire</c>, so the
     ///       baseline is the state the peer LOADED and every later delta is a real transition;
-    ///   (b) the completion is DEFERRED, not dropped, when this peer is not on a geoscape map surface
-    ///       (<c>DurableWindowRegistry.MayPresent</c>) — and something OUTSIDE the apply drains it, or
-    ///       "deferred" means "lost" for a peer no further research delta ever reaches. This half became
+    ///   (b) the completion is HELD, not dropped, when this peer is not on a geoscape map surface — the
+    ///       hold is the game's own drain gate (<c>WindowOrder.HoldsForOpenScreen</c>) and this law
+    ///       EXECUTES it for the priority-99 modal — and something OUTSIDE the apply drains the latch
+    ///       list, or "deferred" means "lost" for a peer no further research delta ever reaches. Until
+    ///       2026-08-15 half (b) was asserted as a CALL to <c>DurableWindowRegistry.MayPresent</c> from
+    ///       inside the pump; that second gate is what made the client queue the window at a different
+    ///       moment from the host and is deleted (L496). This half became
     ///       load-bearing the day geoscape time stopped pausing for a peer's own tab (L413/TimeSync): a
     ///       research can now complete while this peer is deep in Manufacturing, and P13 forbids yanking it
     ///       out of an unrelated screen.
@@ -47,7 +51,7 @@ namespace RailCheck
     ///
     /// Falsify: delete the <c>ResearchSync.SeedLatchFromMirror</c> call from <c>GenericApplier.ApplyDelta</c>
     /// → seed-after-the-batch; delete the <c>ResearchSync.ClientTick</c> call from the sync tick → deferred
-    /// -window-has-no-drain; drop the <c>MayPresent</c> gate from <c>PumpDeferredCompletions</c> → yanks.
+    /// -window-has-no-drain; add <c>"UIStateManufacturing"</c> to <c>WindowOrder.MapStates</c> → yanks.
     /// </summary>
     internal static class L412_AResearchCompletionIsSeededBeforeTheBatchThatCarriesIt
     {
@@ -66,15 +70,13 @@ namespace RailCheck
             var clientTick = typeof(ResearchSync).GetMethod("ClientTick", All);
             var stub = mod.GetType("Multiplayer.Network.Sync.SyncEngine");   // SyncEngineStub.cs declares it
             var tick = stub?.GetMethod("Tick", All);
-            var mayPresent = typeof(DurableWindowRegistry).GetMethods(All)
-                             .FirstOrDefault(m => m.Name == "MayPresent" && m.GetParameters().Length == 2);
 
             if (applyDelta == null || fire == null || seed == null || pump == null || clientTick == null ||
-                tick == null || mayPresent == null)
+                tick == null)
             {
                 yield return "L412 premise-changed: one of GenericApplier.ApplyDelta / UiEventMap.Fire / " +
                              "ResearchSync.SeedLatchFromMirror / PumpDeferredCompletions / ClientTick / " +
-                             "SyncEngineStub.Tick / DurableWindowRegistry.MayPresent no longer resolves, so " +
+                             "SyncEngineStub.Tick no longer resolves, so " +
                              "nothing checks that a research completion survives the first batch after a " +
                              "reload boundary. Re-point this law — do not delete it: what it guards is the " +
                              "window every peer is owed appearing on the host alone, silently.";
@@ -107,14 +109,24 @@ namespace RailCheck
                              "research that completes on the first clock motion after a mission return is " +
                              "latched as backlog and its window opens on the host alone (live 2026-08-11).";
 
-            if (!Program.Callees(pump, mod).Any(c => c.MetadataToken == mayPresent.MetadataToken &&
-                                                     c.Module == mayPresent.Module))
-                yield return "L412 completion-yanks-the-player: ResearchSync.PumpDeferredCompletions no longer " +
-                             "asks DurableWindowRegistry.MayPresent before raising the native window. Geoscape " +
-                             "time keeps running while a peer is in its own tab (L413), so a research can now " +
-                             "complete while this peer is inside Manufacturing — raising the modal there tears " +
-                             "it out of a screen it chose to be in (P13). The gate reads THIS peer's own view " +
-                             "state and waits on nobody.";
+            // RE-POINTED 2026-08-15 (popup-order RCA). The anti-yank half used to be asserted as a CALL:
+            // PumpDeferredCompletions had to ask DurableWindowRegistry.MayPresent before it would queue.
+            // That second gate was the order defect — the host has no such pre-gate, so host and client
+            // queued the same window at different moments and it sorted differently on each. The property
+            // is unchanged and is now asserted where it actually lives, EXECUTED over the surviving gate:
+            // the completed modal is queued at priority 99 (GeoscapeView.cs:1987-1990) and the engine's own
+            // drain HOLDS it while the player is inside a screen. Same P13 promise, one gate, and read off
+            // the predicate rather than off a call.
+            foreach (var screen in new[] { typeof(PhoenixPoint.Geoscape.View.ViewStates.UIStateManufacturing),
+                                           typeof(PhoenixPoint.Geoscape.View.ViewStates.UIStateResearch) })
+                if (!WindowOrder.HoldsForOpenScreen(99,
+                        typeof(PhoenixPoint.Geoscape.View.ViewStates.UIStateGeoModal), screen))
+                    yield return "L412 completion-yanks-the-player: the drain gate RELEASES a priority-99 " +
+                                 "UIStateGeoModal — the research-completed modal and nothing else — onto " +
+                                 screen.Name + ". Geoscape time keeps running while a peer is in its own tab " +
+                                 "(L413), so a research can complete while this peer is inside Manufacturing; " +
+                                 "opening the modal there tears it out of a screen it chose to be in (P13). " +
+                                 "The gate reads THIS peer's own view state and waits on nobody.";
 
             if (!Program.Callees(tick, mod).Any(c => c.MetadataToken == clientTick.MetadataToken &&
                                                      c.Module == clientTick.Module))

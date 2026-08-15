@@ -66,7 +66,6 @@ namespace Multiplayer.Network.Sync
         // Completions latched but not yet SHOWN, because this peer was not on a map surface when they
         // landed. Deferred, never dropped — drained by PumpDeferredCompletions from the sync tick.
         private static readonly List<string> _deferredCompleted = new List<string>();
-        private static bool _deferralAnnounced;
         // Has this peer EVER stood on a geoscape map surface in this session? Sticky, one-way.
         private static bool _everOnMapSurface;
 
@@ -112,8 +111,9 @@ namespace Multiplayer.Network.Sync
         ///
         /// Before that first surface the mirror is still ARRIVING, so a completion there is backlog and is
         /// latched silently (the same swallow the unseeded path uses). After it, behaviour is unchanged and
-        /// every real completion still presents — including one that lands while this peer is off the map,
-        /// which is the deferral in <see cref="PumpDeferredCompletions"/> and stays exactly as it was.
+        /// every real completion still presents — including one that lands while this peer is off the map:
+        /// that one is queued through <see cref="PumpDeferredCompletions"/> like any other and held by the
+        /// game's own drain gate until this peer is back on the map.
         /// </summary>
         internal static bool LatchCompletion(string researchId, bool onMapSurfaceNow)
         {
@@ -346,16 +346,25 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>
-        /// SHOW THE LATCHED COMPLETIONS, ON THIS PEER'S OWN TERMS. Driven both from the apply (so the
-        /// common case is same-frame) and from the sync tick (so a peer who was elsewhere still gets it).
+        /// QUEUE THE LATCHED COMPLETIONS THROUGH THE GAME'S OWN DRAIN — with NO gate of its own.
         ///
-        /// The gate is <see cref="DurableWindowRegistry.MayPresent()"/> — THIS peer's own view state and
-        /// nothing else. NOT A QUORUM: nothing waits on another human, and a peer who never comes back to
-        /// the map simply keeps its window pending. It matters more than it used to: geoscape time no
-        /// longer stops because somebody opened a tab (see <see cref="TimeSync"/>), so a research really
-        /// can complete while this peer is deep in Manufacturing — and yanking it out of an unrelated
-        /// screen is exactly what P13 forbids. Vanilla never had to answer this because vanilla's clock
-        /// was frozen the whole time the tab was open.
+        /// THE DEFECT THIS DELETION FIXES (owner, 2026-08-14; RCA 2026-08-15). Two presentation channels
+        /// answered "may this window take the screen now": this method's own
+        /// <c>DurableWindowRegistry.MayPresent</c> pre-gate, and the universal one at the engine's single
+        /// drain (<see cref="WindowOrder.HoldsForOpenScreen"/>). The HOST has only the second — it raises
+        /// natively — so a client sitting in <c>UIStateGeoscapeEvent</c> logged
+        /// "deferred 2 completed research window(s)" and QUEUED the window at DRAIN time while the host had
+        /// queued it at RAISE time. Different queue positions, hence the measured 90 s order gap: contents
+        /// identical, order not. Worse, a drain from <see cref="ClientTick"/> runs with
+        /// <c>RailOrdinal.Current == 0</c>, so the window is keyed off this peer's OWN counter instead of
+        /// the ordinal of the message that caused it.
+        ///
+        /// ONE GATE, AND IT IS THE GAME'S. The completion is queued from inside the apply that carried it,
+        /// so <c>RailOrdinal.ForNewWindow</c> inherits the applying ordinal and every peer keys the window
+        /// identically BY CONSTRUCTION (L124/L507/L511). The screen the player opened is still protected —
+        /// <see cref="WindowOrder.HoldsForOpenScreen"/> holds <c>UIStateGeoModal</c> at priority 99 (P13),
+        /// exactly as it holds every other review window, and releases it when this peer walks back onto
+        /// the map. NOT A QUORUM: the hold reads THIS peer's own view state; nothing waits on another human.
         ///
         /// Presentation itself stays NATIVE: the game's own private handlers, invoked off this peer's
         /// mirrored element, so the window is built by GeoscapeView.OnFactionResearchCompleted (:1980) and
@@ -366,18 +375,6 @@ namespace Multiplayer.Network.Sync
             if (_deferredCompleted.Count == 0) return;
             var research = geo == null || geo.ViewerFaction == null ? null : geo.ViewerFaction.Research;
             if (research == null || research.AllResearchesArray == null) return;
-            if (!DurableWindowRegistry.MayPresent(true, geo.View == null || geo.View.CurrentViewState == null
-                    ? null : geo.View.CurrentViewState.GetType()))
-            {
-                if (_deferralAnnounced) return;
-                _deferralAnnounced = true;
-                MpLog.Log("[Multiplayer][rail] ResearchSync CLIENT deferred " + _deferredCompleted.Count +
-                          " completed research window(s) — this peer is not on a geoscape map surface. " +
-                          "Nothing is lost and nobody is waiting on it: it opens the moment this peer is " +
-                          "back on the map.");
-                return;
-            }
-            _deferralAnnounced = false;
             var pending = _deferredCompleted.ToArray();
             _deferredCompleted.Clear();
             foreach (var id in pending)
@@ -402,8 +399,12 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>The sync-tick drain: the deferred window opens the moment this peer walks back onto the
-        /// map, with no further rail traffic needed. Client-only — the host raises its own natively.</summary>
+        /// <summary>The sync-tick drain, and the reason the latch list still exists: a completion that
+        /// landed while this peer had no geoscape/viewer faction to raise it off (the only way
+        /// <see cref="PumpDeferredCompletions"/> now returns with rows still pending) is queued on the next
+        /// tick instead of waiting for a rail batch that may never come — the geoscape clock can be paused
+        /// by any peer, and the rail then goes quiet (L412 deferred-window-has-no-drain). Client-only: the
+        /// host raises its own natively.</summary>
         public static void ClientTick(NetworkEngine engine)
         {
             // FIRST, above every early return: the flag must rise on the frame this peer stands on the map,

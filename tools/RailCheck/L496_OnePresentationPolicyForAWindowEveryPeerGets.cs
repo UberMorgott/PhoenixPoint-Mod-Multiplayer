@@ -21,38 +21,49 @@ namespace RailCheck
     /// on the frame the player walked back onto the map. The gap is therefore PRESENTATION and it is
     /// whatever time each peer spends inside a screen — which is P13 working, not a defect.
     ///
-    /// THE DEFECT THAT IS REAL IS THE SECOND GATE. Two independent predicates answer "may a window take
-    /// this peer's screen right now": the universal one at the game's own single drain
+    /// THE DEFECT THAT IS REAL IS THE SECOND GATE, and the 2026-08-15 RCA closed it by DELETION rather
+    /// than by agreement. Two independent predicates used to answer "may a window take this peer's screen
+    /// right now": the universal one at the game's own single drain
     /// (<see cref="WindowOrder.HoldsForOpenScreen"/>, which already holds the research modal — it is queued
     /// through <c>QueryStateSwitch</c> at priority 99, `Queuerd state switch UIStateGeoModal with priority
     /// 99`), and <see cref="DurableWindowRegistry.MayPresent(bool, Type)"/>, which
-    /// <c>ResearchSync.PumpDeferredCompletions</c> consults before it will even queue one. Two predicates
-    /// that must agree and are free not to is exactly how one peer's window becomes arbitrarily later than
-    /// another's: widen one set, or narrow the other, and the research window alone starts waiting for a
-    /// view transition no other window waits for. This law nails them together on every state a player can
-    /// actually be standing in, in BOTH directions.
+    /// <c>ResearchSync.PumpDeferredCompletions</c> consulted before it would even queue one. THE HOST HAS
+    /// ONLY THE FIRST — it raises natively — so the two channels queued the same window at different
+    /// moments: both clients logged `deferred 2 completed research window(s)` at 13:24:45.450 from inside
+    /// <c>UIStateGeoscapeEvent</c> while the host had already queued its own. A window queued at DRAIN time
+    /// takes a different position from one queued at RAISE time, which is the order the owner reported —
+    /// and a drain from <c>ClientTick</c> also runs with <c>RailOrdinal.Current == 0</c>, so it is keyed
+    /// off this peer's own counter (L511 owns that half).
     ///
-    /// NOT A QUORUM AND CANNOT BECOME ONE. Every value either predicate reads is this peer's own view
-    /// state. The law asserts they agree with each other, never that a peer waits for another peer.
+    /// SO THIS LAW NOW ASSERTS THE SURVIVING SINGLE-GATE POLICY, not the agreement of two. It is not a
+    /// weakening: the P13 promise (a review window waits for the map) is still asserted here, EXECUTED,
+    /// over every screen and every map state — only the second, redundant predicate is forbidden.
     ///
-    /// THE ARMS (all EXECUTED over both real predicates and the real game types):
-    ///   (a) <c>screen-policies-disagree</c> — on every screen a player opens, BOTH gates hold.
-    ///   (b) <c>map-policies-disagree</c>, NON-VACUITY — on every state <c>DurableWindowRegistry.MapStates</c>
-    ///       declares as the map, BOTH gates release. Arm (a) alone is satisfied by a pair that holds
+    /// NOT A QUORUM AND CANNOT BECOME ONE. Every value the gate reads is this peer's own view state.
+    ///
+    /// THE ARMS (all EXECUTED over the real predicate and the real game types):
+    ///   (a) <c>screen-window-not-held</c> — on every screen a player opens, the ONE gate holds the
+    ///       priority-99 research modal.
+    ///   (b) <c>map-window-held</c>, NON-VACUITY — on every state <c>DurableWindowRegistry.MapStates</c>
+    ///       declares as the map, the gate releases it. Arm (a) alone is satisfied by a gate that holds
     ///       everywhere, i.e. by windows that never open at all.
     ///   (c) <c>deferral-waits-for-a-batch</c> — the drain is reachable from the sync TICK as well as from
-    ///       the rail apply. A deferral drained only by the next rail batch is late by however long the
+    ///       the rail apply. A latch drained only by the next rail batch is late by however long the
     ///       rail is quiet, which on a paused geoscape is unbounded.
+    ///   (d) <c>second-gate-returned</c> — <c>PumpDeferredCompletions</c> must NOT consult
+    ///       <c>DurableWindowRegistry.MayPresent</c> again. One presentation policy, one predicate; a
+    ///       second one is free to disagree with the host's and that disagreement IS the order defect.
     ///
-    /// UIStateLoading is deliberately not asserted: <see cref="WindowOrder"/> counts it as the map ("no
-    /// player and no screen to protect") and the research gate does not, and no player is standing in it.
-    /// Naming that difference here would freeze a transient state instead of the two screens' rule.
+    /// <c>DurableWindowRegistry.MayPresent</c> itself stays — it is the first-map-surface latch's
+    /// definition of "on the map" (L475), which is a different question from "may a window take the
+    /// screen". UIStateLoading is deliberately not asserted: <see cref="WindowOrder"/> counts it as the map
+    /// ("no player and no screen to protect") and no player is standing in it.
     ///
     /// Falsify (verified RED, then restored):
-    ///   • add <c>UIStateResearch</c> to <c>DurableWindowRegistry.MapStates</c> → (a)
-    ///   • remove <c>UIStateVehicleSelected</c> from <c>DurableWindowRegistry.MapStates</c> → (b)
     ///   • add <c>"UIStateResearch"</c> to <c>WindowOrder.MapStates</c> → (a)
+    ///   • remove <c>"UIStateVehicleSelected"</c> from <c>WindowOrder.MapStates</c> → (b)
     ///   • drop the <c>PumpDeferredCompletions</c> call from <c>ResearchSync.ClientTick</c> → (c)
+    ///   • restore the <c>MayPresent</c> pre-gate inside <c>PumpDeferredCompletions</c> → (d)
     /// </summary>
     internal static class L496_OnePresentationPolicyForAWindowEveryPeerGets
     {
@@ -90,34 +101,35 @@ namespace RailCheck
                 typeof(UIStateGeoRoster), typeof(UIStateRosterRecruits), typeof(UIStateInterception),
             };
 
-            // ── (a) on a screen the player opened, BOTH gates hold ─────────────────────────────────────
+            // ── (a) on a screen the player opened, the ONE gate holds ──────────────────────────────────
             foreach (var screen in screens)
             {
-                bool universalHolds = Holds(universal, screen);
-                bool researchHolds = !MayPresent(research, screen);
-                if (universalHolds && researchHolds) continue;
-                yield return "L496 screen-policies-disagree: on " + screen.Name + " the universal drain gate " +
-                             (universalHolds ? "HOLDS" : "RELEASES") + " a research-completed modal while " +
-                             "DurableWindowRegistry.MayPresent " + (researchHolds ? "HOLDS" : "RELEASES") +
-                             " it. Two predicates answering the same question — may a window take this peer's " +
-                             "screen — must give the same answer, or the one window every peer is supposed to " +
-                             "see becomes the one window whose moment is decided per subsystem. The owner's " +
-                             "2026-08-14 report is that shape: the host had dismissed a research window the " +
-                             "ally had not been shown yet.";
+                if (Holds(universal, screen)) continue;
+                yield return "L496 screen-window-not-held: on " + screen.Name + " the drain gate RELEASES a " +
+                             "research-completed modal onto a screen the player opened. That is P13 broken " +
+                             "for the one window family every peer is supposed to see at the same point in " +
+                             "its own queue — and since this is now the ONLY gate in front of it (the " +
+                             "PumpDeferredCompletions pre-gate was deleted 2026-08-15), nothing else is left " +
+                             "to hold it.";
             }
 
-            // ── (b) NON-VACUITY: on the map BOTH gates release ─────────────────────────────────────────
+            // ── (b) NON-VACUITY: on the map the gate releases ──────────────────────────────────────────
             foreach (var name in (IEnumerable<Type>)mapStates.GetValue(null))
             {
-                bool universalHolds = Holds(universal, name);
-                bool researchHolds = !MayPresent(research, name);
-                if (!universalHolds && !researchHolds) continue;
-                yield return "L496 map-policies-disagree: on " + name.Name + " — a state " +
+                if (!Holds(universal, name)) continue;
+                yield return "L496 map-window-held: on " + name.Name + " — a state " +
                              "DurableWindowRegistry.MapStates itself declares to be the geoscape map — the " +
-                             "universal gate " + (universalHolds ? "HOLDS" : "RELEASES") + " and the research " +
-                             "gate " + (researchHolds ? "HOLDS" : "RELEASES") + ". The map is the one place " +
-                             "both are supposed to let a window through; a pair that agrees only by holding " +
-                             "everywhere satisfies arm (a) and shows no window ever again.";
+                             "drain gate HOLDS the research-completed modal. The map is the one place a " +
+                             "notification IS reviewed; a gate that holds everywhere satisfies arm (a) and " +
+                             "shows no window ever again.";
+                // MayPresent is read here only as the repo's declaration of "this peer is on the map"
+                // (L475's first-surface latch). It must still SAY yes there, or the two definitions have
+                // drifted and arm (b) is asserting the map against a set nothing else agrees with.
+                if (!MayPresent(research, name))
+                    yield return "L496 map-declaration-drifted: DurableWindowRegistry.MayPresent refuses " +
+                                 name.Name + ", a member of its own MapStates. That set is the first-map-" +
+                                 "surface latch's definition of the map (L475); if it stops meaning the map, " +
+                                 "arm (b) is checking the drain gate against nothing.";
             }
 
             // ── (c) the drain does not wait for the next rail batch ────────────────────────────────────
@@ -129,6 +141,17 @@ namespace RailCheck
                              "by any peer and the rail then goes quiet for as long as it stays paused, so that " +
                              "is a wait with no bound — and the player's own walk back onto the map, which is " +
                              "the event the release is supposed to answer, produces no rail traffic at all.";
+
+            // ── (d) THE SECOND GATE STAYS DELETED ──────────────────────────────────────────────────────
+            if (Program.Callees(pump, mod).Any(c => Same(c, research)))
+                yield return "L496 second-gate-returned: ResearchSync.PumpDeferredCompletions consults " +
+                             "DurableWindowRegistry.MayPresent again before it will queue the window. The HOST " +
+                             "has no such pre-gate — it raises natively — so this peer queues the completion " +
+                             "at DRAIN time while the host queued it at RAISE time, the two land in different " +
+                             "positions of their own queues, and the window every peer is owed opens in a " +
+                             "different order on each (owner's report, 2026-08-14; measured again 2026-08-15 " +
+                             "with both clients deferring from UIStateGeoscapeEvent). One presentation policy " +
+                             "means ONE predicate: the engine's own drain gate, asserted in arms (a) and (b).";
         }
 
         private static bool Holds(MethodInfo universal, Type state) =>
