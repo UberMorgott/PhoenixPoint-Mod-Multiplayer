@@ -2231,6 +2231,26 @@ namespace Multiplayer.Network
         private long _revealDueHostMs;
         private bool _revealScheduled;
 
+        // ── THIS PEER'S OWN FIRST POST-LOAD FRAME (law L554) ─────────────────────────
+        // The deadline above turned out to be a guess about two things it cannot see: DELIVERY and the
+        // RECEIVER'S OWN frame budget. Measured 2026-08-15 21:54 with the deadline shipped — RTT ~0, so
+        // the lead was the 400 ms floor, so both clients read the shipped instant as inMs=-258 (already
+        // overdue on arrival) and then each spent one 2038 ms post-load frame before it could act on it.
+        // Host on screen 10.646, clients 11.862/11.854: the same 1.2 s head start, with the deadline
+        // working exactly as designed. So the instant became a FLOOR and the RELEASE became this: every
+        // peer holds until IT has observed every LIVE peer's own first rendered post-load frame.
+        //
+        // A FRAME NUMBER, NOT A CLOCK AND NOT A CALLBACK — the same reason _loadCompleteDueFrame is one
+        // (see its comment): a peer reaches the end of its load in the MIDDLE of one enormous blocking
+        // frame, and anything said from inside that frame is a claim the peer cannot yet honour. `+1` is
+        // what makes it strictly a LATER frame. It cannot outlive its boundary and so needs no clearing
+        // at any of the re-arm sites; PerformDeferredLift disarms it only so a spent arm cannot re-fire.
+        private int _revealReadyDueFrame;
+        // Local wall-clock at the arm. The ONLY use is the give-up bound for a peer that goes silent
+        // WITHOUT leaving — deliberately local, so the peer that stopped talking cannot also withhold the
+        // timer that releases everyone from waiting on it.
+        private long _revealArmedAtMs;
+
         /// <summary>This peer's read of the HOST clock. A stale offset is still SHARED and is used as-is —
         /// a drifted sample still puts every peer on one instant, while falling back to "now" puts each peer
         /// on its own, which is the defect. Only a peer that never sampled the host clock at all gives up,
@@ -2248,29 +2268,142 @@ namespace Multiplayer.Network
         private long ScheduleReveal(long dueHostMs, string why)
         {
             if (_revealed) return dueHostMs;   // already lifted (abort, on-demand join): nothing left to time
+            // THE ARM IS THE SAME ON EVERY ROLE, AND IT HANGS OFF THE ANNOUNCED BOUNDARY — never off a
+            // patch edge. That matters for one role in particular: on the new-campaign path the host never
+            // re-enters the level it already is (:714 "No Loaded→Playing edge is coming for this peer"),
+            // so an arm keyed on Loaded→Playing would skip the host by construction and it would lift
+            // whenever it happened to feel like it. Both callers — the host's AllDone release and a
+            // client's RevealAll arrival — are barrier facts about the announced boundary, so every role
+            // arms here or nowhere.
+            bool firstArm = !_revealScheduled;
             if (_revealScheduled && dueHostMs >= _revealDueHostMs) return _revealDueHostMs;
             _revealDueHostMs = dueHostMs;
             _revealScheduled = true;
+            if (firstArm)
+            {
+                // This peer owes one RENDERED frame before it may claim to be ready (law L554).
+                _revealReadyDueFrame = Time.frameCount + 1;
+                _revealArmedAtMs = NowMs();
+            }
             MpLog.Log("[Multiplayer] reveal scheduled (" + why + "): dueHostMs=" + dueHostMs +
                       " inMs=" + (dueHostMs - RevealClockNowMs()) +
-                      " — every peer lifts at this instant, nobody earlier.");
+                      " — a FLOOR, not a release: the lift also waits for every live peer's own first " +
+                      "post-load frame.");
             return dueHostMs;
         }
 
-        /// <summary>Fire the armed instant. Runs on EVERY peer, every frame, above every host-only return in
-        /// <see cref="Update"/>. NOT A QUORUM (P13): it asks the clock and nothing else — no roster, no
-        /// tracker, no peer — so a peer that goes silent, pauses or leaves between the release and the
-        /// instant cannot postpone anyone's lift, and a peer whose instant already passed lifts on this very
-        /// frame. The host is inside the scheme, not exempt from it, which is the whole point.</summary>
+        /// <summary>Report THIS peer's own first rendered post-load frame, once per boundary, on every
+        /// role. Runs from the per-frame tick above every host-only return, so the host reports its own
+        /// frame exactly like everyone else and is inside the barrier it hands out rather than beside it.
+        ///
+        /// NOT A QUORUM (P13): the fact being reported is that a frame RENDERED. It renders with nobody at
+        /// the keyboard, so an AFK peer reports on the same frame an attentive one would; no keypress,
+        /// confirmation or acknowledgement is anywhere on this path.</summary>
+        private void FlushRevealReady()
+        {
+            if (_revealReadyDueFrame == 0 || Time.frameCount < _revealReadyDueFrame) return;
+            _revealReadyDueFrame = 0;
+            var slot = _engine.Session.LocalSlotIndex;
+            _tracker.MarkReady(slot);       // local self-mark: this peer's own observation of itself
+            var payload = MessageSerializer.SerializeRevealReady(slot, _loadBoundaryId);
+            var msg = new NetworkMessage(PacketType.RevealReady, payload); // reliable
+            // The host RELAYS every readiness (see OnRevealReady), so it broadcasts its own the same way
+            // it would forward anyone else's — one path, no per-role arm.
+            if (_engine.IsHost) _engine.BroadcastToAll(msg); else _engine.SendToHost(msg);
+            MpLog.Log("[Multiplayer] reveal ready slot=" + slot + " (frame boundary past the armed reveal " +
+                      "— this peer has actually rendered)");
+        }
+
+        /// <summary>A slot's own first post-load frame has rendered — its own claim on the host, the
+        /// host's relay of it on a client. The host forwards it verbatim so every peer converges on the
+        /// SAME ready-set and can decide its own lift without asking anybody.</summary>
+        public void OnRevealReady(NetworkMessage msg)
+        {
+            byte slot;
+            Guid boundaryId;
+            try { (slot, boundaryId) = MessageSerializer.DeserializeRevealReady(msg.Payload); }
+            catch (Exception e)
+            {
+                MpLog.LogWarning("[Multiplayer] RevealReady rejected: malformed payload (" + e.Message + ").");
+                return;
+            }
+            var hasSenderSlot = _engine.Session.TryGetSlotForPeer(msg.SenderSteamId, out var senderSlot);
+            if (!LoadBarrierAuthority.AcceptRevealReady(_engine.IsHost, _revealed, _loadBoundaryId,
+                    boundaryId, _engine.Session.HostPeerId, msg.SenderSteamId, hasSenderSlot, senderSlot, slot))
+            {
+                MpLog.LogWarning("[Multiplayer] RevealReady rejected: sender/slot/boundary is not " +
+                                 "authoritative sender=" + msg.SenderSteamId + " slot=" + slot +
+                                 " boundary=" + boundaryId.ToString("N").Substring(0, 8) + ".");
+                return;
+            }
+            _tracker.MarkReady(slot);
+            if (MpDiag.On)
+                MpLog.Log("[MP][reveal] ready slot=" + slot + " pending=[" +
+                          _tracker.PendingReady(_engine.Session.GetLiveRosterSlots()) + "]");
+            // Relay so the clients hear about each other. Set semantics upstream make the sender's own
+            // copy coming back a no-op, so no exclusion list is needed.
+            if (_engine.IsHost)
+                _engine.BroadcastToAll(new NetworkMessage(PacketType.RevealReady,
+                    MessageSerializer.SerializeRevealReady(slot, boundaryId)));
+        }
+
+        /// <summary>Decide, from what THIS peer has observed, whether its own curtain may come up. Runs on
+        /// EVERY peer, every frame, above every host-only return in <see cref="Update"/> — the host is
+        /// inside the barrier it announces, not beside it, which is the whole point.
+        ///
+        /// TWO CONDITIONS, AND THE DEADLINE IS THE WEAKER ONE. The shipped instant is a FLOOR: nobody
+        /// lifts before it however ready everyone is, so a fast peer can never re-acquire a head start.
+        /// The RELEASE is the ready-set — every live roster slot's own first rendered post-load frame,
+        /// observed here, locally, from messages this peer received. Measured 2026-08-15 21:54, the
+        /// deadline alone was 258 ms in the PAST when it reached the clients and they still owed a 2038 ms
+        /// frame each: the host lifted 1.21 s early with the deadline perfectly satisfied.
+        ///
+        /// NOT A QUORUM (P13): every input is a LOAD or a FRAME, never a human action. An AFK peer's
+        /// machine renders its frame and reports; a departing or pausing peer leaves GetLiveRosterSlots
+        /// and so SHRINKS what is waited for; a peer that goes silent without leaving is given up on
+        /// RevealSchedule.ReadyGiveUpMs after this peer's OWN arm, measured on this peer's OWN clock. No
+        /// branch here can be held open by a person doing nothing.</summary>
         private void TickScheduledReveal()
         {
             if (!_revealScheduled || _revealed) return;
-            if (!RevealSchedule.Due(RevealClockNowMs(), _revealDueHostMs)) return;
+            FlushRevealReady();     // this peer's own frame first — it is one of the slots being waited for
+            var live = _engine.Session.GetLiveRosterSlots();
+            bool allReady = _tracker.AllReady(live);
+            if (!RevealSchedule.MayLift(allReady, RevealClockNowMs(), _revealDueHostMs,
+                                        NowMs() - _revealArmedAtMs))
+            {
+                LogRevealHold(allReady);
+                return;
+            }
+            if (!allReady)
+                MpLog.LogWarning("[Multiplayer] reveal give-up after " + RevealSchedule.ReadyGiveUpMs +
+                                 "ms: still no rendered frame from [" +
+                                 _tracker.PendingReady(_engine.Session.GetLiveRosterSlots()) + "] and they " +
+                                 "have not left either. Lifting rather than stranding everyone behind them.");
+            else if (MpDiag.On)
+                MpLog.Log("[MP][reveal] lift: allReady=1 hostNow=" + RevealClockNowMs() +
+                          " due=" + _revealDueHostMs + " sinceArmed=" + (NowMs() - _revealArmedAtMs) + "ms");
             _revealScheduled = false;
             PerformDeferredLift();
             if (!_engine.IsHost) return;
             HostReseedAfterReveal();     // rca-4: every peer entered the loaded level → re-seed now
             HostReplayIntroCinematic();  // co-op campaign intro: AFTER the reveal, or the mirror drops it
+        }
+
+        // A held reveal is a black screen, so it must never be a SILENT black screen: say once a second
+        // which of the two conditions is still holding it and who for. This is the line that will name the
+        // slow peer in the next capture instead of leaving a spread to be reconstructed from three logs.
+        private long _lastRevealHoldLogMs;
+        private void LogRevealHold(bool allReady)
+        {
+            if (!MpDiag.On) return;
+            var now = NowMs();
+            if (now - _lastRevealHoldLogMs < 1000) return;
+            _lastRevealHoldLogMs = now;
+            MpLog.Log("[MP][reveal] holding: allReady=" + (allReady ? 1 : 0) +
+                      " pending=[" + _tracker.PendingReady(_engine.Session.GetLiveRosterSlots()) + "]" +
+                      " hostNow=" + RevealClockNowMs() + " due=" + _revealDueHostMs +
+                      " sinceArmed=" + (now - _revealArmedAtMs) + "ms");
         }
 
         // Lift the held synced reveal (native curtain we suppressed + the mod overlay roster) so the
@@ -2280,6 +2413,9 @@ namespace Multiplayer.Network
             if (_revealed) return;
             _revealed = true;
             _revealScheduled = false;   // whichever path got here, the armed instant is spent (law L551)
+            _revealReadyDueFrame = 0;   // …and so is this peer's own pending readiness report (law L554):
+                                        // an abort or an on-demand join can reach the lift without any
+                                        // barrier left to report into, and a spent arm must not re-fire.
             _revealedAtMs = NowMs();
             _loadPhaseActive = false; // THE one release of the hold this flag names (see its declaration)
             _hostEntryHold = false; // Batch 2: reveal done → drop the entry-hold flag (next Begin re-guards on _begun)
@@ -3063,6 +3199,13 @@ namespace Multiplayer.Network
             if (!_engine.IsHost || !_revealed || _loadBoundaryId == Guid.Empty) return;
             _engine.SendToClient(peerId, new NetworkMessage(PacketType.RevealAll,
                 MessageSerializer.SerializeRevealAll(_loadBoundaryId, _revealDueHostMs)));
+            // …and the ready-set that went with it (law L554). Everyone else has already lifted, so nobody
+            // is going to re-broadcast their readiness: without this the straggler would arm a barrier whose
+            // other slots can never fill and sit behind its curtain until the give-up bound. It waits for
+            // its own first frame and nothing else, which is exactly right — it IS the last peer.
+            foreach (var slot in _engine.Session.GetLiveRosterSlots())
+                _engine.SendToClient(peerId, new NetworkMessage(PacketType.RevealReady,
+                    MessageSerializer.SerializeRevealReady(slot, _loadBoundaryId)));
         }
 
         /// <summary>The worst round trip this session actually MEASURES, over the live clients only. A peer

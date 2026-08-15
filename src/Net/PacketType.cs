@@ -96,6 +96,16 @@ namespace Multiplayer.Network.MessageLayer
                                    // cancel stops the countdown for everyone. Unlike the lobby cancel (0x4A),
                                    // no ready state to clear — the battle is over and there is no gate to
                                    // re-arm the countdown automatically.
+        RevealReady = 0x4D,        // any direction: "MY OWN first post-load frame has rendered" for one
+                                   // slot. Payload [slot:u8][boundaryId:16]. Sent once per load boundary
+                                   // by EVERY peer including the host, one frame after that peer arms its
+                                   // reveal, and RELAYED by the host so every peer builds the SAME
+                                   // ready-set locally and decides its own lift without asking anyone.
+                                   // Pairs with 0x1E LoadComplete, which says the strictly earlier and far
+                                   // cheaper thing ("my LOAD finished"): the ~2 s between the two is the
+                                   // head start the host used to get. Law L554. NOT a readiness VOTE — it
+                                   // reports a RENDERED FRAME, which happens with nobody at the keyboard,
+                                   // so no human action gates it (P13 / NO QUORUMS).
 
         // ActionSync 0x60-0x6F
         // 0x60 (ActionRequest) + 0x61 (ActionApply) + 0x62 (ActionReject) RETIRED at the envelope cutover — the

@@ -455,6 +455,7 @@ namespace RailCheck
             Add(laws, () => L551_TheRevealIsOneInstantForEveryPeer.Check());
             Add(laws, () => L552_DismissalScopeAndAnswerAuthorityAreTwoDerivations.Check());
             Add(laws, () => L553_OneWindowOneIdentityOneResolution.Check());
+            Add(laws, () => L554_NoLiftBeforeThisPeersOwnFirstFrame.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -502,8 +503,17 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 353;
-        // Updated deliberately 2026-08-15: L553 (every live window has its own identity, and every answer
+        private const int ExpectedLawRegistrations = 354;
+        // Updated deliberately 2026-08-15: L554 (no peer lifts until every LIVE peer has said, from its own
+        // rendered frame, that it is ready) was ADDED — 353 -> 354. Nothing was retired and nothing was
+        // weakened: L551 keeps every arm it had — the arrival still ARMS the reveal instead of consuming
+        // it, the host is still bound by the instant it hands out, the lead is still measured, a passed
+        // instant still lifts now. What L551 could not state is what the armed reveal may be RELEASED by,
+        // and the 21:54 capture proved a host-clock instant cannot be it: RTT measured ~0, so the 400 ms
+        // lead expired 258 ms before the packet even landed and each client still owed one 2038 ms
+        // post-load frame — the host was back to a 1.21 s head start with L551 fully green, correctly,
+        // because L551's subject was never the release predicate. L554 owns that predicate and nothing else.
+        // Earlier the same day: L553 (every live window has its own identity, and every answer
         // channel resolves its target the same way) was ADDED — 352 -> 353. Nothing was retired and
         // nothing was weakened: L176 keeps every arm it had (HandleAdvance still calls AnswerQueued
         // directly, AnswerQueued still reads WindowOrder.RequestsField and _dialogHandler, and still pops
@@ -620,14 +630,22 @@ namespace RailCheck
         // locally re-raised): one new identity string, 349 -> 350 executed identities. No identity
         // retired. Earlier the same day with L549 (the acting peer's own gesture repaints its own
         // persistent HUD): one new identity string, 348 -> 349 executed identities.
-        // Updated deliberately 2026-08-15 with L552 (dismissal scope and answer authority are two
+        // Updated deliberately 2026-08-15 with L554 (no peer lifts before its own first post-load frame
+        // has rendered, and neither does the host): one new identity string, 353 -> 354 executed
+        // identities. No identity retired. L551 keeps its own identity and every arm; its arm (e) was
+        // RE-EXPRESSED, not narrowed — it used to forbid the ARM and the TICK alike from consulting the
+        // roster, which was correct while the instant was the whole release and wrong the moment the
+        // instant became a floor. It now owns the MINTING (a deadline that moved with the roster would
+        // let a departure shift everyone's floor) and keeps both seams categorically clear of human
+        // readiness, which is the line P13 actually draws.
+        // Earlier the same day with L552 (dismissal scope and answer authority are two
         // derivations, and no scope key is dead): one new identity string, 351 -> 352 executed
         // identities. No identity retired. L547 keeps its own identity and all four of its arms — it was
         // re-expressed against MayRelayAnswer's second parameter, not narrowed.
         // Updated deliberately 2026-08-15 with L553 (every live window has its own identity, and every
         // answer channel resolves its target the same way): one new identity string, 352 -> 353 executed
         // identities. No identity retired. L176 and L109 keep theirs and all of their arms.
-        private const string ExpectedExecutionIdentityDigest = "d03ceecd6f16ef93c5535cc8a6a59ee477b53cb35db41242beaa07a7ea2c9e5e";
+        private const string ExpectedExecutionIdentityDigest = "d6a04d271de80d4bdb135a229ac6891c3929ccc3d842c13e1cb1bffeb146dc4c";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

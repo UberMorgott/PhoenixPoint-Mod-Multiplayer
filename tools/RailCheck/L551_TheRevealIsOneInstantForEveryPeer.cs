@@ -24,12 +24,20 @@ namespace RailCheck
     /// LOAD order — "whoever loads first gets in first". The reveal was one MESSAGE; it has to be one
     /// INSTANT (<see cref="RevealSchedule"/>).
     ///
+    /// WHAT THE INSTANT TURNED OUT NOT TO BE — READ WITH L554. Re-measured 2026-08-15 21:54 with the
+    /// deadline shipped: RTT sampled ~0, so the lead was the 400 ms floor, so both clients read the
+    /// shipped instant as inMs=-258 (already overdue on arrival) and still owed one 2038 ms post-load
+    /// frame each. Host 10.646 vs clients 11.862/11.854 — the head start came back with every arm below
+    /// green, correctly, because none of them is about what RELEASES the reveal. The instant is now a
+    /// FLOOR and L554 owns the release. Every arm here survives unchanged except (e), which was
+    /// RE-EXPRESSED rather than weakened: see its comment.
+    ///
     /// AND IT IS STILL NOT A QUORUM (P13 / NO QUORUMS). The distinction the mandate draws is between
-    /// waiting on a human ACTION and waiting on something that ends by itself. A deadline ends by
-    /// itself: arm (e) below forbids the scheduler and its tick from consulting the roster, the
-    /// progress tracker or any peer at all, so a silent, AFK, paused or departed peer cannot postpone
-    /// the reveal by one millisecond. Arm (d) pins the other end — a peer whose instant already passed
-    /// while the packet was in flight lifts immediately rather than being stranded.
+    /// waiting on a human ACTION and waiting on something that ends by itself — a deadline, a load, a
+    /// rendered frame. Arm (e) keeps the half that is this law's: the instant is MINTED from the clock
+    /// and the measured link alone, never from who is present, so a departure cannot shift anyone's
+    /// floor; and neither seam may touch human readiness. Arm (d) pins the other end — a peer whose
+    /// instant already passed while the packet was in flight is never stranded by it.
     ///
     /// Falsify (each verified RED, then restored): call <c>PerformDeferredLift()</c> from
     /// <c>Update</c>'s AllDone branch again → <c>host-lifts-on-its-own-broadcast-frame</c>; make
@@ -147,30 +155,44 @@ namespace RailCheck
                              "BEFORE the common instant. Early is the defect; the whole scheme is that nobody " +
                              "is early.";
 
-            // ── (e) THE DEADLINE ELAPSES BY ITSELF — NO QUORUM, NO PERSON ────────────
-            // P13. A time deadline is allowed precisely because nothing human can hold it. The moment the
-            // scheduler or its tick consults the roster, the progress tracker or a peer, it stops being a
-            // deadline and becomes a wait on somebody, and an AFK-but-connected peer can hang it forever.
-            var personish = new[] { "RosterProgressTracker", "SessionManager", "PeerListEntry",
-                                    "LobbyController", "NetworkEngine" };
+            // ── (e) THE INSTANT IS MINTED FROM THE CLOCK ALONE — NO QUORUM, NO PERSON ─
+            // P13, RE-EXPRESSED 2026-08-15 AND NOT WEAKENED. This arm used to cover the ARM and the TICK
+            // together and to forbid BOTH of them from consulting the roster or the progress tracker at
+            // all. That was right while the instant was the whole release; it stopped being right the
+            // moment the instant was demoted to a FLOOR. The 21:54 capture proved a host-clock instant
+            // cannot express "everybody is actually ready" — it landed 258 ms overdue on peers that still
+            // owed a 2038 ms frame each — so the RELEASE now also waits on every live peer's own rendered
+            // frame (L554), and a tick that asks the live roster is asking about LOADS, which the mandate
+            // names as the ALLOWED case, not about people.
+            //
+            // What this arm still owns, undiminished, is the MINTING: the instant the host puts on the
+            // wire is a function of the clock and the measured link, never of who is present. If the
+            // deadline itself moved with the roster, a peer that left could shift everybody's floor.
+            foreach (var c in schedule == null ? Enumerable.Empty<MethodBase>() : Program.Callees(schedule, mod))
+            {
+                if (c.DeclaringType == null) continue;
+                if (c.Name == "AllDone" || c.Name == "IsDone" || c.Name == "AllReady" ||
+                    c.Name.StartsWith("GetRosterSlots") || c.Name == "GetLiveRosterSlots")
+                    yield return "L551 the-deadline-waits-on-a-person: ScheduleReveal calls " +
+                                 c.DeclaringType.Name + "." + c.Name + ". The common instant must be minted " +
+                                 "from the clock and the measured link alone — a floor that moves with who " +
+                                 "is present is not a floor, and a peer that leaves would shift everyone " +
+                                 "else's.";
+            }
+            // And BOTH seams stay categorically clear of human readiness. This is the line the mandate
+            // actually draws: waiting on a load or a frame is allowed because it ends by itself; waiting
+            // on somebody to press something is the quorum, and it is one identifier away in this file.
+            var humanReadiness = new[] { "IsReady", "get_IsReady", "set_IsReady", "AllClientsReady",
+                                         "OnClientReady", "OnClientUnready", "EveryoneReady", "ReadyCount" };
             foreach (var seam in new[] { schedule, tick })
             {
                 if (seam == null) continue;
                 foreach (var c in Program.Callees(seam, mod))
-                {
-                    if (c.DeclaringType == null) continue;
-                    if (c.Name == "AllDone" || c.Name == "IsDone" || c.Name.StartsWith("GetRosterSlots") ||
-                        c.Name == "GetLiveRosterSlots")
-                        yield return "L551 the-deadline-waits-on-a-person: " + seam.Name + " calls " +
-                                     c.DeclaringType.Name + "." + c.Name + ". The reveal instant must elapse " +
-                                     "on its own — a peer that goes silent between the release and the " +
-                                     "instant cannot be allowed to postpone anyone's lift. That is the " +
-                                     "quorum P13 forbids, arriving through the clock.";
-                    if (personish.Contains(c.DeclaringType.Name) && c.Name != "get_IsHost")
+                    if (humanReadiness.Contains(c.Name))
                         yield return "L551 the-deadline-waits-on-a-person: " + seam.Name + " consults " +
-                                     c.DeclaringType.Name + "." + c.Name + ". Firing this peer's own " +
-                                     "deadline must never become a question about another peer.";
-                }
+                                     (c.DeclaringType?.Name ?? "?") + "." + c.Name + ". Neither arming nor " +
+                                     "firing the reveal may become a question about what a HUMAN did — an " +
+                                     "AFK-but-connected peer would hang the campaign forever.";
             }
 
             // ── (f) NON-VACUITY: the wire really carries the instant ─────────────────

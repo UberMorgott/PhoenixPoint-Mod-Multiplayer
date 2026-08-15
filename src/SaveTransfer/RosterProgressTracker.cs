@@ -14,6 +14,13 @@ namespace Multiplayer.Network
             = new Dictionary<byte, (byte, byte)>();
         private readonly HashSet<byte> _done = new HashSet<byte>();
 
+        // THE SECOND SET, AND WHY IT IS NOT THE FIRST ONE. _done means "that peer's LOAD finished" — it is
+        // what the host weighs to decide the barrier may end at all. _ready means "that peer has since
+        // RENDERED A FRAME past the reveal being armed", which is a strictly later and much more expensive
+        // event: measured 2026-08-15, the first post-load frame was 2038 ms long. Collapsing the two is
+        // exactly the mistake that let the host onto the geoscape 1.21 s before its clients.
+        private readonly HashSet<byte> _ready = new HashSet<byte>();
+
         /// <summary>Merge one (slot, phase, percent) observation; returns true if state changed.</summary>
         public bool Merge(byte slot, byte phase, byte percent)
         {
@@ -40,6 +47,35 @@ namespace Multiplayer.Network
         {
             _state.Clear();
             _done.Clear();
+            _ready.Clear();
+        }
+
+        /// <summary>Record that a slot's own first post-load frame has rendered. Set semantics on
+        /// purpose: a relayed duplicate, a replay to a straggler and the peer's own local mark are all
+        /// the same fact said more than once.</summary>
+        public void MarkReady(byte slot) => _ready.Add(slot);
+
+        public bool IsReady(byte slot) => _ready.Contains(slot);
+
+        /// <summary>Every expected slot has rendered its own first post-load frame. The caller passes the
+        /// LIVE roster and re-asks every frame, so a peer that departs or pauses SHRINKS this question
+        /// instead of extending it — that is what keeps it a wait on loads (allowed) rather than a wait on
+        /// people (forbidden, P13).</summary>
+        public bool AllReady(IEnumerable<byte> expectedSlots)
+        {
+            foreach (var s in expectedSlots)
+                if (!_ready.Contains(s)) return false;
+            return true;
+        }
+
+        /// <summary>How many of the expected slots are still not ready, and who — diagnostics only, so a
+        /// held reveal always names the peer it is held for instead of being a silent black screen.</summary>
+        public string PendingReady(IEnumerable<byte> expectedSlots)
+        {
+            string s = "";
+            foreach (var slot in expectedSlots)
+                if (!_ready.Contains(slot)) s += (s.Length == 0 ? "" : ",") + "s" + slot;
+            return s;
         }
 
         public bool IsDone(byte slot) => _done.Contains(slot);

@@ -39,6 +39,20 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
     if ($n -match '^L(\d+)') { $regIds[$Matches[1]] = $true } else { $inlineRegs.Add($n) }
 }
 
+# Updated deliberately 2026-08-15: L554 ADDED (no peer lifts before its own first post-load frame has
+# RENDERED, and the host is not exempt. The deadline shipped the day before was re-measured at 21:54 and
+# failed: RTT sampled ~0 so the lead was the 400 ms floor, so both clients read the common instant as
+# inMs=-258 -- already overdue on arrival -- and still owed one 2038 ms post-load frame each. Host on
+# screen 10.646 vs clients 11.862/11.854: the 1.2 s head start was back with every barrier law green. The
+# instant is now a FLOOR and the RELEASE is RevealSchedule.MayLift over a ready-set each peer observes for
+# itself, fed by the new 0x4D RevealReady the host relays) -- 353 -> 354 registrations, one new identity
+# string. Nothing retired. NOT A QUORUM: "ready" is a rendered frame, which an AFK player's machine
+# produces anyway; a departed or paused peer leaves GetLiveRosterSlots and so SHRINKS the wait; a peer
+# that goes silent without leaving is given up on after RevealSchedule.ReadyGiveUpMs measured on the
+# waiting peer's OWN clock. L551 keeps its identity and every arm -- its arm (e) was RE-EXPRESSED, not
+# narrowed: it used to forbid the ARM and the TICK alike from consulting the roster, which was right while
+# the instant was the whole release; it now owns the MINTING (a floor that moved with the roster would let
+# a departure shift everyone else's) and still forbids either seam from touching human readiness.
 # Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
 # with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
 # registration multiset (so sparse ids and many registrations per source file remain valid).
@@ -173,7 +187,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # AnswerQueued directly; AnswerQueued still reads WindowOrder.RequestsField and _dialogHandler and pops no
 # screen); L109 arm (g) and the inline L82 identity row were RE-EXPRESSED, not weakened -- they now RAISE
 # the window they ask about (TagRaise) before asking, because an identity belongs to a raise.
-$expectedRegistrationDigest = 'f1bacb1dd75f76afe57a9163997b7897f4bda155d4e6e30d783e3db93007e0e6'
+$expectedRegistrationDigest = 'b7ad5b3b75bbb08469fc9253a8a2690ab900339b530c81d5e307cd40cdc50307'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

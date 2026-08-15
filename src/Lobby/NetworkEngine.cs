@@ -756,6 +756,10 @@ namespace Multiplayer.Network
                     SaveTransfer?.OnRevealAll(msg);
                     break;
 
+                case PacketType.RevealReady:
+                    SaveTransfer?.OnRevealReady(msg);
+                    break;
+
                 case PacketType.RosterProgress:
                     SaveTransfer?.OnRosterProgress(msg);
                     break;

@@ -32,6 +32,135 @@ namespace RailSim
                               TheRevealIsOneInstantForEveryPeer);
             yield return Pair("two-raises-never-share-an-identity", TwoRaisesNeverShareAnIdentity);
             yield return Pair("every-channel-answers-a-held-window", EveryChannelAnswersAHeldWindow);
+            yield return Pair("no-lift-before-this-peers-own-first-frame",
+                              NoLiftBeforeThisPeersOwnFirstFrame);
+        }
+
+        /// <summary>L554 as an OBSERVABLE RUN, over the skew the 21:54 capture actually measured — which is
+        /// the skew the 16 ms frame grid in <see cref="TheRevealIsOneInstantForEveryPeer"/> cannot see.
+        /// Three peers, host at the origin; delivery is hundreds of ms and each CLIENT is inside one
+        /// enormous first post-load frame (2038 ms, measured) when the reveal reaches it, while the host is
+        /// not. That combination is what made a host-clock deadline useless: it expired 258 ms before the
+        /// packet even landed.
+        ///
+        /// The run compares the DEADLINE-ONLY policy (what shipped) with the READY-SET policy over the same
+        /// numbers, so it cannot go green by testing nothing — the old one must still reproduce a spread of
+        /// seconds. The property that matters is not the spread though, it is this: NO PEER, AND ESPECIALLY
+        /// NOT THE HOST, LIFTS BEFORE THE LAST PEER WAS READY. Also run: a packet delayed far beyond
+        /// anything the RTT sample could predict, a peer that departs mid-barrier, and a peer that simply
+        /// stops talking.</summary>
+        private static IEnumerable<string> NoLiftBeforeThisPeersOwnFirstFrame(int seed)
+        {
+            var rng = new Random(seed);
+            const long releaseMs = 100000;      // the host observes AllDone on its own clock
+            const int cheapFrameMs = 16;        // a peer that is already rendering
+            // Host index 0. Hops and first-frame costs from the 2026-08-15 21:54 capture, jittered by seed.
+            int[] hopMs = { 0, 180 + rng.Next(-20, 21), 420 + rng.Next(-20, 21) };
+            // The host does NOT pay a post-load frame on the new-campaign path — it never re-entered the
+            // level it already is (SaveTransferCoordinator.cs:714). That asymmetry IS the defect, so it is
+            // modelled rather than smoothed away.
+            int[] firstFrameMs = { cheapFrameMs, 2038, 1900 };
+            // A LATE PACKET: s2's RevealAll is held up well past anything the RTT sample could predict.
+            int[] extraDelayMs = { 0, 0, 600 };
+
+            // The lead is minted from the MEASURED link, and the capture measured ~0 — that is precisely how
+            // a 400 ms floor came to be shipped as the whole answer.
+            long due = releaseMs + RevealSchedule.LeadMs(0);
+
+            var arrival = new long[3];
+            var ready = new long[3];
+            for (int p = 0; p < 3; p++)
+            {
+                arrival[p] = releaseMs + hopMs[p] + extraDelayMs[p];
+                // READY = one of THIS peer's own frames completed past the arm. Not the arrival and not the
+                // load callback: the peer is inside a frame when the packet lands and cannot act until it ends.
+                ready[p] = arrival[p] + firstFrameMs[p];
+            }
+
+            // ── OLD: the deadline is the whole release ───────────────────────────────
+            var oldLift = new long[3];
+            for (int p = 0; p < 3; p++)
+                oldLift[p] = Math.Max(arrival[p], due) + (p == 0 ? cheapFrameMs : firstFrameMs[p]);
+
+            // ── NEW: the deadline is a floor, the ready-set is the release ───────────
+            // Each peer observes its own readiness immediately, the host's after one hop, and another
+            // client's after two (the host relays). Nobody is consulted: this is what LANDED locally.
+            var newLift = new long[3];
+            for (int q = 0; q < 3; q++)
+            {
+                long observed = ready[q];
+                for (int p = 0; p < 3; p++)
+                {
+                    if (p == q) continue;
+                    long hops = hopMs[p] + (q == 0 || p == 0 ? 0 : hopMs[q]);
+                    observed = Math.Max(observed, ready[p] + hops);
+                }
+                newLift[q] = NextFrame(Math.Max(observed, due), rng.Next(cheapFrameMs), cheapFrameMs);
+            }
+
+            long oldSpread = oldLift.Max() - oldLift.Min();
+            long newSpread = newLift.Max() - newLift.Min();
+
+            if (oldLift[0] >= ready.Max())
+                yield return "no-lift-before-this-peers-own-first-frame: the deadline-only policy did NOT " +
+                             "put the host on the geoscape ahead of the last peer's readiness in this run, " +
+                             "so the scenario is not reproducing the defect it exists to measure and would " +
+                             "stay green through it.";
+            if (oldSpread < 1000)
+                yield return "no-lift-before-this-peers-own-first-frame: the deadline-only policy spread " +
+                             "only " + oldSpread + "ms. The measured run spread 1210ms; a model that cannot " +
+                             "reproduce that is not modelling the 21:54 capture.";
+
+            // THE INVARIANT. Everything else in this scenario is context for this line.
+            for (int p = 0; p < 3; p++)
+                if (newLift[p] < ready.Max())
+                    yield return "no-lift-before-this-peers-own-first-frame: peer " + p + " lifted at " +
+                                 newLift[p] + ", before the LAST peer was ready at " + ready.Max() + ". A " +
+                                 "screen may only come up on a condition its own peer observed to be " +
+                                 "satisfied — being early is the entire defect, and the host being early is " +
+                                 "the reported one.";
+            if (newSpread >= oldSpread)
+                yield return "no-lift-before-this-peers-own-first-frame: the ready-set policy spread " +
+                             newSpread + "ms against the deadline's " + oldSpread + "ms. It is supposed to " +
+                             "collapse the spread, not preserve it.";
+            if (newSpread > 2 * hopMs.Max() + cheapFrameMs)
+                yield return "no-lift-before-this-peers-own-first-frame: peers left the loading screen " +
+                             newSpread + "ms apart. The irreducible residual is the relay — one hop out and " +
+                             "one back — plus a frame; beyond that the ready-set is not reaching everybody " +
+                             "the same way.";
+
+            // ── A DEPARTED PEER SHRINKS THE WAIT, NEVER EXTENDS IT (P13) ────────────
+            long twoPeerReady = Math.Max(ready[0], ready[1]);
+            if (twoPeerReady > ready.Max())
+                yield return "no-lift-before-this-peers-own-first-frame: dropping a peer from the live " +
+                             "roster made the remaining peers wait LONGER. A departure must only ever " +
+                             "shrink the expected set.";
+            var tracker = new RosterProgressTracker();
+            tracker.MarkReady(0);
+            tracker.MarkReady(1);
+            if (tracker.AllReady(new byte[] { 0, 1, 2 }))
+                yield return "no-lift-before-this-peers-own-first-frame: AllReady is true while slot 2 is " +
+                             "still expected and has never rendered. The barrier would be decorative.";
+            if (!tracker.AllReady(new byte[] { 0, 1 }))
+                yield return "no-lift-before-this-peers-own-first-frame: AllReady is false once the " +
+                             "departed slot leaves the expected set, so one player quitting would hang " +
+                             "everyone else behind a black screen forever.";
+
+            // ── A SILENT PEER IS GIVEN UP ON: BOUNDED, AND ON THE WAITER'S OWN CLOCK ─
+            // Not a wait on a person: nothing here needs the missing peer to DO anything, and the timer runs
+            // locally so the peer that went quiet cannot withhold the release from it.
+            if (RevealSchedule.MayLift(false, due, due, RevealSchedule.ReadyGiveUpMs - 1))
+                yield return "no-lift-before-this-peers-own-first-frame: the give-up fired before its bound " +
+                             "elapsed, so a merely slow peer is abandoned mid-load.";
+            if (!RevealSchedule.MayLift(false, due, due, RevealSchedule.ReadyGiveUpMs))
+                yield return "no-lift-before-this-peers-own-first-frame: a peer that never reports and never " +
+                             "leaves strands every other peer behind the curtain forever. Silence must be " +
+                             "bounded — that is the difference between waiting on a LOAD and waiting on a " +
+                             "peer that has stopped existing.";
+            if (RevealSchedule.MayLift(true, due - 1, due, 0))
+                yield return "no-lift-before-this-peers-own-first-frame: everybody-ready lifted BEFORE the " +
+                             "common instant. The instant is a floor: it may delay a fast peer, never " +
+                             "release an early one.";
         }
 
         /// <summary>L553 as an OBSERVABLE RUN: a session that raises the SAME window many times. The payload

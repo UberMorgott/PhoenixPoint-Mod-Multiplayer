@@ -616,6 +616,28 @@ namespace Multiplayer.Network.MessageLayer
                 return (new Guid(br.ReadBytes(16)), br.ReadInt64());
         }
 
+        // ─── RevealReady (one slot's OWN first post-load frame has rendered) ─────────
+        // The boundary rides along for the same reason it does on RevealAll: a readiness from a load two
+        // boundaries ago must not be able to release the barrier standing now. Slot rather than peer id so
+        // the host can RELAY it verbatim — the payload already names who it is about, which is what lets
+        // every peer build the identical ready-set from the same bytes. Law L554.
+        public static byte[] SerializeRevealReady(byte slot, Guid boundaryId)
+        {
+            using (var ms = new MemoryStream())
+            using (var bw = new BinaryWriter(ms))
+            {
+                bw.Write(slot);
+                bw.Write(boundaryId.ToByteArray());
+                return ms.ToArray();
+            }
+        }
+
+        public static (byte slot, Guid boundaryId) DeserializeRevealReady(byte[] data)
+        {
+            using (var br = new BinaryReader(new MemoryStream(data ?? Array.Empty<byte>())))
+                return (br.ReadByte(), new Guid(br.ReadBytes(16)));
+        }
+
         // ─── EntryTransferAbort (tac-entry save transfer will never complete) ────────
         // A single reason string — diagnostics only; the receiving client's abort action is unconditional.
         public static byte[] SerializeEntryTransferAbort(string reason)
