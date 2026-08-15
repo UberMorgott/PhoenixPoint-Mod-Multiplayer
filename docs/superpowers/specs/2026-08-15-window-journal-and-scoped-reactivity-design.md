@@ -478,25 +478,51 @@ bounded by how long that player ignores their windows — a quantity the player 
 PER-PEER: a GLOBAL dismissal still needs the explicit host-minted void record of §A.5, because that
 removes an entry a peer has NOT read.
 
-**A.2b — DECIDED (was Q1): the journal is NOT persisted, and a save requires an empty journal.**
+**A.2b — DECIDED (was Q1): the journal is NOT persisted, and a MANUAL save requires an empty journal.**
 
 - **No persistence.** A savegame contains ZERO journal entries. Carrying journal state across a game
   exit/restart is explicitly OUT OF SCOPE — **do not build it**. There is no codec for the journal,
   no `SerializationData` field, no restore path. This is the ponytail rung: the feature nobody asked
   for is the feature never written.
-- **A player may not SAVE until their own journal is empty.** Every entry read (§A.2) ⇒ deleted ⇒
-  journal empty ⇒ save permitted. The gate reads ONLY the LOCAL peer's cursor. It therefore waits on
-  the local human reading their own windows and on NOTHING else — not on another peer, not on
-  another human's action, not on a network round-trip. **This is not a quorum and must never become
-  one** (§7.6): a peer who is AFK blocks only their OWN save, and every other peer saves freely.
-  A law asserting this gate reads no remote peer state is required (§8, item 6).
+- **A player may not SAVE until their own journal is empty — PLAYER-INITIATED saves ONLY.** Every
+  entry read (§A.2) ⇒ deleted ⇒ journal empty ⇒ save permitted. The gate reads ONLY the LOCAL peer's
+  cursor. It therefore waits on the local human reading their own windows and on NOTHING else — not
+  on another peer, not on another human's action, not on a network round-trip. **This is not a quorum
+  and must never become one** (§7.6): a peer who is AFK blocks only their OWN save, and every other
+  peer saves freely. A law asserting this gate reads no remote peer state is required (§8, item 6),
+  and **any save-gate law MUST exempt `SaveType.Autosave`** (`Base.Serialization\SaveType.cs:8`) so
+  that no law can ever be written that blocks or defers an autosave (§A.2c).
 - **Reconnect loses the backlog, by design.** A peer that disconnects and rejoins receives only
   entries appended AFTER its reconnect. Everything from before is gone for it. This is INTENDED and
   is not a defect — do not add a catch-up replay, and do not log it as an anomaly.
 - **Consequence for §A.6:** with read ⇒ delete and no persistence, the 4096 safety bound described
   below is unnecessary. Keep the once-per-session error line as a runaway-raiser canary only.
-- **REMAINING (Q8) — autosaves.** A save the player did not request cannot wait on a human reading a
-  window. Evidence gathered, decision deferred to the user (§6).
+**A.2c — DECIDED (was Q8): an AUTOSAVE always proceeds, and unread entries are simply LOST.**
+
+**An autosave is never blocked, never deferred, and never forces the journal to be drained first —
+it proceeds immediately. Unread journal entries that exist at that moment are LOST, exactly as they
+are lost on any ordinary session exit. This is intended behaviour, not a defect, and MUST NOT be
+"fixed" later by adding persistence.** The manual-save gate of §A.2b stays exactly as decided and
+applies to player-initiated saves ONLY.
+
+Consequence, stated plainly: **the journal is session-scoped and best-effort with respect to saves.
+No journal state is ever written to, or read from, a save file** — no codec, no `SerializationData`
+field, no restore path (§A.2b). A save file therefore never carries a window, and reloading one
+never resurrects one.
+
+- The autosave is identifiable at the seam without heuristics: `SaveType.Autosave`
+  (`Base.Serialization\SaveType.cs:8`), stamped at `PhoenixSaveManager.cs:430`.
+- Single entry point: `public IEnumerator<NextUpdate> AutosaveGame()`
+  (`PhoenixPoint.Common.Saves\PhoenixSaveManager.cs:414`).
+- Its vanilla triggers, all `Timing.Current.CallSafe(SaveManager.AutosaveGame(), ex)` in
+  `PhoenixPoint.Geoscape.Levels\GeoLevelController.cs`: `:701`, `:1236`, `:1328`, `:1424`, `:1447`
+  (FIVE — the earlier audit said four and missed `:1447`, the non-mandatory-mission arm).
+  **None of them is patched, skipped, delayed or wrapped by this work.**
+- The mod has **no save gate today** — nothing in `src/` patches or refuses a save. The gate added
+  by §8 item 6 is the first, and it covers manual/quick saves only.
+- Any law asserting the save gate MUST exempt `SaveType.Autosave`; a law that could turn RED because
+  an autosave went through with a non-empty journal is wrong by construction and must be rejected in
+  review (same class as R7).
 
 **A.3 — Lifetime: the session only, across the tactical boundary, never across a restart.**
 The journal is owned by the MOD and survives the whole session INCLUDING the tactical boundary; the
@@ -1003,7 +1029,9 @@ SEPARATED, so a host-only fault (which is exactly P1) can appear.
   without ever dropping an entry.
 - **R8 — The empty-journal save gate becoming a blocker.** It must read ONLY the local cursor. If it
   ever consults another peer's state it is a quorum and violates §7.6. A law must assert this
-  (§A.2b). Q8 (autosaves) is the unresolved half of this risk.
+  (§A.2b). The autosave half of this risk is RETIRED by the Q8 decision (§A.2c): an autosave always
+  proceeds, so the gate can never stall a save the player did not ask for; any save-gate law must
+  exempt `SaveType.Autosave`.
 - **R6 — Concurrent agents.** Agents editing this repo in parallel sweep each other's commits and
   collide on law numbers (recorded in project memory). See §7.
 - **R7 — A law written to legitimise a duplicate.** `L496` did exactly this. Any new law that
@@ -1012,43 +1040,15 @@ SEPARATED, so a host-only fault (which is exactly P1) can appear.
 
 ## 6. OPEN QUESTIONS
 
-Q1–Q7 are **CLOSED**. Each is now a decision written into its own section — read the section, not
-this table. Q8 is the one thing genuinely still open, and it is the user's call.
+Q1–Q8 are **ALL CLOSED**. Each is now a decision written into its own section — read the section,
+not this table.
 
 ### 6.1 Still open
 
-| # | Question | Where it bites |
-|---|---|---|
-| **Q8** | **AUTOSAVES vs the empty-journal save gate.** §A.2b forbids SAVING until the local journal is empty. That is safe for a save the player asked for. An AUTOSAVE is not asked for and cannot wait on a human reading a window. Which way does it go? NOT decided — the user decides. | §A.2b |
-
-**Evidence gathered for Q8 (so the decision needs no further digging):**
-- `SaveType` distinguishes the kinds: `Base.Serialization\SaveType.cs:8` declares `Autosave`
-  (alongside `Quicksave`), so an autosave is *identifiable* at the seam — a gate can tell the two
-  apart without heuristics.
-- **One common autosave entry point:** `PhoenixSaveManager.AutosaveGame()`, signature
-  `public IEnumerator<NextUpdate> AutosaveGame()`
-  (`PhoenixPoint.Common.Saves\PhoenixSaveManager.cs:414`). It stamps
-  `SaveType.Autosave` (`:430`) and deletes the previous autosave (`:433`, `:439-441`).
-- **Exactly four vanilla autosave triggers**, all in `PhoenixPoint.Geoscape.Levels\GeoLevelController.cs`,
-  all of the form `Timing.Current.CallSafe(SaveManager.AutosaveGame(), ex)`:
-  `:701`, `:1236`, `:1328`, `:1424` (each followed by `ShowAutosaveError` on failure — `:706`,
-  `:1239`, `:1332`, `:1429`).
-- The mod has **no save gate today** — nothing in `src/` patches or refuses a save.
-
-**The option space (do not pick one without the user):**
-1. **Exempt autosaves** — the gate applies to manual/quick saves only. An autosave may capture a
-   non-empty journal; since the journal is not persisted (§A.2b), those unread entries are simply
-   lost on reload. Smallest change; silently loses windows.
-2. **Suppress the autosave** while the journal is non-empty (skip the four call sites, retry at the
-   next trigger). Loses no window; the player can lose an autosave they never knew was skipped.
-3. **Drain-then-save** — treat the autosave as a signal to present the backlog, then save. Closest
-   to "no window is lost, no save is lost", but it pushes windows at the player at a moment the game
-   chose, which cuts against §A.4 (only DISPLAY is postponed, and it is postponed by the *player's*
-   position, not by a save).
-
-**What would settle it:** a statement from the user of which loss is acceptable — a lost autosave, a
-lost window, or an interrupted moment. This is a product judgement, not a code fact; no further
-source reading will decide it.
+**NONE. Q8 was the last one and it is now DECIDED (§A.2c, 2026-08-15): an autosave always proceeds
+and unread journal entries are lost. There is no open question left in this spec.** Nothing in §8
+is blocked on a user decision any more. Do not re-open a closed question; if a NEW gap is found,
+add it here as `Q9+` with its evidence, do not answer it by invention.
 
 ### 6.2 Closed — where each decision now lives
 
@@ -1061,6 +1061,7 @@ source reading will decide it.
 | **Q5** | Stable-ID addressed everywhere; no index segments exist and the keyless arm aborts loudly rather than falling back. One trap: an `EntityList` field is a single blob at the FIELD path. R4 retired. | §B.3 |
 | **Q6** | `view.CurrentViewState.GetType()` via `WindowOrder.CurrentViewStateOf`. No peer's surface is replicated today and none will be — each peer derives its own. The duplicate `MapStates` pair collapses to the NAME form. | §B.7 |
 | **Q7** | Log the peer NUMBER (`slot=`), never a persona name. Two sites to fix. In-game notices keep names. A content law only if it can carry a real guard and kill. | §2.4 |
+| **Q8** | An AUTOSAVE always proceeds — never blocked, never deferred, never drains the journal first. Unread entries at that moment are LOST, as on any session exit; intended, never to be "fixed" with persistence. The empty-journal gate covers player-initiated saves only, and any save-gate law must exempt `SaveType.Autosave`. | §A.2b, §A.2c |
 
 ---
 
@@ -1241,10 +1242,10 @@ touch `src/` or `tools/RailCheck` are SERIAL (§7.7). Item 0 is read-only and ma
 with nothing else pending.
 
 **0. Resolve the open questions that block later items — ✅ DONE 2026-08-15.**
-- Q1 → §A.2/§A.2b/§A.6 · Q2 → §A.9 · Q3 → §A.10 · Q4 → §A.11 · Q5 → §B.3 · Q6 → §B.7 · Q7 → §2.4.
-- **Nothing here blocks any item below.** The one remaining open question, **Q8 (autosaves vs the
-  empty-journal save gate)**, blocks ONLY item 6 and is the user's decision — its evidence is
-  already gathered in §6.1, so no further research is needed before asking.
+- Q1 → §A.2/§A.2b/§A.6 · Q2 → §A.9 · Q3 → §A.10 · Q4 → §A.11 · Q5 → §B.3 · Q6 → §B.7 · Q7 → §2.4
+  · Q8 → §A.2c.
+- **Nothing here blocks any item below.** Q8 (autosaves vs the empty-journal save gate) is now
+  DECIDED (§A.2c) — item 6 is unblocked and no question is left for the user.
 
 **1. Collapse the doubled host broadcast (R2).**
 - Files: `src/Rail/GeoWindowCoverage.cs:663-676`, `src/Rail/EventPopup.cs:411`.
@@ -1292,14 +1293,19 @@ with nothing else pending.
 - Verification: RailCheck GREEN at the adjusted law count (`tools/law-count.txt` updated); mutation
   kill; net-negative diff reported in the commit body.
 
-**6. Remove the tail-trim cap; read ⇒ delete; the save gate (§A.2, §A.2b, §A.6 — decided).
-BLOCKED on Q8 for the autosave arm only; the rest may land.**
+**6. Remove the tail-trim cap; read ⇒ delete; the save gate (§A.2, §A.2b, §A.2c, §A.6 — decided).
+NOT blocked: the autosave arm is decided (§A.2c).**
 - Files: `src/Rail/GeoWindowCoverage.cs:586`, `:620-635` (delete `QueueCap`/`TrimQueue`); the journal
-  itself (read ⇒ delete); the save gate — see §6.1 for the four vanilla autosave call sites and the
-  one common entry point, and ASK THE USER before gating any of them.
+  itself (read ⇒ delete); the save gate, on the PLAYER-INITIATED save path only. **Do not patch,
+  skip, delay or wrap `PhoenixSaveManager.AutosaveGame()`
+  (`PhoenixPoint.Common.Saves\PhoenixSaveManager.cs:414`) or any of its five `GeoLevelController`
+  triggers (`:701`, `:1236`, `:1328`, `:1424`, `:1447`)** — an autosave proceeds immediately and
+  whatever is unread is lost (§A.2c).
 - Laws: (a) "no code path removes an UNREAD journal entry except a host-minted void"; (b) the 4096
   canary logs once and **keeps appending**; (c) **the save gate reads only the LOCAL cursor** — it
-  must not touch any remote peer's state (R8, §7.6).
+  must not touch any remote peer's state (R8, §7.6); (d) **the save gate exempts
+  `SaveType.Autosave`** (`Base.Serialization\SaveType.cs:8`) — no law may be written that could
+  block or defer an autosave.
 - Verification: RailCheck GREEN; mutation kill; harness run appending past 4096 and asserting no
   entry was dropped and the append continued; a two-peer harness case proving peer B's unread
   backlog does not affect peer A's ability to save.
