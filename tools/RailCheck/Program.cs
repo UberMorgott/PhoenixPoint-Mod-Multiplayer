@@ -432,6 +432,7 @@ namespace RailCheck
             Add(laws, () => L505_ADerivedSetterNeverRidesTheWire.Check(game));
             Add(laws, () => L506_EveryClientRefusalGateAsksTheOnePredicate.Check());
             Add(laws, () => L507_ProvisionalWindowOrdinalIsBackFilled.Check());
+            Add(laws, () => L510_TheClientLocalRngClosureIsClosed.Check(game));
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -479,11 +480,11 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 330;
-        // Updated deliberately 2026-08-15: L429 was RENAMED (ThePublishLagIsPricedAtThePreLatchRate →
-        // TheAnchorPublishesHostTruth) when the clock's flight compensation moved from the host to the
-        // receiver. Same count, same set of numbers, one identity string changed.
-        private const string ExpectedExecutionIdentityDigest = "de9d2f987b0f13481a4334b54bda1233cb46ad48e7c04373d53d60f91fbeafee";
+        private const int ExpectedLawRegistrations = 331;
+        // Updated deliberately 2026-08-15: L510 (the client-local geoscape RNG closure) was ADDED —
+        // 330 → 331 registrations, one new identity string. The previous edit on the same day was L429's
+        // rename (ThePublishLagIsPricedAtThePreLatchRate → TheAnchorPublishesHostTruth).
+        private const string ExpectedExecutionIdentityDigest = "98c7098c5abaa6978867af8b2a5ff802b40f714e5fc6fdf36614fe3fc789e1d8";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
