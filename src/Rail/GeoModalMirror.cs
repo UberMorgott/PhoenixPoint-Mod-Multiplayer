@@ -129,11 +129,10 @@ namespace Multiplayer.Network.Sync
             /// off its own mirrored research container — the renderer walks
             /// <c>UnlocksResearches</c>/<c>ManufactureRewards</c> off it
             /// (GeoReseatchCompleteDataBind.cs:97-125), which a synthesized element could not answer.
-            /// NO LIVE PRODUCER since 2026-08-05: <c>ModalType.GeoResearchComplete</c> is declared LocalOnly
-            /// (GeoWindowCoverage — the raise raced ahead of the 0xAC deltas and the window arrived twice), so
-            /// <see cref="HostBroadcast"/> returns before <see cref="Describe"/> ever sees one. Kept, not
-            /// deleted: the wire value stays reserved, and RailCheck L49's shape-derivation and refusal arms
-            /// execute this shape by name.</summary>
+            /// LIVE AGAIN since 2026-08-15: <c>ModalType.GeoResearchComplete</c> is Mirrored once more (it
+            /// was LocalOnly 2026-08-05 → 2026-08-15 on the strength of a second, client-side producer that
+            /// §A.9/L520 has since deleted — see the declaration's own reason). Nothing on the wire moved
+            /// across either reversal: this shape kept its value and its codec throughout.</summary>
             ResearchComplete = 1,
             /// <summary><c>DiplomacyResearchRewardData</c>: Ref = <c>Faction</c>, Keys = every
             /// <c>ResearchID</c> in <c>Researches</c>, Num = <c>DiplomacyShareLevel</c>.</summary>
@@ -488,6 +487,28 @@ namespace Multiplayer.Network.Sync
                           "peer had already read it or never received it");
         }
 
+        private static readonly HashSet<string> _discardAnnounced = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>THE PUBLISH DECISION, PURE so RailCheck L546 EXECUTES it instead of reading its IL: may
+        /// the journal position the capture seam just minted leave this host? Null = publish. A non-empty
+        /// string = the stated reason it is discarded, and a discard must ALWAYS be stated.
+        ///
+        /// THE DEFECT THIS REPLACES was a bare <c>return</c> on the same condition. A window's position is
+        /// minted UNCONDITIONALLY at the one seam (GeoWindowCoverageGate) and only then does this ask what
+        /// the family is declared as, so a non-Mirrored declaration silently destroys a position that the
+        /// host has already appended to its OWN journal. For a family whose only producer is this
+        /// publication — <see cref="GeoWindowCoverage.HostAuthoritativeRaisers"/> — the whole window then
+        /// exists on exactly one screen and nothing anywhere says so.</summary>
+        internal static string PublishRefusal(string name, uint journalPos, WindowSync? sync)
+        {
+            if (sync == WindowSync.Mirrored) return null;
+            return "'" + name + "' minted journal position " + journalPos + " at the capture seam and is " +
+                   "declared " + (sync == null ? "UNDECLARED" : sync.ToString()) + ", so nothing is " +
+                   "published and no peer can ever hold that position. Correct ONLY when this peer's own " +
+                   "game raises the window for itself — a window the host's own simulation raises has no " +
+                   "other producer, and this line is then the whole of the missing window (L546)";
+        }
+
         internal static void HostBroadcast(StateKind kind, ModalType modalType, object modalData, int priority)
         {
             var engine = NetworkEngine.Instance;
@@ -498,8 +519,16 @@ namespace Multiplayer.Network.Sync
             var rule = kind == StateKind.Modal
                 ? GeoWindowCoverage.RuleForModal(modalType)
                 : GeoWindowCoverage.RuleFor(StateTypeOf(kind));
-            if (rule == null || rule.Sync != WindowSync.Mirrored) return;  // declared: the gate already announced it
             string name = NameOf(kind, modalType);
+            // A DISCARD IS NEVER SILENT (L546). The position was already minted; if it does not ship, the
+            // reason is said out loud once per family rather than being a bare `return`.
+            string publishRefusal = PublishRefusal(name, journalPos,
+                                                   rule == null ? (WindowSync?)null : rule.Sync);
+            if (publishRefusal != null)
+            {
+                if (journalPos != 0 && _discardAnnounced.Add(name)) MpLog.Log("[MP][modals] " + publishRefusal);
+                return;
+            }
             try
             {
                 var p = Describe(modalData);

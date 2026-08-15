@@ -447,6 +447,7 @@ namespace RailCheck
             Add(laws, () => L543_NoHandRolledSignatureSurvives.Check());
             Add(laws, () => L544_NoPathSegmentIsAnIndex.Check());
             Add(laws, () => L545_PatchDoNotRebuild.Check());
+            Add(laws, () => L546_AHostMintedPositionIsPublishedOrStated.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -494,8 +495,13 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 345;
-        // Updated deliberately 2026-08-15: L545 (a surface with model or animation state is patched, never
+        private const int ExpectedLawRegistrations = 346;
+        // Updated deliberately 2026-08-15: L546 (a host-minted journal position is published, and a discard
+        // is never silent) was ADDED — 345 -> 346. Nothing was retired or amputated: L520 owns "there is one
+        // publication path", L521 owns "the append needs no screen" and L524 owns retention; none of them
+        // asked whether a position the seam MINTED ever leaves the host, which is how ModalType
+        // .GeoResearchComplete minted host positions 1 and 2 that no client received.
+        // Earlier the same day: L545 (a surface with model or animation state is patched, never
         // rebuilt) was ADDED — 344 -> 345. Nothing was retired: scoping a repaint decides WHETHER it fires,
         // and L545 decides what it is allowed to destroy when it does. L156's resolve-all-first arm was
         // re-pointed from the retired EsDisplay binding to EsUiRefreshNeeded, same arm, same strength.
@@ -550,7 +556,7 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "40066a63c080a4c1b7d934e6d92d4f183089b9f365874354f3083826fe3866e7";
+        private const string ExpectedExecutionIdentityDigest = "3eb6e6409e799b195273ab45ba0e116f997400636ce536d4f0fd3eadae863607";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

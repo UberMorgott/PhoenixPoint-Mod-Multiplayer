@@ -42,7 +42,13 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
 # with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
 # registration multiset (so sparse ids and many registrations per source file remain valid).
-# Updated deliberately 2026-08-15: L545 ADDED (a surface with model or animation state is PATCHED, never
+# Updated deliberately 2026-08-15: L546 ADDED (a host-minted journal position is PUBLISHED, and a discard
+# is never silent: every modal in GeoWindowCoverage.HostAuthoritativeRaisers is declared and never
+# LocalOnly, and the real seam is EXECUTED -- mint, hand off, take back, ask GeoModalMirror.PublishRefusal
+# with the real rule -- so a Mirrored family publishes and any other family states its discard) --
+# 345 -> 346 registrations, one new identity string. Nothing retired or amputated: L520/L521/L524 keep
+# every arm; none of them asked whether a MINTED position ever leaves the host.
+# Earlier the same day: L545 ADDED (a surface with model or animation state is PATCHED, never
 # rebuilt: every name in UiNativeRepaint.ModelAnimationSurfaces has a Table entry, no binding held by
 # UiNativeRepaint resolves to one of those surfaces' own doll methods -- the resetAnimation:true paths --
 # and OpenUiRepaint.Repaint refuses the Exit+Enter fallback for them) -- 344 -> 345 registrations, one new
@@ -99,7 +105,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Earlier the same day: L514 ADDED (the roster list repaints on the same mirrored
 # level-up), 334 -> 335; L513 ADDED (no peer lifts before its boundary releases), 333 -> 334;
 # L512 ADDED (the crew strip repaints on a mirrored level-up), 332 -> 333.
-$expectedRegistrationDigest = 'bd44ec38ae0f973d849393801a8f70fb5021107f9daa4735d6c45ac8c91c28a7'
+$expectedRegistrationDigest = '4610e68999d6ee3ec71d6a1c85c622ccbd289a75c541e1d4a9c834c843cc9538'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

@@ -253,6 +253,32 @@ namespace Multiplayer.Network.Sync
 
             // ── MIRRORED: host-side campaign-progress notifications, acknowledgement-only ──
             Modal(d, WindowSync.Mirrored,
+                "research completed — VERDICT RESTORED 2026-08-15 (LocalOnly 2026-08-05 → 2026-08-15). The " +
+                "2026-08-05 reversal rested entirely on there being a SECOND producer on the client: " +
+                "ResearchSync.PresentFromMirror, which reflected into the game's own " +
+                "GeoscapeView.OnFactionResearchCompleted:1980 off the mirrored research state and made the " +
+                "window arrive TWICE (two UIStateGeoModal entries 225 ms apart on Instance2). That producer " +
+                "is DELETED (§A.9, L520: the journal is the single entrance and no mod-served replay may " +
+                "raise a window beside it), so the premise is gone and LocalOnly — 'each peer raises its " +
+                "own' — became a claim about a raiser that no longer exists. MEASURED 2026-08-15: the host " +
+                "journalled pos=1 and pos=2 UIStateGeoModal, both clients only ever received pos=3 " +
+                "UIStateGeoscapeEvent, and the two research windows appeared on the host alone. A client's " +
+                "game NEVER runs the native handler: the rail writes ViewerFaction.Research directly and " +
+                "does not travel the completion path that fires ResearchCompletedEventHandler. The payload " +
+                "needs no work — DataShape.ResearchComplete already ships Ref = the research's faction, " +
+                "Keys[0] = ResearchID, Num = SwitchToResearchState, and GeoModalMirror.BuildData rebuilds " +
+                "the GeoResearchCompleteData off THIS peer's own live ResearchElement, so no wire schema " +
+                "moves. dialogHandler stays null and loses nothing: " +
+                "ResearchCompleteModalHandler:2107 ignores the ModalResult entirely, and the game's own " +
+                "raiser passes SwitchToResearchState: false (GeoscapeView.cs:1985). ponytail: the " +
+                "SURVIVING half of the 2026-08-05 finding is a COSMETIC ceiling, not a reason to withhold " +
+                "the window — 0xB7 is on the wire before the 0xAC deltas that fill " +
+                "ResearchElement.UnlocksResearches (DiffEngine.HostTick, 0.1 s), so a client's copy may " +
+                "draw with NewResearchesGroup hidden (GeoReseatchCompleteDataBind.SetResearchRewards" +
+                ":171-181). A missing blink beats a missing window; if it is ever worth fixing, the lever " +
+                "is GeoModalMirror.NeedsPark, not a second producer",
+                ModalType.GeoResearchComplete);
+            Modal(d, WindowSync.Mirrored,
                 "diplomacy research share — raised HOST-side by GeoscapeView.PxFaction_ResearchShared:1990 with a " +
                 "NULL DialogCallback in the shipped game, so there is nothing authoritative to lose. Data = " +
                 "DiplomacyResearchRewardData{Faction, Researches, DiplomacyShareLevel}: faction root ref + the " +
@@ -366,26 +392,10 @@ namespace Multiplayer.Network.Sync
                 ModalType.LoadPrompt, ModalType.SiteEncounter, ModalType.SiteRecruit, ModalType.ResourcePayment);
 
             // ── LOCALONLY: correct NOT to replicate ──
-            Modal(d, WindowSync.LocalOnly,
-                "research completed — VERDICT REVERSED 2026-08-05 (Mirrored until today), because this window " +
-                "had TWO producers on a client and the player got it TWICE: the 0xB7 raise here and " +
-                "ResearchSync.PresentFromMirror:242, which invokes the game's OWN " +
-                "GeoscapeView.OnFactionResearchCompleted:1980 off the mirrored research state. Measured on " +
-                "Instance2: the 0xB7 raise at t=530.898, the native present at t=531.123 — two UIStateGeoModal " +
-                "queue entries, two closes 225 ms apart. The FALSIFIED CLAIM this entry used to carry was that " +
-                "the client's copy is \"re-fetched LIVE ... so the renderer's own walk over UnlocksResearches " +
-                "answers from this peer's mirror\": the element is live, but the RAISE is not ordered against " +
-                "the deltas that fill it. The host broadcasts at its own OpenModal, BEFORE the 0xAC values that " +
-                "unlock the follow-up researches land, so GeoReseatchCompleteDataBind.SetResearchRewards:171-181 " +
-                "reads an EMPTY ResearchElement.UnlocksResearches and hides NewResearchesGroup — the early copy " +
-                "is the one WITHOUT the \"new research available\" blink. The surviving producer is the correct " +
-                "one on both counts: it is the more NATIVE path (the game's own handler, not a rebuilt " +
-                "GeoResearchCompleteData) and it is DELTA-DRIVEN — UiEventMap:79 calls it from inside the rail's " +
-                "own apply, i.e. after the batch that describes what the window is about to draw. Nothing is " +
-                "lost by not replicating the WINDOW: every peer raises its own off its own mirrored state, and " +
-                "the callback was never authoritative anyway (ResearchCompleteModalHandler:2107 ignores the " +
-                "ModalResult entirely)",
-                ModalType.GeoResearchComplete);
+            // Every entry below is raised by THIS peer's own gesture. Nothing raised by the host's own
+            // simulation may live here — GeoWindowCoverage.HostAuthoritativeRaisers names that class and
+            // L546 keeps it out, because a LocalOnly declaration over it mints a journal position and
+            // silently destroys it (research-completed did exactly that, 2026-08-05 → 2026-08-15).
             Modal(d, WindowSync.LocalOnly,
                 "ability CONFIRMATION — raised by the clicking peer's own ability view " +
                 "(ActivateBaseAbilityView.cs:19/:28, ExcavateAbilityView.cs:16, AncientGuardianGuardAbilityView.cs:16) " +
@@ -428,6 +438,41 @@ namespace Multiplayer.Network.Sync
         /// impossible to commit and <see cref="AnnounceModal"/> makes impossible to miss at runtime.</summary>
         internal static WindowRule RuleForModal(ModalType modal) =>
             DeclaredModals.TryGetValue(modal, out var rule) ? rule : null;
+
+        /// <summary>
+        /// THE HOST-AUTHORITATIVE RAISERS (L546): modals the host's OWN SIMULATION raises by reaching a
+        /// milestone, never a peer clicking. Every entry is a <c>GeoscapeView</c> method that exists only as
+        /// a faction/site EVENT SUBSCRIPTION and opens a modal from inside it — verified against the shipped
+        /// assembly 2026-08-15: <c>OnFactionResearchCompleted</c>:1980 → GeoResearchComplete,
+        /// <c>PxFaction_ResearchShared</c>:1994 → DiplomacyResearchBrief, <c>PxFaction_OnBaseActivated</c>:1962
+        /// → GeoPhoenixBaseOutcome, <c>OnSiteMissionCancelled</c>:1934/:1938 →
+        /// GeoPhoenixBaseDefenseOutcome / AncientSiteDefenceOutcome, <c>OnNewAlienIntlligence</c>:2010 →
+        /// AlienResearchBrief.
+        ///
+        /// WHY THE SET IS A DECLARATION AND NOT A VERDICT: a client's own game NEVER runs these handlers.
+        /// The rail writes the mirrored state directly (0xAC values, structural creates); it does not travel
+        /// the native completion path that fires <c>ResearchCompletedEventHandler</c>. So on a client there
+        /// is NO local producer at all, and §A.9/L520 deleted the last mod-served replay that pretended
+        /// otherwise. <see cref="WindowSync.LocalOnly"/> — "each peer raises its own" — is therefore a
+        /// FALSE STATEMENT about any member of this set, and a false one that fails SILENTLY: the seam mints
+        /// a journal position for the window either way and
+        /// <see cref="GeoModalMirror.PublishRefusal"/> then throws it away, so the host's journal holds a
+        /// position no peer will ever receive. That is exactly what GeoResearchComplete did between
+        /// 2026-08-05 and 2026-08-15 (host pos=1 and pos=2, both clients only ever saw pos=3).
+        ///
+        /// <see cref="WindowSync.Gap"/> STAYS LEGAL HERE and Gap alone: a gap is an ANNOUNCED hole
+        /// (<see cref="AnnounceModal"/> warns once per session with its reason), which is a reviewed
+        /// decision rather than a silent one. L546 forbids only the silent claim.
+        /// </summary>
+        internal static readonly ModalType[] HostAuthoritativeRaisers =
+        {
+            ModalType.GeoResearchComplete,
+            ModalType.DiplomacyResearchBrief,
+            ModalType.GeoPhoenixBaseOutcome,
+            ModalType.GeoPhoenixBaseDefenseOutcome,
+            ModalType.AncientSiteDefenceOutcome,
+            ModalType.AlienResearchBrief,
+        };
 
         // ─── The THIRD axis: WHO the answer belongs to ──────────────────────
 

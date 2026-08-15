@@ -59,10 +59,13 @@ namespace RailCheck
         /// GetMissionBriefModal:1724 picks between), HavenMissionUtil.cs:59 (soldier join).</summary>
         private static readonly Dictionary<ModalType, Type> MirroredData = new Dictionary<ModalType, Type>
         {
-            // GeoResearchComplete left this table 2026-08-05 with its Mirrored verdict: the window had TWO
-            // producers on a client (this raise and ResearchSync's native present off the mirrored state) and
-            // arrived twice, 225 ms apart. It is LocalOnly now — every peer raises its own — and L49's
-            // two-producers-one-window arm is what keeps it that way.
+            // GeoResearchComplete RETURNED 2026-08-15 with its Mirrored verdict. It left on 2026-08-05
+            // because the window had TWO producers on a client (this raise and ResearchSync's native present
+            // off the mirrored state) and arrived twice, 225 ms apart; §A.9/L520 has since DELETED that
+            // second producer, so the host's publication is the only one left and withholding it left the
+            // window on the host's screen alone (L546). L49's two-producers-one-window arm still holds —
+            // there is exactly one producer again, and it is this one.
+            [ModalType.GeoResearchComplete] = typeof(GeoResearchCompleteData),
             [ModalType.DiplomacyResearchBrief] = typeof(DiplomacyResearchRewardData),
             [ModalType.GeoPhoenixBaseOutcome] = null,
             [ModalType.FactionSoldierJoin] = typeof(GeoCharacter),
