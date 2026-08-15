@@ -333,9 +333,14 @@ namespace Multiplayer.Network.Sync
         /// this batch actually carried a piece of it. Guarding on touched is what keeps re-application honest:
         /// applying an anchor re-states "Now = anchor AS OF NOW", so replaying an old one would rewind the
         /// clock by however long it had been current.</summary>
-        internal static void ApplyIfTouched(GeoLevelController geo, HashSet<object> touched)
+        internal static void ApplyIfTouched(GeoLevelController geo, HashSet<GenericApplier.TouchedLeaf> touched)
         {
-            if (_clientDto == null || geo?.Timing == null || touched == null || !touched.Contains(_clientDto)) return;
+            if (_clientDto == null || geo?.Timing == null || touched == null) return;
+            // The set is keyed by (Entity, Path) since §B.1, so membership is asked of the ENTITY — the
+            // anchor DTO is what this guard has always been about, and the path it rode is irrelevant.
+            bool carried = false;
+            foreach (var leaf in touched) if (ReferenceEquals(leaf.Entity, _clientDto)) { carried = true; break; }
+            if (!carried) return;
             // The anchor moves the clock BASE only — never the rate state, and never the accrual every
             // ACTOR clock hangs off (see Rebase). Paused/Scale ride as ordinary leaves on root "T"
             // (Base.Core.Timing), where they land through the PROPERTY setters, which reschedule and fire

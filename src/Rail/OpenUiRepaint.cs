@@ -40,6 +40,12 @@ namespace Multiplayer.Network.Sync
     public static class OpenUiRepaint
     {
         private static bool _dirty;
+        // §B.4: the global bool above STAYS and serves the ~63 kindless sites and all structural
+        // create/destroy. The scoped pair is BESIDE it, never instead of it — a kindless mark repaints
+        // everything. Nothing NARROWS on these yet; Task 4 is what reads the paths.
+        private static bool _scopedDirty;
+        private static readonly System.Collections.Generic.HashSet<string> _touchedPaths =
+            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal);
         private static bool _hudDirty;
         private static int _deferredFrames;
         private static bool _deferLogged;
@@ -763,6 +769,46 @@ namespace Multiplayer.Network.Sync
             MarkDirty();
         }
 
+        /// <summary>
+        /// THE SAME MARK, CARRYING THE EXACT RAIL PATH THAT CHANGED. The rail has always known the leaf —
+        /// <see cref="GenericApplier"/>'s ApplyEntry holds (kindId, path, fieldIdx, subKey, value) — and used
+        /// to throw the path away one line before it was needed. This is where it stops being thrown away
+        /// (§B.1).
+        ///
+        /// It accumulates into a SET OF TOUCHED PATHS BESIDE the global bool and NEVER instead of it. A null
+        /// path (structural create/destroy, a preparation edit, a durable choice) falls straight through to
+        /// the unconditional arm, which is exactly what the ~63 kindless call sites already do (§B.4).
+        ///
+        /// NOTHING IS NARROWED HERE. <see cref="FlushIfDirty"/> treats a scoped mark exactly like a global
+        /// one — it repaints everything — so this task lands the CARRIER with the DECISION unchanged. Task 4
+        /// is what makes a declared surface consult the paths.
+        ///
+        /// The declared-irrelevance gate is repeated rather than delegated: the two-argument overload owes
+        /// L60 a DIRECT call to MarkHudDirty on its declined branch, and a shared helper would hide it from
+        /// a callee walk.
+        ///
+        /// CONSERVATIVE BY CONSTRUCTION, in the same direction as the overload above: an unknown kind, a
+        /// null path or no open screen at all marks.
+        /// </summary>
+        public static void MarkDirty(Type kind, GeoLevelController geo, string path)
+        {
+            if (path == null) { MarkDirty(kind, geo); return; }   // no path = today's behaviour, exactly
+            var screen = geo?.View?.CurrentViewState;
+            if (screen != null && kind != null &&
+                UiNativeRepaint.IgnoredKinds.TryGetValue(screen.GetType(), out var ignored) &&
+                ignored.Contains(kind))
+            {
+                if (_loggedSkips.Add(screen.GetType().Name + ":" + kind.Name))
+                    MpLog.Log("[MP][uirepaint] SKIP " + kind.Name + " on " + screen.GetType().Name +
+                              " — kind declared irrelevant to this screen (logged once per kind per screen)");
+                MarkHudDirty();
+                return;
+            }
+            _touchedPaths.Add(path);
+            _scopedDirty = true;
+            _marksSinceFlush++;
+        }
+
         /// <summary>Material deployment edits use the same coalesced, drag-safe repaint boundary as a
         /// mirrored model batch, but name the callback-free roster primitive explicitly so a queued
         /// window can never fall through to destructive Exit/Enter.</summary>
@@ -867,6 +913,8 @@ namespace Multiplayer.Network.Sync
         public static void Reset()
         {
             _dirty = false;
+            _scopedDirty = false;
+            _touchedPaths.Clear();
             _hudDirty = false;
             _deferredFrames = 0;
             _deferLogged = false;
@@ -895,7 +943,9 @@ namespace Multiplayer.Network.Sync
             // Task 12 terminal teardown is callback-free and retryable independently of its already-durable
             // tombstone. A transient carrier exception therefore heals on the next ordinary sync tick.
             DurableSourceRevalidationEngine.RetryTerminalTeardown(DurableInboxSession.ActiveStore);
-            if (!_dirty)
+            // A SCOPED mark is a mark. Until Task 4 gives a surface a declaration to be measured
+            // against, _scopedDirty is read here and nowhere else, and it means exactly what _dirty means.
+            if (!_dirty && !_scopedDirty)
             {
                 // Every mark the open screen declined still owes the persistent HUD a refresh (L60,
                 // see MarkHudDirty). Same once-per-frame coalescing as the screen repaint, and it does
@@ -920,6 +970,8 @@ namespace Multiplayer.Network.Sync
             }
             _deferredFrames = 0;
             _dirty = false;
+            _scopedDirty = false;
+            _touchedPaths.Clear();
             _hudDirty = false; // RepaintOpenGeoscapeScreen opens with the HUD refresh itself
             RepaintOpenGeoscapeScreen();
         }

@@ -76,13 +76,15 @@ namespace RailCheck
             var modAsm = typeof(UiEventMap).Assembly;
             var fire = typeof(UiEventMap).GetMethod("Fire", All);
             var reseed = typeof(UiEventMap).GetMethod("ReseedIdentityDisplay", All);
+            // RE-POINTED for §B.1 (scoped-reactivity Task 3): the kind-carrying mark Fire reaches is now
+            // the three-argument overload that also carries the changed rail path. Same assertion.
             var markDirty = typeof(OpenUiRepaint).GetMethods(All)
-                .FirstOrDefault(m => m.Name == "MarkDirty" && m.GetParameters().Length == 2);
+                .FirstOrDefault(m => m.Name == "MarkDirty" && m.GetParameters().Length == 3);
 
             if (fire == null || reseed == null || markDirty == null)
             {
                 yield return "L148 premise-changed: UiEventMap.{Fire,ReseedIdentityDisplay} / " +
-                             "OpenUiRepaint.MarkDirty(Type,GeoLevelController) no longer resolve. The identity " +
+                             "OpenUiRepaint.MarkDirty(Type,GeoLevelController,string) no longer resolve. The identity " +
                              "reactivity seam has moved and this law is asserting something about a shape the " +
                              "mod no longer has — re-read it before assuming a rename still crosses.";
                 yield break;

@@ -256,7 +256,7 @@ namespace Multiplayer.Network.Sync
                 // delta the clients saw after the boundary was the completion itself; it seeded them
                 // silently and the research-complete window opened on the host alone).
                 ResearchSync.SeedLatchFromMirror(geo);
-                var touched = new HashSet<object>();
+                var touched = new HashSet<TouchedLeaf>();
                 try
                 {
                     int defCount = r.ReadByte();
@@ -423,7 +423,7 @@ namespace Multiplayer.Network.Sync
                 }
 
                 bool created = false;
-                var touched = new HashSet<object>();
+                var touched = new HashSet<TouchedLeaf>();
                 try
                 {
                     using (SyncApplyScope.Enter())
@@ -460,7 +460,7 @@ namespace Multiplayer.Network.Sync
                                 { MpLog.LogError("[Multiplayer][rail] structural create '" + rootKey + "': " + (unit == null ? "blob deserialize failed" : "no _tacUnits registry")); return; }
                                 reg[unit.Id] = unit; // the game's own load registration (ProcessInstanceData:609)
                                 created = true;
-                                touched.Add(unit);   // UiEventMap GeoCharacter arm: native derived-stat refresh + repaint
+                                touched.Add(new TouchedLeaf(unit, null, null));   // null path = unconditional repaint; UiEventMap GeoCharacter arm: native derived-stat refresh + repaint
                                 MpLog.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + blob.Length + "B)");
                             }
                             else LogMissOnce("structural create for '" + rootKey + "' not enabled — skipped");
@@ -608,7 +608,7 @@ namespace Multiplayer.Network.Sync
         /// .ResumeUpdating(Timing)`. That starts the mission's own updateable on the client, i.e. local
         /// sim over state the host already ships (`SerializedNextUpdate`, `_status` are covered leaves) —
         /// law 3. The client stays a projector; the countdown it shows is the host's.</summary>
-        private static bool ApplyDescendCreate(GeoLevelController geo, string rootKey, byte[] blob, HashSet<object> touched)
+        private static bool ApplyDescendCreate(GeoLevelController geo, string rootKey, byte[] blob, HashSet<TouchedLeaf> touched)
         {
             if (!ResolveDescendTarget(geo, rootKey, out var owner, out var field))
             { LogMissOnce("descend owner/field unresolved at " + rootKey + " — create skipped"); return false; }
@@ -663,7 +663,7 @@ namespace Multiplayer.Network.Sync
                             owner.GetType().Name + "." + field.Name + ", which is not a GeoSite — " +
                             "GeoSite.RegisterMission did NOT run, so its native subscriptions and the site's " +
                             "marker repaint are missing on this peer");
-            touched.Add(owner);
+            touched.Add(new TouchedLeaf(owner, null, null)); // structural: no leaf path, so the unconditional arm
             MarkOrderChange(geo, rootKey, owner, field.Name); // the mission wrapper is a MARKER, not a view state (law 11)
             OpenUiRepaint.MarkDirty(); // law 11: the open geoscape shows the new marker NOW
             MpLog.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (" + t.Name + ")");
@@ -674,12 +674,12 @@ namespace Multiplayer.Network.Sync
         /// with no entry, no tombstone and no log line (RCA gap B1/B2). Nothing to un-wire: the
         /// subscriptions RegisterMission created live ON the dropped object, and the client never resumed
         /// its updateable, so there is no EndUpdating to mirror (GeoSite.cs:1070).</summary>
-        private static void ApplyDescendDestroy(GeoLevelController geo, string rootKey, HashSet<object> touched)
+        private static void ApplyDescendDestroy(GeoLevelController geo, string rootKey, HashSet<TouchedLeaf> touched)
         {
             if (!ResolveDescendTarget(geo, rootKey, out var owner, out var field))
             { LogMissOnce("descend owner/field unresolved at " + rootKey + " — destroy skipped"); return; }
             field.SetValue(owner, null);
-            touched.Add(owner);
+            touched.Add(new TouchedLeaf(owner, null, null)); // structural: no leaf path, so the unconditional arm
             // The retired mission's blue wrapper hangs off GeoSiteVisualsController.RefreshMissionVisuals:620
             // (`site.ActiveMission as GeoUpdateableMission`), a globe MonoBehaviour that no view-state
             // re-enter touches — so MarkDirty alone leaves the wrapper on screen. Same seam as the leaf path.
@@ -1051,8 +1051,34 @@ namespace Multiplayer.Network.Sync
             return !before.Equals(after);
         }
 
+        /// <summary>ONE TOUCHED LEAF, with the information the rail already had and used to discard
+        /// (§B.1). Equality is by (Entity, Path) so a HashSet still collapses repeats the way the old
+        /// HashSet&lt;object&gt; did — a path ADDRESSES the entity, so every leaf of one entity in one batch
+        /// carries the same path and collapses to one touch. The Field is carried for diagnostics and for a
+        /// future finer scope, and deliberately does NOT participate in equality: two fields of one entity
+        /// on one path are one touch as far as a repaint is concerned.</summary>
+        public sealed class TouchedLeaf : IEquatable<TouchedLeaf>
+        {
+            public readonly object Entity;
+            public readonly string Path;
+            public readonly string Field;
+
+            public TouchedLeaf(object entity, string path, string field)
+            { Entity = entity; Path = path; Field = field; }
+
+            public bool Equals(TouchedLeaf other) =>
+                other != null && ReferenceEquals(Entity, other.Entity) &&
+                string.Equals(Path, other.Path, StringComparison.Ordinal);
+
+            public override bool Equals(object obj) => Equals(obj as TouchedLeaf);
+
+            public override int GetHashCode() =>
+                (Entity == null ? 0 : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Entity)) ^
+                (Path == null ? 0 : Path.GetHashCode());
+        }
+
         private static void ApplyEntry(NetworkEngine engine, GeoLevelController geo, byte kindId, string path, ushort fieldIdx,
-                                       string subKey, byte[] value, HashSet<object> touched)
+                                       string subKey, byte[] value, HashSet<TouchedLeaf> touched)
         {
             if (!_kinds.TryGetValue(kindId, out var rt))
             {
@@ -1316,7 +1342,7 @@ namespace Multiplayer.Network.Sync
                 // unreadable field (either read threw), compares as changed and marks — the safe
                 // direction, because an unreadable model may cost a repaint but may never cost a
                 // stale screen.
-                if (!comparable || LeafChanged(beforeValue, afterValue)) touched.Add(entity);
+                if (!comparable || LeafChanged(beforeValue, afterValue)) touched.Add(new TouchedLeaf(entity, path, field.Name));
                 // NOT repaint marks and deliberately unconditional: the order channel and the scoped
                 // backfill acknowledgement are owed by the ENTRY landing, not by the value moving.
                 MarkOrderChange(geo, path, entity, field.Name);
@@ -2190,7 +2216,7 @@ namespace Multiplayer.Network.Sync
         /// <summary>Prune local dict keys absent from the host census. Removes EXTRAS only — keys the host
         /// holds arrive as ordinary value entries in the same forced batch, so applying a census twice is a
         /// no-op (law 7). Direct dict.Remove, same as the tombstone path (never RemoveItem — side effects).</summary>
-        private static void ApplyDictCensus(object entity, RailField field, string path, byte[] value, HashSet<object> touched)
+        private static void ApplyDictCensus(object entity, RailField field, string path, byte[] value, HashSet<TouchedLeaf> touched)
         {
             if (!(field.GetValue(entity) is IDictionary dict)) return;
             var present = new HashSet<string>(RailMeta.DecodeDictCensus(value), StringComparer.Ordinal);
@@ -2206,7 +2232,7 @@ namespace Multiplayer.Network.Sync
             }
             if (extras == null) return;
             foreach (var k in extras) dict.Remove(k);
-            touched.Add(entity);
+            touched.Add(new TouchedLeaf(entity, path, field.Name));
             // NAME them. This store is the SHARED Phoenix inventory as often as it is anything else
             // (F#…ItemStorage._storageItems), so "pruned 2 phantom dict keys" threw away the only evidence
             // of WHICH two items the peers disagreed about — and the prune is where that evidence dies.

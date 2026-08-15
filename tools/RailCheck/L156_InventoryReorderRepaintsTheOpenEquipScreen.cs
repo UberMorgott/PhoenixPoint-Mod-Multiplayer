@@ -65,15 +65,17 @@ namespace RailCheck
             var modAsm = typeof(UiEventMap).Assembly;
             var gameAsm = typeof(GeoCharacter).Assembly;
             var fire = typeof(UiEventMap).GetMethod("Fire", All);
+            // RE-POINTED for §B.1 (scoped-reactivity Task 3): the kind-carrying mark Fire reaches is now
+            // the three-argument overload that also carries the changed rail path. Same assertion.
             var markDirty = typeof(OpenUiRepaint).GetMethods(All)
-                .FirstOrDefault(m => m.Name == "MarkDirty" && m.GetParameters().Length == 2);
+                .FirstOrDefault(m => m.Name == "MarkDirty" && m.GetParameters().Length == 3);
             var ignoredFi = typeof(UiNativeRepaint).GetField("IgnoredKinds", All);
             var tableFi = typeof(UiNativeRepaint).GetField("Table", All);
             var reseed = typeof(UiNativeRepaint).GetMethod("ReseedEquipScreen", All);
 
             if (fire == null || markDirty == null || ignoredFi == null || tableFi == null || reseed == null)
             {
-                yield return "L156 premise-changed: UiEventMap.Fire / OpenUiRepaint.MarkDirty(Type,Geo) / " +
+                yield return "L156 premise-changed: UiEventMap.Fire / OpenUiRepaint.MarkDirty(Type,Geo,string) / " +
                              "UiNativeRepaint.{IgnoredKinds,Table,ReseedEquipScreen} no longer resolve. The equip " +
                              "reactivity seam has moved and this law is asserting something about a shape the mod " +
                              "no longer has — re-read it before assuming a rearranged inventory still repaints.";

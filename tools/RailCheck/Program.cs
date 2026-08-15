@@ -6531,11 +6531,16 @@ namespace RailCheck
             // ── Arm 1: the gate is WIRED, and nothing bypasses it ──
             var ours = typeof(UiEventMap).Assembly;
             var fire = typeof(UiEventMap).GetMethod("Fire", AllMembers);
+            // RE-POINTED for §B.1 (scoped-reactivity Task 3): Fire now reaches the PATH-CARRYING
+            // overload MarkDirty(Type, GeoLevelController, string), which asks UiNativeRepaint.IgnoredKinds
+            // exactly as the two-argument one does and then records the changed rail path beside the mark.
+            // The assertion is unchanged — Fire must reach a KIND-CARRYING mark and must never reach the
+            // parameterless blanket one; only the overload that carries the kind has moved.
             var kindMark = typeof(OpenUiRepaint).GetMethod("MarkDirty", AllMembers, null,
-                                                           new[] { typeof(Type), typeof(PhoenixPoint.Geoscape.Levels.GeoLevelController) }, null);
+                                                           new[] { typeof(Type), typeof(PhoenixPoint.Geoscape.Levels.GeoLevelController), typeof(string) }, null);
             var blanketMark = typeof(OpenUiRepaint).GetMethod("MarkDirty", AllMembers, null, Type.EmptyTypes, null);
             if (fire == null || kindMark == null || blanketMark == null)
-                yield return "L38 gate-unresolved: UiEventMap.Fire / OpenUiRepaint.MarkDirty(Type, GeoLevelController) / " +
+                yield return "L38 gate-unresolved: UiEventMap.Fire / OpenUiRepaint.MarkDirty(Type, GeoLevelController, string) / " +
                              "MarkDirty() did not all resolve — the relevance gate cannot be verified and the " +
                              "declaration below may be applying to nothing";
             else
@@ -6546,7 +6551,7 @@ namespace RailCheck
                 var direct = Callees(fire, ours, directCallsOnly: true).ToList();
                 if (!direct.Any(c => Same(c, kindMark)))
                     yield return "L38 relevance-unwired: UiEventMap.Fire never calls OpenUiRepaint.MarkDirty(Type, " +
-                                 "GeoLevelController) — the per-kind relevance declaration is consulted by nobody, so " +
+                                 "GeoLevelController, string) — the per-kind relevance declaration is consulted by nobody, so " +
                                  "every churning world kind marks the open screen dirty again";
                 if (direct.Any(c => Same(c, blanketMark)))
                     yield return "L38 relevance-bypassed: UiEventMap.Fire calls the parameterless " +

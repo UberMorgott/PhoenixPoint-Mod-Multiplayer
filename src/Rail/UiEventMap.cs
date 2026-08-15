@@ -64,12 +64,18 @@ namespace Multiplayer.Network.Sync
     {
         private static readonly HashSet<string> _loggedUnknown = new HashSet<string>(StringComparer.Ordinal);
 
-        public static void Fire(HashSet<object> touched, GeoLevelController geo)
+        public static void Fire(HashSet<GenericApplier.TouchedLeaf> touched, GeoLevelController geo)
         {
             if (touched == null || touched.Count == 0) return;
             bool researchDone = false;
-            foreach (var entity in touched)
+            foreach (var leaf in touched)
             {
+                // §B.1: the exact rail path that changed, carried to the mark instead of discarded.
+                // null (structural create/destroy, a preparation edit, a durable choice) routes to the
+                // unconditional arm — exactly what the ~63 kindless call sites already do.
+                var entity = leaf.Entity;
+                var path = leaf.Path;
+                if (entity == null) continue;
                 try
                 {
                     switch (entity)
@@ -83,7 +89,7 @@ namespace Multiplayer.Network.Sync
                             // menu, research cost gating) → also the universal repaint seam.
                             // Safe from inside SyncApplyScope: MarkDirty only sets a flag, the
                             // flush stays in SyncEngine.Tick with its own scope + defer/coalescing.
-                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo, path);
                             break;
                         case Research _:
                         case ResearchElement _:
@@ -120,7 +126,7 @@ namespace Multiplayer.Network.Sync
                             // painting stale CharacterStats. Same per-kind shape as Wallet/ItemStorage:
                             // run the native derive, then the universal repaint re-reads it.
                             RefreshDerivedStats(OwnerOf(cp, geo));
-                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo, path);
                             break;
                         case GeoCharacter gc:
                             // Item lists (_armourItems…) also land raw — natively SetItems runs
@@ -131,7 +137,7 @@ namespace Multiplayer.Network.Sync
                                 using (SyncApplyScope.Enter())
                                     AddAbilitiesFromItemsMethod.Invoke(gc, new object[] { false });
                             RefreshDerivedStats(gc);
-                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo, path);
                             break;
                         case PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility fac:
                             // Facility leaves (_isPowered, state, update times) land RAW, so the native
@@ -145,7 +151,7 @@ namespace Multiplayer.Network.Sync
                             // the universal repaint re-reads it.
                             using (SyncApplyScope.Enter())
                                 if (fac.PxBase != null) fac.PxBase.UpdateStats();
-                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo, path);
                             break;
                         case PhoenixPoint.Geoscape.Events.GeoscapeEventSystem _:
                             // A record delta NEVER raises a window (windows are live 0xB6 raises) — but it
@@ -153,7 +159,7 @@ namespace Multiplayer.Network.Sync
                             // Record ref and closes a picker somebody else already answered
                             // (EventPopup.RepaintDialog, the UiNativeRepaint entry for UIStateGeoscapeEvent).
                             // Site encounter labels etc. ride the same universal repaint like any other kind.
-                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo, path);
                             break;
                         case CharacterIdentity ci:
                             // THE REPAINT WAS FIRING ALL ALONG AND PAINTED NOTHING (live 2026-08-06:
@@ -163,7 +169,7 @@ namespace Multiplayer.Network.Sync
                             // invisible until the visit is torn down and rebuilt — the "leave the screen and
                             // come back" the user measured. Both are re-seeded here, before the flush.
                             ReseedIdentityDisplay(OwnerOf(ci, geo), geo);
-                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo, path);
                             break;
                         case ItemStorage storage:
                             RaiseStorageChanged(storage);
@@ -174,7 +180,7 @@ namespace Multiplayer.Network.Sync
                             // go through the universal repaint seam; the flush dispatches to the screen's
                             // native rebuild via the UiNativeRepaint table below (manufacturing's entry
                             // also re-snapshots the scrap-mode storage copies).
-                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo, path);
                             break;
                         default:
                             // Law 11 universal cover, guaranteed HERE: any kind without a per-kind
@@ -183,7 +189,7 @@ namespace Multiplayer.Network.Sync
                             // exception is declared, not implicit: a kind listed against the open
                             // screen in UiNativeRepaint.IgnoredKinds cannot change anything that
                             // screen paints, and skipping it is logged once per kind per screen.
-                            OpenUiRepaint.MarkDirty(entity.GetType(), geo);
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo, path);
                             if (_loggedUnknown.Add(entity.GetType().Name))
                                 MpLog.Log("[Multiplayer][rail] UiEventMap: " + entity.GetType().Name + " rides the universal open-screen repaint (logged once)");
                             break;
@@ -211,7 +217,11 @@ namespace Multiplayer.Network.Sync
                     foreach (var soldier in soldiers) if (soldier != null) touched.Add(soldier);
                 }
             }
-            Fire(touched, geo);
+            var leaves = new HashSet<GenericApplier.TouchedLeaf>();
+            // A preparation edit names SUBJECTS, not rail paths: every leaf goes in with a null path so
+            // Fire routes it to the unconditional repaint arm, exactly as it did before §B.1.
+            foreach (var subject in touched) leaves.Add(new GenericApplier.TouchedLeaf(subject, null, null));
+            Fire(leaves, geo);
             // The durable ledger update above refreshes queued/suspended copies before they can be
             // displayed.  The open native preparation screen is callback-free and must participate in
             // the same coalesced read-direction repaint as the touched campaign entities.
@@ -224,7 +234,7 @@ namespace Multiplayer.Network.Sync
         internal static void FireDurableChoice(GeoLevelController geo)
         {
             if (geo?.EventSystem == null) return;
-            Fire(new HashSet<object> { geo.EventSystem }, geo);
+            Fire(new HashSet<GenericApplier.TouchedLeaf> { new GenericApplier.TouchedLeaf(geo.EventSystem, null, null) }, geo);
         }
 
         private static readonly MethodInfo UpdateStatsMethod =
