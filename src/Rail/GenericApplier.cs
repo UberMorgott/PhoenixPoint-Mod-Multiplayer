@@ -256,6 +256,12 @@ namespace Multiplayer.Network.Sync
                 // delta the clients saw after the boundary was the completion itself; it seeded them
                 // silently and the research-complete window opened on the host alone).
                 ResearchSync.SeedLatchFromMirror(geo);
+                // Same seam, same reason (L550 arm (c)): the geoscape log rides as ONE blob that REBUILDS
+                // every entry, so a peer joining or reloading receives the whole history in its first
+                // batch. Seeded HERE — before the batch — that history is the baseline and presents
+                // nothing; seeded from inside the post-batch present it would be the baseline AND the
+                // transition, and the status bar would replay the campaign in one frame.
+                GeoLogNotice.SeedFromMirror(geo);
                 var touched = new HashSet<TouchedLeaf>();
                 try
                 {

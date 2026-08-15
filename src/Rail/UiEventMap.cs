@@ -68,6 +68,7 @@ namespace Multiplayer.Network.Sync
         {
             if (touched == null || touched.Count == 0) return;
             bool researchDone = false;
+            bool geoLogDone = false;
             foreach (var leaf in touched)
             {
                 // §B.1: the exact rail path that changed, carried to the mark instead of discarded.
@@ -109,6 +110,24 @@ namespace Multiplayer.Network.Sync
                                 ResearchSync.PumpDeferredCompletions(geo);
                                 ResearchSync.RepaintResearchUi();
                             }
+                            break;
+                        case GeoscapeLog _:
+                            // THE SECOND PRESENTATION CHANNEL (L550). The log's keyless _entries list is
+                            // written straight into the field by the applier, so GeoscapeLog.AddEntry never
+                            // runs here and OnNewEntry — the ONLY thing that reaches
+                            // UIModuleStatusBarMessages.ShowEventMessage (GeoscapeView.cs:292/1576) —
+                            // never fires on a peer that did not simulate the event. Re-raise it from the
+                            // mirrored list, behind the cursor seeded before this batch. The widget is a
+                            // QUEUE (ShowEventMessage:74 appends, the module's own Update():174 drains it
+                            // next frame), so this repaints an ALREADY-OPEN geoscape with no re-entry.
+                            if (!geoLogDone)
+                            {
+                                geoLogDone = true;
+                                GeoLogNotice.PresentFromMirror(geo);
+                            }
+                            // The mirrored LOG SCREEN (UIStateGeoscapeLog) is a separate, pull-model
+                            // surface: keep the universal mark the default arm used to give this kind.
+                            OpenUiRepaint.MarkDirty(entity.GetType(), geo, path);
                             break;
                         case Timing _:
                         case TimingInstanceData _: // the TimeAnchor scratch DTO

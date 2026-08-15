@@ -42,7 +42,18 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
 # with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
 # registration multiset (so sparse ids and many registrations per source file remain valid).
-# Updated deliberately 2026-08-15: L548 ADDED (a progress-only delta never rebuilds the top-right
+# Updated deliberately 2026-08-15: L550 ADDED (every host-only PRESENTATION CHANNEL is mirrored or
+# locally re-raised: GeoLogNotice.HostOnlyChannels is executed against the SHIPPED ASSEMBLY -- a
+# ClientDriven row must have a real IL call to its declared native presenter, a row served from mirrored
+# state must not be opted out in RailMeta, nothing may call the host-only GeoscapeLog.AddEntry, and the
+# anti-avalanche CURSOR is run in five directions with no game: join presents 0, a rebuild presents 0, an
+# append presents 1, the 50-cap front-trim still presents exactly 1, and a backwards log presents 0)
+# -- 349 -> 350 registrations, one new identity string. Nothing retired or amputated: L546's domain is
+# GeoWindowCoverage.HostAuthoritativeRaisers -- ModalType windows that MINT a journal position -- so the
+# centre-top status bar, a SECOND presentation channel that mints nothing and lives outside the journal,
+# was in no coverage table at all. That is how every "haven destroyed"/"site captured" notice showed on
+# the host and on no client for the life of the mod with every law green.
+# Earlier the same day: L548 ADDED (a progress-only delta never rebuilds the top-right
 # agenda strip: IL pins that RefreshAgendaTracker keys its TEARDOWN on a row-IDENTITY builder and never on
 # OpenUiRepaint.ScopeKey -- a generation that also moves on a ticking countdown -- and the gate is EXECUTED
 # in both directions with a real BumpScopeGenerations moving underneath an unchanged identity) -- 347 -> 348
@@ -128,7 +139,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Nothing retired or amputated: L154 owns the same seam's FLUSH (the change ships to the
 # CLIENTS this cycle) and never asked whether the peer that ACTED repaints itself, which is how every mark
 # site in the repo came to be an APPLY path and the host grew no research row for its own research.
-$expectedRegistrationDigest = 'd276d663bf056537a9cf5e5dbe3e9177f9e13e6cdf5d6a0a2b5afd35956e3a83'
+$expectedRegistrationDigest = '4799ab082800ff6f531973cdf22e5a3e5cf2fc5dd740587714fa17aec3652e1a'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

@@ -234,6 +234,7 @@ namespace Multiplayer.Network.Sync
         {
             IntentRail.Reset();
             ResearchSync.Reset();
+            GeoLogNotice.Reset();  // the status-bar cursor belongs to the session whose log it points into
             ManufactureSync.Reset();
             EquipSync.Reset();
             MistSync.Reset();
@@ -265,6 +266,7 @@ namespace Multiplayer.Network.Sync
         public void ResetForReloadBoundary()
         {
             ResearchSync.ResetForReloadBoundary();
+            GeoLogNotice.ResetForReloadBoundary();  // the transferred save replaced the log this cursor indexed
             ManufactureSync.ResetForReloadBoundary();
             EquipSync.ResetForReloadBoundary();
             TimeSync.ResetForReloadBoundary();

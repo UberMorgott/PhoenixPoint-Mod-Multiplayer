@@ -2197,7 +2197,8 @@ namespace Multiplayer.Network
         public void OnRevealAll(NetworkMessage msg)
         {
             Guid boundaryId;
-            try { (boundaryId, _) = MessageSerializer.DeserializeRevealAll(msg.Payload); }
+            long sentTicks;
+            try { (boundaryId, sentTicks) = MessageSerializer.DeserializeRevealAll(msg.Payload); }
             catch (Exception e)
             {
                 MpLog.LogWarning("[Multiplayer] RevealAll rejected: malformed payload (" + e.Message + ").");
@@ -2209,6 +2210,17 @@ namespace Multiplayer.Network
                 MpLog.LogWarning("[Multiplayer] RevealAll rejected: sender/phase is not authoritative.");
                 return;
             }
+            // DIAG ONLY (no behaviour change). The host calls PerformDeferredLift in the SAME frame it
+            // broadcasts RevealAll (:2783), so every client's lift trails the host's by the wire hop plus
+            // one client frame. The wire ticks were being deserialized and DISCARDED, so that lag was the
+            // one number no log ever carried — and it is exactly the "the host got in first" complaint.
+            if (MpDiag.On)
+                MpLog.Log("[MP][reveal] RevealAll hop: sent=" + new DateTime(sentTicks, DateTimeKind.Utc)
+                              .ToString("HH:mm:ss.fff") +
+                          " recv=" + DateTime.UtcNow.ToString("HH:mm:ss.fff") +
+                          " lagMs=" + (long)(DateTime.UtcNow - new DateTime(sentTicks, DateTimeKind.Utc))
+                              .TotalMilliseconds +
+                          " boundary=" + boundaryId.ToString("N").Substring(0, 8));
             MpLog.Log("[Multiplayer] OnRevealAll received → PerformDeferredLift");
             PerformDeferredLift();
         }

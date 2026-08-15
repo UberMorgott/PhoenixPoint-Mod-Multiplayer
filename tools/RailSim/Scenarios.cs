@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Base.Core;
 using Base.Serialization;
+using PhoenixPoint.Geoscape.Levels;
 using Multiplayer.Network.Sync;
 
 namespace RailSim
@@ -23,6 +25,69 @@ namespace RailSim
             yield return Pair("a-progress-tick-never-tears-down-the-agenda-strip",
                               AProgressTickNeverTearsDownTheAgendaStrip);
             yield return Pair("my-own-gesture-repaints-my-own-strip", MyOwnGestureRepaintsMyOwnStrip);
+            yield return Pair("a-joining-peer-never-replays-the-status-bar",
+                              AJoiningPeerNeverReplaysTheStatusBar);
+        }
+
+        /// <summary>L550 as an OBSERVABLE HISTORY, and the one property the law's per-call arms cannot
+        /// state: a WHOLE SESSION of status-bar notices, presented exactly once each across a join, a
+        /// reload and the 50-entry cap. The geoscape log rides as ONE blob that REBUILDS the entire list
+        /// on every apply, so a peer joining mid-campaign receives the whole history at once and every
+        /// later batch hands it that history again. The run below is that history: seed (join), three
+        /// idle re-applies of the identical log, three real events, a front-trim at the cap, and a batch
+        /// with nothing new. Total presented must equal the number of entries that were genuinely APPENDED
+        /// after the join — 4 — and never the 30 the join carried, which is the avalanche.</summary>
+        private static IEnumerable<string> AJoiningPeerNeverReplaysTheStatusBar(int seed)
+        {
+            long ticks = long.MinValue;
+            int atLast = 0;
+            var shown = new List<GeoscapeLogEntry>();
+
+            // The campaign this peer joins into: 30 entries, three per geoscape instant.
+            var log = new List<GeoscapeLogEntry>();
+            for (int i = 0; i < 30; i++) log.Add(Logged(1000 + i / 3));
+
+            int total = 0, onJoin = 0;
+            onJoin = GeoLogNotice.SelectNew(log, false, ref ticks, ref atLast, shown);  // the seed
+            bool seeded = true;
+
+            for (int idle = 0; idle < 3; idle++)                                        // identical rebuilds
+                total += GeoLogNotice.SelectNew(Rebuild(log), seeded, ref ticks, ref atLast, shown);
+
+            for (int ev = 0; ev < 3; ev++)                                              // three real events
+            {
+                log = Rebuild(log);
+                log.Add(Logged(2000 + ev));
+                total += GeoLogNotice.SelectNew(log, seeded, ref ticks, ref atLast, shown);
+            }
+
+            log = Rebuild(log).Skip(5).ToList();                                        // the 50-cap trim…
+            log.Add(Logged(3000));                                                      // …plus one event
+            total += GeoLogNotice.SelectNew(log, seeded, ref ticks, ref atLast, shown);
+
+            total += GeoLogNotice.SelectNew(Rebuild(log), seeded, ref ticks, ref atLast, shown); // quiet batch
+
+            if (onJoin != 0)
+                yield return "a-joining-peer-never-replays-the-status-bar: the join itself presented " +
+                             onJoin + " notice(s). The first sync after a join or a load must present " +
+                             "NOTHING — the blob it carries is history, not news.";
+            if (total != 4)
+                yield return "a-joining-peer-never-replays-the-status-bar: " + total + " notice(s) were " +
+                             "presented across the session where exactly 4 entries were appended after the " +
+                             "join. More means the rebuilt blob refired old entries (the centre-top bar " +
+                             "replaying the campaign); fewer means a real event went unseen, which is the " +
+                             "defect this channel was added to fix.";
+        }
+
+        private static List<GeoscapeLogEntry> Rebuild(List<GeoscapeLogEntry> src)
+        {
+            // Every apply rebuilds each entry with Activator + table fields, so object identity is worthless.
+            return src.Select(e => Logged(e.EventDate.TimeSpan.Ticks)).ToList();
+        }
+
+        private static GeoscapeLogEntry Logged(long ticks)
+        {
+            return new GeoscapeLogEntry { EventDate = TimeUnit.FromTimeSpan(TimeSpan.FromTicks(ticks)) };
         }
 
         /// <summary>L549 as an OBSERVABLE HISTORY, and the direction L548's history does not cover: there
