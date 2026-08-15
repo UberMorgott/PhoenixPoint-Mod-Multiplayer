@@ -87,6 +87,20 @@ namespace Multiplayer.Network.Sync
         private static readonly FieldInfo InfoBarContext =
             AccessTools.Field(typeof(UIModuleInfoBar), "_context");
 
+        // UIModuleVehicleSelection: private SetCrew(IEnumerable<GeoCharacter>, int):401, which forwards to
+        // AircraftCrewController.SetCrew:56 — the ONE place that ever switches
+        // UnitOnBoardElementController.LevelUpIndicator (:28) on, at AircraftCrewController.cs:127-139 off
+        // LevelProgression.HasNewLevel. Bound BY SIGNATURE like the two strips above, so a native overload
+        // change reports itself instead of silently resolving to something else.
+        private static readonly MethodInfo VehicleSelectionSetCrew =
+            AccessTools.Method(typeof(UIModuleVehicleSelection), "SetCrew",
+                new[] { typeof(System.Collections.Generic.IEnumerable<GeoCharacter>), typeof(int) });
+        // The vehicle the module is CURRENTLY drawing (SetVehicleInfo:294). Asked of the module rather than
+        // derived from the view state: the strip is a module, it outlives the state that opened it, and
+        // repainting anything other than what it is showing would be a guess.
+        private static readonly FieldInfo VehicleSelectionCurrent =
+            AccessTools.Field(typeof(UIModuleVehicleSelection), "_currentVehicle");
+
         /// <summary>The open state's OWN contextual-ability derivation, cached per state type. Deliberately
         /// resolved by NAME on whatever state is open instead of naming screens: the two states that drive
         /// the site menu build DIFFERENT lists — UIStateNothingSelected.GetContextualAbilities:682 is the
@@ -149,7 +163,110 @@ namespace Multiplayer.Network.Sync
             RefreshAgendaTracker(mods);
             RefreshInfoBar(geo, mods);
             RefreshSiteContextualMenu(geo, mods, view.CurrentViewState);
+            RefreshVehicleCrew(mods);
         }
+
+        /// <summary>
+        /// THE AIRCRAFT CREW STRIP — fourth citizen of the same gap, and the one the green level-up cross
+        /// lives on.
+        ///
+        /// THE REPORT (owner, 2026-08-15): a soldier levels up on one peer and the green cross appears on
+        /// that peer's crew strip alone; the ally sees it only after leaving the geoscape and coming back.
+        ///
+        /// IT WAS NEVER A REPLICATION DEFECT. <c>LevelProgression.HasNewLevel</c> is a plain stored public
+        /// bool (LevelProgression.cs:20, written at :90), it is a covered rail leaf
+        /// (docs/rail-baseline.txt: `LevelProgression [direct] covered=3/3`) and <c>LevelProgression</c> is
+        /// an audited kind that reaches <see cref="UiEventMap.Fire"/> and marks dirty. The state LANDS on
+        /// every peer. Nothing REPAINTS it: the indicator is painted in exactly one place
+        /// (<c>AircraftCrewController.SetCrew</c>:127-139, off <c>UIModuleVehicleSelection.SetCrew</c>:401),
+        /// the universal repaint re-enters the open VIEW STATE, and the crew strip is a MODULE — no
+        /// <see cref="UiNativeRepaint.Table"/> row can reach it, and <c>UIModuleVehicleSelection</c> had
+        /// ZERO references anywhere in src/. Will and Health only survived because they are
+        /// <c>BaseStat</c>s: RailTypes.EchoStatChange re-raises <c>StatChangeEvent</c>, which reaches
+        /// <c>RefreshCrewBars</c> — sliders only, never the indicator.
+        ///
+        /// SO THE MODULE'S OWN NATIVE PAINT IS RE-RUN, nothing is hand-drawn, and only when the strip is
+        /// actually up and something it draws actually changed — <c>SetCrew</c> RECREATES its elements
+        /// (UIUtil.EnsureActiveComponentsInContainer + a full re-subscribe), so running it on every rail
+        /// flush would be the L492 flicker again at ~10 Hz. Two bounds, both cheap:
+        ///   • the crew panel must be ACTIVE IN HIERARCHY — a module whose state is not up is switched off
+        ///     by the game itself (UIModuleBehavior.SetStateID:34), and <c>SetCrew</c> would re-activate
+        ///     the panel, so this also stops the repaint from revealing a strip the game hid;
+        ///   • <see cref="CrewSignature"/> must have changed, through the same one gate the other strips
+        ///     use (<see cref="RepaintNeeded"/>).
+        /// </summary>
+        private static void RefreshVehicleCrew(GeoscapeModulesData mods)
+        {
+            if (VehicleSelectionSetCrew == null || VehicleSelectionCurrent == null) return;
+            var module = mods.VehicleSelectionModule;
+            if (module == null)
+            {
+                if (_loggedFailures.Add("VehicleSelectionMissing"))
+                    MpLog.LogWarning("[Multiplayer][rail] GeoscapeModulesData.VehicleSelectionModule is null — " +
+                                     "the aircraft crew strip has no handle to repaint, so a level-up cross or a " +
+                                     "crew change will only appear on a screen re-enter (logged once)");
+                return;
+            }
+            try
+            {
+                var crew = module.CrewController;
+                if (crew == null || !crew.gameObject.activeInHierarchy) return; // strip not up: nothing open to repaint
+                var vehicle = VehicleSelectionCurrent.GetValue(module) as GeoVehicle;
+                // Not ours = the module drew DisableCrew():407, and SetCrew would switch the panel back on.
+                if (vehicle == null || !vehicle.IsOwnedByViewer) return;
+                if (!RepaintNeeded("crew", CrewSignature(vehicle))) return;
+                // law 8: the native paint re-subscribes stat events and can fire UI events a capture seam hears.
+                using (SyncApplyScope.Enter())
+                    VehicleSelectionSetCrew.Invoke(module, new object[] { vehicle.Units, vehicle.MaxCharacterSpace });
+            }
+            catch (Exception ex)
+            {
+                if (_loggedFailures.Add("VehicleCrew"))
+                    MpLog.LogWarning("[Multiplayer][rail] aircraft crew-strip repaint threw — the level-up cross " +
+                                     "and crew changes may stay stale until a screen re-enter (logged once): " + ex);
+            }
+        }
+
+        /// <summary>EVERYTHING <c>AircraftCrewController.SetCrew</c> PAINTS AND THE STAT ECHO DOES NOT, AS ONE
+        /// STRING — read off :100-152 slot by slot: the crew SET and its order, each character's display name,
+        /// occupied space, level, corruption, and <c>LevelProgression.HasNewLevel</c> (the green cross itself),
+        /// plus the vehicle's slot count. Health/stamina/corruption BARS are deliberately absent: they are
+        /// <c>BaseStat</c>s and repaint natively through RailTypes.EchoStatChange → RefreshCrewBars, so
+        /// including them would rebuild the whole strip on every point of damage. Returns null when the model
+        /// cannot be read; null forces the repaint, so an unreadable model costs at worst a flicker and never
+        /// a stale cross (REACTIVITY is a hard mandate).</summary>
+        private static string CrewSignature(GeoVehicle vehicle)
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.Append(vehicle.MaxCharacterSpace).Append('|');
+                foreach (var c in vehicle.Units)
+                    sb.Append(c == null ? "-" : CrewSlotKey(c.DisplayName, c.OccupingSpace, c.LevelProgression,
+                        c.CharacterStats == null ? -1 : c.CharacterStats.Corruption.IntValue)).Append(',');
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                if (_loggedFailures.Add("CrewSignature"))
+                    MpLog.LogWarning("[Multiplayer][rail] crew-strip signature threw — the strip falls back to " +
+                                     "repainting on every flush (logged once): " + ex);
+                return null;
+            }
+        }
+
+        /// <summary>ONE CREW SLOT AS THE STRIP DRAWS IT. Separated from <see cref="CrewSignature"/> so RailCheck
+        /// L512 can execute the level-up half without a live <c>GeoVehicle</c> (a Unity object whose
+        /// <c>MaxCharacterSpace</c> dereferences its def). <c>HasNewLevel</c> — the green cross — is read
+        /// BEFORE <c>Level</c> and <c>Level</c> is asked only when the def is there, because the level is
+        /// DERIVED (<c>Def.GetLevel(Experience)</c>) and an unresolvable def must not cost the cross its
+        /// key.</summary>
+        internal static string CrewSlotKey(string name, int space,
+                                           PhoenixPoint.Common.Entities.Characters.LevelProgression level,
+                                           int corruption) =>
+            (name ?? "?") + "@" + space + "@" +
+            (level == null ? "-" : (level.HasNewLevel ? "!" : "") + (level.Def == null ? "?" : level.Level.ToString())) +
+            "@" + corruption;
 
         /// <summary>Top-right activity strip. The flag makes UpdateData() take its InitialSetup branch
         /// (UIModuleFactionAgendaTracker.cs:186-190 → :144), i.e. the module's own full rebuild from
