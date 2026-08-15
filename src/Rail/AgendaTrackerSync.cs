@@ -1,5 +1,9 @@
 using System.Collections.Generic;
 using Base.Serialization.General;
+using PhoenixPoint.Common.Entities.Items;
+using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Entities.PhoenixBases;
+using PhoenixPoint.Geoscape.Entities.Research;
 
 namespace Multiplayer.Network.Sync
 {
@@ -34,5 +38,29 @@ namespace Multiplayer.Network.Sync
         /// reload boundary (IdentityResolver.cs:205-206) — the transferred save has its own agenda
         /// rows, so nothing is lost in the gap.</summary>
         internal static void ResetForReloadBoundary() => State.Rows.Clear();
+
+        /// <summary>Stable row key for a tracker element's TrackedObject. Reuses the SAME identity
+        /// each system's own intent-capture code already addresses that task by — not a new scheme:
+        /// Research → ResearchElement.ResearchID; Manufacturing → ManufactureQueueItem's
+        /// ManufacturableItem.RelatedItemDef.Guid; Facility → GeoSite.SiteId + GeoPhoenixFacility.FacilityId;
+        /// Vehicle (travel/exploration) → IdentityResolver's "V#<id>@<ownerGuid>" root ref.
+        /// Returns null for an unrecognized TrackedObject shape (row is left unsynced, native computation applies).</summary>
+        internal static string RowKey(object trackedObject)
+        {
+            switch (trackedObject)
+            {
+                case ResearchElement research:
+                    return "Research:" + research.ResearchID;
+                case ItemManufacturing.ManufactureQueueItem queueItem:
+                    return "Manufacturing:" + queueItem.ManufacturableItem?.RelatedItemDef?.Guid;
+                case GeoPhoenixFacility facility:
+                    return "Facility:" + facility.PxBase?.Site?.SiteId + ":" + facility.FacilityId;
+                case GeoVehicle vehicle:
+                    return (vehicle.Travelling ? "AircraftTravel:" : "AircraftExploration:")
+                        + IdentityResolver.RootRef(vehicle);
+                default:
+                    return null;
+            }
+        }
     }
 }
