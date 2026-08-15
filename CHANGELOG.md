@@ -3,6 +3,60 @@
 Player-facing notes for each release. Releases before `0.9.5-beta` are documented on the
 [GitHub releases page](https://github.com/UberMorgott/PhoenixPoint-Mod-Multiplayer/releases).
 
+## 0.9.16-beta
+
+A patch release on top of `0.9.15-beta`. Same mod, same install — replace the `Multiplayer` folder
+in your `Mods` directory. **Every player must run the same version**; a mismatch is reported when
+you join. This one changes what the machines send each other, so `0.9.16-beta` and `0.9.15-beta`
+cannot play together at all.
+
+This round is almost entirely about the pop-up windows the game puts in front of you, and about
+the moment a session finishes loading. Windows that only ever appeared for the host now appear
+for everybody, an answer given by one player no longer yanks a window away from the others unless
+it genuinely has to, and nobody drops into the globe before their own screen is ready.
+
+### Pop-up windows
+
+- **The research-completed window reaches the guests.** Finishing a project raised the window on
+  the host and dropped it on the way out; every player now gets the same announcement.
+- **Twelve more windows now travel to every peer.** Mission outcome reports and the Pandoran
+  reconnaissance line were previously written off as host-only; they are relayed like everything
+  else. More generally, a window is only allowed to be skipped when the thing it carries genuinely
+  cannot be described over the wire — it is no longer enough to declare it unsendable.
+- **Answering a window no longer closes it for everybody by default.** Reading a report and
+  pressing OK is your own business; the other players keep their copy and can read it in their
+  own time.
+- **Except when the answer disposes of something shared** — dismissing a soldier or a vehicle, or
+  handing out a purchased asset. Those close on every machine the instant anyone answers, so two
+  players cannot act on the same soldier twice.
+- **Two identical prompts can no longer be mistaken for each other.** A window is now identified by
+  what raised it rather than by how it looks, an answer is applied exactly once, and it counts
+  whether it came in over the session channel or was pressed locally.
+
+### The geoscape
+
+- **Centre-screen status notices show up for everyone.** The banner the game throws across the
+  middle of the globe is re-raised on each peer instead of being seen only where it originated.
+- **The agenda strip stops rebuilding itself on the clock.** It used to tear itself down on every
+  progress tick; it now redraws when its rows actually change, repaints immediately for the player
+  whose own click caused the change, and rebuilds any summary the incoming update made stale
+  without waiting for a further message.
+
+### Loading into a session
+
+- **Nobody enters the globe early.** The loading curtain is now held on each machine until that
+  machine has actually rendered its first frame, rather than lifting on a shared signal that some
+  peers were not ready for.
+
+### Known issues
+
+- The host's own research row is still sometimes missing from the agenda strip. Diagnostics are
+  shipped in this build to identify it; a capture from a real session is still needed.
+- `AlienResearchBrief` and the interception windows are still host-only. Nothing about their
+  contents can be sent yet, so they remain deliberately skipped.
+- Timed status ribbons (`ShowTimedEventMessage`) still do not travel — the game raises them with
+  no field that can be put on the wire.
+
 ## 0.9.15-beta
 
 A patch release on top of `0.9.14-beta`. Same mod, same install — replace the `Multiplayer` folder
