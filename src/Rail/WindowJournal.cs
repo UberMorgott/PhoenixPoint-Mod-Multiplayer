@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace Multiplayer.Network.Sync
@@ -56,12 +56,25 @@ namespace Multiplayer.Network.Sync
         /// <summary>The declaration table, and the ONLY place a family's scope may be written. No
         /// `if (family == …)` anywhere else in the codebase (§A.5).
         ///
-        /// THIS TABLE ANSWERS ONE QUESTION ONLY: does MY dismissal close YOUR copy? Practically every
-        /// window in this game is INFORMATIONAL and PER-PEER, so practically every family is LOCAL, and
-        /// that is the owner's decision (2026-08-15), not an accident of coverage. It does NOT answer
-        /// "may my ANSWER reach the host" — that is a property of what the answer MUTATES, it is declared
-        /// per <c>ModalType</c> in <c>GeoWindowCoverage.AnswerMutatesSharedState</c>, and fusing the two
-        /// is what made a client's Accept on <c>FactionSoldierJoin</c> a no-op (L552).
+        /// REDUCED 2026-08-15 TO ITS ONE IRREDUCIBLE JOB (L556). It used to be the WHOLE of "does MY
+        /// dismissal close YOUR copy", and that is why a soldier accepted at a haven left the offer open on
+        /// every other peer: every modal in the game is the single family <c>UIStateGeoModal</c>, so no
+        /// name-keyed table could ever separate one modal from another. The question is now DERIVED from the
+        /// RAISE — <c>GeoModalMirror.DismissalIsGlobal</c> over
+        /// <c>GeoModalMirror.AnswerDisposesSharedAsset</c> — which classifies a window the game, a DLC or
+        /// TFTV adds tomorrow with no edit anywhere.
+        ///
+        /// WHAT SURVIVES HERE, AND WHY IT CANNOT BE DELETED: a state that carries NO DESCRIBABLE PAYLOAD.
+        /// <c>UIStateRosterDeployment</c> is not published on 0xB7 at all — each peer's own game raises the
+        /// deployment-preparation screen behind the mission launch — so there is no <c>Raise</c> to derive
+        /// anything from and the family NAME really is all there is to key on. That is the entire remaining
+        /// content of this table: one row, for the one window whose dismissal scope no per-raise derivation
+        /// can reach. A new MODAL must never be added here; if its answer disposes of something the campaign
+        /// owns, the derivation already says so.
+        ///
+        /// IT STILL DOES NOT ANSWER "may my ANSWER reach the host" — that is a property of what the answer
+        /// MUTATES (<c>GeoModalMirror.AnswerMutatesSharedState</c>), and fusing the two is what made a
+        /// client's Accept on <c>FactionSoldierJoin</c> a no-op (L552).
         ///
         /// EVERY KEY HERE MUST BE THE NAME OF A TYPE THAT EXISTS (L552 arm a). <see cref="FamilyOf"/> is
         /// <c>stateType.Name</c>, so a key naming no type is a declaration no window can ever carry.
@@ -76,7 +89,7 @@ namespace Multiplayer.Network.Sync
         ///     holds a copy to dismiss. Nothing beats not raising it.
         ///   • THE DEPLOYMENT-PREPARATION SCREEN, by this table: <c>UIStateRosterDeployment</c> is a real
         ///     state type of its own, it is the family <c>DeploymentWindowClose</c>:532 hands to
-        ///     <c>GeoModalMirror.HostVoidFamily</c>, and the host-minted void removes it from every
+        ///     <c>GeoModalMirror.HostVoidRaise</c>, and the host-minted void removes it from every
         ///     peer's backlog.</summary>
         private static readonly Dictionary<string, DismissScope> FamilyScope =
             new Dictionary<string, DismissScope>(StringComparer.Ordinal)

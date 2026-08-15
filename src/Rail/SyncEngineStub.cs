@@ -224,6 +224,13 @@ namespace Multiplayer.Network.Sync
             // A research-complete window this peer latched while it was off the map (P13: never yank a
             // player out of an unrelated screen) opens here, the moment it is back — no rail traffic.
             ResearchSync.ClientTick(_engine);
+            // client-only inside, and it must stay IMMEDIATELY ahead of the flush (L557): the rail writes
+            // model state as FIELDS, so the game's own change events never fire here and every stored
+            // rollup that only an event refreshes is frozen at zero — which is why the manufacture row's
+            // ETA was uncomputable and the agenda strip destroyed the row it had just built. This rebuilds
+            // the armed rollups from the batch's own touched paths, so the flush below paints the
+            // CORRECTED value in the same frame rather than a stale one.
+            DerivedAggregateRefresh.ClientTick(_engine);
             t = RailCost.Now();
             OpenUiRepaint.FlushIfDirty();
             RailCost.Charge("repaint", t);

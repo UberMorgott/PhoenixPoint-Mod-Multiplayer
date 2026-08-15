@@ -531,6 +531,85 @@ namespace Multiplayer.Network.Sync
             return state != null && _raiseTags.TryGetValue(state, out tag) ? tag.Id : null;
         }
 
+        /// <summary>The journal position a live window IS, or 0 when this peer cannot tie it to a raise.
+        /// The exact inverse of <see cref="RaiseTagFor"/>, spelled here so the void path names ONE RAISE
+        /// instead of the first unread entry that happens to share a family name (L556 arm g).</summary>
+        internal static uint JournalPosOf(object state)
+        {
+            string tag = RaiseTagOf(state);
+            return tag != null && tag.Length > 1 && tag[0] == 'j' &&
+                   uint.TryParse(tag.Substring(1), out uint pos) ? pos : 0u;
+        }
+
+        /// <summary>The DATA a window's answer is about, for the two kinds this surface can name — the same
+        /// two <see cref="IdentityOf"/> switches on, so "what is this window about" has one spelling. Null
+        /// for everything else, which <c>GeoModalMirror.Describe</c> answers as
+        /// <c>DataShape.None</c>: a state with no describable payload is classified by its FAMILY or not at
+        /// all.</summary>
+        internal static object AnswerDataOf(object state) =>
+            state is UIStateGeoModal modal ? modal.ModalData
+            : state is UIStateAssetDeployment deploy ? deploy.DeployBind
+            : (object)null;
+
+        /// <summary>
+        /// CLOSE THIS PEER'S COPY OF A RAISE THE HOST VOIDED — the half of a void that
+        /// <c>WindowJournal.ApplyVoid</c> cannot do, because that one removes an entry the peer has NOT read
+        /// and the reported window had been read and was on screen.
+        ///
+        /// THE GAME'S OWN DOORS AND NO OTHERS. A window that never entered is taken out of
+        /// <c>_viewStateSwitchRequests</c> through <see cref="TakeQueued"/> — the same spelling an answer
+        /// uses, so the durable carrier is released exactly once. A window that IS on screen leaves through
+        /// <c>GeoscapeView.FinishQueriedState</c>:2164, which is what the player's own Esc reaches.
+        ///
+        /// SILENCED, because this peer answered nothing. <c>_durableSilentExit</c> already exists for that
+        /// exact shape and suppresses <see cref="SendAdvance"/>, so a client whose copy is closed BY the
+        /// void does not turn round and send the host an answer for a window the host has already answered.
+        /// (Were it to, the host would refuse it in words: the identity names one raise and that raise is
+        /// gone from both the current slot and the pending list.)
+        ///
+        /// Matched by the PER-RAISE TAG, never by family or payload: two structurally identical windows of
+        /// one family are two raises, and only the answered one may close.
+        /// </summary>
+        internal static bool CloseVoidedRaise(uint journalPos)
+        {
+            string tag = RaiseTagFor(journalPos);
+            if (tag == null) return false;
+            try
+            {
+                var view = GenericApplier.StartedGeoLevel()?.View;
+                var query = view == null ? null : SwitchQueryField?.GetValue(view) as GeoscapeViewSwitchQuery;
+                if (query == null) return false;
+                bool closed = false;
+                // QUEUED FIRST. Doing it before the on-screen arm means the list this walks cannot be
+                // mutated underneath by whatever FinishQueriedState pushes next.
+                if (WindowOrder.RequestsField?.GetValue(query) is IList<GeoscapeViewStateSwitchRequest> pending)
+                    for (int i = pending.Count - 1; i >= 0; i--)
+                        if (string.Equals(RaiseTagOf(pending[i]?.State), tag, StringComparison.Ordinal))
+                        {
+                            TakeQueued(pending, i);
+                            closed = true;
+                        }
+                var current = CurrentRequestField?.GetValue(query) as GeoscapeViewStateSwitchRequest;
+                if (string.Equals(RaiseTagOf(current?.State), tag, StringComparison.Ordinal))
+                {
+                    _durableSilentExit = true;
+                    try { view.FinishQueriedState(); }
+                    finally { _durableSilentExit = false; }
+                    closed = true;
+                }
+                if (closed)
+                    MpLog.Log("[MP][windows] closed this peer's copy of voided raise " + tag + " — another " +
+                              "peer answered it and the decision is taken for everybody");
+                return closed;
+            }
+            catch (Exception ex)
+            {
+                MpLog.LogError("[MP][windows] could not close this peer's copy of voided raise " + tag +
+                               " — the window stays up and will be refused if it is answered: " + ex);
+                return false;
+            }
+        }
+
         /// <summary>PURE (L553). Why a window this peer DECLARES shared still has no identity. Two different
         /// defects wore one silent null until 2026-08-15, and the send sites say which one they hit.</summary>
         internal static string IdentityRefusal(bool hasShape, bool hasRaiseTag) =>
@@ -977,6 +1056,11 @@ namespace Multiplayer.Network.Sync
             pending.RemoveAt(at);
             OccurrenceId occurrence;
             if (TryGetDurable(request, out occurrence)) UntrackDurableNativeCarrier(request, occurrence);
+            // AND IT CLOSES ON EVERYBODY (L556), if answering it disposed of something the campaign owns.
+            // LAST, and after the removal, on purpose: the void's own close walks this very list, so the
+            // answered request must already be out of it. Host-gated inside HostVoidRaise; a client reaching
+            // here (through CloseVoidedRaise) mints nothing.
+            GeoModalMirror.HostVoidRaise(request?.State);
         }
 
         // ─── CLIENT: the capture seam (law 4a, presentation) ───────────────
@@ -1142,8 +1226,30 @@ namespace Multiplayer.Network.Sync
         [HarmonyPatch(typeof(GeoscapeView), nameof(GeoscapeView.FinishQueriedState))]
         internal static class FinishQueriedStateCapture
         {
+            /// <summary>The state the prefix saw in the current slot, carried to the postfix. The HOST's
+            /// void (L556) must be minted AFTER the native call has cleared that slot, or the close the
+            /// void performs would re-enter this very method over a window the game is already closing.</summary>
+            private static object _closing;
+
             private static void Prefix(GeoscapeView __instance)
-            { if (!_durableSilentExit) { MarkDurableDismissed(__instance); SendAdvance(__instance); } }
+            {
+                if (_durableSilentExit) return;
+                MarkDurableDismissed(__instance);
+                var query = SwitchQueryField?.GetValue(__instance) as GeoscapeViewSwitchQuery;
+                _closing = (CurrentRequestField?.GetValue(query) as GeoscapeViewStateSwitchRequest)?.State;
+                SendAdvance(__instance);
+            }
+
+            /// <summary>THE ON-SCREEN ANSWER SEAM (L556). Every answer of the window that IS on screen leaves
+            /// through here — the host's own click, and the relayed answer the host runs through
+            /// <c>modal.FinishDialog</c>:82. If it disposed of something the campaign owns, the raise is
+            /// voided and every other peer's copy closes.</summary>
+            private static void Postfix()
+            {
+                var state = _closing;
+                _closing = null;
+                if (state != null) GeoModalMirror.HostVoidRaise(state);
+            }
         }
 
         /// <summary>Half three, and the ONLY blocking seam in this family: the asset-deployment prompt's one

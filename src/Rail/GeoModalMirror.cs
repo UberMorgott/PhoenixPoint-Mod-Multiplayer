@@ -88,7 +88,9 @@ namespace Multiplayer.Network.Sync
         /// last-writer guard, so a mid-session reload must NOT reset it (rca-3 contract, same as
         /// <see cref="EventPopup.Reset"/>). The park queue DOES go: a parked raise names an entity in the
         /// graph that teardown just threw away.</summary>
-        public static void Reset() { Seq.Reset(); Park.Clear(); }
+        // _voided is session-scoped for the same reason the journal is: positions restart at 1 on a new
+        // session, so a stale fuse would refuse the FIRST void of the next campaign.
+        public static void Reset() { Seq.Reset(); Park.Clear(); _voided.Clear(); }
         internal static void ClearDurableCarrierState() => Park.Clear();
 
         // ─── THE PAYLOAD (host→all, surface 0xB7) ──────────────────────────
@@ -437,6 +439,81 @@ namespace Multiplayer.Network.Sync
         /// this.</summary>
         internal static bool AnswerMutatesSharedState(object modalData) => NamesEntity(Describe(modalData));
 
+        /// <summary>The rail classes a window can be ABOUT that the campaign OWNS AND MOVES, as Types so a
+        /// rename cannot silently empty the set. A soldier and a vehicle are assets the team disposes of; a
+        /// GeoSite / GeoFaction / GeoHavenZone is a feature of the world that exists for everybody anyway
+        /// and is never "given" to anyone by a window.</summary>
+        private static readonly Type[] RosterAssetClasses =
+        {
+            typeof(PhoenixPoint.Geoscape.Entities.GeoCharacter),
+            typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle),
+        };
+
+        /// <summary>PURE (RailCheck L556). Does the raise name a ROSTER ASSET? Answered off the WIRE alone:
+        /// the generic EntityRef arm puts the payload's own class in <c>Keys[0]</c>
+        /// (<see cref="Describe"/>:310) because the peer's data-bind has to cast on it, so this needs no live
+        /// object and RailCheck/RailSim execute it headless.
+        /// ponytail: an exact class match — a SUBCLASS of GeoCharacter added by a mod would answer NO and
+        /// its window would stay per-peer, which is the recoverable direction (a window that stays costs a
+        /// click; one that vanishes is a decision the player was never asked about). The lever is this
+        /// array.</summary>
+        internal static bool NamesRosterAsset(string[] keys)
+        {
+            string cls = keys != null && keys.Length > 0 ? keys[0] : null;
+            if (string.IsNullOrEmpty(cls)) return false;
+            foreach (var t in RosterAssetClasses) if (cls == t.FullName) return true;
+            return false;
+        }
+
+        /// <summary>PURE (RailCheck L556). DOES ANSWERING THIS RAISE DISPOSE OF SOMETHING THE CAMPAIGN OWNS
+        /// — i.e. is the answer a decision taken ONCE, for everybody?
+        ///
+        /// THIS IS THE DISMISSAL QUESTION, and it is deliberately NARROWER than
+        /// <see cref="AnswerMutatesSharedState"/>'s AUTHORITY question (L552): a window may name a
+        /// replicated entity and still decide nothing about it. Two rungs, both the rail's own grammar and
+        /// neither of them a list of windows:
+        ///   1. <see cref="DataShape.AssetDeploy"/> — the shape IS "put this asset somewhere", and its
+        ///      answer is <c>GeoPhoenixFaction.DeployAsset</c> whichever half of the bind is filled. Its
+        ///      entity ref is OPTIONAL (a manufactured aircraft is named by a def, not by a GeoCharacter),
+        ///      which is exactly why <see cref="NamesEntity"/> alone cannot carry this question.
+        ///   2. a NAMED ROSTER ASSET — <see cref="NamesEntity"/> (the repo's one definition of "this payload
+        ///      names a rail entity", so no second opinion is opened) AND the named class is one the campaign
+        ///      moves. <c>FactionSoldierJoin</c>'s modalData is the offered <c>GeoCharacter</c> and
+        ///      <c>HavenMissionUtil</c>:59 answers Confirm with <c>reward.Apply</c>: once anyone accepts, the
+        ///      unit is in the shared roster and every other copy of the offer is asking for a decision that
+        ///      no longer exists.
+        ///
+        /// AND WHAT IT LEAVES ALONE. <c>ModalType.PandoranRevealResult</c> names a <c>GeoSite</c> — a map
+        /// feature, not an asset — and <c>GeoscapeView.ModalResultCallback</c>:843-845 answers it with an
+        /// empty <c>break</c>: nothing is decided, so nothing may be closed for anyone else. Research
+        /// completion, the diplomacy brief and a null payload are informational by SHAPE and never reach
+        /// rung 2 at all.</summary>
+        internal static bool AnswerDisposesSharedAsset(Raise p) =>
+            p.Shape == DataShape.AssetDeploy || (NamesEntity(p) && NamesRosterAsset(p.Keys));
+
+        /// <summary>PURE (RailCheck L556). DOES ANSWERING THIS WINDOW CLOSE IT ON EVERY PEER?
+        ///
+        /// The owner's rule, 2026-08-15: "first to choose, it disappears for the others" for a window whose
+        /// answer mutates shared state; a purely informational window is dismissed by each player
+        /// individually. Two arms, and the FIRST is not redundant:
+        ///   • the family's DECLARED scope (§A.5) — the arm for a state that carries NO describable payload
+        ///     at all, which no per-raise derivation can classify. That is exactly one window, the
+        ///     deployment-preparation screen (<c>UIStateRosterDeployment</c>), and it is why
+        ///     <c>WindowJournal.FamilyScope</c> still exists rather than being deleted by this method.
+        ///   • the RAISE — <see cref="AnswerDisposesSharedAsset"/>, derived, so a window the game, a DLC or
+        ///     TFTV adds tomorrow is classified with no edit anywhere.
+        ///
+        /// EXCEPT THE PER-PEER ANSWER CLASS, which is derived too
+        /// (<c>GeoWindowCoverage.IsPerPeerAnswer</c>, asked of the game's own <c>GetMissionBriefModal</c>):
+        /// every peer answers a mission brief / outcome for itself, so one player declining is "I am busy"
+        /// and must never be that decline taken for the whole team.
+        ///
+        /// NO QUORUM. A global dismissal is one host-minted void travelling one way. Nothing waits for a
+        /// peer to act, and a peer that never answers anything is never waited on.</summary>
+        internal static bool DismissalIsGlobal(string family, Raise p, bool perPeerAnswer) =>
+            WindowJournal.ScopeOf(family) == DismissScope.Global ||
+            (!perPeerAnswer && AnswerDisposesSharedAsset(p));
+
         /// <summary>The object a payload's <c>Ref</c> NAMES: the data object itself for
         /// <see cref="DataShape.EntityRef"/>, the asset inside the bind for
         /// <see cref="DataShape.AssetDeploy"/>. <see cref="HostBroadcast"/> resolves the derived name back to
@@ -500,16 +577,21 @@ namespace Multiplayer.Network.Sync
         /// <summary>THE HOST-MINTED VOID (§A.5). A GLOBAL dismissal removes an entry from every peer's
         /// UNPRESENTED backlog. Explicit by design: without a void record, two peers time out differently and
         /// diverge (FIX gap-fill, §2.5). Only the host mints one; a client applies what it is sent.</summary>
-        internal static void HostMintVoid(uint journalPos, string family)
+        internal static void HostMintVoid(uint journalPos, string family, Raise p, bool perPeerAnswer)
         {
             if (!HostMayPublish()) return;
-            if (WindowJournal.ScopeOf(family) != DismissScope.Global)
+            if (!DismissalIsGlobal(family, p, perPeerAnswer))
             {
                 MpLog.LogWarning("[MP][windows] refused to void position " + journalPos + " for family '" +
-                                 (family ?? "<null>") + "': its declared dismissal scope is LOCAL. A LOCAL " +
-                                 "dismissal removes only the dismissing peer's own entry");
+                                 (family ?? "<null>") + "': its dismissal is LOCAL — the family declares no " +
+                                 "global scope and answering shape=" + p.Shape + " disposes of no shared " +
+                                 "asset. A LOCAL dismissal removes only the dismissing peer's own entry");
                 return;
             }
+            // ANSWER-ONCE AND THE VOID AGREE, and this is the line that makes them agree: a position is
+            // voided AT MOST ONCE per session. The close the void performs re-enters this peer's own
+            // FinishQueriedState seam, which would otherwise mint the very void it is the consequence of.
+            if (!_voided.Add(journalPos)) return;
             var engine = NetworkEngine.Instance;
             if (engine == null) return;
             uint seq = Seq.Next(SurfaceIds.GeoModalRaise);
@@ -521,16 +603,36 @@ namespace Multiplayer.Network.Sync
                       "', scope GLOBAL) seq=" + seq);
         }
 
-        /// <summary>THE HOST'S CALL SITE HELPER: void whatever unread position this family holds, if the
-        /// family is GLOBAL and this peer is the host. It exists so a dismissal site (a native-queue sweep,
-        /// an answered window) never has to touch <see cref="WindowJournal"/> itself — a site that evaluates
-        /// GAME state per peer must not be able to remove a journal entry, only to ask the host to void
-        /// one (L526 arm d).</summary>
-        internal static void HostVoidFamily(string family)
+        /// <summary>Session-scoped, host-side: the positions this host has already voided. See
+        /// <see cref="HostMintVoid"/> — it is a re-entrancy fuse, not a ledger, and nothing durable.</summary>
+        private static readonly HashSet<uint> _voided = new HashSet<uint>();
+
+        /// <summary>THE ONE CALL SITE HELPER (L556): a window was just answered or dropped HERE — if its
+        /// dismissal is global, void THAT RAISE on every peer.
+        ///
+        /// IT NAMES THE RAISE, NEVER THE FAMILY. Its predecessor took a family NAME and handed it to
+        /// <c>WindowJournal.FindUnread</c>, which returns the FIRST unread entry of that name — so with two
+        /// unread windows of one family it voided the wrong one. That was latent while exactly one family
+        /// could mint a void and goes live the moment every shared window can. Every raise has carried a
+        /// per-raise tag since <c>4c3d278</c> (<see cref="WindowQueueSync.RaiseTagFor"/> over the host
+        /// journal position, worn by the host's own queued state at the mint seam), so the position is read
+        /// off THE ANSWERED WINDOW ITSELF. The family lookup survives only as the fallback for a host window
+        /// that carries no tag, where the name really is all there is.
+        ///
+        /// It exists so a dismissal site (a native-queue sweep, an answered window) never has to touch
+        /// <see cref="WindowJournal"/> itself — a site that evaluates GAME state per peer must not be able
+        /// to remove a journal entry, only to ask the host to void one (L526 arm d).</summary>
+        internal static void HostVoidRaise(object state)
         {
-            if (!HostMayPublish() || WindowJournal.ScopeOf(family) != DismissScope.Global) return;
-            uint pos = WindowJournal.FindUnread(family);
-            if (pos != 0) HostMintVoid(pos, family);
+            if (state == null || !HostMayPublish()) return;
+            string family = WindowJournal.FamilyOf(state.GetType());
+            var p = Describe(WindowQueueSync.AnswerDataOf(state));
+            bool perPeer = state is UIStateGeoModal modal &&
+                           GeoWindowCoverage.IsPerPeerAnswer(modal.ModalType, modal.ModalData);
+            if (!DismissalIsGlobal(family, p, perPeer)) return;
+            uint pos = WindowQueueSync.JournalPosOf(state);
+            if (pos == 0) pos = WindowJournal.FindUnread(family);
+            if (pos != 0) HostMintVoid(pos, family, p, perPeer);
         }
 
         /// <summary>[seq:u32][kind:u8 = 2][journalPos:u32] and nothing else — a void names a position, not a
@@ -547,21 +649,24 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>Remove it from the backlog. Same code on host and client — the host applies its own void
-        /// through here so both roles converge on ONE implementation rather than on two that must agree.
+        /// <summary>Remove it from the backlog AND close the copy that is already up. Same code on host and
+        /// client — the host applies its own void through here so both roles converge on ONE implementation
+        /// rather than on two that must agree.
         ///
-        /// AN ALREADY-OPEN COPY closes through the game's own door, and that door is already wired: the
-        /// repaint below re-runs the open geoscape screen, which sweeps the unservable window out of the
-        /// native queue (src/Rail/OpenUiRepaint.cs:969 → DeploymentWindowClose.DropUnservableQueued) and
-        /// closes an open brief with <c>view.ResetViewState()</c> + <c>view.FinishQueriedState()</c>
-        /// (src/Rail/DeploymentWindow.cs:462-470, reached from src/Rail/UiEventMap.cs:456). No second close
-        /// path is minted here.</summary>
+        /// BOTH HALVES ARE NEEDED AND ONLY THE FIRST USED TO EXIST. <see cref="WindowJournal.ApplyVoid"/>
+        /// removes an UNREAD entry, and the window the 2026-08-15 report was about was not unread: the other
+        /// peers had already read it — it was on their screens, still offering a soldier somebody had
+        /// accepted. <see cref="WindowQueueSync.CloseVoidedRaise"/> is the other half, and it closes the copy
+        /// through THE GAME'S OWN doors and no others (take it out of <c>_viewStateSwitchRequests</c> if it
+        /// never entered; <c>GeoscapeView.FinishQueriedState</c> if it is on screen), silenced so this peer
+        /// does not then emit an answer to a window it never answered (L556 arm i).</summary>
         internal static void ApplyVoidLocally(uint journalPos)
         {
             // ASKED BEFORE THE REMOVAL: the void names a position and carries no family, so the family is
             // this peer's own journal's answer and it stops existing one line below.
             string family = WindowJournal.FamilyAt(journalPos);
             bool removed = WindowJournal.ApplyVoid(journalPos);
+            WindowQueueSync.CloseVoidedRaise(journalPos);
             WindowGap.Forget(journalPos);
             // REACTIVITY (hard mandate): the backlog changed, so the open screen must repaint without the
             // player leaving and re-entering. Kindless arm — a void carries no rail path.

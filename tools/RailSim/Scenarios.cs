@@ -21,6 +21,8 @@ namespace RailSim
             yield return Pair("one-peers-backlog-never-blocks-another", OnePeersBacklogNeverBlocksAnother);
             yield return Pair("a-local-dismissal-removes-only-mine", ALocalDismissalRemovesOnlyMine);
             yield return Pair("a-global-dismissal-removes-it-everywhere", AGlobalDismissalRemovesItEverywhere);
+            yield return Pair("an-answered-shared-window-closes-everywhere",
+                              AnAnsweredSharedWindowClosesEverywhere);
             yield return Pair("no-gap-is-permanent", NoGapIsPermanent);
             yield return Pair("a-hole-is-earned-not-declared", AHoleIsEarnedNotDeclared);
             yield return Pair("the-hole-predicate-classifies-anything", TheHolePredicateClassifiesAnything);
@@ -36,6 +38,154 @@ namespace RailSim
             yield return Pair("every-channel-answers-a-held-window", EveryChannelAnswersAHeldWindow);
             yield return Pair("no-lift-before-this-peers-own-first-frame",
                               NoLiftBeforeThisPeersOwnFirstFrame);
+            yield return Pair("a-gated-peers-rollup-becomes-computable",
+                              AGatedPeersRollupBecomesComputable);
+            yield return Pair("an-unarmed-rollup-is-never-rebuilt", AnUnarmedRollupIsNeverRebuilt);
+        }
+
+        /// <summary>The row the two properties below drive: production income, the rollup the reported
+        /// defect was measured on. Built through the REAL <c>DerivedAggregateRefresh.Row</c> so the
+        /// properties execute the shipped arming decision rather than a copy of it.</summary>
+        private static DerivedAggregateRefresh.Row ProductionRow() =>
+            new DerivedAggregateRefresh.Row(
+                typeof(PhoenixPoint.Geoscape.Levels.GeoFaction), "OnSiteProductionChanged",
+                DerivedAggregateRefresh.Kind.Recompute, "UpdateProduction", new[] { "S#" },
+                "railsim probe");
+
+        /// <summary>
+        /// L557 AS AN OBSERVABLE RUN. A GATED PEER — one whose whole hourly sim is refused by
+        /// <c>ClientSimGate</c> and whose model state arrives as direct FIELD writes, so the game's own
+        /// <c>site.ProductionChanged</c> event never fires locally.
+        ///
+        /// The run compares the SHIPPED-BEFORE policy (no rebuild ever) with the engine's, over the same
+        /// batches, so it cannot go green by testing nothing: the old policy must still reproduce the
+        /// measured defect — production income pinned at zero, therefore
+        /// <c>ItemManufacturing.GetTotalTime</c> returning <c>TimeUnit.Invalid</c>, therefore
+        /// <c>UIModuleFactionAgendaTracker.UpdateData</c> destroying the manufacture row it had just built,
+        /// on every single batch.
+        ///
+        /// <c>Invalid</c> is modelled as a NEGATIVE duration rather than as a separate flag, because that
+        /// is exactly the trap in the real code: <c>TimeUnit.Invalid</c> IS <c>TimeSpan.MinValue</c>, so
+        /// the strip's "already elapsed" test (<c>&lt;= TimeUnit.Zero</c>) swallows the uncomputable case
+        /// silently. A model that gave it its own flag would test a bug the game does not have.
+        ///
+        /// Nothing here waits on a peer: every step is this peer's own batch and its own model.
+        /// </summary>
+        private static IEnumerable<string> AGatedPeersRollupBecomesComputable(int seed)
+        {
+            var rng = new Random(seed);
+            var row = ProductionRow();
+            const double manufactureCost = 240.0;   // manufacture points the queued item still owes
+
+            // A run of rail batches as a real session produces them: soldier churn and clock ticks with
+            // genuine site-production writes interleaved. The site writes land as FIELDS, which is the
+            // whole premise — the mirrored per-site production below is ALREADY correct on this peer.
+            var batches = new[]
+            {
+                new[] { "U#a.Progression" },
+                new[] { "S#7.SiteProduction", "S#7.State" },
+                new[] { "T.Now" },
+                new[] { "U#b.Statuses", "V#3.Travel" },
+                new[] { "S#9.SiteProduction" },
+                new[] { "T.Now" },
+            };
+            // Per-batch mirrored truth: what the host's own rollup would have produced from the same
+            // sites. Jittered by seed so a hard-coded expectation cannot pass.
+            double income = 0.0;
+            var mirrored = new double[batches.Length];
+            for (int i = 0; i < batches.Length; i++)
+            {
+                if (batches[i].Any(p => p.StartsWith("S#", StringComparison.Ordinal)))
+                    income += 6.0 + rng.Next(0, 5);
+                mirrored[i] = income;
+            }
+            if (mirrored[mirrored.Length - 1] <= 0.0)
+                yield return "a-gated-peers-rollup-becomes-computable: the run itself produced no " +
+                             "production income at all, so it would pass without testing anything.";
+
+            // ── OLD: the rollup is never rebuilt on the gated peer ───────────
+            double oldIncome = 0.0;
+            int oldRowsDestroyed = 0;
+            foreach (var batch in batches)
+            {
+                double time = oldIncome <= 0.0 ? -1.0 : manufactureCost / oldIncome; // Invalid == negative
+                if (time <= 0.0) oldRowsDestroyed++;
+            }
+            if (oldRowsDestroyed != batches.Length)
+                yield return "a-gated-peers-rollup-becomes-computable: the pre-fix policy did NOT " +
+                             "reproduce the reported defect (" + oldRowsDestroyed + " of " + batches.Length +
+                             " batches destroyed the row, expected all of them). The comparison below is " +
+                             "then measuring nothing.";
+
+            // ── NEW: an armed row is rebuilt from state this peer already holds ──
+            double newIncome = 0.0;
+            int rebuilds = 0, survived = 0, destroyedAfterFirstInput = 0;
+            bool sawInput = false;
+            for (int i = 0; i < batches.Length; i++)
+            {
+                // THE SHIPPED DECISION, executed — not a re-implementation of it.
+                if (DerivedAggregateRefresh.Arms(row, batches[i]))
+                {
+                    newIncome = mirrored[i];   // the parameterless rebuild is a pure function of mirrored state
+                    rebuilds++;
+                    sawInput = true;
+                }
+                double time = newIncome <= 0.0 ? -1.0 : manufactureCost / newIncome;
+                if (time > 0.0) survived++;
+                else if (sawInput) destroyedAfterFirstInput++;
+            }
+
+            if (rebuilds != 2)
+                yield return "a-gated-peers-rollup-becomes-computable: expected exactly 2 rebuilds (the " +
+                             "two batches that touched a site), got " + rebuilds + ". Arming is BY INPUT: " +
+                             "rebuilding more often is wasted work, rebuilding less often is the stale zero.";
+            if (destroyedAfterFirstInput != 0)
+                yield return "a-gated-peers-rollup-becomes-computable: the manufacture row was still " +
+                             "destroyed " + destroyedAfterFirstInput + " time(s) AFTER the peer had " +
+                             "everything needed to compute its duration. A rollup the peer can rebuild " +
+                             "from mirrored state must never leave a derived duration uncomputable.";
+            if (survived == 0)
+                yield return "a-gated-peers-rollup-becomes-computable: the row never survived a single " +
+                             "batch, so the engine changed nothing.";
+            if (Math.Abs(newIncome - mirrored[mirrored.Length - 1]) > 1e-9)
+                yield return "a-gated-peers-rollup-becomes-computable: the peer's rebuilt income (" +
+                             newIncome + ") does not equal what the same inputs give the host (" +
+                             mirrored[mirrored.Length - 1] + "). A recompute that is not EXACT is a second " +
+                             "source of truth, which is the divergence the carry-vs-recompute choice rests " +
+                             "on not creating.";
+        }
+
+        /// <summary>The other direction, and the one that keeps the engine cheap enough to sit in the rail
+        /// frame: a batch that touched nothing the row DECLARED must not rebuild it, while every UNCERTAIN
+        /// answer must. The conservative direction is not symmetric on purpose — an unnecessary rebuild
+        /// costs one pure rollup, a missed one is the stale zero this whole file exists to remove.</summary>
+        private static IEnumerable<string> AnUnarmedRollupIsNeverRebuilt(int seed)
+        {
+            var row = ProductionRow();
+            var carried = new DerivedAggregateRefresh.Row(
+                typeof(PhoenixPoint.Geoscape.Levels.GeoFaction), "OnSiteAdded",
+                DerivedAggregateRefresh.Kind.Carried, null, new string[0], "railsim probe");
+
+            if (DerivedAggregateRefresh.Arms(row, new[] { "U#a.Progression", "T.Now", "V#3.Travel" }))
+                yield return "an-unarmed-rollup-is-never-rebuilt: a batch of soldier, clock and vehicle " +
+                             "paths armed a row that declared only sites. Arming on everything puts a " +
+                             "reflective rebuild of every rollup into every rail batch.";
+            if (!DerivedAggregateRefresh.Arms(row, new[] { "U#a.Progression", "S#7.SiteProduction" }))
+                yield return "an-unarmed-rollup-is-never-rebuilt: a batch that DID touch a site failed to " +
+                             "arm the site-declaring row.";
+            if (!DerivedAggregateRefresh.Arms(row, new string[] { null }))
+                yield return "an-unarmed-rollup-is-never-rebuilt: a null (unknown) path did not arm. Every " +
+                             "uncertain answer must be 'rebuild' — the same conservative direction " +
+                             "OpenUiRepaint.SurfaceRepaints takes for the same reason.";
+            if (DerivedAggregateRefresh.Arms(row, new string[0]))
+                yield return "an-unarmed-rollup-is-never-rebuilt: an EMPTY batch armed a rebuild. Nothing " +
+                             "changed at all, so nothing can have staled.";
+            if (DerivedAggregateRefresh.Arms(carried, new[] { "S#7.SiteProduction" }))
+                yield return "an-unarmed-rollup-is-never-rebuilt: a CARRIED row armed. A carried handler " +
+                             "mints information this peer cannot derive — running it locally is precisely " +
+                             "the client-side simulation ClientSimGate exists to refuse.";
+            if (DerivedAggregateRefresh.Arms(null, new[] { "S#7.SiteProduction" }))
+                yield return "an-unarmed-rollup-is-never-rebuilt: a null row armed.";
         }
 
         /// <summary>L554 as an OBSERVABLE RUN, over the skew the 21:54 capture actually measured — which is
@@ -714,6 +864,100 @@ namespace RailSim
             if (WindowJournal.FamilyAt(7) != null)
                 yield return "a-global-dismissal-removes-it-everywhere: a voided position still named a " +
                              "family, so the entry outlived its removal.";
+            WindowJournal.Reset();
+        }
+
+        /// <summary>L556: a window whose answer DISPOSES OF A SHARED ASSET closes on every peer the moment
+        /// any peer answers it; an informational one closes only on the peer who dismissed it. Two
+        /// properties the harness owns rather than the law: the void must name the ANSWERED RAISE when a
+        /// peer holds two unread entries of ONE family, and an informational window must SURVIVE another
+        /// peer's dismissal.</summary>
+        private static IEnumerable<string> AnAnsweredSharedWindowClosesEverywhere(int seed)
+        {
+            string character = typeof(PhoenixPoint.Geoscape.Entities.GeoCharacter).FullName;
+            string site = typeof(PhoenixPoint.Geoscape.Entities.GeoSite).FullName;
+            GeoModalMirror.Raise Raise(GeoModalMirror.DataShape shape, string @ref, string cls) =>
+                new GeoModalMirror.Raise
+                {
+                    Shape = shape,
+                    Ref = @ref,
+                    Keys = cls == null ? new string[0] : new[] { cls },
+                };
+
+            // ── THE DERIVATION, over the payload space rather than over a set of windows ──
+            var soldierOffer = Raise(GeoModalMirror.DataShape.EntityRef, "U#7", character);
+            var aircraftPrompt = Raise(GeoModalMirror.DataShape.AssetDeploy, "", null);
+            var pandoranReveal = Raise(GeoModalMirror.DataShape.EntityRef, "S#3", site);
+
+            if (!GeoModalMirror.DismissalIsGlobal("UIStateGeoModal", soldierOffer, false))
+                yield return "an-answered-shared-window-closes-everywhere: the haven soldier offer is not " +
+                             "globally dismissed. Accepting it runs reward.Apply on the host for the whole " +
+                             "campaign, so every other peer's copy offers a unit that has already joined.";
+            if (!GeoModalMirror.DismissalIsGlobal("UIStateGeoModal", aircraftPrompt, false))
+                yield return "an-answered-shared-window-closes-everywhere: the asset-distribution prompt " +
+                             "for an AIRCRAFT — which names no GeoCharacter at all — is not globally " +
+                             "dismissed, so NamesEntity has quietly become the whole derivation again.";
+            if (GeoModalMirror.DismissalIsGlobal("UIStateGeoModal", pandoranReveal, false))
+                yield return "an-answered-shared-window-closes-everywhere: the Pandoran reconnaissance " +
+                             "window is globally dismissed. Its payload is a GeoSite — a map feature the " +
+                             "world owns anyway — and answering it runs nothing, so one peer clicking OK " +
+                             "must not take it off anybody else's screen.";
+            if (GeoModalMirror.DismissalIsGlobal("UIStateGeoModal", soldierOffer, true))
+                yield return "an-answered-shared-window-closes-everywhere: a window of the PER-PEER answer " +
+                             "class was globally dismissed. Every peer answers a mission brief for itself; " +
+                             "one player declining means 'I am busy', not 'cancelled for everyone'.";
+            if (!GeoModalMirror.DismissalIsGlobal("UIStateRosterDeployment",
+                    Raise(GeoModalMirror.DataShape.None, "", null), false))
+                yield return "an-answered-shared-window-closes-everywhere: the deployment-preparation " +
+                             "screen stopped being globally dismissed. It carries no describable payload, " +
+                             "so the declaration table is the only arm that can classify it and the new " +
+                             "derivation must ADD to that table, never replace it.";
+
+            // ── TWO UNREAD ENTRIES OF ONE FAMILY: only the ANSWERED raise is voided ──
+            // Every modal in this game is the single family "UIStateGeoModal", so this is the ordinary
+            // case and not an edge one: WindowJournal.FindUnread would return position 4 for BOTH.
+            WindowJournal.Reset();
+            WindowJournal.Append(4, "UIStateGeoModal", new byte[] { 4 });
+            WindowJournal.Append(5, "UIStateGeoModal", new byte[] { 5 });
+            if (WindowJournal.FindUnread("UIStateGeoModal") != 4)
+                yield return "an-answered-shared-window-closes-everywhere: FindUnread stopped returning " +
+                             "the FIRST unread entry of a family, so the hazard this property exists for " +
+                             "has moved and the property no longer proves anything.";
+            // The answered raise is the SECOND one, named by its own per-raise tag and never by the family.
+            const uint answered = 5;
+            if (WindowQueueSync.RaiseTagFor(answered) != "j5")
+                yield return "an-answered-shared-window-closes-everywhere: the per-raise tag of position 5 " +
+                             "is not 'j5'. The void names a raise through this derivation and nothing else.";
+            if (!WindowJournal.ApplyVoid(answered))
+                yield return "an-answered-shared-window-closes-everywhere: the void of the answered raise " +
+                             "removed nothing.";
+            var survivor = WindowJournal.PeekHead();
+            if (survivor == null || survivor.Pos != 4 || WindowJournal.UnreadCount != 1)
+                yield return "an-answered-shared-window-closes-everywhere: after answering raise 5 the " +
+                             "backlog holds " + WindowJournal.UnreadCount + " entries headed by " +
+                             (survivor == null ? "<none>" : survivor.Pos.ToString()) + ", not exactly " +
+                             "position 4. A family NAME cannot pick between two unread windows of that " +
+                             "family — voiding by name would take the one nobody answered.";
+
+            // ── AN INFORMATIONAL WINDOW SURVIVES ANOTHER PEER'S DISMISSAL ──
+            // Peer A dismisses its own copy: read ⇒ deleted, locally, and NO void is minted because the
+            // derivation says the dismissal is LOCAL. Peer B's entry is therefore untouched.
+            WindowJournal.Reset();
+            WindowJournal.Append(6, "UIStateGeoModal", new byte[] { 6 });
+            JournalEntry mine;
+            WindowJournal.TryRead(out mine);
+            int aRemaining = WindowJournal.UnreadCount;
+            WindowJournal.Reset();                       // peer B — a separate journal generation
+            WindowJournal.Append(6, "UIStateGeoModal", new byte[] { 6 });
+            if (aRemaining != 0 || WindowJournal.UnreadCount != 1)
+                yield return "an-answered-shared-window-closes-everywhere: peer A holds " + aRemaining +
+                             " and peer B holds " + WindowJournal.UnreadCount + " after peer A dismissed " +
+                             "an informational window. A LOCAL dismissal is a per-peer delete with no wire " +
+                             "form at all — nothing may reach peer B.";
+            if (GeoModalMirror.DismissalIsGlobal("UIStateGeoModal", pandoranReveal, false))
+                yield return "an-answered-shared-window-closes-everywhere: peer A's dismissal of the " +
+                             "informational window would mint a void, and peer B would lose a window it " +
+                             "was still reading.";
             WindowJournal.Reset();
         }
 

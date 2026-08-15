@@ -457,6 +457,8 @@ namespace RailCheck
             Add(laws, () => L553_OneWindowOneIdentityOneResolution.Check());
             Add(laws, () => L554_NoLiftBeforeThisPeersOwnFirstFrame.Check());
             Add(laws, () => L555_ADescribableWindowIsNeverAHole.Check());
+            Add(laws, () => L557_NoPeerReadsARollupItsOwnRailStaled.Check());
+            Add(laws, () => L556_AnAnsweredSharedWindowClosesEverywhere.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -504,7 +506,27 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 355;
+        private const int ExpectedLawRegistrations = 357;
+        // Updated deliberately 2026-08-15: L557 (no peer reads a rollup its own rail silently staled) was
+        // ADDED — 356 -> 357. Nothing was retired and nothing was weakened. It is NOT a second sim-gating
+        // law: L506 and ClientSimGate keep every arm they had, and this law agrees with them that the
+        // hourly tick must stay refused on a client. What none of them could state is the OTHER half of
+        // the same coin — the rail writes model state as FIELDS, so the game's own change EVENTS never
+        // fire on a peer, and a stored rollup whose only refresh is such an event is frozen at zero there.
+        // That is what made ItemManufacturing.GetTotalTime:405-417 return TimeUnit.Invalid on the client,
+        // and TimeUnit.Invalid IS TimeSpan.MinValue, so UIModuleFactionAgendaTracker.UpdateData destroyed
+        // the manufacture row it had just correctly built. L541/L542 own which SURFACE repaints and L60
+        // owns which KIND reaches it — all three were green through this, correctly, because the value
+        // being painted was never their subject.
+        // Updated deliberately 2026-08-15: L556 (a window whose answer DISPOSES A SHARED ASSET closes on
+        // every peer the moment any peer answers it; an informational one closes only on the peer who
+        // dismissed it) was ADDED — 355 -> 356. Nothing was retired and nothing was weakened: L526 still
+        // makes an undeclared family LOCAL, L547 still forbids a LOCAL dismissal travelling, and L552 still
+        // keeps dismissal scope and ANSWER AUTHORITY two separate derivations — L556 is the third question
+        // ("does my ANSWER close YOUR copy"), derived off the same Raise and sharing NamesEntity, which no
+        // existing law could state. It is what closes the reported defect: a soldier accepted at a haven
+        // left the offer open, and already taken, on every other peer, because every modal is one LOCAL
+        // family and only the deployment-preparation screen ever reached a void.
         // Updated deliberately 2026-08-15: L555 (a describable window is never a hole, and every hole
         // states a machine-checkable reason) was ADDED — 354 -> 355. Nothing was retired and nothing was
         // weakened: L48/L49 still keep the coverage tables TOTAL, and L546 still forbids a LocalOnly claim
@@ -658,7 +680,11 @@ namespace RailCheck
         // identity retired. L106 keeps its own identity and every arm — its MirroredData table GAINED the
         // twelve kinds that stopped being holes, which is the table growing with the coverage it describes,
         // not an arm being relaxed. L48/L49/L546 are untouched.
-        private const string ExpectedExecutionIdentityDigest = "fc420cec117902fb4ecffc13e44d62796b286d69807596265ef079e4a432d541";
+        // Updated deliberately 2026-08-15 with L557 (no peer reads a rollup its own rail silently staled):
+        // one new identity string. No identity retired. L506 keeps its own identity and every arm — the
+        // hourly tick stays refused on a client; what L557 adds runs BESIDE that refusal and invokes only
+        // methods the caller supplies no information to, so it advances no simulation.
+        private const string ExpectedExecutionIdentityDigest = "9665f73a89a7c82821fd0370d85110e7bfbe44eed605bd6fe0696fd7485a0c80";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

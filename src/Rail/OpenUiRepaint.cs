@@ -928,6 +928,14 @@ namespace Multiplayer.Network.Sync
         /// <summary>Test seam for L549: does the persistent HUD owe a refresh?</summary>
         internal static bool HudRepaintOwed => _hudDirty;
 
+        /// <summary>THIS BATCH'S TOUCHED PATHS, read-only, for the one consumer that has to run BEFORE the
+        /// flush rather than inside it: <see cref="DerivedAggregateRefresh"/> (L557). A rollup the rail
+        /// staled has to be rebuilt while the batch's paths are still known — the repaint that follows one
+        /// line later then paints the CORRECTED value instead of the stale one, in the same frame.
+        /// Exposed as a peek and never as a handle to clear: <see cref="FlushIfDirty"/> owns the lifetime
+        /// of this set, and a second owner is how a batch gets consumed twice.</summary>
+        internal static System.Collections.Generic.ICollection<string> TouchedPaths => _touchedPaths;
+
         /// <summary>
         /// A DESTROYED SOLDIER MUST NOT STAY UNDER SOMEBODY'S CURSOR. Reported 2026-08-08: a client
         /// dismissed a soldier, every peer's model converged (host `intent APPLIED op=fire`, both clients
