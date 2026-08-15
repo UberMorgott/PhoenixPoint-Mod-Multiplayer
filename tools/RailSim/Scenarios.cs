@@ -22,6 +22,8 @@ namespace RailSim
             yield return Pair("a-local-dismissal-removes-only-mine", ALocalDismissalRemovesOnlyMine);
             yield return Pair("a-global-dismissal-removes-it-everywhere", AGlobalDismissalRemovesItEverywhere);
             yield return Pair("no-gap-is-permanent", NoGapIsPermanent);
+            yield return Pair("a-hole-is-earned-not-declared", AHoleIsEarnedNotDeclared);
+            yield return Pair("the-hole-predicate-classifies-anything", TheHolePredicateClassifiesAnything);
             yield return Pair("an-untouched-surface-does-not-repaint", AnUntouchedSurfaceDoesNotRepaint);
             yield return Pair("a-progress-tick-never-tears-down-the-agenda-strip",
                               AProgressTickNeverTearsDownTheAgendaStrip);
@@ -862,6 +864,88 @@ namespace RailSim
                              ", not " + n + ". The shipped QueueCap = 64 trimmed from the TAIL — it " +
                              "dropped the NEWEST window, i.e. exactly the one that had just been raised.";
             WindowJournal.Reset();
+        }
+
+        /// <summary>PROPERTY (L555): every HOLE in the coverage tables is EARNED. Walk the real tables and
+        /// assert that a Gap always names the payload class it rests on, that
+        /// <c>GeoModalMirror.CanDescribeClass</c> refuses that class, and that no other verdict carries a
+        /// witness. The reported defect was the opposite of all three at once: a Gap over a GeoSite with
+        /// nothing but a paragraph behind it.</summary>
+        private static IEnumerable<string> AHoleIsEarnedNotDeclared(int seed)
+        {
+            foreach (var kv in GeoWindowCoverage.DeclaredModals)
+            {
+                var rule = kv.Value;
+                if (rule == null) { yield return "a-hole-is-earned-not-declared: modal '" + kv.Key + "' has a null rule."; continue; }
+                if (rule.Sync != WindowSync.Gap)
+                {
+                    if (rule.GapDataClass != null)
+                        yield return "a-hole-is-earned-not-declared: modal '" + kv.Key + "' is " + rule.Sync +
+                                     " and still carries the hole witness '" + rule.GapDataClass.FullName +
+                                     "'. A witness is evidence for a HOLE and reads as one wherever it sits.";
+                    continue;
+                }
+                if (rule.GapDataClass == null)
+                {
+                    yield return "a-hole-is-earned-not-declared: modal '" + kv.Key + "' is a HOLE with no " +
+                                 "payload class, so 'this cannot travel' is a sentence nothing re-checks.";
+                    continue;
+                }
+                if (GeoModalMirror.CanDescribeClass(rule.GapDataClass))
+                    yield return "a-hole-is-earned-not-declared: modal '" + kv.Key + "' is a HOLE over a '" +
+                                 rule.GapDataClass.FullName + "', which the rail CAN name and Describe CAN " +
+                                 "put on the wire. The window is being withheld by declaration alone — the " +
+                                 "Pandoran-reveal defect.";
+                if (GeoWindowCoverage.HoleAnnouncement(kv.Key.ToString(), rule)
+                                     .IndexOf(rule.GapDataClass.Name, StringComparison.Ordinal) < 0 &&
+                    rule.GapDataClass != typeof(void))
+                    yield return "a-hole-is-earned-not-declared: the announcement for modal '" + kv.Key +
+                                 "' never names its own witness, so the log says a window is missing without " +
+                                 "saying what it is missing over.";
+            }
+        }
+
+        /// <summary>PROPERTY (L555): the hole predicate is TOTAL and SAFE over the whole payload space, not
+        /// a list of the windows this build happens to know. Every type in the two game assemblies plus a
+        /// few synthetic ones must get a verdict without throwing; a rail ROOT must be describable and an
+        /// unknown third-party class must not — the loud default, since an undescribable window is announced
+        /// as a hole rather than mirrored into an empty prefab.</summary>
+        private static IEnumerable<string> TheHolePredicateClassifiesAnything(int seed)
+        {
+            var probes = new List<Type>
+            {
+                null, typeof(void), typeof(object), typeof(string), typeof(int), typeof(Scenarios),
+                typeof(PhoenixPoint.Geoscape.Entities.GeoSite),
+                typeof(PhoenixPoint.Geoscape.Entities.GeoVehicle),
+                typeof(PhoenixPoint.Geoscape.Entities.GeoCharacter),
+                typeof(PhoenixPoint.Geoscape.Entities.GeoMission),
+            };
+            var yes = new HashSet<Type> { probes[6], probes[7], probes[8], probes[9] };
+            foreach (var t in probes)
+            {
+                bool verdict = false;
+                string threw = null;
+                try { verdict = GeoModalMirror.CanDescribeClass(t); }
+                catch (Exception ex) { threw = ex.GetType().Name; }
+                if (threw != null)
+                {
+                    yield return "the-hole-predicate-classifies-anything: CanDescribeClass threw on '" +
+                                 (t == null ? "<null>" : t.FullName) + "' (" + threw + "). A class this " +
+                                 "build has never seen must get a VERDICT, not an exception.";
+                    continue;
+                }
+                if (verdict != yes.Contains(t))
+                    yield return "the-hole-predicate-classifies-anything: CanDescribeClass('" +
+                                 (t == null ? "<null>" : t.FullName) + "') = " + verdict + ", expected " +
+                                 yes.Contains(t) + ". A predicate that has gone constant makes every hole " +
+                                 "legal (constant-true) or every hole illegal (constant-false), and both " +
+                                 "read as a green law.";
+            }
+            foreach (var t in GeoModalMirror.DescribedClasses)
+                if (!GeoModalMirror.CanDescribeClass(t))
+                    yield return "the-hole-predicate-classifies-anything: Describe has a case for '" +
+                                 t.FullName + "' but CanDescribeClass refuses it, so the host can ship a " +
+                                 "payload the hole predicate believes cannot travel.";
         }
 
         /// <summary>Send 8 numbered messages to peer 1 at t=0, let the clock run past the delay ceiling,

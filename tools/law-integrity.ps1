@@ -187,7 +187,16 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # AnswerQueued directly; AnswerQueued still reads WindowOrder.RequestsField and _dialogHandler and pops no
 # screen); L109 arm (g) and the inline L82 identity row were RE-EXPRESSED, not weakened -- they now RAISE
 # the window they ask about (TagRaise) before asking, because an identity belongs to a raise.
-$expectedRegistrationDigest = 'b7ad5b3b75bbb08469fc9253a8a2690ab900339b530c81d5e307cd40cdc50307'
+# Updated deliberately 2026-08-15: L555 ADDED (a describable window is never a hole, and every hole
+# states a machine-checkable reason). The Pandoran-reconnaissance window showed on the host alone because
+# our own coverage table declared ModalType.PandoranRevealResult a Gap over a GeoSite -- a rail ROOT the
+# wire has always been able to name -- and nothing compared that hand-written verdict against
+# GeoModalMirror.Describe. A Gap now has to name the payload CLASS its raiser hands over, and
+# CanDescribeClass must answer NO for it, so holes are DERIVED instead of declared. 354 -> 355
+# registrations, one new identity string. Nothing retired: L48/L49 still keep the tables total, L546 still
+# forbids a LocalOnly claim over a host-authoritative raiser, and L106's MirroredData table GAINED the
+# twelve kinds that stopped being holes rather than losing an arm.
+$expectedRegistrationDigest = 'd5f7fced847aab9416656356436e019165c7ca77f6d73451f3ef89328540392d'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

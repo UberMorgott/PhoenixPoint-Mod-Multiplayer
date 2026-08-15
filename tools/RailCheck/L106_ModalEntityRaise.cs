@@ -79,6 +79,26 @@ namespace RailCheck
             [ModalType.AncientSiteDefenceBrief] = typeof(GeoMission),
             [ModalType.BehemothAttackBrief] = typeof(GeoMission),
             [ModalType.InfestedHavenBrief] = typeof(GeoMission),
+            // ADDED 2026-08-15 with L555 (a describable window is never a hole). The eleven *Outcome kinds
+            // and the Pandoran reveal were declared Gap until that law asked the question of the PAYLOAD:
+            // both raisers of an outcome hand over the live GeoMission (UIStateInitial.cs:112 off
+            // _params.LastMission, GeoscapeView.OnSiteMissionCancelled:1934/:1938 off the cancelled one),
+            // which EntityRefOf names by its site's own ActiveMission slot.
+            [ModalType.GeoHavenAttackOutcome] = typeof(GeoMission),
+            [ModalType.GeoAlienBaseOutcome] = typeof(GeoMission),
+            [ModalType.GeoScavengeOutcome] = typeof(GeoMission),
+            [ModalType.GeoPhoenixBaseDefenseOutcome] = typeof(GeoMission),
+            [ModalType.GeoAmbushOutcome] = typeof(GeoMission),
+            [ModalType.HavenInfiltrateOutcome] = typeof(GeoMission),
+            [ModalType.GeoPhoenixBaseInfestationOutcome] = typeof(GeoMission),
+            [ModalType.AncientSiteAttackOutcome] = typeof(GeoMission),
+            [ModalType.AncientSiteDefenceOutcome] = typeof(GeoMission),
+            [ModalType.BehemothAttackOutcome] = typeof(GeoMission),
+            [ModalType.InfestedHavenOutcome] = typeof(GeoMission),
+            // The reveal has TWO branches at one raiser — UIStateInitial:118 passes RevealedSites[0], :122
+            // passes nothing. The GeoSite branch is the one declared here because it is the one that has to
+            // survive the wire; the no-data branch is DataShape.None, which never resolves and never fails.
+            [ModalType.PandoranRevealResult] = typeof(GeoSite),
         };
 
         /// <summary>The kinds whose whole point is the GENERIC arm. Without this, "every Mirrored kind is

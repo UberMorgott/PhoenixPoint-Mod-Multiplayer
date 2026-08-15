@@ -344,6 +344,52 @@ namespace Multiplayer.Network.Sync
         /// for the mission's structural create, so a peer resolving it walks the SAME member.</summary>
         internal const string MissionSlotPath = ".SerializationData.ActiveMission";
 
+        /// <summary>The classes <see cref="Describe"/> and <see cref="EntityRefOf"/> actually test for, as
+        /// one list so <see cref="CanDescribeClass"/> can be asked the same question WITHOUT a live object.
+        /// RailCheck L555 arm (d) reads the <c>isinst</c> set out of those two methods' own IL and requires
+        /// every entry of it to be accepted here, so a shape added to <c>Describe</c> cannot leave the hole
+        /// predicate behind — which is precisely how a declaration ends up claiming a payload "cannot
+        /// travel" years after it could.</summary>
+        internal static readonly Type[] DescribedClasses =
+        {
+            typeof(GeoResearchCompleteData),
+            typeof(DiplomacyResearchRewardData),
+            typeof(GeoDeployAssetFactionCharacterBind),
+            typeof(PhoenixPoint.Geoscape.Entities.GeoMission),
+        };
+
+        /// <summary>PURE (RailCheck L555). CAN A WINDOW CARRYING THIS PAYLOAD TRAVEL AT ALL?
+        ///
+        /// The type-level twin of <see cref="Describe"/>, and the reason a HOLE in
+        /// <see cref="GeoWindowCoverage"/> is now DERIVED rather than declared. <c>Describe</c> answers for a
+        /// LIVE object and <c>HostBroadcast</c> refuses the raise when it falls to
+        /// <see cref="DataShape.Unsupported"/>; a coverage declaration has no live object, only the class the
+        /// raiser hands to <c>OpenModal</c>, so the same question is asked of the class. Two rungs and both
+        /// are the rail's own, not a second opinion about windows:
+        ///   1. the rail can NAME an instance — <see cref="IdentityResolver.IsRefAddressableType"/>, the one
+        ///      definition of law-2 addressability in this repo (a GeoSite, a GeoVehicle, a GeoCharacter, a
+        ///      GeoFaction, a GeoHavenZone). This rung alone falsified the Pandoran-reveal hole: its payload
+        ///      is <c>RevealedSites[0]</c>, a GeoSite (UIStateInitial.cs:118).
+        ///   2. <see cref="Describe"/> has an explicit shape for it, or <see cref="EntityRefOf"/> reaches it
+        ///      through an owner slot (a <c>GeoMission</c> rides its site's <c>ActiveMission</c> path).
+        ///
+        /// TOTAL AND SAFE BY DEFAULT: a class this build has never seen — another mod's window, a DLC's —
+        /// answers NO without throwing, which is the loud verdict (an un-describable window is announced as a
+        /// hole, never silently mirrored into an empty prefab). <c>null</c> and <c>typeof(void)</c> both mean
+        /// "there is no payload to describe" and answer NO for the same reason.
+        ///
+        /// NOTE THE SIGNATURE. It takes a <see cref="Type"/> and nothing else — no <c>ModalType</c>, no
+        /// window name, no coverage table — so a per-window verdict list is not merely discouraged here, it
+        /// is unexpressible, exactly as <see cref="AnswerMutatesSharedState"/>'s signature makes one
+        /// unexpressible for answer authority (L552 arm c).</summary>
+        internal static bool CanDescribeClass(Type dataClass)
+        {
+            if (dataClass == null || dataClass == typeof(void)) return false;
+            if (IdentityResolver.IsRefAddressableType(dataClass)) return true;
+            foreach (var t in DescribedClasses) if (t.IsAssignableFrom(dataClass)) return true;
+            return false;
+        }
+
         /// <summary>PURE: does this payload name a rail ENTITY the peer must already hold before the window
         /// can be built? The park queue and the host's own name-check both ask THIS, so a new shape opts into
         /// both by answering here — <see cref="DataShape.AssetDeploy"/>'s ref is OPTIONAL (an aircraft has no
@@ -962,6 +1008,11 @@ namespace Multiplayer.Network.Sync
                 return false;
             }
 
+            // TWO PRODUCERS, ONE WINDOW — see IsLocalTwin. Asked BEFORE the state is built so an adopted
+            // copy costs nothing, and only for the modal family, which is the only one this peer's own game
+            // raises for itself.
+            if (p.Kind == StateKind.Modal && AdoptLocalTwin(q, p, name)) return true;
+
             GeoscapeViewState state;
             if (p.Kind == StateKind.AssetDeployment)
             {
@@ -1029,6 +1080,71 @@ namespace Multiplayer.Network.Sync
             MpLog.Log("[MP][modals] raised '" + name + "' seq=" + seq + " kind=" + p.Kind + " shape=" + p.Shape +
                       " priority=" + p.Priority + " data=" + (data == null ? "none" : data.GetType().Name));
             return true;
+        }
+
+        /// <summary>IS THIS ALREADY THIS PEER'S OWN COPY OF THE SAME WINDOW? (2026-08-15, the arm that made
+        /// the outcome/reveal families mirrorable at all.)
+        ///
+        /// A window the host mirrors may ALSO be raised by this peer's own game: the return from tactical
+        /// raises the mission outcome and the Pandoran reveal on EVERY returning peer
+        /// (UIStateInitial.cs:112 / :118 / :122), off <c>_params.LastMission</c> that peer holds itself. Two
+        /// producers, one window — so mirroring those families without this question would put two identical
+        /// panels on a client, which is why they used to be declared holes instead.
+        ///
+        /// THE TWIN IS READ, NOT LISTED, and both halves come from machinery that already exists:
+        ///   • it carries NO RAISE TAG. Only a mirrored raise tags a window (L553, WindowQueueSync.TagRaise),
+        ///     so an untagged copy is by construction one this peer produced for itself.
+        ///   • it DESCRIBES THE SAME PAYLOAD. <see cref="Describe"/> over the live <c>ModalData</c> yields the
+        ///     host's own ref for the same object, so a client's own brief for mission A is NOT the twin of a
+        ///     unicast brief for mission B — the misidentification that a ModalType compare alone would make,
+        ///     and the same lesson the 2026-08-01 type-matched dismissal taught.
+        ///   • or it is the DEGRADED twin: this peer raised the same window with NO data where the host named
+        ///     an entity. That is not a curiosity, it is the reported defect — a client reaches
+        ///     UIStateInitial:118 before the host's 0xBB reward lands, so its own
+        ///     <c>ApplyResult.RevealedSites</c> is empty and it takes the :122 no-data branch, drawing the
+        ///     "no colony was detected" variant of the very window the host is drawing with a site in it.
+        ///
+        /// THE HOST'S COPY WINS, because it is the one carrying the host's data and the journal position.
+        /// A QUEUED twin is dropped and replaced; a twin that is ALREADY THE OPEN WINDOW is adopted where it
+        /// stands — tagged with the host's raise tag so answers and the journal reach it — because closing a
+        /// window under the player's cursor to put a near-identical one in its place is a flicker, not a fix.
+        /// Returns true when the caller must NOT raise (the open copy was adopted).</summary>
+        private static bool AdoptLocalTwin(GeoscapeViewSwitchQuery q, Raise p, string name)
+        {
+            var current = WindowOrder.CurrentRequest(q);
+            if (IsLocalTwin(current?.State, p))
+            {
+                WindowQueueSync.TagRaise(current.State, WindowQueueSync.RaiseTagFor(p.JournalPos));
+                MpLog.Log("[MP][modals] '" + name + "' ADOPTED this peer's own OPEN copy at journal position " +
+                          p.JournalPos + " — the same window from two producers (this peer's own arrival raise " +
+                          "and the host's mirror), so it is tagged where it stands instead of being closed and " +
+                          "reopened under the player's cursor");
+                return true;
+            }
+            var pending = WindowOrder.RequestsField?.GetValue(q) as IList<GeoscapeViewStateSwitchRequest>;
+            if (pending == null) return false;
+            int dropped = 0;
+            for (int i = pending.Count - 1; i >= 0; i--)
+                if (IsLocalTwin(pending[i]?.State, p)) { pending.RemoveAt(i); dropped++; }
+            if (dropped > 0)
+                MpLog.Log("[MP][modals] dropped " + dropped + " untagged local copy/copies of '" + name +
+                          "' from this peer's own queue — the host's mirrored raise carries the host's data " +
+                          "and the journal position, so it is the one window that shows");
+            return false;
+        }
+
+        /// <summary>The twin test itself, kept apart from the queue walk so both the open window and every
+        /// pending one are judged by ONE rule. See <see cref="AdoptLocalTwin"/> for what it is for.</summary>
+        private static bool IsLocalTwin(object state, Raise p)
+        {
+            var modal = state as UIStateGeoModal;
+            if (modal == null || (int)modal.ModalType != p.ModalType) return false;
+            if (WindowQueueSync.RaiseTagOf(modal) != null) return false;   // already a mirrored copy
+            Raise local;
+            try { local = Describe(modal.ModalData); }
+            catch { return false; }                                        // unreadable = not provably the twin
+            if (local.Shape == p.Shape && (local.Ref ?? "") == (p.Ref ?? "")) return true;
+            return local.Shape == DataShape.None && NamesEntity(p);
         }
 
         /// <summary>Resolve the shipped refs against THIS peer's live graph and rebuild the concrete

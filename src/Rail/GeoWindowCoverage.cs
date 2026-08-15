@@ -22,7 +22,8 @@ namespace Multiplayer.Network.Sync
         LocalOnly,
         /// <summary>A known, reviewed HOLE: this window SHOULD reach the other peer and does not yet.
         /// Announced once per type per session — a gap the player can see must never be a gap only the
-        /// player can see.</summary>
+        /// player can see. EARNED, NOT CLAIMED since 2026-08-15: a hole is legal only where the payload
+        /// behind it cannot be described at all (<see cref="WindowRule.GapDataClass"/>, L555).</summary>
         Gap,
     }
 
@@ -30,6 +31,13 @@ namespace Multiplayer.Network.Sync
     {
         public WindowSync Sync;
         public string Why;
+        /// <summary><see cref="WindowSync.Gap"/> ONLY, and REQUIRED there (RailCheck L555): the runtime
+        /// class the native raiser hands to <c>OpenModal</c> for this window, or <c>typeof(void)</c> when
+        /// nothing in the shipped assembly raises it at all. It is the EVIDENCE for the hole —
+        /// <see cref="GeoModalMirror.CanDescribeClass"/> must answer NO for it — so "this cannot travel" is
+        /// a claim a machine re-checks on every run instead of a paragraph a human re-reads. Null on every
+        /// other verdict: a witness anywhere else is a leftover that will eventually be read as one.</summary>
+        public Type GapDataClass;
     }
 
     /// <summary>
@@ -247,6 +255,18 @@ namespace Multiplayer.Network.Sync
             foreach (var t in types) d[t] = new WindowRule { Sync = sync, Why = why };
         }
 
+        /// <summary>A HOLE, and it cannot be declared without its evidence: the payload class comes FIRST in
+        /// the signature, so there is no spelling of a Gap that forgets to name what it rests on (L555 arm a
+        /// would fail the build, but a call site that cannot express the mistake is better than a law that
+        /// catches it). <paramref name="payloadClass"/> is <c>typeof(void)</c> when nothing raises the window
+        /// at all — there is then no payload, which is a different sentence from "the payload is null".</summary>
+        private static void Hole(Dictionary<ModalType, WindowRule> d, Type payloadClass, string why,
+                                 params ModalType[] types)
+        {
+            foreach (var t in types)
+                d[t] = new WindowRule { Sync = WindowSync.Gap, Why = why, GapDataClass = payloadClass };
+        }
+
         private static Dictionary<ModalType, WindowRule> BuildModalRules()
         {
             var d = new Dictionary<ModalType, WindowRule>();
@@ -335,60 +355,101 @@ namespace Multiplayer.Network.Sync
                 "(DataRefusal) instead of rendering an empty prefab",
                 ModalType.FactionSoldierJoin);
 
-            // ── GAP: should reach the other peer, and does not yet ──
-            Modal(d, WindowSync.Gap,
-                "mission OUTCOME — TWO raisers with OPPOSITE verdicts under one ModalType, which is why this stays " +
-                "a declared hole instead of a half-answer. UIStateInitial.cs:112 raises it on the peer RETURNING " +
-                "from tactical off its own _params.LastMission — per-peer arrival UI, so mirroring THAT would show " +
-                "the window twice. FALSE PREMISE CORRECTED 2026-08-01 (measured, user report item 3a): the words " +
-                "\"fires natively on every peer that played the mission\" were never true in this repo, and this " +
-                "entry rested on them. It fires on the HOST only, because ClientMissionResultGate blocked " +
-                "GeoMission.Complete WHOLE and Complete:267/:275 is the sole writer of both flags the raising " +
-                "branch tests (UIStateInitial:101 `IsCompleted || GetMissionOutcomeState() != Playing`) — so on a " +
-                "client the branch was permanently false and the panel simply never existed. The client now calls " +
-                "the game's own CompleteSilently:284 instead (see ClientMissionResultGate) and the raise is " +
-                "genuinely per-peer, as this verdict always claimed; the CONTENT the panel draws — " +
-                "reward.ApplyResult, which every one of the eleven outcome data binds reaches through the same " +
-                "RewardsController.SetReward(mission.Reward) call — rides 0xBB MissionOutcomeMirror, since it is " +
-                "host-computed and on no other rail. STILL A GAP, and now for ONE reason only: " +
-                "GeoscapeView.OnSiteMissionCancelled:1930 raises the base-defence / ancient-site variants off a " +
-                "HOST sim event alone, which no client ever fires. Splitting the two raisers needs a RAISER-aware " +
-                "seam; a per-ModalType verdict cannot express it. 0xBB's declared remainder rides here too: it " +
-                "carries Resources + Items, not SetReward's stolen-aircraft / stolen-research / new-unit / " +
-                "captured-alien rows (:104-114)",
+            Modal(d, WindowSync.Mirrored,
+                "mission OUTCOME — VERDICT REVERSED 2026-08-15 (Gap 2026-07-31 → Mirrored), and the ground the " +
+                "hole rested on is what fell: its own text claimed \"0xBB carries Resources + Items, not " +
+                "SetReward's ... rows\", while MissionOutcomeMirror.RowKinds has shipped all fifteen of them — " +
+                "RevealedSites is row 3 — the whole time. L555 is the law that makes such a claim re-checkable: " +
+                "the payload here is the live GeoMission (UIStateInitial.cs:112 and " +
+                "GeoscapeView.OnSiteMissionCancelled:1934/:1938 both pass it), and GeoModalMirror.EntityRefOf " +
+                "names one on rung two by the owner slot its site already addresses it with " +
+                "(S#<id>.SerializationData.ActiveMission), so it was ALWAYS describable and the hole was a " +
+                "declaration, not a limit. " +
+                "THE TWO RAISERS THE OLD TEXT SAID NEEDED A RAISER-AWARE SEAM STILL EXIST, and they no longer " +
+                "need one: UIStateInitial:112 raises this on EVERY returning peer off its own LastMission " +
+                "(true since ClientMissionResultGate started calling the game's own CompleteSilently:284), " +
+                "while OnSiteMissionCancelled raises the base-defence / ancient-site variants off a HOST sim " +
+                "event no client ever fires — and the second of those is the hole a player actually saw. " +
+                "Mirroring serves it, and the arrival duplicate the old verdict feared is answered by reading " +
+                "the peer's own queue instead of by withholding the window: GeoModalMirror.IsLocalTwin finds " +
+                "this peer's OWN untagged copy of the same window (same ModalType, same Describe payload) and " +
+                "the host's copy replaces it, or adopts it in place when it is already open. A client's own " +
+                "brief for a different mission is not a twin, because the payload refs differ. Each peer still " +
+                "dismisses its own copy — these are INFORMATIONAL and nothing closes anybody else's " +
+                "(WindowJournal scope LOCAL); GeoPhoenixBaseDefenseOutcome and AncientSiteDefenceOutcome are in " +
+                "HostAuthoritativeRaisers, and Mirrored is the only verdict L546 leaves them that is also true",
                 ModalType.GeoHavenAttackOutcome, ModalType.GeoAlienBaseOutcome, ModalType.GeoScavengeOutcome,
                 ModalType.GeoPhoenixBaseDefenseOutcome, ModalType.GeoAmbushOutcome, ModalType.HavenInfiltrateOutcome,
                 ModalType.GeoPhoenixBaseInfestationOutcome, ModalType.AncientSiteAttackOutcome,
                 ModalType.AncientSiteDefenceOutcome, ModalType.BehemothAttackOutcome, ModalType.InfestedHavenOutcome);
-            Modal(d, WindowSync.Gap,
-                "pandoran reveal result — UIStateInitial.cs:118/:122 over Reward.ApplyResult.RevealedSites[0]: " +
-                "arrival UI on the returning peer, same shape and same split as the outcome family, and the sites " +
-                "it reveals are shared campaign truth the other peer is simply not told about. Same hole, same fix",
+            Modal(d, WindowSync.Mirrored,
+                "pandoran reveal result — VERDICT REVERSED 2026-08-15 (Gap 2026-07-31 → Mirrored) and THE " +
+                "REPORTED DEFECT: the Pandoran-reconnaissance window appeared on the host and nowhere else. It " +
+                "is vanilla (TFTV only DECORATES it — AircraftReworkGeoscape.Scanning.cs:672-675 rewrites the " +
+                "description and :766 patches GeoAlienFaction.TryRevealAlienBase; it adds no ModalType and no " +
+                "view state), so this was OUR declaration. Its payload is Reward.ApplyResult.RevealedSites[0], " +
+                "a GeoSite — a rail ROOT that IdentityResolver.RootRef names on rung ONE — so " +
+                "GeoModalMirror.Describe puts it on the wire as the generic EntityRef shape with no " +
+                "window-specific code on either side, and the peer rebuilds it against its own graph. " +
+                "WHY THE CLIENT'S OWN RAISE WAS NOT ENOUGH, measured rather than assumed: UIStateInitial " +
+                "raises this window on every returning peer, but it CHOOSES ITS BRANCH on " +
+                "RevealedSites.Any() (:118 with the site, :122 with nothing), and a client reaches that line " +
+                "before the host's 0xBB reward lands — the host broadcasts as its own player clicks through " +
+                "the battle summary, so a faster client ALWAYS loses that race (MissionOutcomeMirror" +
+                ".StampMirroredOutcome's _awaitingReward warning is the same finding from the other side). The " +
+                "client therefore drew the no-data variant, which TFTV's own PandoranBaseRevealDataBind " +
+                "postfix labels \"No Pandoran colony was detected\" — a window that is present and WRONG, which " +
+                "reads to a player exactly like a window that is missing. The host's copy now replaces that " +
+                "degraded twin (GeoModalMirror.IsLocalTwin's second arm: same window, this peer has NO payload " +
+                "where the host named an entity). INFORMATIONAL: each peer dismisses its own copy and nothing " +
+                "closes anyone else's",
                 ModalType.PandoranRevealResult);
-            Modal(d, WindowSync.Gap,
-                "interception — InterceptionInfoData holds LIVE aircraft LISTS (player/enemy/disengaged), not one " +
-                "rail ref, and the brief sets DisableCancel (InterceptionBriefDataBind.cs:83) which " +
-                "UIStateGeoModal.OnCancel:96 honours, so a mirrored copy could not even be closed; Confirm reads a " +
-                "TOGGLE off the host's own prefab and calls LaunchInterceptionGame. The outcome's GeoAirMission has " +
-                "no rail identity at all. Air combat needs its own replication before its windows can mean anything. " +
-                "AMENDED 2026-08-01: a brief that DisableCancel has wedged on an idle host wedges its whole " +
-                "queue and the shared clock with it, so this Gap is a campaign-stopper and not only a missing " +
-                "window. The same-day claim that 0xB9's advance op resolves it host-side \"without a mirrored " +
-                "copy existing at all\" is WITHDRAWN and was the regression: an answer with no copy to name it " +
-                "from could only be matched on the window's KIND, so it landed on whatever the host had up. " +
-                "0xB9 now reaches only what the host itself raised to the answering peer, which is nothing here",
-                ModalType.InterceptionBrief, ModalType.InterceptionOutcome);
-            Modal(d, WindowSync.Gap,
-                "alien intelligence brief — AlienIntelligenceBriefData carries its OWN DialogCallback (invoked at " +
-                "GeoscapeView.cs:2017) plus a live GeoscapeViewContext the raiser injects (:2011) and a " +
-                "List<RewardDiplomacyChange>; the data object IS the closure. Describable in principle (faction + " +
-                "research ids + the diplomacy deltas), not described yet",
+
+            // ── GAP: an EARNED hole — the payload itself cannot be described (L555) ──
+            Hole(d, typeof(PhoenixPoint.Geoscape.View.DataObjects.InterceptionInfoData),
+                "interception BRIEF — the payload is an InterceptionInfoData: LIVE aircraft LISTS " +
+                "(player/enemy/disengaged), not one rail ref, so GeoModalMirror.Describe falls to " +
+                "DataShape.Unsupported and HostBroadcast ships nothing. That is the machine-checked reason " +
+                "this hole survives L555 while the outcome and reveal families did not. The rest is why it " +
+                "would still be wrong even if it could travel: the brief sets DisableCancel " +
+                "(InterceptionBriefDataBind.cs:83) which UIStateGeoModal.OnCancel:96 honours, so a mirrored " +
+                "copy could not even be closed, and Confirm reads a TOGGLE off the host's own prefab and calls " +
+                "LaunchInterceptionGame. Air combat needs its own replication before its windows can mean " +
+                "anything. AMENDED 2026-08-01: a brief that DisableCancel has wedged on an idle host wedges " +
+                "its whole queue and the shared clock with it, so this hole is a campaign-stopper and not only " +
+                "a missing window. The same-day claim that 0xB9's advance op resolves it host-side \"without a " +
+                "mirrored copy existing at all\" is WITHDRAWN and was the regression: an answer with no copy to " +
+                "name it from could only be matched on the window's KIND, so it landed on whatever the host " +
+                "had up. 0xB9 now reaches only what the host itself raised to the answering peer, which is " +
+                "nothing here",
+                ModalType.InterceptionBrief);
+            Hole(d, typeof(PhoenixPoint.Geoscape.Entities.Missions.GeoAirMission),
+                "interception OUTCOME — the payload is the GeoAirMission itself (GeoscapeView" +
+                ".ShowInterceptionResult:782), and it has no rail identity at all: it is not a root " +
+                "IdentityResolver.RootRef names, and it is not a GeoMission, so EntityRefOf's owner-slot rung " +
+                "cannot reach it either. Declared APART from the brief since 2026-08-15 because the two carry " +
+                "DIFFERENT payload classes and L555 asks the question of the payload, not of the family — one " +
+                "witness for two windows would have been evidence for neither. Same remedy as the brief: air " +
+                "combat needs its own replication first",
+                ModalType.InterceptionOutcome);
+            Hole(d, typeof(PhoenixPoint.Geoscape.View.ViewControllers.Modal.AlienIntelligenceBriefData),
+                "alien intelligence brief — AlienIntelligenceBriefData carries its OWN DialogCallback (invoked " +
+                "at GeoscapeView.cs:2017) plus a live GeoscapeViewContext the raiser injects (:2011) and a " +
+                "List<RewardDiplomacyChange>; the data object IS the closure, and GeoModalMirror.Describe has " +
+                "no shape for it, so the host ships nothing. Describable IN PRINCIPLE (faction root ref + " +
+                "research ids + the diplomacy deltas — the DiplomacyReward shape is already most of it), which " +
+                "is what makes this the one remaining hole worth closing: it needs a shape written, not a " +
+                "verdict changed. Until that shape exists the payload is genuinely undescribable and L555 is " +
+                "satisfied by the fact rather than by the sentence",
                 ModalType.AlienResearchBrief);
-            Modal(d, WindowSync.Gap,
-                "NO caller anywhere in the shipped assembly (full sweep 2026-07-31) — declared so this table stays " +
-                "TOTAL over the enum. Gap rather than LocalOnly on purpose: nobody has reviewed what these should " +
-                "do because nothing raises them, so if a patch, a DLC or a mod ever does, the runtime announce is " +
-                "LOUD at the moment it happens instead of silently deciding it does not matter",
+            Hole(d, typeof(void),
+                "NO caller anywhere in the shipped assembly (full sweep 2026-07-31, re-checked 2026-08-15) — " +
+                "declared so this table stays TOTAL over the enum. typeof(void) is the witness and it is the " +
+                "honest one: there is no payload class because there is no raise, which is a different " +
+                "statement from \"the payload is null\" (a null payload is DataShape.None and travels fine). A " +
+                "hole rather than LocalOnly on purpose: nobody has reviewed what these should do because " +
+                "nothing raises them, so if a patch, a DLC or a mod ever does, the runtime announce is LOUD at " +
+                "the moment it happens instead of silently deciding it does not matter",
                 ModalType.LoadPrompt, ModalType.SiteEncounter, ModalType.SiteRecruit, ModalType.ResourcePayment);
 
             // ── LOCALONLY: correct NOT to replicate ──
@@ -599,8 +660,30 @@ namespace Multiplayer.Network.Sync
                                "screen only. Declare it (Mirrored / LocalOnly / Gap) with a reason; RailCheck L48 " +
                                "fails on it until someone does");
             else if (rule.Sync == WindowSync.Gap)
-                MpLog.LogWarning("[MP][windows] '" + stateType.Name + "' is a KNOWN un-mirrored window — the other " +
-                                 "peer does not get it: " + rule.Why);
+                MpLog.LogWarning("[MP][windows] " + HoleAnnouncement(stateType.Name, rule));
+        }
+
+        /// <summary>THE HOLE, IN ONE SENTENCE THE LOG AND THE LAW BOTH READ (L555 arm e). PURE, so RailCheck
+        /// executes it rather than trusting that a warning somewhere says the right thing.
+        ///
+        /// A hole is announced with its EVIDENCE — the payload class the raiser hands over and the derived
+        /// verdict <see cref="GeoModalMirror.CanDescribeClass"/> returns for it — not merely with the prose
+        /// somebody typed when the hole was declared. That is the whole asymmetry this file gained on
+        /// 2026-08-15: a hole over a describable payload is illegal, so the announcement of a legal one must
+        /// carry the fact that makes it legal, where a reader (and the next agent) can check it against the
+        /// code instead of against a paragraph. The reviewed prose still rides along; it is now the second
+        /// half of the sentence rather than the whole of it.</summary>
+        internal static string HoleAnnouncement(string window, WindowRule rule)
+        {
+            var cls = rule == null ? null : rule.GapDataClass;
+            string payload =
+                cls == null ? "an UNDECLARED payload class (the hole names no evidence at all — L555 arm a)"
+                : cls == typeof(void) ? "NO payload class, because nothing in this build raises it"
+                : "a '" + cls.FullName + "'";
+            return "'" + window + "' is a DECLARED HOLE — the other peer does NOT get this window. It rests " +
+                   "on " + payload + ", which GeoModalMirror.Describe cannot put on the wire (describable=" +
+                   GeoModalMirror.CanDescribeClass(cls) + "), so the host ships nothing and only this peer " +
+                   "ever sees it. Reviewed reason: " + (rule == null ? "<none>" : rule.Why);
         }
 
         private static readonly HashSet<ModalType> _announcedModals = new HashSet<ModalType>();
@@ -620,8 +703,7 @@ namespace Multiplayer.Network.Sync
                                "certainly showing on ONE screen only. Declare it (Mirrored / LocalOnly / Gap) with " +
                                "a reason; RailCheck L49 fails on it until someone does");
             else if (rule.Sync == WindowSync.Gap)
-                MpLog.LogWarning("[MP][windows] modal '" + modal + "' is a KNOWN un-mirrored window — the other " +
-                                 "peer does not get it: " + rule.Why);
+                MpLog.LogWarning("[MP][windows] modal " + HoleAnnouncement(modal.ToString(), rule));
         }
 
         // ─── NO BOUND (§A.6, L524) ──────────────────────────────────────────

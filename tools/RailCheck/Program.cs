@@ -456,6 +456,7 @@ namespace RailCheck
             Add(laws, () => L552_DismissalScopeAndAnswerAuthorityAreTwoDerivations.Check());
             Add(laws, () => L553_OneWindowOneIdentityOneResolution.Check());
             Add(laws, () => L554_NoLiftBeforeThisPeersOwnFirstFrame.Check());
+            Add(laws, () => L555_ADescribableWindowIsNeverAHole.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -503,7 +504,14 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 354;
+        private const int ExpectedLawRegistrations = 355;
+        // Updated deliberately 2026-08-15: L555 (a describable window is never a hole, and every hole
+        // states a machine-checkable reason) was ADDED — 354 -> 355. Nothing was retired and nothing was
+        // weakened: L48/L49 still keep the coverage tables TOTAL, and L546 still forbids a LocalOnly claim
+        // over a host-authoritative raiser. What neither could state is that a Gap declaration must be
+        // EARNED — that the payload behind the window genuinely cannot be described — which is what let
+        // ModalType.PandoranRevealResult sit as an announced hole over a GeoSite, a rail root the wire has
+        // been able to name since law 2 existed.
         // Updated deliberately 2026-08-15: L554 (no peer lifts until every LIVE peer has said, from its own
         // rendered frame, that it is ready) was ADDED — 353 -> 354. Nothing was retired and nothing was
         // weakened: L551 keeps every arm it had — the arrival still ARMS the reveal instead of consuming
@@ -645,7 +653,12 @@ namespace RailCheck
         // Updated deliberately 2026-08-15 with L553 (every live window has its own identity, and every
         // answer channel resolves its target the same way): one new identity string, 352 -> 353 executed
         // identities. No identity retired. L176 and L109 keep theirs and all of their arms.
-        private const string ExpectedExecutionIdentityDigest = "d6a04d271de80d4bdb135a229ac6891c3929ccc3d842c13e1cb1bffeb146dc4c";
+        // Updated deliberately 2026-08-15 with L555 (a describable window is never a hole, and every hole
+        // states a machine-checkable reason): one new identity string, 354 -> 355 executed identities. No
+        // identity retired. L106 keeps its own identity and every arm — its MirroredData table GAINED the
+        // twelve kinds that stopped being holes, which is the table growing with the coverage it describes,
+        // not an arm being relaxed. L48/L49/L546 are untouched.
+        private const string ExpectedExecutionIdentityDigest = "fc420cec117902fb4ecffc13e44d62796b286d69807596265ef079e4a432d541";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
