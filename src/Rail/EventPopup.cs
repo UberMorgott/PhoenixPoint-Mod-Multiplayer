@@ -1792,15 +1792,20 @@ namespace Multiplayer.Network.Sync
                 // StubReward on the host had nothing to build from and fell back to the empty object. Read back
                 // from the bytes just written rather than converting a second way: the host then holds exactly
                 // what the clients hold.
+                MissionOutcomeMirror.RewardWire wire;
                 using (var back = new MemoryStream(body))
                 using (var r = new BinaryReader(back, Encoding.UTF8))
                 {
                     OccurrenceId occurrence;
                     if (TryGetDurableOccurrence(source, out occurrence) || TryFindDurableOccurrence(eventId, out occurrence))
-                    { r.ReadByte(); EventSync.ReadOccurrence(r); _durableRewards[occurrence] = MissionOutcomeMirror.DecodeRaw(r); }
-                    else { WireString.ReadKey(r); _rewards[eventId] = MissionOutcomeMirror.DecodeRaw(r); }
+                    { r.ReadByte(); EventSync.ReadOccurrence(r); _durableRewards[occurrence] = wire = MissionOutcomeMirror.DecodeRaw(r); }
+                    else { WireString.ReadKey(r); _rewards[eventId] = wire = MissionOutcomeMirror.DecodeRaw(r); }
                 }
-                MpLog.Log("[MP][events] HOST reward for '" + eventId + "' broadcast");
+                // Counts off the host's OWN read-back of the bytes it just sent: a client reporting rows=0 is
+                // then either matched here (a legitimate resources-only reward) or contradicted (a real loss),
+                // instead of being unprovable from the host side.
+                MpLog.Log("[MP][events] HOST reward for '" + eventId + "' broadcast res=" + wire.Resources.Values.Count +
+                          " items=" + wire.Items.ToList().Count + " rows=" + wire.Rows.Count);
             }
             catch (Exception ex)
             { MpLog.LogError("[MP][events] reward broadcast for '" + eventId + "' failed: " + ex); }
