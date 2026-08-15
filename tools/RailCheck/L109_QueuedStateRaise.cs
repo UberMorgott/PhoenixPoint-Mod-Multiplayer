@@ -174,6 +174,10 @@ namespace RailCheck
                              "), so the identity the 0xB9 deploy op matches on is unchecked.";
             else
             {
+                // RAISED FIRST, and each under its OWN host journal position (L553): an identity belongs to
+                // a raise, not to an object, and two prompts are two raises even when they describe alike.
+                WindowQueueSync.TagRaise(state, WindowQueueSync.RaiseTagFor(41));
+                if (other != null) WindowQueueSync.TagRaise(other, WindowQueueSync.RaiseTagFor(42));
                 one = WindowQueueSync.IdentityOf(state);
                 two = other == null ? null : WindowQueueSync.IdentityOf(other);
                 if (string.IsNullOrEmpty(one))

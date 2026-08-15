@@ -158,7 +158,22 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # FactionSoldierJoin (reward.Apply, host-authoritative) did nothing at all. L547 was RE-EXPRESSED, not
 # weakened: it keeps its identity and all four arms and now executes MayRelayAnswer's two-input form with
 # the authority input pinned false, which is precisely the case it owns. L526 is untouched.
-$expectedRegistrationDigest = '28dace18e40821dacff8bf6d236283232cf1129c932c446eb451f77375a9136d'
+# Updated deliberately 2026-08-15: L553 ADDED (every live window has its own identity, and every answer
+# channel resolves its target the same way) -- 352 -> 353 registrations, one new identity string. Two
+# measured defects, both general: (1) an identity was the window KIND plus the 0xB7 payload, and an
+# asset-deploy payload's entity ref is EMPTY by construction, so two manufactured aircraft shared one
+# identity string and a stale answer deployed the WRONG asset -- the identity now carries the host journal
+# position of the RAISE (WindowQueueSync.TagRaise/RaiseTagFor, minted at the one seam every pushed window
+# passes and already shipped as Raise.JournalPos), so uniqueness comes from the raise and not from a
+# per-window table; (2) HandleAdvance answered a QUEUED window and HandleDeploy read only
+# _currentStateSwitchRequest, so a host inside the manufacturing screen -- where the prompt is raised FROM
+# -- refused every deploy answer and the transport was never placed. Both channels now resolve through
+# WindowQueueSync.ResolveAnswerTarget and both take the window out of the queue through TakeQueued
+# (answer-once, no second ledger). Nothing retired. L176 keeps all four arms (HandleAdvance still calls
+# AnswerQueued directly; AnswerQueued still reads WindowOrder.RequestsField and _dialogHandler and pops no
+# screen); L109 arm (g) and the inline L82 identity row were RE-EXPRESSED, not weakened -- they now RAISE
+# the window they ask about (TagRaise) before asking, because an identity belongs to a raise.
+$expectedRegistrationDigest = 'f1bacb1dd75f76afe57a9163997b7897f4bda155d4e6e30d783e3db93007e0e6'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

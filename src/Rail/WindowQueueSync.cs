@@ -481,6 +481,66 @@ namespace Multiplayer.Network.Sync
                 });
         }
 
+        // ─── THE PER-RAISE TAG (RailCheck L553) ────────────────────────────
+
+        /// <summary>
+        /// WHAT MAKES A WINDOW'S IDENTITY UNIQUE, and it is NOT the payload.
+        ///
+        /// Until 2026-08-15 an identity was the window KIND plus the 0xB7 payload, and such a string is only
+        /// as unique as the payload happens to be. <see cref="GeoModalMirror.DataShape.AssetDeploy"/>'s ref is
+        /// OPTIONAL BY CONSTRUCTION — a manufactured aircraft is named by a def, not by a GeoCharacter
+        /// (GeoModalMirror.cs:349) — so two manufactured aircraft of the same type produced the SAME identity
+        /// string, and a stale copy answered later validated against the NEWER window and deployed the wrong
+        /// asset. A WRONG result, not a lost one.
+        ///
+        /// The property that has to hold is general and says nothing about aircraft: EVERY RAISED WINDOW IS
+        /// DISTINGUISHABLE FROM EVERY OTHER LIVE ONE, whatever its payload resolves to. So the identity
+        /// carries the HOST'S JOURNAL POSITION of the raise — <see cref="WindowJournal.MintHostPosition"/>,
+        /// monotonic and never reused within a session, minted at the ONE seam every pushed window passes
+        /// (the <c>QueryStateSwitch</c> postfix) and already shipped in every raise
+        /// (<c>GeoModalMirror.Raise.JournalPos</c>). No second id scheme and no per-window table: the host
+        /// tags the window it queued, the peer tags the copy it built out of that very raise, and both spell
+        /// the same tag because it is the same number.
+        ///
+        /// A WINDOW WITH NO TAG HAS NO IDENTITY, and says so. That is the safe default rather than a silent
+        /// one: an untagged window is either this peer's OWN (nobody else ever saw it) or a raise that
+        /// claimed no journal position (JournalPos 0 — the mission-brief unicast, whose host-side window is
+        /// suppressed and which is answered per-peer anyway), and neither may be answered for another peer.
+        /// </summary>
+        private sealed class RaiseTag { internal string Id; }
+        private static readonly ConditionalWeakTable<object, RaiseTag> _raiseTags =
+            new ConditionalWeakTable<object, RaiseTag>();
+
+        /// <summary>PURE (L553): the tag a raise wears, derived from the host journal position it was minted
+        /// under. ONE derivation, called by the host's tag site and by the peer's — 0 means "this raise
+        /// claimed no position", which is not a tag.</summary>
+        internal static string RaiseTagFor(uint journalPos) => journalPos == 0 ? null : "j" + journalPos;
+
+        /// <summary>Remember which raise this live window IS. Keyed on the state object itself, so it dies
+        /// with the window and no bookkeeping has to remove it.</summary>
+        internal static void TagRaise(object state, string tag)
+        {
+            if (state == null || string.IsNullOrEmpty(tag)) return;
+            _raiseTags.Remove(state);
+            _raiseTags.Add(state, new RaiseTag { Id = tag });
+        }
+
+        internal static string RaiseTagOf(object state)
+        {
+            RaiseTag tag;
+            return state != null && _raiseTags.TryGetValue(state, out tag) ? tag.Id : null;
+        }
+
+        /// <summary>PURE (L553). Why a window this peer DECLARES shared still has no identity. Two different
+        /// defects wore one silent null until 2026-08-15, and the send sites say which one they hit.</summary>
+        internal static string IdentityRefusal(bool hasShape, bool hasRaiseTag) =>
+            !hasShape ? "its data has no 0x" + SurfaceIds.GeoModalRaise.ToString("X2") + " shape, so nothing " +
+                        "on the wire describes it and no peer holds the same window"
+            : !hasRaiseTag ? "it carries no per-raise tag — this peer's own game raised it, or the host's " +
+                             "raise claimed no journal position, so no peer can name the same INSTANCE and " +
+                             "an answer could only ever land on somebody else's window"
+            : "its window is not declared Mirrored, so no peer was ever raised a copy of it";
+
         // ─── WINDOW IDENTITY (pure; RailCheck L82 executes it) ─────────────
 
         /// <summary>
@@ -520,7 +580,8 @@ namespace Multiplayer.Network.Sync
             {
                 case UIStateGeoModal modal:
                     if (GeoWindowCoverage.RuleForModal(modal.ModalType)?.Sync != WindowSync.Mirrored) return null;
-                    return Identity(modal.ModalType.ToString(), GeoModalMirror.Describe(modal.ModalData));
+                    return Identity(modal.ModalType.ToString(), GeoModalMirror.Describe(modal.ModalData),
+                                    RaiseTagOf(modal));
                 // The SAME argument, one state further: since 2026-08-05 the host raises this one to every
                 // peer through 0xB7's non-modal arm, so a peer's copy really was built out of the host's own
                 // payload and re-describing the live bind yields the same string on both sides. That is the
@@ -528,18 +589,25 @@ namespace Multiplayer.Network.Sync
                 case UIStateAssetDeployment deploy:
                     if (GeoWindowCoverage.RuleFor(typeof(UIStateAssetDeployment))?.Sync != WindowSync.Mirrored)
                         return null;
-                    return Identity("AssetDeployment", GeoModalMirror.Describe(deploy.DeployBind));
+                    return Identity("AssetDeployment", GeoModalMirror.Describe(deploy.DeployBind),
+                                    RaiseTagOf(deploy));
                 default:
                     return null;                                               // this peer's own local window
             }
         }
 
-        /// <summary>The identity string itself: the window KIND plus the 0xB7 payload that built it, minus
-        /// <c>Num</c> — that field is a presentation flag the client's rebuild deliberately overrides
-        /// (SwitchToResearchState) or a pair of display bits, and it names nothing.</summary>
-        private static string Identity(string kind, GeoModalMirror.Raise p) =>
-            p.Shape == GeoModalMirror.DataShape.Unsupported ? null   // never rode the 0xB7 raise
-                : kind + "|" + p.Shape + "|" + p.Ref + "|" + string.Join(",", p.Keys ?? new string[0]);
+        /// <summary>The identity string itself: the window KIND, the 0xB7 payload that built it minus
+        /// <c>Num</c> (a presentation flag the client's rebuild deliberately overrides, or a pair of display
+        /// bits — it names nothing), and THE PER-RAISE TAG, which is what makes the whole string name one
+        /// window rather than a class of identical ones (see <see cref="RaiseTagFor"/>). PURE, and total: a
+        /// payload no raise ever carried and a window this peer cannot tie to a raise both come out null,
+        /// which is the one verdict that can never answer somebody else's window.</summary>
+        internal static string Identity(string kind, GeoModalMirror.Raise p, string raiseTag) =>
+            p.Shape == GeoModalMirror.DataShape.Unsupported ||   // never rode the 0xB7 raise
+            string.IsNullOrEmpty(raiseTag)                       // no raise this peer and the host both hold
+                ? null
+                : kind + "|" + p.Shape + "|" + p.Ref + "|" + string.Join(",", p.Keys ?? new string[0]) +
+                  "|" + raiseTag;
 
         // ─── THE VALIDATOR (pure — host facts only, law 3; RailCheck L82 executes it) ───
 
@@ -633,6 +701,39 @@ namespace Multiplayer.Network.Sync
             modal != null && DialogHandlerField?.GetValue(modal) == null &&
             GeoModalMirror.AnswerMutatesSharedState(modal.ModalData);
 
+        /// <summary>"NOTHING HERE ANSWERS THAT" — the resolver's verdict when neither the current window nor
+        /// the queue holds the named one.</summary>
+        internal const int TargetNone = -2;
+        /// <summary>The named window IS <c>_currentStateSwitchRequest</c>: the game's own exit funnel runs.</summary>
+        internal const int TargetCurrent = -1;
+
+        /// <summary>
+        /// PURE (RailCheck L553 EXECUTES it): THE ONE TARGET RESOLUTION EVERY ANSWER CHANNEL USES.
+        ///
+        /// A host holds a window in TWO ways and an answer must reach it in both: the window is
+        /// <c>_currentStateSwitchRequest</c>, or it is still in <c>_viewStateSwitchRequests</c> because
+        /// <c>WindowOrder.HoldsForOpenScreen</c> keeps a raised window queued while this peer is inside a
+        /// screen it opened itself. Until 2026-08-15 only the ADVANCE channel knew that. <c>HandleDeploy</c>
+        /// read the current slot alone, so a host inside the manufacturing screen — which is precisely where
+        /// an asset-deployment prompt is raised FROM — refused every deploy answer: the manufactured
+        /// transport was never placed and the prompt wedged on every peer.
+        ///
+        /// It is one function rather than two bodies because the defect is structural, not local: a THIRD
+        /// channel written next year would repeat whichever half its author happened to remember. Both
+        /// channels call this, and L553 arm (b) turns RED for any op handler on this surface that does not.
+        /// </summary>
+        /// <returns><see cref="TargetCurrent"/>, an index into <paramref name="queuedIdentities"/>, or
+        /// <see cref="TargetNone"/>.</returns>
+        internal static int ResolveAnswerTarget(string currentIdentity, IList<string> queuedIdentities,
+                                                string wantIdentity)
+        {
+            if (ValidateIdentity(currentIdentity, wantIdentity) == null) return TargetCurrent;
+            if (queuedIdentities != null)
+                for (int i = 0; i < queuedIdentities.Count; i++)
+                    if (MayAnswerQueued(currentIdentity, queuedIdentities[i], wantIdentity)) return i;
+            return TargetNone;
+        }
+
         /// <summary><see cref="ValidateIdentity"/> plus the one question only a MODAL answer raises. Split so
         /// the deploy op can ask the identity half without inventing a <c>ModalResult</c> it does not have.</summary>
         internal static string Validate(string haveIdentity, string wantIdentity, byte result)
@@ -663,11 +764,21 @@ namespace Multiplayer.Network.Sync
             }
 
             var current = CurrentRequestField?.GetValue(query) as GeoscapeViewStateSwitchRequest;
-            var modal = current?.State as UIStateGeoModal;
-            string haveIdentity = IdentityOf(modal);
+            // The LIVE STATE, not a modal cast of it: IdentityOf names every window kind this surface can
+            // name, and a cast here would silently answer "no window" for a current asset-deployment prompt
+            // instead of refusing the advance in words below.
+            string haveIdentity = IdentityOf(current?.State);
+
+            // THE SHARED RESOLUTION (L553), asked here exactly as the deploy channel asks it: is the named
+            // window the one on screen, one the host is holding queued behind a screen of its own, or
+            // neither? Only the middle answer may take the queued arm.
+            int at = ResolveAnswerTarget(haveIdentity, QueuedIdentities(
+                         WindowOrder.RequestsField?.GetValue(query) as IList<GeoscapeViewStateSwitchRequest>),
+                     wantIdentity);
 
             string why = Validate(haveIdentity, wantIdentity, result);
-            if (why != null && AnswerQueued(query, haveIdentity, wantIdentity, result, senderPeerId, nonce)) return;
+            if (at >= 0 && why != null &&
+                AnswerQueued(query, haveIdentity, wantIdentity, result, senderPeerId, nonce)) return;
             if (why != null)
             {
                 // LOGGED, never rejected — see the class doc. A reject's forced re-emit exists to pull back a
@@ -678,6 +789,17 @@ namespace Multiplayer.Network.Sync
                 return;
             }
 
+            var modal = current?.State as UIStateGeoModal;
+            if (modal == null)
+            {
+                // The identity matched, so this really is the window the peer answered — but an OpAdvance
+                // carries a ModalResult and a non-modal window has no DialogCallback to hand it to. Its own
+                // channel (OpDeploy) is the one that answers it.
+                MpLog.LogError("[MP][windows] advance from peer=" + senderPeerId + " nonce=" + nonce +
+                               " did NOT apply — '" + haveIdentity + "' is not a modal, so there is no " +
+                               "DialogCallback for this answer to run. It must ride its own op");
+                return;
+            }
             // The host's OWN DialogCallback runs here, over the host's OWN modalData: FinishDialog:82 clears
             // the queue slot and then invokes it — native, host-side, off host objects, on the very window
             // the host itself raised to the answering peer. The client contributed one byte.
@@ -717,13 +839,13 @@ namespace Multiplayer.Network.Sync
             if (!(WindowOrder.RequestsField.GetValue(query) is IList<GeoscapeViewStateSwitchRequest> pending))
                 return false;
 
-            for (int i = 0; i < pending.Count; i++)
+            int at = ResolveAnswerTarget(haveIdentity, QueuedIdentities(pending), wantIdentity);
+            if (at >= 0)
             {
-                var modal = pending[i].State as UIStateGeoModal;
-                if (modal == null) continue;
-                if (!MayAnswerQueued(haveIdentity, IdentityOf(modal), wantIdentity)) continue;
+                var modal = pending[at].State as UIStateGeoModal;
+                if (modal == null) return false;
 
-                pending.RemoveAt(i);
+                TakeQueued(pending, at);
                 var cb = DialogHandlerField.GetValue(modal) as DialogCallback;
                 DialogHandlerField.SetValue(modal, null);
                 MpLog.Log("[MP][windows] HOST advanced QUEUED '" + wantIdentity + "' with " + (ModalResult)result +
@@ -766,14 +888,22 @@ namespace Multiplayer.Network.Sync
             }
 
             var current = CurrentRequestField?.GetValue(query) as GeoscapeViewStateSwitchRequest;
-            var deploy = current?.State as UIStateAssetDeployment;
-            string haveIdentity = IdentityOf(deploy);
+            string haveIdentity = IdentityOf(current?.State);
+            var pending = WindowOrder.RequestsField?.GetValue(query) as IList<GeoscapeViewStateSwitchRequest>;
 
-            string why = ValidateIdentity(haveIdentity, wantIdentity);
-            if (why != null)
+            // THE SAME RESOLUTION THE ADVANCE CHANNEL USES, and the whole of the second 2026-08-15 defect:
+            // an asset-deployment prompt is raised from inside the manufacturing screen, so on the host it
+            // is normally QUEUED and never becomes _currentStateSwitchRequest at all.
+            int at = ResolveAnswerTarget(haveIdentity, QueuedIdentities(pending), wantIdentity);
+            var deploy = (at == TargetCurrent ? current?.State
+                          : at >= 0 ? pending[at].State : null) as UIStateAssetDeployment;
+            if (at == TargetNone || deploy == null)
             {
                 MpLog.Log("[MP][windows] deploy from peer=" + senderPeerId + " nonce=" + nonce +
-                          " did NOT apply — " + why);
+                          " did NOT apply — " + (at == TargetNone
+                              ? ValidateIdentity(haveIdentity, wantIdentity)
+                              : "'" + wantIdentity + "' names a window that is not an asset-deployment " +
+                                "prompt, so there is no DeployAtSite for this answer to run"));
                 return;
             }
 
@@ -789,9 +919,64 @@ namespace Multiplayer.Network.Sync
                 return;
             }
 
-            deploy.DeployAtSite(site);
-            MpLog.Log("[MP][windows] HOST deployed '" + haveIdentity + "' at " + siteRef +
-                      " for peer=" + senderPeerId + " nonce=" + nonce);
+            if (at == TargetCurrent)
+            {
+                // The GAME'S OWN exit: DeployAtSite:69 is DeployAsset plus FinishQueriedState, exactly what a
+                // host click does — and the FinishQueriedState is CORRECT here, because this prompt really is
+                // the state the host's stack pushed.
+                deploy.DeployAtSite(site);
+                MpLog.Log("[MP][windows] HOST deployed '" + haveIdentity + "' at " + siteRef +
+                          " for peer=" + senderPeerId + " nonce=" + nonce);
+                return;
+            }
+
+            // THE HELD PROMPT, answered the way AnswerQueued answers a held modal: out of the queue FIRST,
+            // then the authoritative half ALONE. DeployAtSite:69 cannot be used on a state the stack never
+            // pushed — its tail is FinishQueriedState:2164, which would pop the screen the host is actually
+            // looking at (and Context is not even set on an un-entered state). What is left is the one line
+            // the native method wraps, verbatim including its Unity null-check on the aircraft def
+            // (UIStateAssetDeployment.cs:71-78) — one DeployAsset overload takes both asset kinds
+            // (GeoPhoenixFaction.cs:714).
+            var bind = deploy.DeployBind;
+            TakeQueued(pending, at);
+            bind.Faction.DeployAsset(site, (bool)bind.Aircraft ? (object)bind.Aircraft : bind.Asset,
+                                     bind.Manufactured);
+            MpLog.Log("[MP][windows] HOST deployed QUEUED '" + wantIdentity + "' at " + siteRef +
+                      " for peer=" + senderPeerId + " nonce=" + nonce + " — this host is inside a screen of " +
+                      "its own (a deployment prompt is raised FROM one), so the window was still in " +
+                      "_viewStateSwitchRequests. The asset is placed and nothing on screen is popped");
+        }
+
+        /// <summary>The identity of every window in the host's pending list, in list order, so the shared
+        /// resolver can be asked about the queue without knowing what a <c>GeoscapeViewStateSwitchRequest</c>
+        /// is. Nulls are kept: an index here IS an index there.</summary>
+        private static IList<string> QueuedIdentities(IList<GeoscapeViewStateSwitchRequest> pending)
+        {
+            if (pending == null) return null;
+            var identities = new string[pending.Count];
+            for (int i = 0; i < identities.Length; i++) identities[i] = IdentityOf(pending[i]?.State);
+            return identities;
+        }
+
+        /// <summary>
+        /// ANSWER-ONCE, ONE SPELLING FOR BOTH CHANNELS. The answered window leaves the host's pending list
+        /// BEFORE its consequence runs, so a second peer's stale answer arrives to find no window of that
+        /// identity at all and is refused in words by <see cref="ValidateIdentity"/> — which is a real
+        /// refusal now that an identity names ONE RAISE (see <see cref="RaiseTagFor"/>) instead of a class
+        /// of structurally identical windows. The CURRENT arm inherits the same property from the game
+        /// itself: <c>FinishDialog</c>:82 and <c>DeployAtSite</c>:79 both clear the slot through
+        /// <c>FinishQueriedState</c> before anything else can name it.
+        ///
+        /// NO SECOND LEDGER (L523). The durable occurrence this request already carries is RELEASED here
+        /// rather than duplicated: the window is gone, so the carrier that claimed to be presenting it must
+        /// stop claiming it — otherwise the inbox would re-present a decision that has been taken.
+        /// </summary>
+        private static void TakeQueued(IList<GeoscapeViewStateSwitchRequest> pending, int at)
+        {
+            var request = pending[at];
+            pending.RemoveAt(at);
+            OccurrenceId occurrence;
+            if (TryGetDurable(request, out occurrence)) UntrackDurableNativeCarrier(request, occurrence);
         }
 
         // ─── CLIENT: the capture seam (law 4a, presentation) ───────────────
@@ -863,9 +1048,11 @@ namespace Multiplayer.Network.Sync
                     // hiding, which is how this class of defect stayed invisible until it was reported.
                     if (GeoWindowCoverage.RuleForModal(modal.ModalType)?.Sync == WindowSync.Mirrored &&
                         _unclassifiedLogged.Add(modal.ModalType.ToString()))
-                        MpLog.LogError("[MP][windows] '" + modal.ModalType + "' is declared MIRRORED but its " +
-                                       "data has no 0x" + SurfaceIds.GeoModalRaise.ToString("X2") + " shape, " +
-                                       "so this peer's answer NAMES NO WINDOW and cannot cross. If answering " +
+                        MpLog.LogError("[MP][windows] '" + modal.ModalType + "' is declared MIRRORED but " +
+                                       IdentityRefusal(GeoModalMirror.Describe(modal.ModalData).Shape !=
+                                                       GeoModalMirror.DataShape.Unsupported,
+                                                       RaiseTagOf(modal) != null) +
+                                       ", so this peer's answer NAMES NO WINDOW and cannot cross. If answering " +
                                        "it mutates shared state, that answer is being LOST on this peer — " +
                                        "give the payload a shape, or declare the window Gap on purpose " +
                                        "(logged once per ModalType)");
@@ -980,9 +1167,13 @@ namespace Multiplayer.Network.Sync
                         // Never fall through to native: that would deploy on this peer alone. The prompt stays
                         // up here so the player can retry, and the reason is on the log.
                         MpLog.LogError("[MP][windows] asset-deploy click DROPPED — " +
-                                       (identity == null ? "this peer's prompt has no shared identity, so the host " +
-                                                           "could not tell which window is being answered"
-                                                         : "the chosen site has no rail root ref") +
+                                       (identity == null
+                                           ? "this peer's prompt has no shared identity (" +
+                                             IdentityRefusal(GeoModalMirror.Describe(__instance.DeployBind).Shape !=
+                                                             GeoModalMirror.DataShape.Unsupported,
+                                                             RaiseTagOf(__instance) != null) +
+                                             "), so the host could not tell which window is being answered"
+                                           : "the chosen site has no rail root ref") +
                                        ". Nothing was deployed locally either");
                         return false;
                     }

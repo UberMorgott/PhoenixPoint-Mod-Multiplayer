@@ -681,6 +681,11 @@ namespace Multiplayer.Network.Sync
                     WindowJournal.SetHostPending(pos, family);
                     // The host's own copy: the live request IS the payload on this peer.
                     WindowJournal.Append(pos, family, null);
+                    // AND THE HOST'S OWN WINDOW WEARS THE TAG OF THAT RAISE (L553). The peer's copy is
+                    // tagged with the same number out of the raise payload (GeoModalMirror.RaiseMirrored),
+                    // so the two sides spell one identity for one window and two identities for two
+                    // structurally identical ones — which the payload alone could not do.
+                    WindowQueueSync.TagRaise(request?.State, WindowQueueSync.RaiseTagFor(pos));
                 }
                 // THE NON-MODAL RAISE, at the one queue every pushed window passes: a state that reached here
                 // is one the game is interrupting the player with, it carries its own priority and its own

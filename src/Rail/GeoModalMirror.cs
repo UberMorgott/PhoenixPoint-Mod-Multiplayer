@@ -1014,6 +1014,11 @@ namespace Multiplayer.Network.Sync
             // A ONE-SHOT pause, not a hold: any peer resumes unconditionally, first-to-act-wins.
             { PauseGame = true };
             q.QueryStateSwitch(request);
+            // THE PER-RAISE TAG (L553), from the host's own journal position for this raise: the identity a
+            // peer may answer with names ONE RAISE, never a class of windows that describe the same way.
+            // After QueryStateSwitch on purpose — the coverage gate's own tag site is host-only, so nothing
+            // here is overwritten, and a peer that somehow minted one would lose it to the host's number.
+            WindowQueueSync.TagRaise(state, WindowQueueSync.RaiseTagFor(p.JournalPos));
             if (!string.IsNullOrEmpty(p.DurableTrigger))
             {
                 var occurrence = DurableWindowRegistry.MatchPriorityOccurrence(DurableInboxSession.ActiveStore,

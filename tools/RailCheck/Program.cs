@@ -454,6 +454,7 @@ namespace RailCheck
             Add(laws, () => L550_EveryHostOnlyPresentationChannelIsServed.Check());
             Add(laws, () => L551_TheRevealIsOneInstantForEveryPeer.Check());
             Add(laws, () => L552_DismissalScopeAndAnswerAuthorityAreTwoDerivations.Check());
+            Add(laws, () => L553_OneWindowOneIdentityOneResolution.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -501,8 +502,15 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 352;
-        // Updated deliberately 2026-08-15: L552 (dismissal scope and answer authority are two
+        private const int ExpectedLawRegistrations = 353;
+        // Updated deliberately 2026-08-15: L553 (every live window has its own identity, and every answer
+        // channel resolves its target the same way) was ADDED — 352 -> 353. Nothing was retired and
+        // nothing was weakened: L176 keeps every arm it had (HandleAdvance still calls AnswerQueued
+        // directly, AnswerQueued still reads WindowOrder.RequestsField and _dialogHandler, and still pops
+        // no screen) and L109 keeps its answerable/deploy arms — what neither asserted was that two
+        // structurally identical windows get DIFFERENT identities, or that the deploy channel resolves its
+        // target the same way the advance channel does.
+        // Earlier the same day: L552 (dismissal scope and answer authority are two
         // derivations, and no scope key is dead) was ADDED — 351 -> 352. Nothing was retired and
         // nothing was weakened: L547 keeps the whole of its own invariant (a LOCAL family's dismissal
         // never travels) and was only RE-EXPRESSED against MayRelayAnswer's second parameter, because
@@ -616,7 +624,10 @@ namespace RailCheck
         // derivations, and no scope key is dead): one new identity string, 351 -> 352 executed
         // identities. No identity retired. L547 keeps its own identity and all four of its arms — it was
         // re-expressed against MayRelayAnswer's second parameter, not narrowed.
-        private const string ExpectedExecutionIdentityDigest = "d9fd6a1a5ec68f82e1dcd0398c3f7fa2690b61391887ad5595f26ec3074fa6c9";
+        // Updated deliberately 2026-08-15 with L553 (every live window has its own identity, and every
+        // answer channel resolves its target the same way): one new identity string, 352 -> 353 executed
+        // identities. No identity retired. L176 and L109 keep theirs and all of their arms.
+        private const string ExpectedExecutionIdentityDigest = "d03ceecd6f16ef93c5535cc8a6a59ee477b53cb35db41242beaa07a7ea2c9e5e";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
@@ -5337,10 +5348,17 @@ namespace RailCheck
                 yield return "L82 identity-names-a-local-modal: ActivateBase is declared LocalOnly — the clicking " +
                              "peer's OWN ability confirmation — and it was given an identity anyway, so closing it " +
                              "would advance another peer's queue";
-            if (WindowQueueSync.IdentityOf(new UIStateGeoModal(ModalType.GeoPhoenixBaseOutcome, null, null)) == null)
+            // RE-EXPRESSED 2026-08-15 (L553), not weakened: the window is RAISED first — i.e. tagged with the
+            // host journal position its raise minted, which is what both peers do for a real one — and the
+            // same claim is then made of it. An identity belongs to a RAISE, so a window that was never
+            // raised has none by design; asking the un-raised object would assert the opposite of L553.
+            var raisedMirrored = new UIStateGeoModal(ModalType.GeoPhoenixBaseOutcome, null, null);
+            WindowQueueSync.TagRaise(raisedMirrored, WindowQueueSync.RaiseTagFor(11));
+            if (WindowQueueSync.IdentityOf(raisedMirrored) == null)
                 yield return "L82 identity-misses-the-mirrored-modal: GeoPhoenixBaseOutcome is declared Mirrored and " +
-                             "raises with null modalData (DataShape.None), and it got NO identity — the one family " +
-                             "this op can legitimately advance would be refused and peer autonomy is dead code";
+                             "raises with null modalData (DataShape.None), and it got NO identity even as a RAISED " +
+                             "window — the one family this op can legitimately advance would be refused and peer " +
+                             "autonomy is dead code";
 
             // ── (2) the seams really are the game's own funnels ─────────────
             var handle = ModMethod(typeof(WindowQueueSync), "HandleAdvance");

@@ -30,6 +30,113 @@ namespace RailSim
                               AJoiningPeerNeverReplaysTheStatusBar);
             yield return Pair("the-reveal-is-one-instant-for-every-peer",
                               TheRevealIsOneInstantForEveryPeer);
+            yield return Pair("two-raises-never-share-an-identity", TwoRaisesNeverShareAnIdentity);
+            yield return Pair("every-channel-answers-a-held-window", EveryChannelAnswersAHeldWindow);
+        }
+
+        /// <summary>L553 as an OBSERVABLE RUN: a session that raises the SAME window many times. The payload
+        /// is the measured one — a manufactured aircraft, whose entity ref is EMPTY by construction — so the
+        /// OLD identity (kind plus payload) collides on every raise and the NEW one (payload plus the host
+        /// journal position of the raise) cannot. The old policy is run too, and MUST still collide: a
+        /// scenario that only exercises the fix goes green while proving nothing.</summary>
+        private static IEnumerable<string> TwoRaisesNeverShareAnIdentity(int seed)
+        {
+            var rng = new Random(seed);
+            var payload = new GeoModalMirror.Raise
+            {
+                Shape = GeoModalMirror.DataShape.AssetDeploy,
+                Ref = "",                                   // no GeoCharacter: the aircraft case
+                Keys = new[] { "aircraft-guid", "item-guid" },
+            };
+
+            // Every raise in this run gets the host's next journal position, exactly as the mint seam hands
+            // them out; the run starts at an arbitrary position so nothing depends on being first.
+            uint position = (uint)rng.Next(1, 500);
+            var live = new List<string>();
+            var payloadOnly = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < 8; i++)
+            {
+                live.Add(WindowQueueSync.Identity("AssetDeployment", payload,
+                                                  WindowQueueSync.RaiseTagFor(position + (uint)i)));
+                payloadOnly.Add("AssetDeployment|" + payload.Shape + "|" + payload.Ref + "|" +
+                                string.Join(",", payload.Keys));
+            }
+
+            if (payloadOnly.Count != 1)
+                yield return "two-raises-never-share-an-identity: the payload-only identity no longer " +
+                             "collides for eight identical raises, so this scenario is not reproducing the " +
+                             "defect it exists to measure and would stay green through it.";
+            if (live.Distinct(StringComparer.Ordinal).Count() != live.Count || live.Any(string.IsNullOrEmpty))
+                yield return "two-raises-never-share-an-identity: " +
+                             (live.Count - live.Distinct(StringComparer.Ordinal).Count()) + " of " + live.Count +
+                             " concurrently live windows share an identity string. That is the wrong-asset " +
+                             "defect: a stale copy answered later validates against a NEWER window and the " +
+                             "host deploys something nobody chose.";
+
+            // AND THE STALE ANSWER IS REFUSED IN WORDS, never re-aimed: the peers keep their own copies (an
+            // ordinary window is per-peer and is not force-closed), so a copy of raise #1 CAN be answered
+            // after raise #2 has taken the screen. It must land nowhere.
+            if (WindowQueueSync.ValidateIdentity(live[1], live[0]) == null)
+                yield return "two-raises-never-share-an-identity: an answer naming the FIRST raise was " +
+                             "accepted against the second. A stale answer must be refused with a reason, " +
+                             "never applied to whatever window happens to be up.";
+            if (WindowQueueSync.ValidateIdentity(live[0], live[0]) != null)
+                yield return "two-raises-never-share-an-identity: an answer naming the window that IS up was " +
+                             "refused, so no window could ever be answered at all.";
+        }
+
+        /// <summary>L553's second half as an OBSERVABLE RUN: a host that spends the session INSIDE screens of
+        /// its own (manufacturing, research), where <c>WindowOrder.HoldsForOpenScreen</c> keeps every raised
+        /// window queued and never current. Both answer channels are driven over the same history — the OLD
+        /// per-channel policy (read <c>_currentStateSwitchRequest</c> only) must still lose the answers, the
+        /// shared resolution must land every one of them, and an answer already taken must not apply
+        /// twice.</summary>
+        private static IEnumerable<string> EveryChannelAnswersAHeldWindow(int seed)
+        {
+            var rng = new Random(seed);
+            var payload = new GeoModalMirror.Raise
+            {
+                Shape = GeoModalMirror.DataShape.AssetDeploy,
+                Ref = "",
+                Keys = new[] { "aircraft-guid", "item-guid" },
+            };
+
+            // The host is inside a screen: nothing is current, everything the game raised is held.
+            var queued = new List<string>();
+            for (uint pos = 1; pos <= 5; pos++)
+                queued.Add(WindowQueueSync.Identity("AssetDeployment", payload,
+                                                    WindowQueueSync.RaiseTagFor(pos)));
+            string currentIdentity = null;
+
+            int oldPolicyApplied = 0, applied = 0;
+            foreach (var answer in queued.OrderBy(_ => rng.Next()).ToArray())
+            {
+                // OLD: the deploy channel's whole body — validate against the current slot, or drop it.
+                if (WindowQueueSync.ValidateIdentity(currentIdentity, answer) == null) oldPolicyApplied++;
+
+                int at = WindowQueueSync.ResolveAnswerTarget(currentIdentity, queued, answer);
+                if (at < 0) continue;
+                queued.RemoveAt(at);           // TakeQueued: out of the queue BEFORE the consequence runs
+                applied++;
+
+                // ANSWER-ONCE: the same answer arriving again from a second peer must find nothing.
+                if (WindowQueueSync.ResolveAnswerTarget(currentIdentity, queued, answer) !=
+                    WindowQueueSync.TargetNone)
+                    yield return "every-channel-answers-a-held-window: the answer '" + answer + "' resolved " +
+                                 "to a target a second time after it had been applied. Two peers answering " +
+                                 "one window would deploy the asset twice, or launch one mission twice.";
+            }
+
+            if (oldPolicyApplied != 0)
+                yield return "every-channel-answers-a-held-window: the current-slot-only policy applied " +
+                             oldPolicyApplied + " answers, so this scenario is no longer reproducing the " +
+                             "defect it exists to measure and would stay green through it.";
+            if (applied != 5 || queued.Count != 0)
+                yield return "every-channel-answers-a-held-window: " + applied + " of 5 answers landed and " +
+                             queued.Count + " windows are still queued. A host inside a screen of its own is " +
+                             "the NORMAL state for an asset-deployment prompt (it is raised from one), so a " +
+                             "channel that cannot answer a held window never answers at all — the transport " +
+                             "is never placed and the prompt wedges on every peer.";
         }
 
         /// <summary>L551 as an OBSERVABLE RUN, and the one property the law's IL arms cannot state: with a
