@@ -424,6 +424,7 @@ namespace RailCheck
             Add(laws, () => L497_TheCrewBarsRepaintOnAMirroredStat.Check());
             Add(laws, () => L495_TheDrainGateAsksTheViewItIsGating.Check());
             Add(laws, () => L523_DurableIsAnswerOnceNotOrdering.Check());
+            Add(laws, () => L524_OnlyAVoidRemovesAnUnreadEntry.Check());
             Add(laws, () => L498_TheInfoBarRepaintsOnlyWhenWhatItDrawsChanges.Check());
             Add(laws, () => L500_AStructuralCreateWiresOnlyAfterItsValuesLand.Check());
             Add(laws, () => L501_ARefusalNoticeIsThePlayersSentenceSaidOnce.Check());
@@ -485,8 +486,13 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 336;
-        // Updated deliberately 2026-08-15: L523 (durable means answered exactly once, not ordered) was
+        private const int ExpectedLawRegistrations = 337;
+        // Updated deliberately 2026-08-15: L524 (an unread journal entry is removed only by being read or
+        // by a host-minted void) was ADDED — 336 -> 337. In the same commit the BOUND arm of the inline
+        // L82 was AMPUTATED, not weakened: GeoWindowCoverage.QueueCap/TrimQueue are deleted, so the arm's
+        // subject no longer exists and it could only have gone premise-changed forever. L82's arbiter and
+        // seam arms are untouched and still registered, so the registration count does not move for it.
+        // Earlier the same day: L523 (durable means answered exactly once, not ordered) was
         // ADDED and THREE laws were RETIRED in the same commit — 338 -> 336. L496 asserted that the two
         // presentation gates AGREE instead of that there is one gate, i.e. it legitimised the duplicate
         // (R7). L380 (a priority window suspends before it preempts) and L406 (a confirm puts the
@@ -507,7 +513,7 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "94f4a4d79d64e88d041b71e0ad2af1b427e86c2e9a013b0e36e6336fcf1a78ef";
+        private const string ExpectedExecutionIdentityDigest = "3e91b682426a293af9a949cb5580d58a4dc7b0580ffa7a679ccfc88b53c0b278";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
@@ -5169,19 +5175,21 @@ namespace RailCheck
                              "' — that prefix matches ZERO covered paths and a rejected answer never converges";
         }
 
-        /// <summary>L82 — PEER AUTONOMY OVER THE WINDOW QUEUE, and its two silent failure modes.
+        /// <summary>L82 — PEER AUTONOMY OVER THE WINDOW QUEUE, and its silent failure mode.
         ///
         /// The queue drains ONLY on a click: <c>ProcessQueriedStateSwitch</c>:58-63 dequeues while
         /// <c>_currentStateSwitchRequest == null</c> and the sole writer that clears it is
-        /// <c>FinishCurrentStateSwitch</c>:116. So (a) an idle host wedges every peer's campaign behind one
-        /// window — <see cref="WindowQueueSync"/> is the way out, and it is worthless unless it really funnels
-        /// into the game's OWN two exits and really refuses an answer aimed at a different window; and (b) the
-        /// pending list grows forever, which is an O(n²) insert (<c>QueryStateSwitch</c>:77-82), a walk of the
-        /// whole list on every save (<c>GetRestorableData</c>:25-37) and therefore a payload in every join
-        /// transfer. Neither failure logs anything on its own: a mis-addressed advance silently answers the
-        /// WRONG window (a tutorial dismissal confirming a mission brief), and an unbounded queue merely gets
-        /// slower. Both arms below are EXECUTED, not inspected — the arbiter is run on its real cases and the
-        /// bound is run on a real <c>GeoscapeViewSwitchQuery</c>.</summary>
+        /// <c>FinishCurrentStateSwitch</c>:116. So an idle host wedges every peer's campaign behind one
+        /// window — <see cref="WindowQueueSync"/> is the way out, and it is worthless unless it really
+        /// funnels into the game's OWN two exits and really refuses an answer aimed at a different window.
+        /// The failure logs nothing on its own: a mis-addressed advance silently answers the WRONG window
+        /// (a tutorial dismissal confirming a mission brief). The arms below are EXECUTED, not inspected —
+        /// the arbiter is run on its real cases.
+        ///
+        /// AMPUTATED 2026-08-15: this law also carried a second failure mode, the unbounded pending list,
+        /// and five arms asserting <c>GeoWindowCoverage.TrimQueue</c> capped it. That cap is deleted (§A.6)
+        /// because it trimmed the TAIL, i.e. dropped the NEWEST window. Retention now lives in
+        /// <c>WindowJournal</c> and L524 asserts it. See the note where those arms were.</summary>
         private static IEnumerable<string> WindowAutonomyLaw()
         {
             // ── (1) the arbiter, EXECUTED on the cases that actually happen ──
@@ -5287,40 +5295,17 @@ namespace RailCheck
                                  "is gone. Every answer would degrade to a bare dismissal";
             }
 
-            // ── (3) the BOUND, executed on a real queue object ──────────────
-            var q = new GeoscapeViewSwitchQuery(null, null);
-            var f = AccessTools.Field(typeof(GeoscapeViewSwitchQuery), "_viewStateSwitchRequests");
-            var trim = ModMethod(typeof(GeoWindowCoverage), "TrimQueue");
-            if (f == null || trim == null)
-            {
-                yield return "L82 bound-unmoored: GeoscapeViewSwitchQuery._viewStateSwitchRequests or " +
-                             "GeoWindowCoverage.TrimQueue did not resolve — the queue bound checked nothing, and an " +
-                             "unbounded queue is an O(n²) insert plus a payload in every save and every join transfer";
-                yield break;
-            }
-            var live = (System.Collections.IList)f.GetValue(q);
-            for (int i = 0; i < 4096; i++)
-                live.Add(new GeoscapeViewStateSwitchRequest(null, 4096 - i));
-            int before = live.Count;
-            trim.Invoke(null, new object[] { q });
-            int after = live.Count;
-            if (after >= before)
-                yield return "L82 bound-absent: TrimQueue left " + after + " of " + before + " pending windows — " +
-                             "nothing caps the list, so a peer that stops answering degrades every later push " +
-                             "(FindIndex+Insert per window) and drags the whole backlog into every save";
-            else if (after > 256)
-                yield return "L82 bound-loose: TrimQueue capped at " + after + " pending windows, which is not a " +
-                             "bound a human queue ever reaches — the cap has stopped being a guard and become a limit";
-            else if (((GeoscapeViewStateSwitchRequest)live[0]).Priority != 4096)
-                yield return "L82 bound-drops-the-head: TrimQueue removed from the FRONT — the list is " +
-                             "priority-descending and GetNextQueriedStateSwitch:111 always takes index 0, so trimming " +
-                             "there throws away the window the peer is about to be shown and keeps the least " +
-                             "important ones";
-
-            var gatePost = typeof(GeoWindowCoverageGate).GetMethod("Postfix", AllMembers);
-            if (!Reaches(gatePost, null, "TrimQueue"))
-                yield return "L82 bound-unwired: GeoWindowCoverageGate.Postfix does not call TrimQueue — the bound " +
-                             "exists as a method nothing runs, and the live queue grows exactly as before";
+            // ── (3) the BOUND: AMPUTATED 2026-08-15, never weakened ─────────
+            // Five arms lived here — bound-unmoored / bound-absent / bound-loose / bound-drops-the-head /
+            // bound-unwired — and every one of them named GeoWindowCoverage.TrimQueue and its QueueCap = 64.
+            // Both are DELETED (§A.6, L524): the trim removed from the TAIL, i.e. it dropped the NEWEST
+            // pending window, which is the exact opposite of accumulating what the local player has not
+            // looked at. Retention moved to WindowJournal and is one rule — an entry goes when THIS peer
+            // reads it, or on an explicit host-minted void — with a 4096 runaway CANARY that logs once and
+            // keeps appending. L524 asserts all of that, EXECUTED, including that QueueCap/TrimQueue do not
+            // come back. So these arms are removed rather than re-pointed: their subject does not exist, a
+            // premise-changed arm here would fire forever, and nothing they guarded is unguarded — L524
+            // guards the replacement. Peer autonomy over the queue (arms 1, 1b, 2 above) is untouched.
         }
 
         /// <summary>L27 — the event-answer arbiter, which is what makes "the first choice is frozen for

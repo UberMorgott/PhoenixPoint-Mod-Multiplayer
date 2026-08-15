@@ -13,6 +13,7 @@ namespace RailSim
         {
             yield return Pair("seeded-transport-is-reproducible", SeededTransportIsReproducible);
             yield return Pair("every-peer-presents-in-the-same-order", EveryPeerPresentsInTheSameOrder);
+            yield return Pair("the-backlog-is-never-trimmed", TheBacklogIsNeverTrimmed);
         }
 
         /// <summary>§C.1 property 1: EVERY PEER'S PRESENTATION ORDER IS IDENTICAL. The measured P1 shape,
@@ -99,6 +100,40 @@ namespace RailSim
                              "delivery order " + string.Join(",", a) + ". The transport is not reordering, " +
                              "so every ordering scenario in this harness would pass without proving " +
                              "anything.";
+        }
+
+        /// <summary>§A.6: the journal has NO cap and NO trim of any kind. Append past the runaway canary
+        /// and assert that every single entry is still there and the append kept working. The canary is a
+        /// LOG LINE, never a policy — the old QueueCap = 64 trimmed from the TAIL, i.e. dropped the
+        /// NEWEST, which is the exact opposite of accumulating what the player has not looked at.</summary>
+        private static IEnumerable<string> TheBacklogIsNeverTrimmed(int seed)
+        {
+            WindowJournal.Reset();
+            const int n = WindowJournal.RunawayCanaryAt + 64;
+            for (uint i = 1; i <= n; i++) WindowJournal.Append(i, "UIStateGeoModal", new byte[] { 1 });
+
+            if (WindowJournal.UnreadCount != n)
+                yield return "the-backlog-is-never-trimmed: appended " + n + " entries and the journal " +
+                             "holds " + WindowJournal.UnreadCount + ". An entry is dropped ONLY by being " +
+                             "read or by a host-minted void — never by a cap, a trim, a staleness sweep " +
+                             "or an LRU. The " + WindowJournal.RunawayCanaryAt + " canary logs once and " +
+                             "KEEPS APPENDING.";
+
+            var head = WindowJournal.PeekHead();
+            if (head == null || head.Pos != 1)
+                yield return "the-backlog-is-never-trimmed: the head is " +
+                             (head == null ? "<null>" : head.Pos.ToString()) + ", not 1. A trim that " +
+                             "removed from the FRONT would drop the oldest unread window, which is the " +
+                             "one the player is owed next.";
+
+            uint last = 0;
+            JournalEntry e;
+            while (WindowJournal.TryRead(out e)) last = e.Pos;
+            if (last != n)
+                yield return "the-backlog-is-never-trimmed: the last entry drained was " + last +
+                             ", not " + n + ". The shipped QueueCap = 64 trimmed from the TAIL — it " +
+                             "dropped the NEWEST window, i.e. exactly the one that had just been raised.";
+            WindowJournal.Reset();
         }
 
         /// <summary>Send 8 numbered messages to peer 1 at t=0, let the clock run past the delay ceiling,

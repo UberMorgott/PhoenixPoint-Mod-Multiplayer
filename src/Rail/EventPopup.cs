@@ -242,8 +242,11 @@ namespace Multiplayer.Network.Sync
         /// <summary>The bound. A peer that is loading a geoscape holds windows for SECONDS, not minutes, so
         /// this is a wide margin over a legitimate burst (the host raised two the frame after a mission ended
         /// on 2026-08-01); past it the peer is not "loading", it is somewhere this seam does not understand,
-        /// and an unbounded list would then grow for the rest of the session. Same posture as
-        /// <c>GeoWindowCoverage.TrimQueue</c>'s 64: drop LOUDLY rather than leak.</summary>
+        /// and an unbounded list would then grow for the rest of the session. Drop LOUDLY rather than leak.
+        ///
+        /// NOT THE JOURNAL'S BACKLOG, and it must never become a model for it: this bounds a TRANSIENT
+        /// hold across one load, which ends by itself in seconds. The journal's unread list has NO cap at
+        /// all (§A.6, L524) — its length is what the local player has not looked at.</summary>
         private const int MaxHeld = 32;
 
         // ─── THE PAYLOAD (host→all, surface 0xB6) ──────────────────────────

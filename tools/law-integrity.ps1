@@ -42,7 +42,11 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
 # with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
 # registration multiset (so sparse ids and many registrations per source file remain valid).
-# Updated deliberately 2026-08-15: L523 ADDED (durable means answered exactly once, not ordered) and
+# Updated deliberately 2026-08-15: L524 ADDED (an unread journal entry is removed only by being read or
+# by a host-minted void) -- 336 -> 337 registrations, one new identity string. The same commit deleted
+# GeoWindowCoverage.QueueCap/TrimQueue and AMPUTATED the five bound-* arms of the INLINE L82, whose only
+# subject those two were; L82 keeps its arbiter/seam arms and its registration, so it does not move the
+# count and the amputation is not a retirement. Earlier the same day: L523 ADDED (durable means answered exactly once, not ordered) and
 # THREE laws RETIRED -- 338 -> 336 registrations, identity set changed. L496 (it legitimised a duplicate
 # presentation gate, R7), L380 (a priority window suspends before it preempts) and L406 (a confirm puts
 # the preparation window first) all assert the second ordering system this commit deletes. Earlier the
@@ -58,7 +62,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Earlier the same day: L514 ADDED (the roster list repaints on the same mirrored
 # level-up), 334 -> 335; L513 ADDED (no peer lifts before its boundary releases), 333 -> 334;
 # L512 ADDED (the crew strip repaints on a mirrored level-up), 332 -> 333.
-$expectedRegistrationDigest = 'a3172dc9c9696206b3b66296ec2750952cf444ebeae3f77047151dfa13209e3b'
+$expectedRegistrationDigest = '890f83ea5bb1151ea9576c156e6347eccbb7f4804bdbcae955908aa3fe346a52'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

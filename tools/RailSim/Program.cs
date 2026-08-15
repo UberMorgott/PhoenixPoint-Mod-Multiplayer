@@ -67,6 +67,12 @@ namespace RailSim
         [MethodImpl(MethodImplOptions.NoInlining)]
         private static int Run(int seed)
         {
+            // UnityEngine.Debug's default handler is a native icall — outside the player it throws
+            // SecurityException, so the rail's own warnings would abort the run. Swap in a sink, exactly
+            // as RailCheck.Program.Run:83 does. The 4096 runaway canary logs an ERROR by design, so a
+            // scenario that appends past it reaches this path on purpose.
+            UnityEngine.Debug.unityLogger.logHandler = new Sink();
+
             var failures = new List<string>();
             int ran = 0;
             foreach (var scenario in Scenarios.All())
@@ -89,6 +95,12 @@ namespace RailSim
             }
             Console.WriteLine("RAILSIM GREEN — scenarios=" + ran + "/" + ran + " failures=0 seed=" + seed);
             return 0;
+        }
+
+        private sealed class Sink : UnityEngine.ILogHandler
+        {
+            public void LogFormat(UnityEngine.LogType t, UnityEngine.Object c, string fmt, params object[] a) { }
+            public void LogException(Exception e, UnityEngine.Object c) { }
         }
     }
 

@@ -580,78 +580,35 @@ namespace Multiplayer.Network.Sync
                                  "peer does not get it: " + rule.Why);
         }
 
-        // ─── The BOUND: a queue nobody drains must not grow without limit ───
-
-        /// <summary>How many pending windows the queue may hold. The game shows ONE at a time and a player
-        /// clears a handful a minute, so anything past this is the runaway, not a backlog.</summary>
-        private const int QueueCap = 64;
-
-        private static readonly System.Reflection.FieldInfo RequestsField =
-            HarmonyLib.AccessTools.Field(typeof(GeoscapeViewSwitchQuery), "_viewStateSwitchRequests"); // :15
-
-        private static int _dropped;
-
-        /// <summary>
-        /// Cap the pending-window list, because on this rail an UNDRAINED queue is the normal state, not a
-        /// pathology: <c>ProcessQueriedStateSwitch</c>:58-63 dequeues only while
-        /// <c>_currentStateSwitchRequest == null</c> and only a peer's click clears that
-        /// (<c>FinishCurrentStateSwitch</c>:116), so an idle host accumulates every window its sim raises for
-        /// as long as it stays idle. <see cref="WindowQueueSync"/> lets another peer drain the ONE family the
-        /// host raised to it (the Mirrored modals); for everything else — its own briefs, its own cutscene,
-        /// its own asset-deployment prompt — nobody can, so this is what keeps the game alive meanwhile.
-        ///
-        /// Unbounded growth is not merely memory. <c>QueryStateSwitch</c>:77-82 does an O(n)
-        /// <c>FindIndex</c> plus an O(n) <c>Insert</c> per push — O(n²) over a session — and
-        /// <c>GetRestorableData</c>:25-37 walks the WHOLE list on every save, so every queued
-        /// <c>UIStateGeoModal</c> (it IS an <c>IGeoscapeRestorableViewState</c>) rides into every autosave
-        /// and, since join and reconnect ARE a native save transfer (law 1), into every join. Capping n is
-        /// the one fix for all three: the scan, the insert and the save payload all stop growing.
-        ///
-        /// The TAIL is what goes. The list is priority-DESCENDING by construction (insert before the first
-        /// strictly-lower priority) and <c>GetNextQueriedStateSwitch</c>:111-113 always takes index 0, so the
-        /// tail is by the game's own ordering the least important thing pending.
-        ///
-        /// LOUD, never silent — a dropped window is a window a player will never be asked about, and a cap
-        /// nobody can see in the log is indistinguishable from the bug it prevents. The first drop and every
-        /// 32nd after it are errors (a runaway pushes thousands; one line each would cost more than it tells).
-        /// </summary>
-        internal static void TrimQueue(GeoscapeViewSwitchQuery query)
-        {
-            var list = RequestsField?.GetValue(query) as System.Collections.IList;
-            while (list != null && list.Count > QueueCap)
-            {
-                int last = list.Count - 1;
-                var dropped = (list[last] as GeoscapeViewStateSwitchRequest)?.State;
-                list.RemoveAt(last);
-                _dropped++;
-                if (_dropped == 1 || _dropped % 32 == 0)
-                    MpLog.LogError("[MP][windows] window queue OVERFLOW — dropped the lowest-priority pending " +
-                                   "window '" + (dropped == null ? "<null>" : dropped.GetType().Name) + "' to hold " +
-                                   "the queue at " + QueueCap + " (" + _dropped + " dropped this session). The queue " +
-                                   "only drains when a peer answers the current window (ProcessQueriedStateSwitch:60), " +
-                                   "so this peer has not answered one in a very long time — every window past the cap " +
-                                   "is LOST, and the uncapped list is also an O(n²) insert and a payload in every " +
-                                   "save and every join transfer");
-            }
-        }
+        // ─── NO BOUND (§A.6, L524) ──────────────────────────────────────────
+        //
+        // QueueCap = 64 and TrimQueue lived here and are DELETED. The trim removed from the TAIL, i.e. it
+        // dropped the NEWEST pending window — the exact opposite of accumulating what the local player has
+        // not yet looked at, and a window a player is never asked about is the defect the cap claimed to
+        // prevent. Retention is now one rule and it lives in WindowJournal: an entry is removed when THIS
+        // peer reads it, or by an explicit host-minted void. No cap, no trim, no staleness, no LRU. The
+        // 4096 line in WindowJournal.Append is a runaway-raiser CANARY: it logs once and keeps appending.
+        //
+        // The O(n²)-insert / save-payload argument the cap rested on dies with the queue's role: the
+        // native pending list is no longer the ordering authority, the journal is, and the journal is
+        // never persisted (§A.2b). The inline RailCheck law L82's `bound-*` arms were amputated in the
+        // same commit for the same reason — their subject no longer exists.
 
         /// <summary>Full session teardown: a rejoin should re-announce, so a gap is visible in the log of the
         /// session it actually happened in.</summary>
-        public static void Reset() { _announced.Clear(); _announcedModals.Clear(); _dropped = 0; }
+        public static void Reset() { _announced.Clear(); _announcedModals.Clear(); }
     }
 
     /// <summary>
     /// The coverage gate itself (law 4c, presentation): a POSTFIX on the one queue every PUSHED geoscape
-    /// window passes through. Two jobs, both of them about the queue as a whole and neither of them about
-    /// any single window kind — it makes the answer to "does the other peer see this?" exist for every kind
-    /// including ones that do not exist yet (<see cref="GeoWindowCoverage.Announce"/>), and it holds the
-    /// pending list to its bound (<see cref="GeoWindowCoverage.TrimQueue"/>).
+    /// window passes through. Its jobs are about the queue as a whole and none of them about any single
+    /// window kind — it makes the answer to "does the other peer see this?" exist for every kind including
+    /// ones that do not exist yet (<see cref="GeoWindowCoverage.Announce"/>), and it is the ONE seam that
+    /// mints a journal position and publishes.
     ///
-    /// AMENDED 2026-08-01: this used to say "it changes nothing", and the trim makes that false, so the
-    /// claim is replaced rather than left standing. What survives is the part that was load-bearing — the
-    /// gate never SUPPRESSES a window and never changes which one is shown next: the trim only ever removes
-    /// from the TAIL, i.e. below everything the queue would reach first, and only once the list is past a
-    /// bound no live game reaches.
+    /// AMENDED 2026-08-15: THIS GATE CHANGES NOTHING ABOUT THE NATIVE QUEUE AGAIN, and that claim is once
+    /// more literally true. It was falsified in 2026-08-01 by the tail trim; the trim is deleted (§A.6,
+    /// L524) because it dropped the NEWEST pending window, so the gate now only observes and publishes.
     ///
     /// A postfix, and never a prefix: the window must queue exactly as it always did on both peers whatever
     /// the verdict is. Suppressing an un-mirrored window on the host would hide the host's own game from it
@@ -685,9 +642,6 @@ namespace Multiplayer.Network.Sync
                 // is one the game is interrupting the player with, it carries its own priority and its own
                 // live data, and the modal family is already captured at its openers. Host-gated inside.
                 GeoModalMirror.HostBroadcastQueued(request);
-                // Same postfix, same chokepoint, and the same reason it is a postfix: the native insert must
-                // happen exactly as it always did, and only THEN is the list trimmed back to its bound.
-                GeoWindowCoverage.TrimQueue(__instance);
             }
             catch (Exception ex) { MpLog.LogError("[MP][windows] coverage gate threw: " + ex); }
         }
