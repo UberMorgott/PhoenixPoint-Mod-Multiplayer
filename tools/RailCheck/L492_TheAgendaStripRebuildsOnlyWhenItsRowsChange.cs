@@ -50,30 +50,30 @@ namespace RailCheck
         internal static IEnumerable<string> Check()
         {
             OpenUiRepaint.Reset();
-            if (!OpenUiRepaint.AgendaNeedsRebuild("research=A|"))
+            if (!OpenUiRepaint.AgendaNeedsRebuild(true, "research=A|"))
                 yield return "L492 first-paint-skipped: the FIRST agenda signature of a session did not rebuild " +
                              "the strip, so a client joining mid-campaign paints an empty or inherited row set " +
                              "and only a screen re-enter fixes it.";
 
-            if (!OpenUiRepaint.AgendaNeedsRebuild("research=B|"))
+            if (!OpenUiRepaint.AgendaNeedsRebuild(true, "research=B|"))
                 yield return "L492 change-skipped: a CHANGED row set did not rebuild the strip. That is the " +
                              "reactivity mandate broken outright — a research or manufacture finishing on the host " +
                              "would leave the client's open strip showing the previous row until it re-enters a " +
                              "screen, which is exactly the defect class the repaint layer exists to kill.";
 
-            if (OpenUiRepaint.AgendaNeedsRebuild("research=B|"))
+            if (OpenUiRepaint.AgendaNeedsRebuild(true, "research=B|"))
                 yield return "L492 unchanged-rebuilds: an UNCHANGED row set still rebuilt the strip. InitialSetup " +
                              "disposes and re-creates every row, and this runs on every rail batch (marks=10 " +
                              "measured, 2026-08-14) — the reported flicker, back verbatim.";
 
-            if (!OpenUiRepaint.AgendaNeedsRebuild(null) || !OpenUiRepaint.AgendaNeedsRebuild(null))
+            if (!OpenUiRepaint.AgendaNeedsRebuild(true, null) || !OpenUiRepaint.AgendaNeedsRebuild(true, null))
                 yield return "L492 unreadable-model-trusted: an UNREADABLE model (null signature) was treated as " +
                              "'nothing changed'. The safe direction is the other one: an unreadable model may cost " +
                              "a flicker, it may never cost a stale strip.";
 
-            OpenUiRepaint.AgendaNeedsRebuild("research=C|");
+            OpenUiRepaint.AgendaNeedsRebuild(true, "research=C|");
             OpenUiRepaint.Reset();
-            if (!OpenUiRepaint.AgendaNeedsRebuild("research=C|"))
+            if (!OpenUiRepaint.AgendaNeedsRebuild(true, "research=C|"))
                 yield return "L492 reset-vouches-for-dead-session: OpenUiRepaint.Reset kept the last session's " +
                              "agenda signature, so the next session's first paint is skipped against rows that " +
                              "belong to a campaign that is gone.";

@@ -373,12 +373,29 @@ namespace Multiplayer.Network.Sync
             if (TrackerContext.GetValue(tracker) == null) return; // not Init'd yet — InitialSetup would NRE
             try
             {
+                // THE STRIP MUST BE ON SCREEN BEFORE IT IS ASKED ANYTHING (report 2026-08-15: the top-right
+                // label stopped following RESEARCH on clients). A module whose state is not up is switched
+                // off by the game itself (UIModuleBehavior.SetStateID:34) — and unlike UIStateNothingSelected
+                // this module SPANS states, so nothing re-Inits it when the state comes back; that is the
+                // whole reason this method exists. RepaintNeeded REMEMBERS every key it is handed, so asking
+                // an OFF strip made it vouch for a signature nobody ever drew: the research head changed
+                // while the player was inside UIStateResearch or behind the research-complete modal, the key
+                // was recorded, and the next flush — the first one with the strip back on screen — compared
+                // EQUAL and skipped the rebuild. The row then sat stale until something ELSE in the signature
+                // moved, which is exactly "manufacturing updates, research does not".
+                // The two strips added the same day guard this way already (RefreshVehicleCrew:304,
+                // RefreshRosterSlots:212); the agenda strip was the one that did not. The info bar is not in
+                // this class of defect: InfoBarKey carries a one-second floor, so its key can never stay
+                // equal for longer than the module's own native poll.
                 // THE FLICKER (client, reported 2026-08-14). InitialSetup DESTROYS and re-creates every row,
                 // and this ran on EVERY flush — measured at `marks=10`, i.e. ~10 rail batches a second, so the
                 // strip visibly blinked. A rebuild is only owed when the SET OF ROWS changed; the per-element
                 // time text is refreshed by the plain UpdateData below (and by the module's own 1 Hz poll),
                 // which touches no GameObject lifecycle.
-                bool rebuild = AgendaNeedsRebuild(AgendaSignature(TrackerFaction?.GetValue(tracker) as GeoFaction));
+                bool onScreen = tracker.gameObject.activeInHierarchy;
+                bool rebuild = AgendaNeedsRebuild(onScreen,
+                    AgendaSignature(TrackerFaction?.GetValue(tracker) as GeoFaction));
+                if (!onScreen) return; // switched off: nothing to paint, and nothing was remembered either
                 // law 8: the rebuild re-reads the model and can fire native UI events a capture seam hears.
                 using (SyncApplyScope.Enter())
                 {
@@ -396,8 +413,16 @@ namespace Multiplayer.Network.Sync
 
         /// <summary>Does the strip owe a full rebuild? True on the first call of a session, on any change to
         /// <see cref="AgendaSignature"/>, and whenever the signature could not be read (null = rebuild, the
-        /// safe direction). Its own memory, so L492 can drive it without a live tracker.</summary>
-        internal static bool AgendaNeedsRebuild(string signature) => RepaintNeeded("agenda", signature);
+        /// safe direction). Its own memory, so L492 can drive it without a live tracker.
+        ///
+        /// <paramref name="stripOnScreen"/> IS A GATE ON THE QUESTION, NOT ON THE ANSWER (L516, report
+        /// 2026-08-15). <see cref="RepaintNeeded"/> REMEMBERS every key it is handed, so a strip that is
+        /// switched off must not be asked at all — answering "no rebuild" for it would be harmless, but
+        /// RECORDING its signature makes the off strip vouch for rows nobody drew, and the first flush after
+        /// it comes back compares EQUAL and skips the rebuild it owes. Short-circuit, deliberately: the
+        /// whole point is that <see cref="RepaintNeeded"/> is never reached.</summary>
+        internal static bool AgendaNeedsRebuild(bool stripOnScreen, string signature) =>
+            stripOnScreen && RepaintNeeded("agenda", signature);
 
         /// <summary>
         /// THE ONE REPAINT-IF-CHANGED GATE, for every persistent-HUD strip. A rail flush lands ~10 times a

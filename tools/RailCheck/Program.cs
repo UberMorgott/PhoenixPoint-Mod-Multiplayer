@@ -437,6 +437,7 @@ namespace RailCheck
             Add(laws, () => L512_TheCrewStripRepaintsOnAMirroredLevelUp.Check());
             Add(laws, () => L513_NoPeerLiftsBeforeItsBoundaryReleases.Check());
             Add(laws, () => L514_TheRosterListRepaintsOnTheSameMirroredLevelUp.Check());
+            Add(laws, () => L516_AnOffScreenStripNeverVouchesForItsRows.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -484,12 +485,13 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 335;
-        // Updated deliberately 2026-08-15: L514 (the roster list repaints on the same mirrored level-up —
-        // the SECOND paint site of the green cross) was ADDED — 334 → 335 registrations, one new identity
-        // string. Earlier the same day: L513 (no peer lifts before its boundary releases), 333 → 334;
-        // L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "ecda27fb586d815bd0207e62f2b4fff70f892efc060d4d9693bd135c0e2838d9";
+        private const int ExpectedLawRegistrations = 336;
+        // Updated deliberately 2026-08-15: L516 (an off-screen strip never vouches for its rows — the
+        // top-right activity label stopped following research on clients) was ADDED — 335 → 336
+        // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
+        // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
+        // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
+        private const string ExpectedExecutionIdentityDigest = "3a212fc70d69151ce03687cf7391e60fbe71216b9e735d91b6d7485331b478e2";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
