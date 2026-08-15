@@ -29,19 +29,17 @@ namespace RailCheck
     /// <c>RailOrdinal</c> mints one monotonic number per OUTBOUND ENVELOPE at the single encoder
     /// (<c>SyncProtocol.EncodeEnvelope</c>), so a 0xB6 raise and a 0xAC batch become comparable by
     /// construction; <c>SurfaceRouter.OnInbound</c> publishes the applying message's ordinal for the whole
-    /// synchronous dispatch, so a window BORN inside an apply inherits the ordering key of its cause; and
-    /// <c>WindowOrder</c> settles the game's own drain briefly, then re-sorts the queue by
-    /// (priority DESC, ordinal ASC) before the game pops its head.
+    /// synchronous dispatch, so a window BORN inside an apply inherits the ordering key of its cause.
     ///
-    /// THE RANK TABLE STAYS, and arm G is why: the ordinal is only consulted BETWEEN EQUAL PRIORITIES.
-    /// <c>RankFor</c> answers "the resupply screen outranks the event family on every peer" — a decision
-    /// ACROSS priorities; the ordinal answers "which of two equally-ranked windows the host produced first"
-    /// — a fact WITHIN one. Neither can express the other, so L93's arm G and this law are orthogonal and
-    /// both must hold.
-    ///
-    /// THE SETTLE CANNOT BLOCK, and arm D proves the shape rather than asserting the intent: the predicate
-    /// is two readings of the LOCAL clock against a constant, monotone in <c>now</c>, so once true it stays
-    /// true and the drain resumes unconditionally. Nothing in it names a peer, a roster or a message.
+    /// AMPUTATED 2026-08-15 WITH L522, rather than left standing as prose the code no longer keeps. Arms C
+    /// (the real <c>Reorder</c> over a real queue), D (the settle is a bounded local timeout) and G (the
+    /// ordinal never overrides a rank) executed <c>WindowOrder.Compare</c>, <c>Reorder</c>,
+    /// <c>SettleSeconds</c> and <c>SettleExpired</c>, and arm E executed <c>WindowOrder.Stamp</c>. Those
+    /// members are DELETED: two order keys on one stream WAS the bug, so the client stopped sorting
+    /// altogether and reconciles to the host's published journal order instead. L522 asserts they stay
+    /// deleted. What remains here is the ORDINAL's own claim — minted at the one encoder (A), inherited
+    /// inside an apply (B), published by the one inbound chokepoint (F) — plus the drain gate still being
+    /// reached (E).
     ///
     /// ─── PART B: THE CAMPAIGN INTRO ──────────────────────────────────────────────────────
     /// The intro cinematic played on the HOST only. The native condition
@@ -61,11 +59,7 @@ namespace RailCheck
     ///   • drop the ordinal from the envelope, or stop minting in EncodeEnvelope → ordinal-not-on-the-wire
     ///   • make RailOrdinal.ForNewWindow ignore Current                         → local-window-inherits-nothing
     ///   • drop the RailOrdinal.Applying scope from SurfaceRouter.OnInbound     → apply-publishes-no-ordinal
-    ///   • make WindowOrder.Compare ignore the ordinal, or let it outrank priority → order-not-by-ordinal /
-    ///     ordinal-outranks-priority
-    ///   • make SettleExpired ever return false after returning true, or raise the cap past a tick →
-    ///     settle-unbounded
-    ///   • drop WindowOrder.Stamp from the queue prefix, or the settle prefix     → stamp-not-at-the-chokepoint
+    ///   • drop the ReadyToDequeue gate from the drain prefix                      → stamp-not-at-the-chokepoint
     ///   • drop PlayIntroCinematic from ApplyCoopCampaignParams                   → intro-not-suppressed
     ///   • make ReplayCampaignIntro build the cutscene state itself               → intro-bypasses-the-funnel
     ///   • make ConsumeIntroCinematicOwed read without clearing                   → intro-arm-not-one-shot
@@ -131,98 +125,22 @@ namespace RailCheck
                              "ahead of host messages that already arrived.";
             RailOrdinal.Reset();
 
-            // ─── ARM C: EXECUTED — the REAL comparator over a REAL queue, derived structurally ───
-            // Not a hand-listed pair: build a queue whose INSERT order is deliberately the worst case
-            // (ordinals descending), run the production Reorder, then assert the INVARIANT over every
-            // adjacent pair of the result. Any two windows with ordinals X < Y at the same priority come out
-            // X first — for all pairs, not for one the law happened to name.
-            var byOrdinal = new Dictionary<GeoscapeViewStateSwitchRequest, uint>();
-            var queue = new List<GeoscapeViewStateSwitchRequest>();
-            // Two priority bands so the priority-dominance half is exercised by the same run.
-            foreach (var priority in new[] { 0, 20 })
-                for (uint o = 9; o >= 1; o--)
-                {
-                    var req = new GeoscapeViewStateSwitchRequest(null, priority);
-                    byOrdinal[req] = o + (uint)priority * 100u;
-                    queue.Add(req);
-                }
-            WindowOrder.Reorder(queue, r => byOrdinal[r]);
-            for (int i = 1; i < queue.Count; i++)
-            {
-                int pPrev = queue[i - 1].Priority, pCur = queue[i].Priority;
-                uint oPrev = byOrdinal[queue[i - 1]], oCur = byOrdinal[queue[i]];
-                if (pPrev < pCur)
-                {
-                    yield return "L124 ordinal-outranks-priority: the settled queue put priority " + pPrev +
-                                 " ahead of priority " + pCur + ". Priority must stay dominant — it is what " +
-                                 "carries ReplenishSync's rank decision (L93 arm G), and an ordinal that can " +
-                                 "override it silently retires that decision.";
-                    break;
-                }
-                if (pPrev == pCur && oPrev > oCur)
-                {
-                    yield return "L124 order-not-by-ordinal: two equal-priority windows came out of the settled " +
-                                 "queue as ordinal " + oPrev + " then " + oCur + ". Presentation order is then " +
-                                 "not the host's cross-surface order and two peers draining the same queue can " +
-                                 "still disagree.";
-                    break;
-                }
-            }
-            // STABILITY: equal priority AND equal ordinal must keep the game's own insert order, or the two
-            // peers' ties break differently and the whole point is lost.
-            var tieA = new GeoscapeViewStateSwitchRequest(null, 0);
-            var tieB = new GeoscapeViewStateSwitchRequest(null, 0);
-            var ties = new List<GeoscapeViewStateSwitchRequest> { tieA, tieB };
-            WindowOrder.Reorder(ties, r => 5u);
-            if (!ReferenceEquals(ties[0], tieA))
-                yield return "L124 order-not-by-ordinal: the re-sort is not stable — two windows equal on both " +
-                             "keys swapped. Insert order is the game's own last tie-break (L93 arm B) and it " +
-                             "must survive, or peers disagree on exactly the cases the ordinal cannot decide.";
+            // ─── ARMS C, D and G RETIRED 2026-08-15 with L522 ───
+            // They executed WindowOrder.Reorder, SettleSeconds/SettleExpired and Compare — the client-side
+            // comparator, settle and re-sort. All four members are DELETED: the client now reconciles to the
+            // host's published journal order and never sorts, and L522 asserts they stay deleted. What
+            // survives here is the ordinal's own remaining claim (arms A, B, F): it is on the wire, an apply
+            // publishes it and a window born inside an apply inherits it.
 
-            // ─── ARM D: EXECUTED — the settle is bounded and can never become a wait ───
-            // Monotone in `now` and capped by a constant: sweep it and require ONE transition, then true
-            // forever. A settle that could flip back is a stall with no log line.
-            if (!(WindowOrder.SettleSeconds > 0f && WindowOrder.SettleSeconds <= 0.5f))
-                yield return "L124 settle-unbounded: the settle cap is " + WindowOrder.SettleSeconds +
-                             "s. It must be positive (or nothing can be re-ordered) and no more than half a " +
-                             "second (it delays EVERY window on EVERY peer in a co-op session).";
-            bool everTrue = false, regressed = false;
-            for (int step = 0; step <= 200; step++)
-            {
-                float now = step * (WindowOrder.SettleSeconds / 50f);
-                bool expired = WindowOrder.SettleExpired(0f, now);
-                if (expired) everTrue = true;
-                else if (everTrue) regressed = true;
-            }
-            if (!everTrue || regressed || !WindowOrder.SettleExpired(0f, float.MaxValue))
-                yield return "L124 settle-unbounded: SettleExpired is not a monotone local timeout (everTrue=" +
-                             everTrue + " regressed=" + regressed + "). The drain hold is only safe because " +
-                             "the predicate, once true, stays true — otherwise a window can be held again and " +
-                             "again with nothing on any peer able to release it.";
-            // The hold must be decided by the LOCAL clock and the cap alone. A settle that read a peer, a
-            // roster or a message count would be a cross-peer wait wearing a timeout's clothes.
-            var settle = typeof(WindowOrder).GetMethod("SettleExpired", All);
-            if (settle == null || settle.GetParameters().Length != 2 ||
-                settle.GetParameters().Any(p => p.ParameterType != typeof(float)))
-                yield return "L124 settle-unbounded: WindowOrder.SettleExpired is no longer a two-float " +
-                             "predicate. Its whole no-blocking argument is that nothing but two local clock " +
-                             "readings can reach it.";
-
-            // ─── ARM E: the stamp and the settle sit at the game's ONE queue chokepoint ───
+            // ─── ARM E: the drain still runs through the mod's ONE gate ───
             // Coverage by construction, not by enumeration: every modal kind in the game is queued through
             // QueryStateSwitch and drained through ProcessQueriedStateSwitch.
-            var rankPrefix = typeof(ReplenishSync.QueueRankPatch).GetMethod("Prefix", All);
-            if (rankPrefix == null || !Calls(rankPrefix, "Stamp"))
-                yield return "L124 stamp-not-at-the-chokepoint: the prefix on GeoscapeViewSwitchQuery" +
-                             ".QueryStateSwitch no longer calls WindowOrder.Stamp. Windows then enter the queue " +
-                             "with no order key and the re-sort decides nothing — for every kind at once, " +
-                             "because that method is the only way anything is queued.";
             var settlePrefix = typeof(WindowOrder.QueueSettlePatch).GetMethod("Prefix", All);
             if (settlePrefix == null || !Calls(settlePrefix, "ReadyToDequeue"))
                 yield return "L124 stamp-not-at-the-chokepoint: WindowOrder.QueueSettlePatch no longer gates " +
-                             "ProcessQueriedStateSwitch through ReadyToDequeue. Without the bounded settle the " +
-                             "queue is drained the frame the first window lands and a lower ordinal arriving " +
-                             "one diff tick later can never take its place.";
+                             "ProcessQueriedStateSwitch through ReadyToDequeue. That gate is where the local " +
+                             "queue is reconciled to the host's journal order; without it every peer drains " +
+                             "in its own arrival order again.";
             var encode = typeof(SyncProtocol).GetMethod("EncodeEnvelope", All);
             if (encode == null || !Calls(encode, "Mint"))
                 yield return "L124 ordinal-not-on-the-wire: SyncProtocol.EncodeEnvelope no longer mints from " +
@@ -237,20 +155,6 @@ namespace RailCheck
                              "family raises out of an apply — the research modal today, anything added " +
                              "tomorrow — loses the key of the message that caused it, with no per-family " +
                              "symptom to notice it by.";
-
-            // ─── ARM G: EXECUTED — the ordinal can never override a rank ───
-            // The one property that lets L93's rank table and this ordinal coexist instead of one retiring
-            // the other. Driven over the real Compare with the ordinals deliberately fighting the priority.
-            if (WindowOrder.Compare(ReplenishSync.ReplenishRank, uint.MaxValue, 0, 0u) >= 0)
-                yield return "L124 ordinal-outranks-priority: a window ranked " + ReplenishSync.ReplenishRank +
-                             " with the LARGEST possible ordinal no longer beats a priority-0 window with the " +
-                             "smallest. The resupply-first decision (L93 arm G) would then depend on which " +
-                             "message happened to be minted first — i.e. it would be gone.";
-            if (WindowOrder.Compare(0, 5u, 0, 7u) >= 0 || WindowOrder.Compare(0, 7u, 0, 5u) <= 0 ||
-                WindowOrder.Compare(0, 5u, 0, 5u) != 0)
-                yield return "L124 order-not-by-ordinal: Compare no longer orders equal priorities by ascending " +
-                             "ordinal (with equal ordinals tying). The comparator is the whole mechanism; a " +
-                             "queue re-sorted by anything else is just a different arrival order.";
         }
 
         // ═══ PART B ═══════════════════════════════════════════════════════════════════════

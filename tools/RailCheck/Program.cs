@@ -431,7 +431,6 @@ namespace RailCheck
             Add(laws, () => L501_ARefusalNoticeIsThePlayersSentenceSaidOnce.Check());
             Add(laws, () => L505_ADerivedSetterNeverRidesTheWire.Check(game));
             Add(laws, () => L506_EveryClientRefusalGateAsksTheOnePredicate.Check());
-            Add(laws, () => L507_ProvisionalWindowOrdinalIsBackFilled.Check());
             Add(laws, () => L510_TheClientLocalRngClosureIsClosed.Check(game));
             Add(laws, () => L511_AMirroredWindowIsKeyedByTheApplyThatCarriedIt.Check());
             Add(laws, () => L512_TheCrewStripRepaintsOnAMirroredLevelUp.Check());
@@ -440,6 +439,7 @@ namespace RailCheck
             Add(laws, () => L516_AnOffScreenStripNeverVouchesForItsRows.Check());
             Add(laws, () => L520_TheOnlyPublicationIsTheQueryPostfix.Check());
             Add(laws, () => L521_TheAppendIsScreenIndependent.Check());
+            Add(laws, () => L522_AClientNeverSortsAWindowQueue.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -488,7 +488,12 @@ namespace RailCheck
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
         private const int ExpectedLawRegistrations = 338;
-        // Updated deliberately 2026-08-15: L521 (the append is screen-independent and the host's journal
+        // Updated deliberately 2026-08-15: L522 (a client never sorts a window queue) was ADDED and L507
+        // (the provisional WINDOW ordinal is back-filled) was RETIRED in the same commit — the count is
+        // unchanged at 338, the identity SET is not. L507's whole subject was WindowOrder.Stamp/StampAt and
+        // the per-request order key they wrote; those members are deleted, the client no longer sorts at
+        // all, and a law whose premise is gone cannot be re-pointed. Earlier the same day: L521 (the
+        // append is screen-independent and the host's journal
         // position is the only presentation order) was ADDED — 337 → 338 registrations, one new identity
         // string. Earlier the same day: L520 (the only host publication of a window is the
         // QueryStateSwitch postfix — two publication paths keyed one queue) was ADDED — 336 → 337
@@ -498,7 +503,7 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "e33b369dee9aeaf2f0b20f76f58df87f974704f4f112c164d10646e14e72be87";
+        private const string ExpectedExecutionIdentityDigest = "e35d6b4e36133e6bf83d31dd72bc78d35b2bd8643131c4acdb93eedbb4db7c22";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

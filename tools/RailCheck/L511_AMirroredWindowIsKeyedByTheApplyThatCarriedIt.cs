@@ -37,14 +37,14 @@ namespace RailCheck
     ///   (b) <c>apply-publishes-no-ordinal</c> — IL: the inbound dispatch opens a
     ///       <c>RailOrdinal.Applying</c> scope. Without it arm (a) buys nothing: <c>Current</c> is 0 inside
     ///       the apply too, and the inheritance in <c>ForNewWindow</c> never fires.
-    ///   (c) <c>route-does-not-decide-the-key</c>, EXECUTED POSITIVE CONTROL — drive the production
-    ///       <c>WindowOrder.StampAt</c> down BOTH routes for one cause: inside the apply it must carry the
-    ///       applying ordinal, outside it must NOT. Arms (a) and (b) are IL claims about a route; this is
-    ///       the proof that taking the wrong route actually changes the key, i.e. that they are worth
-    ///       asserting at all.
-    ///   (d) <c>order-does-not-follow-the-key</c>, EXECUTED — the REAL <c>WindowOrder.Reorder</c> over a
-    ///       REAL queue puts the apply-keyed window ahead of the tick-keyed one. A key that differs but
-    ///       does not move the sort would not have produced the report.
+    ///   (c) <c>route-does-not-decide-the-key</c>, EXECUTED POSITIVE CONTROL — read the production
+    ///       <c>RailOrdinal.Current</c> down BOTH routes for one cause: inside the apply it must be the
+    ///       applying ordinal, outside it must be 0. Arms (a) and (b) are IL claims about a route; this is
+    ///       the proof that taking the wrong route actually changes what a window born there inherits,
+    ///       i.e. that they are worth asserting at all.
+    ///   (d) RETIRED 2026-08-15 with L522 — it drove the real <c>WindowOrder.Reorder</c> over a real queue.
+    ///       There is no client-side sort left to follow the key: the client reconciles to the host's
+    ///       published journal order, which is what makes the ROUTE this law is about load-bearing.
     ///
     /// WHAT THIS LAW DOES NOT PROVE, stated so nobody reads it as more than it is:
     ///   • NOT that the tick drain is unreachable. It is deliberately reachable (L412
@@ -101,33 +101,23 @@ namespace RailCheck
                              "and ForNewWindow inherits nothing. Arm (a) would stay green while every mirrored " +
                              "window silently fell back to this peer's own counter.";
 
-            // ── (c) POSITIVE CONTROL, EXECUTED: the route is what decides the key ───────────────────────
+            // ── (c) POSITIVE CONTROL, EXECUTED: the route is what decides what an apply publishes ───────
+            // Arms (a) and (b) are IL claims about a route. This is the proof that taking the wrong route
+            // actually changes what a window born there can inherit — i.e. that they are worth asserting.
             RailOrdinal.Reset();
             const uint carried = 900u;
             RailOrdinal.Observe(carried);               // this peer has been told about everything up to here
-            var mirrored = new GeoscapeViewStateSwitchRequest(null, 0);
-            using (RailOrdinal.Applying(carried)) WindowOrder.StampAt(mirrored, 0f);
-            var strayed = new GeoscapeViewStateSwitchRequest(null, 0);
-            WindowOrder.StampAt(strayed, 0f);           // the tick route: no apply in scope
-            uint inherited = WindowOrder.OrdinalOf(mirrored);
-            uint local = WindowOrder.OrdinalOf(strayed);
+            uint inherited;
+            using (RailOrdinal.Applying(carried)) inherited = RailOrdinal.Current;
+            uint local = RailOrdinal.Current;           // the tick route: no apply in scope
             if (inherited != carried)
-                yield return "L511 route-does-not-decide-the-key: a window stamped INSIDE the apply of " +
-                             "ordinal " + carried + " carries " + inherited + ". The whole point of queueing " +
-                             "it from the apply is that the key is the sender's, not this peer's.";
-            if (local == carried)
-                yield return "L511 route-does-not-decide-the-key: a window stamped OUTSIDE any apply carries " +
-                             carried + " too, so the two routes are indistinguishable here and arms (a) and " +
-                             "(b) prove nothing. Re-ground this control before believing them.";
-
-            // ── (d) EXECUTED: and the real sort follows the key ────────────────────────────────────────
-            var queue = new List<GeoscapeViewStateSwitchRequest> { strayed, mirrored };
-            WindowOrder.Reorder(queue, WindowOrder.OrdinalOf);
-            if (!ReferenceEquals(queue[0], mirrored))
-                yield return "L511 order-does-not-follow-the-key: the real queue still opens the tick-keyed " +
-                             "window (ordinal " + local + ") before the apply-keyed one (ordinal " +
-                             inherited + "). The key is what every peer compares; a difference that does not " +
-                             "move the sort is not the defect the owner saw, and one that does is.";
+                yield return "L511 route-does-not-decide-the-key: inside the apply of ordinal " + carried +
+                             " this peer publishes " + inherited + ". The whole point of queueing a mirrored " +
+                             "window from the apply is that what it inherits is the sender's, not this peer's.";
+            if (local == carried || local != 0)
+                yield return "L511 route-does-not-decide-the-key: outside every apply this peer still " +
+                             "publishes " + local + ", so the two routes are indistinguishable here and arms " +
+                             "(a) and (b) prove nothing. Re-ground this control before believing them.";
             RailOrdinal.Reset();
         }
 

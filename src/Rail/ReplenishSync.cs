@@ -124,14 +124,14 @@ namespace Multiplayer.Network.Sync
 
         // ─── S1 + S3 capture: ONE prefix on the game's only queue entry point ───
 
-        /// <summary>Every window in the game is queued through here, so this is where the rank applies —
-        /// and, for the same reason, where <see cref="WindowOrder"/> stamps its cross-surface order key.
+        /// <summary>Every window in the game is queued through here, so this is where the rank applies.
         /// NEVER blocks — it only re-ranks, and only the kinds <see cref="Rank"/> names.
         ///
-        /// The two are ORTHOGONAL and share this prefix only because they share the chokepoint: the rank
-        /// decides ACROSS priorities (the resupply screen outranks the event family — a product decision),
-        /// the ordinal decides WITHIN one priority (which of two equally-ranked windows the host produced
-        /// first). Neither can express the other; see <see cref="WindowOrder"/>.</summary>
+        /// It no longer stamps an order key: the client-side ordinal, the settle and the re-sort were
+        /// deleted with L522 and the host's journal position (minted in the POSTFIX on this same method,
+        /// <c>GeoWindowCoverageGate</c>) is the one ordering authority. The rank still decides ACROSS
+        /// priorities (the resupply screen outranks the event family — a product decision); the journal
+        /// decides which of two windows the host raised first. Neither can express the other.</summary>
         [HarmonyPatch(typeof(GeoscapeViewSwitchQuery), nameof(GeoscapeViewSwitchQuery.QueryStateSwitch))]
         internal static class QueueRankPatch
         {
@@ -152,8 +152,6 @@ namespace Multiplayer.Network.Sync
                     {
                         PauseGame = original.PauseGame,
                     };
-                // AFTER the possible rebuild: the stamp must key the instance that actually reaches the list.
-                WindowOrder.Stamp(request);
             }
         }
 
