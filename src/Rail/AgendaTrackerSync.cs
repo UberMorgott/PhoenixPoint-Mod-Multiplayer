@@ -1,9 +1,12 @@
 using System.Collections.Generic;
 using Base.Serialization.General;
+using HarmonyLib;
 using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.PhoenixBases;
 using PhoenixPoint.Geoscape.Entities.Research;
+using PhoenixPoint.Geoscape.View.ViewControllers;
+using PhoenixPoint.Geoscape.View.ViewModules;
 
 namespace Multiplayer.Network.Sync
 {
@@ -64,6 +67,40 @@ namespace Multiplayer.Network.Sync
                 default:
                     return null;
             }
+        }
+    }
+
+    /// <summary>Host-side capture: mirrors every row the widget's own UpdateData computed into
+    /// AgendaTrackerSync.State.Rows. UpdateData(UIFactionDataTrackerElement) runs on every peer
+    /// (local UI, not patched out) — guard on IsHost so clients never write. __result true means
+    /// the row finished/disposed this tick (UIModuleFactionAgendaTracker.cs:304-308); stop mirroring
+    /// it. element.CurrentTimeLeft is set by element.UpdateData(...) inside the native method body
+    /// (UIModuleFactionAgendaTracker.cs:303, UIFactionDataTrackerElement.cs:85) before this postfix
+    /// runs, so it already reflects the value just computed.</summary>
+    [HarmonyPatch(typeof(UIModuleFactionAgendaTracker), "UpdateData", new[] { typeof(UIFactionDataTrackerElement) })]
+    internal static class AgendaRowCapturePatch
+    {
+        private static void Postfix(UIFactionDataTrackerElement element, bool __result)
+        {
+            var engine = NetworkEngine.Instance;
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+
+            string key = AgendaTrackerSync.RowKey(element.TrackedObject);
+            if (key == null) return;
+
+            if (__result)
+            {
+                // Row finished/disposed this tick — stop mirroring it.
+                AgendaTrackerSync.State.Rows.Remove(key);
+                return;
+            }
+
+            AgendaTrackerSync.State.Rows[key] = new AgendaRow
+            {
+                TrackerType = key.Substring(0, key.IndexOf(':')),
+                Label = element.TrackedName != null ? element.TrackedName.text : null,
+                RemainingSeconds = (int)element.CurrentTimeLeft.TimeSpan.TotalSeconds,
+            };
         }
     }
 }
