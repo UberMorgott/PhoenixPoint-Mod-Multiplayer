@@ -86,6 +86,9 @@ namespace Multiplayer.Network.Sync
         /// field per strip so the SECOND caller costs a line, not a mechanism.</summary>
         private static readonly System.Collections.Generic.Dictionary<string, string> _repaintKeys =
             new System.Collections.Generic.Dictionary<string, string>(StringComparer.Ordinal);
+        /// <summary>Last agenda-strip diag line — TEMPORARY, see the MpDiag block in
+        /// <see cref="RefreshAgendaTracker"/>. Diagnostic only: nothing reads it but the log.</summary>
+        private static string _lastAgendaDiag;
 
         // UIModuleInfoBar: private no-arg UpdatePopulation():276 and the Init(context):144 field that
         // proves the module is live (it dereferences `_context.View` unguarded, so calling it before
@@ -349,8 +352,26 @@ namespace Multiplayer.Network.Sync
                 // ROWS may tear it down, which is what AgendaSignature answers. The countdown text loses
                 // nothing: UpdateData():191-198 repaints every live element on every call, rebuild or not.
                 bool onScreen = tracker.gameObject.activeInHierarchy;
-                bool rebuild = AgendaNeedsRebuild(onScreen,
-                    AgendaSignature(TrackerFaction?.GetValue(tracker) as GeoFaction));
+                var trackedFaction = TrackerFaction?.GetValue(tracker) as GeoFaction;
+                string agendaSignature = AgendaSignature(trackedFaction);
+                bool rebuild = AgendaNeedsRebuild(onScreen, agendaSignature);
+                // TEMPORARY (report 2026-08-15: the RESEARCH row appears/disappears on clients and was
+                // absent on the host). Prints only when the answer CHANGES, so an alternating research head
+                // is visible line by line while a steady strip stays silent — and a role that never reaches
+                // this method prints nothing at all, which is itself the answer for the host.
+                if (MpDiag.On)
+                {
+                    string diag = "[MP][uirepaint] agenda " +
+                        (NetworkEngine.Instance != null && NetworkEngine.Instance.IsHost ? "HOST" : "CLIENT") +
+                        " onScreen=" + onScreen +
+                        " faction=" + (trackedFaction == null ? "NULL-BINDING" : trackedFaction.GetType().Name) +
+                        " research=" + (trackedFaction == null || trackedFaction.Research == null ||
+                                        trackedFaction.Research.Current == null
+                                            ? "-" : trackedFaction.Research.Current.ResearchID) +
+                        " rebuild=" + rebuild + " sig=" + (agendaSignature ?? "NULL");
+                    if (!string.Equals(diag, _lastAgendaDiag, StringComparison.Ordinal))
+                    { _lastAgendaDiag = diag; MpLog.Log(diag); }
+                }
                 if (!onScreen) return; // switched off: nothing to paint, and nothing was remembered either
                 // law 8: the rebuild re-reads the model and can fire native UI events a capture seam hears.
                 using (SyncApplyScope.Enter())
@@ -924,6 +945,7 @@ namespace Multiplayer.Network.Sync
             _loggedSkips.Clear();
             // …and a dead session's strips must not vouch for the next one's: empty = repaint once each.
             _repaintKeys.Clear();
+            _lastAgendaDiag = null;
             _scopeGeneration.Clear();
             // Next session's first refresh must not read a dead session's site refs as a fresh edge.
             _exploringSites.Clear();
