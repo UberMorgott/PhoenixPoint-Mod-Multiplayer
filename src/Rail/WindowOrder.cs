@@ -401,5 +401,58 @@ namespace Multiplayer.Network.Sync
             private static void Postfix(GeoscapeViewSwitchQuery __instance) =>
                 WindowQueueSync.ConfirmDurableNativeOpen(__instance);
         }
+
+        /// <summary>
+        /// THE RESTORE BYPASS, CLOSED (§A.8, L520 arm c). <c>GeoscapeViewSwitchQuery.RestoreData</c>
+        /// (<c>GeoscapeViewSwitchQuery.cs:37-55</c>) rebuilds <c>_viewStateSwitchRequests</c> by ADDING to
+        /// the list directly — it never calls <c>QueryStateSwitch</c>, so the one mint seam
+        /// (<c>GeoWindowCoverageGate</c>) never saw a restored window. A restored request therefore carried
+        /// no journal position at all, which meant it presented in whatever local order each peer happened
+        /// to rebuild — a second order by another name, and one that survives a save/load across EVERY
+        /// battle (<c>GeoscapeView.GetStateSwitchInstanceData</c>:1298-1300 -> <c>RestoreData</c>:37-55,
+        /// replayed at <c>GeoscapeView.cs</c>:349). It now claims a position like anything else.
+        ///
+        /// A POSTFIX, so the native restore happens exactly as it always did whatever this does, and so the
+        /// prefix that drops resolved subjects (<c>WindowQueueSync.RestoreDropsResolvedSubjects</c>, the
+        /// other patch on this same method) has already run — only the windows that SURVIVED restore claim
+        /// a position, and a dropped one never enters the journal.
+        ///
+        /// THE PENDING IS CLEARED AT THE END. The mint is handed to a family's publisher through
+        /// <c>WindowJournal.SetHostPending</c>/<c>TakeHostPending</c>, and <c>HostBroadcastQueued</c>
+        /// publishes only the families it has a payload shape for. A position no publisher consumed must
+        /// not be left sitting for the NEXT unrelated raise to ship as its own — that is a duplicate entry,
+        /// exactly what the take-clears-it rule exists to prevent.
+        ///
+        /// NO QUORUM, NOTHING WAITS: minting is a local counter increment on the host and a local append.
+        /// </summary>
+        [HarmonyPatch(typeof(GeoscapeViewSwitchQuery), nameof(GeoscapeViewSwitchQuery.RestoreData))]
+        internal static class RestoreClaimsPositions
+        {
+            private static void Postfix(GeoscapeViewSwitchQuery __instance)
+            {
+                if (!EventPopup.InSession || RequestsField == null) return;
+                try
+                {
+                    if (!(RequestsField.GetValue(__instance) is IList<GeoscapeViewStateSwitchRequest> restored))
+                        return;
+                    for (int i = 0; i < restored.Count; i++)
+                    {
+                        if (!GeoModalMirror.HostMayPublish()) return;   // clients receive, they never mint
+                        var request = restored[i];
+                        uint pos = WindowJournal.MintHostPosition();
+                        string family = request?.State?.GetType().Name ?? "<unknown>";
+                        WindowJournal.SetHostPending(pos, family);
+                        WindowJournal.Append(pos, family, null);
+                        GeoModalMirror.HostBroadcastQueued(request);
+                    }
+                    WindowJournal.TakeHostPending(out uint _, out string _);
+                }
+                catch (Exception ex)
+                {
+                    MpLog.LogError("[MP][windows] restore position claim threw — the restored queue keeps " +
+                                   "its windows and simply has no journal order: " + ex);
+                }
+            }
+        }
     }
 }
