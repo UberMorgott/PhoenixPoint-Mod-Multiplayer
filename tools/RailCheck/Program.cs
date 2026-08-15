@@ -4934,10 +4934,22 @@ namespace RailCheck
             }
             if (raisers.Count == 0)
             {
-                yield return "L49 one-producer-arm-blind: not one static MethodBase handle in the mod resolves " +
-                             "to a game method that opens a modal, yet ResearchSync drives " +
-                             "GeoscapeView.OnFactionResearchCompleted through exactly such a handle. The sweep " +
-                             "is broken, so 'no window has two producers' is asserted about the empty set";
+                // ZERO MOD-HELD RAISERS IS NOW THE INTENDED STATE, NOT A BLIND SWEEP. The anchor this arm used
+                // to name — ResearchSync's static handle onto GeoscapeView.OnFactionResearchCompleted — was
+                // DELETED on purpose (§A.9, L520 arm (b)): no family is served by replaying a private native
+                // handler any more. So the arm keeps its full strength by SELF-TESTING the detector instead of
+                // asserting a producer exists: point the same two derivations (callee sweep, ModalType read)
+                // at that very method and require them to still recognise it. If they do, an empty raiser set
+                // means "no native producer exists", which is the strongest possible outcome of this arm; if
+                // they do not, the emptiness is an accident and this arm is genuinely blind.
+                var anchor = typeof(GeoscapeView).GetMethod("OnFactionResearchCompleted", AllMembers);
+                if (anchor == null || !Callees(anchor, gameAsm).Any(c => openers.Any(o => Same(c, o))) ||
+                    !ModalTypesOpenedBy(anchor, openers).Any())
+                    yield return "L49 one-producer-arm-blind: the mod holds no static MethodBase handle onto a " +
+                                 "modal-opening game method — which is the intended state — but the detector " +
+                                 "can no longer recognise GeoscapeView.OnFactionResearchCompleted as one " +
+                                 "either, so the empty raiser set proves nothing and 'no window has two " +
+                                 "producers' is asserted about a set this arm cannot build";
                 yield break;
             }
 

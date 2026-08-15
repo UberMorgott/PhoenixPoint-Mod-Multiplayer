@@ -86,8 +86,13 @@ namespace RailCheck
                              "law being re-pointed, so nothing is guarding the seam any more.";
 
             // (b) NO REFLECTIVE NATIVE WINDOW RAISE.
+            // The handler names AND the field names the mod used to hold them in. A static readonly
+            // MethodInfo is initialised from the .cctor, and .cctor is not a GetMethods() result, so the
+            // ldstr arm alone cannot see the shape ResearchSync actually shipped (:86-89) — the field name
+            // is what makes arm (b) bite on it.
             var forbidden = new[] { "OnFactionResearchCompleted", "Faction_ResearchCompleted",
-                                    "OnGeoscapeEventRaised" };
+                                    "OnGeoscapeEventRaised", "ViewResearchCompletedMethod",
+                                    "LogResearchCompletedMethod" };
             var offenders = asm.GetTypes()
                 .SelectMany(t => t.GetFields(BindingFlags.Static | BindingFlags.Instance |
                                              BindingFlags.Public | BindingFlags.NonPublic |

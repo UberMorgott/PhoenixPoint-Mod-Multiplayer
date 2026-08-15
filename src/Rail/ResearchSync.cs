@@ -80,13 +80,10 @@ namespace Multiplayer.Network.Sync
         // the list, a queued one leaves it), so law 11 requires the list to repaint too, not just the queue.
         private static readonly System.Reflection.MethodInfo ShowAvailableMethod =
             AccessTools.Method(typeof(UIModuleResearch), "ShowAvailable");
-        // Native research-complete PRESENTATION handlers (private), invoked directly on the client so the
-        // completed modal + log line appear WITHOUT raising GeoFaction.ResearchCompletedEventHandler
-        // (whose other subscribers — GeoscapeEventSystem, stats, pedia — are host-side logic/state).
-        private static readonly System.Reflection.MethodInfo ViewResearchCompletedMethod =
-            AccessTools.Method(typeof(PhoenixPoint.Geoscape.View.GeoscapeView), "OnFactionResearchCompleted");
-        private static readonly System.Reflection.MethodInfo LogResearchCompletedMethod =
-            AccessTools.Method(typeof(GeoscapeLog), "Faction_ResearchCompleted");
+        // NO MOD-SERVED RAISE (§A.9, L520). The reflective handles onto GeoscapeView.OnFactionResearchCompleted
+        // and GeoscapeLog.Faction_ResearchCompleted are DELETED: a client presents a research completion by
+        // draining its window-journal cursor like every other family, never by replaying a private native
+        // handler whose arguments it reconstructs and whose failures it swallows into a LogWarning.
 
         // ─── Lifecycle (driven by SyncEngine) ──────────────────────────────
 
@@ -366,9 +363,9 @@ namespace Multiplayer.Network.Sync
         /// exactly as it holds every other review window, and releases it when this peer walks back onto
         /// the map. NOT A QUORUM: the hold reads THIS peer's own view state; nothing waits on another human.
         ///
-        /// Presentation itself stays NATIVE: the game's own private handlers, invoked off this peer's
-        /// mirrored element, so the window is built by GeoscapeView.OnFactionResearchCompleted (:1980) and
-        /// queued through the engine's own switch query at priority 99 like any other geoscape window.
+        /// Presentation itself is NOT served here (§A.9, L520): the host raised this window natively, the
+        /// capture postfix minted its journal position and published it, and this peer presents it by
+        /// draining its cursor like every other family. This pump only retires the deferral row.
         /// </summary>
         internal static void PumpDeferredCompletions(GeoLevelController geo)
         {
@@ -379,23 +376,10 @@ namespace Multiplayer.Network.Sync
             _deferredCompleted.Clear();
             foreach (var id in pending)
             {
-                ResearchElement el = null;
-                foreach (var candidate in research.AllResearchesArray)
-                    if (candidate != null && candidate.ResearchID == id) { el = candidate; break; }
-                if (el == null) continue; // the element left the mirror — nothing to draw a window about
-                try
-                {
-                    if (geo.View != null && el.Faction != null)
-                        ViewResearchCompletedMethod?.Invoke(geo.View, new object[] { el.Faction, el });
-                }
-                catch (Exception ex) { MpLog.LogWarning("[Multiplayer][rail] ResearchSync: completed modal failed: " + ex.Message); }
-                try
-                {
-                    if (geo.Log != null && el.Faction != null)
-                        LogResearchCompletedMethod?.Invoke(geo.Log, new object[] { el.Faction, el });
-                }
-                catch (Exception ex) { MpLog.LogWarning("[Multiplayer][rail] ResearchSync: completed log failed: " + ex.Message); }
-                MpLog.Log("[Multiplayer][rail] ResearchSync CLIENT presented complete " + id);
+                // NO MOD-SERVED RAISE (§A.9, L520). Nothing here reflects into a private native handler and
+                // nothing here reconstructs a native argument list.
+                MpLog.Log("[Multiplayer][rail] ResearchSync completion '" + id + "' is journalled; " +
+                          "presentation drains from the window journal cursor");
             }
         }
 
