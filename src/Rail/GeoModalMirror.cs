@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -474,11 +474,15 @@ namespace Multiplayer.Network.Sync
         /// path is minted here.</summary>
         internal static void ApplyVoidLocally(uint journalPos)
         {
+            // ASKED BEFORE THE REMOVAL: the void names a position and carries no family, so the family is
+            // this peer's own journal's answer and it stops existing one line below.
+            string family = WindowJournal.FamilyAt(journalPos);
             bool removed = WindowJournal.ApplyVoid(journalPos);
             WindowGap.Forget(journalPos);
             // REACTIVITY (hard mandate): the backlog changed, so the open screen must repaint without the
             // player leaving and re-entering. Kindless arm — a void carries no rail path.
             OpenUiRepaint.MarkDirty();
+            if (WindowJournal.VoidOwesDeploymentPrompt(family, removed)) DeployPrep.OfferAfterGlobalDismissal();
             if (!removed)
                 MpLog.Log("[MP][windows] void for position " + journalPos + " found nothing unread — this " +
                           "peer had already read it or never received it");

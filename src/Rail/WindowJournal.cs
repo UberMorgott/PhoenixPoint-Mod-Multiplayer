@@ -162,6 +162,23 @@ namespace Multiplayer.Network.Sync
             return 0;
         }
 
+        /// <summary>The family of the entry at <paramref name="pos"/>, or null when this peer holds none.
+        /// The void record names a POSITION and carries no family (9-byte payload), so the receiving peer
+        /// has to ask its own journal what that position was about — and it must ask BEFORE
+        /// <see cref="ApplyVoid"/> removes it. Lookup only.</summary>
+        internal static string FamilyAt(uint pos)
+        {
+            for (int i = 0; i < _unread.Count; i++) if (_unread[i].Pos == pos) return _unread[i].Family;
+            return null;
+        }
+
+        /// <summary>Does a void of <paramref name="family"/> owe this peer the centre-of-screen "enter
+        /// deployment preparation" prompt? Only when the entry was GLOBALLY dismissed because another
+        /// player acted on it — i.e. only for the mission family, and only when this peer had not already
+        /// read it. Pure, so it is executable with no game.</summary>
+        internal static bool VoidOwesDeploymentPrompt(string family, bool wasStillUnread) =>
+            wasStillUnread && ScopeOf(family) == DismissScope.Global;
+
         internal static int UnreadCount => _unread.Count;
 
         /// <summary>THE SAVE PREDICATE (§A.2b). Reads ONLY this peer's own cursor: no roster, no peer

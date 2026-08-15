@@ -120,6 +120,34 @@ namespace RailSim
                 yield return "a-global-dismissal-removes-it-everywhere: a void for a position this peer " +
                              "never held reported success. It must be a no-op — a reconnecting peer " +
                              "legitimately receives voids for entries it never got (§A.2b).";
+
+            // §A.10: what the remaining peers are OWED after that void — the centre-of-screen door in.
+            if (!WindowJournal.VoidOwesDeploymentPrompt("UIStateRosterDeployment", wasStillUnread: true))
+                yield return "a-global-dismissal-removes-it-everywhere: a global void of an UNREAD mission " +
+                             "entry did not owe the centre-of-screen prompt. The remaining peers must get " +
+                             "a way into deployment preparation — the decision to deploy is already taken, " +
+                             "so the alternative is a mission they can see and cannot join.";
+            if (WindowJournal.VoidOwesDeploymentPrompt("UIStateRosterDeployment", wasStillUnread: false))
+                yield return "a-global-dismissal-removes-it-everywhere: a peer that had ALREADY read the " +
+                             "entry was offered the prompt again. It is offered once, to the peers whose " +
+                             "entry the void removed.";
+            if (WindowJournal.VoidOwesDeploymentPrompt("UIStateGeoModal", wasStillUnread: true))
+                yield return "a-global-dismissal-removes-it-everywhere: a LOCAL family owed the deployment " +
+                             "prompt. Only the mission family is GLOBAL and only a global dismissal owes " +
+                             "the prompt.";
+
+            // The family the prompt decision is taken on is read from the entry BEFORE the void removes it.
+            WindowJournal.Reset();
+            WindowJournal.Append(7, "UIStateRosterDeployment", new byte[] { 7 });
+            if (WindowJournal.FamilyAt(7) != "UIStateRosterDeployment")
+                yield return "a-global-dismissal-removes-it-everywhere: the journal could not name the " +
+                             "family at a held position. A void record carries only a position, so a peer " +
+                             "that cannot ask its own journal what that position was about can never " +
+                             "decide whether the dismissal was global.";
+            WindowJournal.ApplyVoid(7);
+            if (WindowJournal.FamilyAt(7) != null)
+                yield return "a-global-dismissal-removes-it-everywhere: a voided position still named a " +
+                             "family, so the entry outlived its removal.";
             WindowJournal.Reset();
         }
 

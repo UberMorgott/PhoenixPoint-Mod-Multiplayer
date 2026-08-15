@@ -3,11 +3,15 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Base.Serialization.General;
+using Base.UI;
 using HarmonyLib;
+using I2.Loc;
 using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.View.ViewModules;
 using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace Multiplayer.Network.Sync
 {
@@ -446,6 +450,77 @@ namespace Multiplayer.Network.Sync
                 MpLog.LogError("[MP][deploy] JOIN failed — this peer stays on the geoscape and every other peer " +
                                "is unaffected: " + ex);
             }
+        }
+
+        /// <summary>
+        /// THE CENTRE-OF-SCREEN PROMPT (§A.10) — the door <see cref="Join"/> already is, offered once at the
+        /// moment another player's action made this peer's mission window vanish.
+        ///
+        /// NATIVE WIDGET, ZERO ADAPTATION. It is the game's own <c>UIModuleConfirmation</c>: a full-screen
+        /// Overlay behind a centred Dialog with Title, ConfirmationMsg and two PhoenixGeneralButtons
+        /// (decompile PhoenixPoint.Geoscape.View.ViewModules/UIModuleConfirmation.cs:11, :22, :25, :28,
+        /// :37, :43, :46). The module is ALWAYS PRESENT and only its Dialog toggles — <c>Awake</c>:56-70
+        /// wires both buttons and starts it hidden (:59) — reached at
+        /// <c>view.GeoscapeModules.ConfirmationModule</c> (Base.UI/GeoscapeModulesData.cs:50,
+        /// PhoenixPoint.Geoscape.View/GeoscapeView.cs:62). So there is nothing to instantiate and no prefab
+        /// to clone: NO new GameObject, NO custom Canvas, NO cloned button row. The call is the vanilla one
+        /// in shape and argument count, UIModuleMutationSection.cs:299.
+        ///
+        /// <c>Init</c>:72 IS the show (<c>Dialog.SetActive(true)</c> is its first statement, :74) and a click
+        /// routes through the private <c>Confirm(res)</c>:94-98, which invokes the callback and calls
+        /// <c>Close()</c>:105-110 — THE DIALOG CLOSES ITSELF and nothing here may hide it. The two optional
+        /// button-text binds are deliberately not passed: :78 dereferences <c>cancelTextLoc</c> whenever
+        /// <c>okTextLoc</c> is non-null, so the prefab's own OkTextTerm/CancelTextTerm (:48, :50) are both
+        /// the safe form and the zero-adaptation one.
+        ///
+        /// WHY THE LABELS ARE WRITTEN AFTERWARDS. <c>Init</c> passes only <c>LocalizationKey</c> into
+        /// <c>Localize.SetTerm</c> (I2.Loc/Localize.cs:336-343), and an unknown term makes
+        /// <c>LocalizationManager.GetTranslation</c> return null (LocalizationManager.cs:910-915), which
+        /// leaves the label showing the PREFAB's placeholder text. This mod ships no localization table, so
+        /// the literal is written onto the label the way <c>CountdownPanel</c> already does
+        /// (src/Lobby/CountdownPanel.cs:296).
+        ///
+        /// NOT A QUORUM (P13). It is an OFFER on this peer's own screen: nobody waits for it, ignoring it
+        /// blocks nothing, and no other peer is told it was shown or answered. With no live announcement
+        /// there is no door — the mission launched or was cancelled — and then no prompt is raised at all,
+        /// rather than one whose OK leads nowhere.
+        /// </summary>
+        internal static void OfferAfterGlobalDismissal()
+        {
+            try
+            {
+                var view = GenericApplier.GeoLevel()?.View;
+                var module = view?.GeoscapeModules?.ConfirmationModule;
+                var live = LiveRecords();
+                if (module == null || live.Length == 0) return;
+                string missionKey = live[0].Key;
+                module.Init(null,
+                    (result, data) =>
+                    {
+                        if (result == UIModuleConfirmation.ConfirmationCallbackResult.ConfirmationOK)
+                            Join(missionKey);
+                    },
+                    new LocalizedTextBind(TakenMessage, true),
+                    new LocalizedTextBind(TakenTitle, true));
+                SetLabel(module.ConfirmationMsg, TakenMessage);
+                SetLabel(module.Title, TakenTitle);
+                MpLog.Log("[MP][deploy] offered the native deployment-preparation prompt for " + missionKey +
+                          " after a global dismissal. Nobody waits on it and no peer is told it was shown");
+            }
+            catch (Exception ex)
+            {
+                MpLog.LogError("[MP][deploy] the deployment-preparation prompt failed to open — this peer " +
+                               "still has the DEPLOYMENT PREP button and every other peer is unaffected: " + ex);
+            }
+        }
+
+        private const string TakenTitle = "MISSION TAKEN";
+        private const string TakenMessage = "Another player has taken this mission. Enter deployment preparation?";
+
+        private static void SetLabel(Localize label, string text)
+        {
+            var target = label == null ? null : label.GetComponentInChildren<Text>(true);
+            if (target != null) target.text = text;
         }
 
         internal static void ResetForReloadBoundary()
