@@ -286,6 +286,13 @@ namespace Multiplayer.Network.Sync
             /// <summary>True only on a mission-confirmation UNICAST addressed to this receiving client.
             /// It is a local navigation entitlement, not mission authority.</summary>
             public bool AutoOpenMissionOnArrival;
+            /// <summary>The HOST's journal position for this window — the one presentation order every peer
+            /// obeys (<see cref="WindowJournal"/>). 0 = a raise the host never queued natively (the mission
+            /// unicast, whose host-side window is suppressed), which is journalled nowhere.</summary>
+            public uint JournalPos;
+            /// <summary>The view-state type NAME the host queued, carried rather than derived (see
+            /// <see cref="GeoModalMirror.Raise.FamilyName"/>).</summary>
+            public string FamilyName;
         }
 
         /// <summary>[seq:u32][eventId][siteRef][vehicleRef][title][narrative][priority:i32]. Pure both ways so
@@ -304,6 +311,10 @@ namespace Multiplayer.Network.Sync
                 w.Write(p.Narrative ?? "");
                 w.Write(p.Priority);
                 w.Write(p.AutoOpenMissionOnArrival);
+                // TRAILING, deliberately: an older decoder stops before these rather than mis-reading an
+                // earlier field.
+                w.Write(p.JournalPos);
+                w.Write(p.FamilyName ?? "");
                 return ms.ToArray();
             }
         }
@@ -314,7 +325,7 @@ namespace Multiplayer.Network.Sync
             using (var r = new BinaryReader(ms, Encoding.UTF8))
             {
                 seq = r.ReadUInt32();
-                return new Raise
+                var p = new Raise
                 {
                     EventId = WireString.ReadKey(r),
                     SiteRef = WireString.ReadKey(r),
@@ -324,6 +335,9 @@ namespace Multiplayer.Network.Sync
                     Priority = r.ReadInt32(),
                     AutoOpenMissionOnArrival = r.ReadBoolean(),
                 };
+                p.JournalPos = r.ReadUInt32();
+                p.FamilyName = WireString.ReadKey(r);
+                return p;
             }
         }
 
@@ -367,6 +381,12 @@ namespace Multiplayer.Network.Sync
                     Narrative = LiveNarrative(data, ev.Context),
                     Priority = QueuedPriority(view, ev),
                 };
+                // THE SEAM HAND-OFF: OnGeoscapeEventRaised queued this very window through
+                // GeoscapeViewSwitchQuery.QueryStateSwitch moments ago and lower in this call stack, and
+                // that postfix is where the position was minted (WindowJournal.SetHostPending).
+                WindowJournal.TakeHostPending(out uint journalPos, out string journalFamily);
+                p.JournalPos = journalPos;
+                p.FamilyName = journalFamily ?? "";
                 uint seq = Seq.Next(SurfaceIds.GeoEventRaise);
                 var store = DurableInboxSession.ActiveStore;
                 if (store != null)
@@ -744,6 +764,14 @@ namespace Multiplayer.Network.Sync
                 // A re-delivered raise is a SECOND window, not a stale value — the strictly-greater guard is
                 // what makes this surface idempotent (law 7), and it is marked only after the window is up.
                 if (!Seq.ShouldApply(SurfaceIds.GeoEventRaise, seq)) return true;
+                // A CLIENT DOES NOT DECIDE THE ORDER — IT RECORDS THE HOST'S. The native raise below still
+                // puts the window on this peer's own queue; the journal says WHEN it may leave that queue.
+                // A raise with no position is one the host never queued natively (the mission unicast) —
+                // there is no shared order to obey and nothing to journal.
+                if (p.JournalPos != 0) WindowJournal.Append(p.JournalPos, p.FamilyName, payload);
+                // REACTIVITY (hard mandate): the kindless arm at src/Rail/OpenUiRepaint.cs:728 re-runs the
+                // open view state, so an already-open screen sees the arrival without a leave-and-re-enter.
+                OpenUiRepaint.MarkDirty();
                 if (RaiseMirrored(p, seq)) Seq.Mark(SurfaceIds.GeoEventRaise, seq);
             }
             catch (Exception ex) { MpLog.LogError("[Multiplayer][rail] EventPopup inbound failed: " + ex); }

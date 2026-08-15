@@ -666,6 +666,21 @@ namespace Multiplayer.Network.Sync
             try
             {
                 GeoWindowCoverage.Announce(request?.State?.GetType());
+                // THE SINGLE ENTRANCE (§A.1, L520/L521). The host claims the next journal position HERE and
+                // nowhere else, then publishes. This is a Harmony postfix on the queue itself, so it is
+                // reachable with GeoLevel() == null — creation, queueing and publication never depend on
+                // which screen the host is in (§A.4); only DISPLAY is postponed. The mint is handed to the
+                // family's own publisher through WindowJournal.TakeHostPending: every publisher is a postfix
+                // on the native method that just queued this very window, so it runs later in THIS call
+                // stack (see the SetHostPending doc).
+                if (GeoModalMirror.HostMayPublish())
+                {
+                    uint pos = WindowJournal.MintHostPosition();
+                    string family = request?.State?.GetType().Name ?? "<unknown>";
+                    WindowJournal.SetHostPending(pos, family);
+                    // The host's own copy: the live request IS the payload on this peer.
+                    WindowJournal.Append(pos, family, null);
+                }
                 // THE NON-MODAL RAISE, at the one queue every pushed window passes: a state that reached here
                 // is one the game is interrupting the player with, it carries its own priority and its own
                 // live data, and the modal family is already captured at its openers. Host-gated inside.

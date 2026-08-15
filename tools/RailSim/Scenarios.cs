@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Multiplayer.Network.Sync;
 
 namespace RailSim
 {
@@ -11,6 +12,65 @@ namespace RailSim
         internal static IEnumerable<KeyValuePair<string, Func<int, IEnumerable<string>>>> All()
         {
             yield return Pair("seeded-transport-is-reproducible", SeededTransportIsReproducible);
+            yield return Pair("every-peer-presents-in-the-same-order", EveryPeerPresentsInTheSameOrder);
+        }
+
+        /// <summary>§C.1 property 1: EVERY PEER'S PRESENTATION ORDER IS IDENTICAL. The measured P1 shape,
+        /// reproduced: the host raises research then event; the transport delivers them to each peer in
+        /// whatever seeded order it likes (the field skew was 363 ms, longer than the old 150 ms settle);
+        /// every peer must still present them in the host's order.</summary>
+        private static IEnumerable<string> EveryPeerPresentsInTheSameOrder(int seed)
+        {
+            var histories = new List<List<string>>();
+            for (int peer = 0; peer < 3; peer++)
+            {
+                var clock = new SimClock();
+                var net = new SimNet(seed + peer, clock);
+                WindowJournal.Reset();
+
+                uint researchPos = WindowJournal.MintHostPosition();
+                uint eventPos = WindowJournal.MintHostPosition();
+                net.Send(peer, Frame(researchPos, "UIStateGeoModal"));
+                net.Send(peer, Frame(eventPos, "UIStateGeoscapeEvent"));
+
+                clock.Advance(1.0f);
+                foreach (var msg in net.Drain())
+                {
+                    uint pos = BitConverter.ToUInt32(msg.Value, 0);
+                    string family = System.Text.Encoding.UTF8.GetString(msg.Value, 4, msg.Value.Length - 4);
+                    WindowJournal.Append(pos, family, msg.Value);
+                }
+
+                var presented = new List<string>();
+                JournalEntry e;
+                while (WindowJournal.TryRead(out e)) presented.Add(e.Family);
+                histories.Add(presented);
+            }
+            WindowJournal.Reset();
+
+            var reference = histories[0];
+            for (int p = 1; p < histories.Count; p++)
+                if (!histories[p].SequenceEqual(reference))
+                    yield return "every-peer-presents-in-the-same-order: peer 0 presented [" +
+                                 string.Join(",", reference) + "] and peer " + p + " presented [" +
+                                 string.Join(",", histories[p]) + "]. This is P1 verbatim — the " +
+                                 "2026-08-15 session had the host queue research→event while both clients " +
+                                 "presented event→research, 363 ms apart, exactly one diff cycle.";
+
+            if (reference.Count != 2 || reference[0] != "UIStateGeoModal")
+                yield return "every-peer-presents-in-the-same-order: the presented order was [" +
+                             string.Join(",", reference) + "], not [UIStateGeoModal,UIStateGeoscapeEvent]. " +
+                             "The HOST was the wrong peer in the field, so the host's own order is " +
+                             "asserted explicitly and not merely compared with the clients'.";
+        }
+
+        private static byte[] Frame(uint pos, string family)
+        {
+            var name = System.Text.Encoding.UTF8.GetBytes(family);
+            var frame = new byte[4 + name.Length];
+            Buffer.BlockCopy(BitConverter.GetBytes(pos), 0, frame, 0, 4);
+            Buffer.BlockCopy(name, 0, frame, 4, name.Length);
+            return frame;
         }
 
         private static KeyValuePair<string, Func<int, IEnumerable<string>>> Pair(

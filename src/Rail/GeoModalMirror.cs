@@ -192,6 +192,14 @@ namespace Multiplayer.Network.Sync
             public int Priority;
             public string DurableTrigger;
             public string DurableSubject;
+            /// <summary>The HOST's journal position for this window — the one presentation order every peer
+            /// obeys (<see cref="WindowJournal"/>). 0 = a raise the host never queued natively (the
+            /// mission-brief unicast, whose host-side window is suppressed), which is journalled nowhere.</summary>
+            public uint JournalPos;
+            /// <summary>The view-state type NAME the host queued, carried rather than derived: the drain
+            /// gate matches this peer's own native queue head against it, and a derivation that silently
+            /// disagrees with the host is a window that never presents.</summary>
+            public string FamilyName;
         }
 
         /// <summary>[seq:u32][kind:u8][modalType:i32][shape:u8][ref][n:u16][key × n][num:i32][priority:i32].
@@ -215,6 +223,10 @@ namespace Multiplayer.Network.Sync
                 w.Write(p.Priority);
                 w.Write(p.DurableTrigger ?? "");
                 w.Write(p.DurableSubject ?? "");
+                // TRAILING, deliberately: an older decoder stops before these rather than mis-reading an
+                // earlier field.
+                w.Write(p.JournalPos);
+                w.Write(p.FamilyName ?? "");
                 return ms.ToArray();
             }
         }
@@ -239,6 +251,8 @@ namespace Multiplayer.Network.Sync
                 p.Priority = r.ReadInt32();
                 p.DurableTrigger = WireString.ReadKey(r);
                 p.DurableSubject = WireString.ReadKey(r);
+                p.JournalPos = r.ReadUInt32();
+                p.FamilyName = WireString.ReadKey(r);
                 return p;
             }
         }
@@ -365,8 +379,7 @@ namespace Multiplayer.Network.Sync
         internal static void HostBroadcastEventPayload(uint seq, byte[] encoded)
         {
             var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
-            if (SyncApplyScope.Active) return;   // law 8: an apply that reaches the view never re-broadcasts
+            if (!HostMayPublish()) return;
             engine.BroadcastToAll(new NetworkMessage(PacketType.SyncEnvelope,
                 SyncProtocol.EncodeEnvelope(SurfaceIds.GeoEventRaise, SyncKind.StateDelta, encoded)));
         }
@@ -390,11 +403,23 @@ namespace Multiplayer.Network.Sync
         /// <summary>Host-side broadcast of ONE window, called from the postfixes on the two native modal
         /// openers and from <see cref="HostBroadcastQueued"/>. Never throws into game code: a raise this
         /// fails on is a window the client does not get, and it says so.</summary>
+        /// <summary>THE ONE HOST PREDICATE, lifted verbatim out of <see cref="HostBroadcast"/>'s own opening
+        /// guard so the mint seam and the publishers cannot disagree about who may publish. `law 8`: an apply
+        /// that reaches the view never re-broadcasts, so a mirrored raise landing on a peer must not mint a
+        /// position there either.</summary>
+        internal static bool HostMayPublish()
+        {
+            var engine = NetworkEngine.Instance;
+            return engine != null && engine.IsActiveSession && engine.IsHost && !SyncApplyScope.Active;
+        }
+
         internal static void HostBroadcast(StateKind kind, ModalType modalType, object modalData, int priority)
         {
             var engine = NetworkEngine.Instance;
-            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
-            if (SyncApplyScope.Active) return;   // law 8: an apply that reaches the view never re-broadcasts
+            if (!HostMayPublish()) return;
+            // THE SEAM HAND-OFF: this window's journal position was minted at the QueryStateSwitch postfix
+            // that queued it, moments ago and lower in this very call stack (WindowJournal.SetHostPending).
+            WindowJournal.TakeHostPending(out uint journalPos, out string journalFamily);
             var rule = kind == StateKind.Modal
                 ? GeoWindowCoverage.RuleForModal(modalType)
                 : GeoWindowCoverage.RuleFor(StateTypeOf(kind));
@@ -406,6 +431,8 @@ namespace Multiplayer.Network.Sync
                 p.Kind = kind;
                 p.ModalType = (int)modalType;
                 p.Priority = priority;
+                p.JournalPos = journalPos;
+                p.FamilyName = journalFamily ?? "";
                 var durable = DurableWindowRegistry.LastCapturedPriorityOccurrence;
                 if (durable.HasValue && durable.Value.EventId == "Modal:" + modalType)
                 {
@@ -586,6 +613,17 @@ namespace Multiplayer.Network.Sync
                 // A re-delivered raise is a SECOND window, not a stale value — the strictly-greater guard is
                 // what makes this surface idempotent (law 7), and it is marked only after the window is up.
                 if (!Seq.ShouldApply(SurfaceIds.GeoModalRaise, seq)) return true;
+                // A CLIENT DOES NOT DECIDE THE ORDER — IT RECORDS THE HOST'S. The native raise below still
+                // puts the window on this peer's own queue; the journal says WHEN it may leave that queue,
+                // which is what makes the host's order the only order (the drain gate lands in Task 5).
+                // A raise with no position is one the host never queued natively (the mission-brief
+                // unicast) — there is no shared order to obey and nothing to journal.
+                if (p.JournalPos != 0) WindowJournal.Append(p.JournalPos, p.FamilyName, payload);
+                // REACTIVITY (hard mandate). The arrival changes replicated presentation state, so an
+                // already-open screen must hear about it without the player leaving and re-entering. The
+                // kindless arm at src/Rail/OpenUiRepaint.cs:728 is the right one: a journal arrival carries
+                // no rail path, and it re-runs the open view state so the drain reaches the new head.
+                OpenUiRepaint.MarkDirty();
                 // STRICT FIFO, and the queue is checked FIRST: once one raise is waiting for its entity,
                 // every later raise waits behind it. The game's own queue is priority-ordered but keeps
                 // ARRIVAL order between equal priorities (QueryStateSwitch:77-82 inserts before the first
