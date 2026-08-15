@@ -64,6 +64,15 @@ namespace Multiplayer.Network.Sync
                 { "UIStateRosterDeployment", DismissScope.Global },
             };
 
+        /// <summary>THE FAMILY OF A WINDOW, and the ONLY definition of it. A family IS the runtime name of
+        /// the UI STATE type the game queued — that is what the mint seam appends
+        /// (<c>GeoWindowCoverageGate.Postfix</c>) and therefore what <see cref="ScopeOf"/> is keyed on. It is
+        /// spelled once, here, so the mint seam and the ANSWER RELAY cannot key two different strings off the
+        /// same window: every modal is <c>UIStateGeoModal</c> whatever its <c>ModalType</c> is, and the two
+        /// GLOBAL families are states of their own (<c>UIStateGeoMissionBrief</c>,
+        /// <c>UIStateRosterDeployment</c>).</summary>
+        internal static string FamilyOf(Type stateType) => stateType == null ? "<unknown>" : stateType.Name;
+
         /// <summary>Undeclared ⇒ LOCAL. A new window family needs no code at all.</summary>
         internal static DismissScope ScopeOf(string family) =>
             family != null && FamilyScope.TryGetValue(family, out var scope) ? scope : DismissScope.Local;

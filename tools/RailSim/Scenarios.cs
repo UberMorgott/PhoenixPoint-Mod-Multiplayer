@@ -143,6 +143,20 @@ namespace RailSim
                 yield return "a-local-dismissal-removes-only-mine: UIStateGeoModal is not declared LOCAL. " +
                              "Default is LOCAL and an UNDECLARED family IS local — a new window family " +
                              "needs no code at all (§A.5).";
+
+            // THE OTHER PROPAGATION SYSTEM. Removing the entry locally is only half of "only mine": the
+            // ANSWER RELAY carries a dismissal too — the host runs modal.FinishDialog off it — and until
+            // 2026-08-15 it never asked the table (measured: a client dismissing the research window closed
+            // the host's copy). L547 owns the invariant; this is the same property in the harness.
+            if (WindowQueueSync.MayRelayAnswer("UIStateGeoModal"))
+                yield return "a-local-dismissal-removes-only-mine: the answer relay would still send peer " +
+                             "A's dismissal of a LOCAL family to the host, which answers it with " +
+                             "modal.FinishDialog and loses its own copy. A LOCAL dismissal removes only the " +
+                             "dismissing peer's window, by BOTH mechanisms.";
+            if (!WindowQueueSync.MayRelayAnswer("UIStateRosterDeployment"))
+                yield return "a-local-dismissal-removes-only-mine: the answer relay refuses the GLOBAL " +
+                             "mission family too, so the gate above is a constant and the mission flow the " +
+                             "relay was written for no longer crosses at all.";
             WindowJournal.Reset();
         }
 

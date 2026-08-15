@@ -588,6 +588,16 @@ namespace Multiplayer.Network.Sync
                // funnel and this arm must not race it with a half-answer that skips FinishQueriedState.
                !string.Equals(haveCurrentIdentity, wantIdentity, StringComparison.Ordinal);
 
+        /// <summary>MAY THIS PEER'S ANSWER TRAVEL? PURE, so RailCheck L547 EXECUTES it. The answer relay is
+        /// the SECOND way a dismissal propagates (the first is the host-minted void), and until 2026-08-15 it
+        /// was the only one that never asked the declaration table: closing a research-completed window on a
+        /// client made the HOST run <c>FinishDialog</c> and lose its own copy. §A.5: dismissal scope is a
+        /// declared property of a FAMILY, so the relay asks the same table the void path asks and nothing
+        /// else. The family here is <see cref="WindowJournal.FamilyOf"/> over the queued UI STATE — the very
+        /// expression the mint seam appends with.</summary>
+        internal static bool MayRelayAnswer(string family) =>
+            WindowJournal.ScopeOf(family) == DismissScope.Global;
+
         /// <summary><see cref="ValidateIdentity"/> plus the one question only a MODAL answer raises. Split so
         /// the deploy op can ask the identity half without inventing a <c>ModalResult</c> it does not have.</summary>
         internal static string Validate(string haveIdentity, string wantIdentity, byte result)
@@ -760,6 +770,9 @@ namespace Multiplayer.Network.Sync
         /// <summary>Once per ModalType: a brief is answered at click rate all game long.</summary>
         private static readonly HashSet<string> _perPeerLogged = new HashSet<string>(StringComparer.Ordinal);
 
+        /// <summary>Once per FAMILY: a LOCAL window is dismissed at click rate all game long.</summary>
+        private static readonly HashSet<string> _localScopeLogged = new HashSet<string>(StringComparer.Ordinal);
+
         /// <summary>Called from the client's own <c>FinishQueriedState</c>, with the state it is closing.
         /// Non-blocking on purpose: closing this peer's own window is PRESENTATION and must happen locally
         /// whatever the host does with the intent (the block-first law governs STATE mutations, and this
@@ -802,6 +815,19 @@ namespace Multiplayer.Network.Sync
                 // slot was already cleared by a re-entrant ExitState (UIStateAssetDeployment:66,
                 // UIStateReplenish:69). Nothing crosses, and silently: it happens at click rate all game long.
                 if (identity == null) return;
+                // THE DECLARED DISMISSAL SCOPE, asked of the SAME table the host-minted void asks (§A.5).
+                // A LOCAL family's dismissal is this peer's own business: the window closes here and nothing
+                // crosses, so the other peers keep their copies until they close them themselves.
+                string family = WindowJournal.FamilyOf(state.GetType());
+                if (!MayRelayAnswer(family))
+                {
+                    if (_localScopeLogged.Add(family))
+                        MpLog.Log("[MP][windows] '" + modal.ModalType + "' dismissed LOCALLY — family '" +
+                                  family + "' declares dismissal scope LOCAL, so no 0x" +
+                                  SurfaceIds.GeoWindowIntent.ToString("X2") + " advance crosses and no other " +
+                                  "peer's copy is closed by this click (logged once per family)");
+                    return;
+                }
                 // Esc / the close button reach FinishQueriedState through OnCancel:96 WITHOUT going through
                 // FinishDialog, so no answer was recorded. That is not "no answer" — the game's own tail
                 // resolves exactly that case as Close (ExitState:121-124), and sending anything else would

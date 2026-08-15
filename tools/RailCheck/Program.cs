@@ -448,6 +448,7 @@ namespace RailCheck
             Add(laws, () => L544_NoPathSegmentIsAnIndex.Check());
             Add(laws, () => L545_PatchDoNotRebuild.Check());
             Add(laws, () => L546_AHostMintedPositionIsPublishedOrStated.Check());
+            Add(laws, () => L547_ALocalDismissalNeverTravels.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -495,8 +496,14 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 346;
-        // Updated deliberately 2026-08-15: L546 (a host-minted journal position is published, and a discard
+        private const int ExpectedLawRegistrations = 347;
+        // Updated deliberately 2026-08-15: L547 (a LOCAL family's dismissal never travels — the ANSWER RELAY
+        // asks the same declaration table the host-minted void asks) was ADDED — 346 -> 347. Nothing was
+        // retired or amputated: L526 owns the TABLE (undeclared is local, the mission family is global, no
+        // scope is decided elsewhere) and never asked whether WindowQueueSync.SendAdvance consults it —
+        // which is why dismissing the research-completed window on a client ran modal.FinishDialog on the
+        // host and closed its own copy.
+        // Earlier the same day: L546 (a host-minted journal position is published, and a discard
         // is never silent) was ADDED — 345 -> 346. Nothing was retired or amputated: L520 owns "there is one
         // publication path", L521 owns "the append needs no screen" and L524 owns retention; none of them
         // asked whether a position the seam MINTED ever leaves the host, which is how ModalType
@@ -556,7 +563,7 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "3eb6e6409e799b195273ab45ba0e116f997400636ce536d4f0fd3eadae863607";
+        private const string ExpectedExecutionIdentityDigest = "d9b424466a55dfbeaf5e1e7c056c3231becc94d2dc2ff5d6731ce96db2444457";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

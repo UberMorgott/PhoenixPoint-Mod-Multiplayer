@@ -678,7 +678,7 @@ namespace Multiplayer.Network.Sync
                 if (GeoModalMirror.HostMayPublish())
                 {
                     uint pos = WindowJournal.MintHostPosition();
-                    string family = request?.State?.GetType().Name ?? "<unknown>";
+                    string family = WindowJournal.FamilyOf(request?.State?.GetType());
                     WindowJournal.SetHostPending(pos, family);
                     // The host's own copy: the live request IS the payload on this peer.
                     WindowJournal.Append(pos, family, null);

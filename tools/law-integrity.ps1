@@ -42,7 +42,14 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
 # with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
 # registration multiset (so sparse ids and many registrations per source file remain valid).
-# Updated deliberately 2026-08-15: L546 ADDED (a host-minted journal position is PUBLISHED, and a discard
+# Updated deliberately 2026-08-15: L547 ADDED (a LOCAL family's dismissal never travels: the ANSWER RELAY
+# -- WindowQueueSync.SendAdvance -> the 0xB9 advance intent -> the host's modal.FinishDialog -- asks
+# WindowJournal.ScopeOf through the pure MayRelayAnswer, which is EXECUTED in both directions, and the IL
+# arms pin that SendAdvance reaches the predicate and the predicate reaches the table) -- 346 -> 347
+# registrations, one new identity string. Nothing retired or amputated: L526 owns the TABLE and never asked
+# whether the answer relay consults it, which is how dismissing the research window on a client closed the
+# host's own copy.
+# Earlier the same day: L546 ADDED (a host-minted journal position is PUBLISHED, and a discard
 # is never silent: every modal in GeoWindowCoverage.HostAuthoritativeRaisers is declared and never
 # LocalOnly, and the real seam is EXECUTED -- mint, hand off, take back, ask GeoModalMirror.PublishRefusal
 # with the real rule -- so a Mirrored family publishes and any other family states its discard) --
@@ -105,7 +112,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Earlier the same day: L514 ADDED (the roster list repaints on the same mirrored
 # level-up), 334 -> 335; L513 ADDED (no peer lifts before its boundary releases), 333 -> 334;
 # L512 ADDED (the crew strip repaints on a mirrored level-up), 332 -> 333.
-$expectedRegistrationDigest = '4610e68999d6ee3ec71d6a1c85c622ccbd289a75c541e1d4a9c834c843cc9538'
+$expectedRegistrationDigest = '6b6920a6e9bcfa43505a0b5598edb899feba8f2cba1dffe6a02c8d980f546d74'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))
