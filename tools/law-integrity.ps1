@@ -68,6 +68,11 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # (the provisional window ordinal is back-filled -- its subject, WindowOrder.Stamp/StampAt and the
 # per-request order key, is deleted). 338 registrations either side; the identity SET changed, which is
 # exactly what this digest is for. Updated deliberately 2026-08-15:
+# L544 ADDED (no rail path segment is produced from a loop index: IdentityResolver.KeyOf is EXECUTED
+# and yields NULL for an unkeyable object, a key for a keyed one (positive control) and NULL for a
+# negative id, and DiffEngine.VisitEntity still reaches the Incident abort) -- 343 -> 344
+# registrations, one new identity string. Nothing retired: prefix subscriptions now DEPEND on element
+# addressing being by stable ID and no existing law owned that. Earlier the same day:
 # L543 ADDED (no hand-rolled read-set survives beside a declared prefix set: the five signature
 # builders are gone, RepaintNeeded/AgendaNeedsRebuild survive as the positive control, and
 # InfoBarNeedsRefresh asks the bar's LIVENESS before touching RepaintNeeded's memory) -- 342 -> 343
@@ -88,7 +93,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Earlier the same day: L514 ADDED (the roster list repaints on the same mirrored
 # level-up), 334 -> 335; L513 ADDED (no peer lifts before its boundary releases), 333 -> 334;
 # L512 ADDED (the crew strip repaints on a mirrored level-up), 332 -> 333.
-$expectedRegistrationDigest = '0bd971244d4f0ffcdf7f56c463f84d400b8395d1dce5ceea39d02ff147c3b968'
+$expectedRegistrationDigest = 'dc5d7587630e1879ac19900fe78ab889f5622e01b672de88507ef80d195a477a'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -445,6 +445,7 @@ namespace RailCheck
             Add(laws, () => L541_AnUndeclaredSurfaceRepaintsOnEverything.Check());
             Add(laws, () => L542_TheKindlessSitesStillRepaintEverything.Check());
             Add(laws, () => L543_NoHandRolledSignatureSurvives.Check());
+            Add(laws, () => L544_NoPathSegmentIsAnIndex.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -492,8 +493,12 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 343;
-        // Updated deliberately 2026-08-15: L543 (no hand-rolled read-set survives beside a declared
+        private const int ExpectedLawRegistrations = 344;
+        // Updated deliberately 2026-08-15: L544 (no rail path segment is produced from a loop index, and
+        // the keyless arm has no fallback) was ADDED — 343 -> 344. Nothing was retired or amputated:
+        // prefix subscriptions now DEPEND on element addressing being by stable ID, and no existing law
+        // executed IdentityResolver.KeyOf or pinned the keyless abort against an index fallback.
+        // Earlier the same day: L543 (no hand-rolled read-set survives beside a declared
         // prefix set) was ADDED — 342 -> 343. Nothing was retired or amputated: L492, L498, L512 and
         // L514 keep every arm they had, with the four that IL-scanned a deleted signature builder
         // re-pointed at the DECLARATION that replaced it — same claim, same failure names' intent, one
@@ -540,7 +545,7 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "6ba6abca160610d4bdfc4265f39e65ee406b2fa55ccfdb73f73775a31972341e";
+        private const string ExpectedExecutionIdentityDigest = "5aced6182eb672892ce193092b0d958c01ce658fd51ff18ea67e3aa143459bb4";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
