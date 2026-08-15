@@ -446,6 +446,7 @@ namespace RailCheck
             Add(laws, () => L542_TheKindlessSitesStillRepaintEverything.Check());
             Add(laws, () => L543_NoHandRolledSignatureSurvives.Check());
             Add(laws, () => L544_NoPathSegmentIsAnIndex.Check());
+            Add(laws, () => L545_PatchDoNotRebuild.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -493,7 +494,11 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 344;
+        private const int ExpectedLawRegistrations = 345;
+        // Updated deliberately 2026-08-15: L545 (a surface with model or animation state is patched, never
+        // rebuilt) was ADDED — 344 -> 345. Nothing was retired: scoping a repaint decides WHETHER it fires,
+        // and L545 decides what it is allowed to destroy when it does. L156's resolve-all-first arm was
+        // re-pointed from the retired EsDisplay binding to EsUiRefreshNeeded, same arm, same strength.
         // Updated deliberately 2026-08-15: L544 (no rail path segment is produced from a loop index, and
         // the keyless arm has no fallback) was ADDED — 343 -> 344. Nothing was retired or amputated:
         // prefix subscriptions now DEPEND on element addressing being by stable ID, and no existing law
@@ -545,7 +550,7 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "5aced6182eb672892ce193092b0d958c01ce658fd51ff18ea67e3aa143459bb4";
+        private const string ExpectedExecutionIdentityDigest = "40066a63c080a4c1b7d934e6d92d4f183089b9f365874354f3083826fe3866e7";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

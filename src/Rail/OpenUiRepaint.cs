@@ -1022,6 +1022,22 @@ namespace Multiplayer.Network.Sync
                               "(logged once per screen)");
                 return;
             }
+            // §B.9: the Exit+Enter fallback destroys and rebuilds every widget on the screen — documented
+            // right above to have restarted a cutscene 7 times — and for a screen carrying a live character
+            // doll it IS the animation reset: EnterState re-runs the state's own DisplaySoldier, which is
+            // the resetAnimation:true call this task removed from the repaint path. It stays the last resort
+            // for UNDECLARED surfaces only. Reaching here for a declared one means its UiNativeRepaint.Table
+            // entry is missing or declined, so say so loudly instead of silently rebuilding the doll.
+            // The persistent HUD was already refreshed by the caller (same as the queued-window arm above).
+            if (UiNativeRepaint.ModelAnimationSurfaces.Contains(current.GetType().Name))
+            {
+                if (_loggedFallback.Add(current.GetType().Name))
+                    MpLog.LogWarning("[Multiplayer][uirepaint] refused the Exit+Enter fallback on " +
+                                     current.GetType().Name + " — it carries model/animation state and " +
+                                     "must be patched, not rebuilt. Its entry in UiNativeRepaint.Table is " +
+                                     "missing or declined (logged once per screen)");
+                return;
+            }
             // LAST RESORT: lifecycle re-enter for screens with no native-rebuild registration yet.
             // One-time inventory line per screen type = the to-do list for the next table entry.
             if (_loggedFallback.Add(current.GetType().Name))

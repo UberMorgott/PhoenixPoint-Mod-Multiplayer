@@ -317,6 +317,17 @@ namespace Multiplayer.Network.Sync
         /// Scoped like every other raiser (law 8): <c>RefreshTags</c> and <c>RefreshSoldierInfo</c> fire
         /// native UI events that an intent-capture seam listens to.
         /// </summary>
+        /// <remarks>§B.9 — CLEARING <c>Addons</c> FORCES THE REBUILD BRANCH (UIModuleActorCycle.cs:635-654:
+        /// an empty Addons list can never equal the character's armour set, so the next DisplaySoldier
+        /// takes <c>CharacterLoadingIndicator.SetActive(true)</c> + <c>CommonCharacterUtils.RebuildCharacter</c>).
+        /// That is correct for an identity that REALLY changed and gratuitous destruction for anything else,
+        /// so it must not be reachable from an unrelated write. IT IS NOT, and the gate is already in place
+        /// one seam up rather than duplicated here: <c>GenericApplier</c>:1345 only puts a leaf in
+        /// <c>touched</c> when <c>LeafChanged(before, after)</c> — so <see cref="Fire"/>'s CharacterIdentity
+        /// arm, the only caller, runs on a real value difference. The remaining <c>touched.Add</c> sites are
+        /// structural (:463/:666/:682) or a census PRUNE that already found extras (:2235), all of which are
+        /// real changes too. No second cache of the identity key is kept here on purpose: it would be a
+        /// duplicate of that gate and would drift from it.</remarks>
         private static void ReseedIdentityDisplay(GeoCharacter owner, GeoLevelController geo)
         {
             var cycle = geo?.View?.GeoscapeModules?.ActorCycleModule;
@@ -388,16 +399,39 @@ namespace Multiplayer.Network.Sync
         // --- UIStateEditSoldier / UIStateEditVehicle: same reseed shape (UIStateEditSoldier.cs
         // CharacterChangedHandler:358-365 minus the UI→model write-back of the previous character):
         // _refreshStorage=true so RefreshStorage re-reads StorageItems() instead of the stale UI list
-        // (:587-597), OnDataChanged = wallet/tags panel, DisplaySoldier = equip lists + doll from the
-        // model (:580-585), then the progression panel.
+        // (:587-597), OnDataChanged = wallet/tags panel, the doll+equip-list paint below, then the
+        // progression panel.
+        //
+        // §B.9 PATCH, DON'T REBUILD. The state's own private DisplaySoldier is deliberately NOT bound
+        // any more (it was EsDisplay/EvDisplay). UIStateEditSoldier.DisplaySoldier:580-585 ends in
+        // _actorCycleModule.DisplaySoldier(character, resetAnimation: true) and
+        // UIStateEditVehicle.DisplaySoldier:344-348 in DisplayVehicle(character, resetAnimation: true)
+        // — and `true` is the ONLY thing that reaches CommonCharacterUtils.ResetCharacterAnimation =
+        // Animator.Play(0, -1, 0f) (CommonCharacterUtils.cs:66-73, called from UIModuleActorCycle
+        // .cs:640 / :695). A repaint driven by ANOTHER peer's delta therefore restarted the soldier's
+        // idle animation from frame 0 on a screen its owner was merely looking at.
+        // PaintSoldierDoll/PaintVehicleDoll below reproduce those three lines verbatim with
+        // resetAnimation: false, exactly the shape RepaintAugmentScreen already uses. Nothing else is
+        // lost: the rebuild branch (UIModuleActorCycle.cs:653-654, CharacterLoadingIndicator +
+        // CommonCharacterUtils.RebuildCharacter) is keyed on the ADDON SET differing, not on
+        // resetAnimation, so a mirrored armour change still rebuilds the doll and an unrelated delta
+        // no longer does.
         private static readonly FieldInfo EsRefreshFlag = AccessTools.Field(typeof(UIStateEditSoldier), "_refreshStorage");
         private static readonly MethodInfo EsGetData = AccessTools.Method(typeof(UIStateEditSoldier), "GetSoldierEquipModuleData");
-        private static readonly MethodInfo EsDisplay = AccessTools.Method(typeof(UIStateEditSoldier), "DisplaySoldier", new[] { typeof(GeoCharacter) });
+        // UIStateEditSoldier.cs:50 / UIStateEditVehicle.cs:45 — the flag the state's own DisplaySoldier
+        // raises (:583 / :347) so the next UpdateState (:459-486 / :360) re-derives the weight/endurance
+        // readouts. Set it here, or the doll repaints and the carry-weight label keeps the old number.
+        private static readonly FieldInfo EsUiRefreshNeeded = AccessTools.Field(typeof(UIStateEditSoldier), "_uiRefreshNeeded");
         private static readonly MethodInfo EsRefreshStorage = AccessTools.Method(typeof(UIStateEditSoldier), "RefreshStorage");
         private static readonly MethodInfo EsSelectProgression = AccessTools.Method(typeof(UIStateEditSoldier), "SelectCharacterProgression", new[] { typeof(GeoCharacter) });
         private static readonly FieldInfo EvRefreshFlag = AccessTools.Field(typeof(UIStateEditVehicle), "_refreshStorage");
         private static readonly MethodInfo EvGetData = AccessTools.Method(typeof(UIStateEditVehicle), "GetSoldierEquipModuleData");
-        private static readonly MethodInfo EvDisplay = AccessTools.Method(typeof(UIStateEditVehicle), "DisplaySoldier", new[] { typeof(GeoCharacter) });
+        private static readonly FieldInfo EvUiRefreshNeeded = AccessTools.Field(typeof(UIStateEditVehicle), "_uiRefreshNeeded");
+        // UIStateEditVehicle.cs:335-341 — the private filter the state's DisplaySoldier feeds
+        // UpdateVehicleData with. Reflected rather than re-implemented: it IS the game's own definition
+        // of which equipment lands in which slot list.
+        private static readonly MethodInfo EvVehicleEquipment = AccessTools.Method(typeof(UIStateEditVehicle), "GetVehicleEquipment",
+            new[] { typeof(GeoCharacter), typeof(PhoenixPoint.Common.Entities.Equipments.GroundVehicleEquipmentType) });
         private static readonly MethodInfo EvRefreshStorage = AccessTools.Method(typeof(UIStateEditVehicle), "RefreshStorage");
         // UIStateGeoRoster.OnActorStatChanged (:364-368) = the game's own open-screen model-change
         // reaction: re-Init the roster module from the containers + refresh the unit-stats panel.
@@ -516,7 +550,7 @@ namespace Multiplayer.Network.Sync
                 [typeof(UIStateEditSoldier)] = (s, v) =>
                 {
                     if (EsSelectProgression == null) return false; // resolve-all-first: decline BEFORE the reseed mutates anything
-                    if (!ReseedEquipScreen(s, v.GeoscapeModules, EsRefreshFlag, EsGetData, EsDisplay, EsRefreshStorage)) return false;
+                    if (!ReseedEquipScreen(s, v.GeoscapeModules, EsRefreshFlag, EsGetData, PaintSoldierDoll, EsRefreshStorage)) return false;
                     // Progression panel: ALWAYS the full native reseed from the mirrored model — the
                     // client-posture law (IntentRail.ShouldRunNative doc) repaints from the model, own
                     // echo included. The reseed also recomputes the visit's undo baseline; the
@@ -526,7 +560,7 @@ namespace Multiplayer.Network.Sync
                 [typeof(UIStateEditVehicle)] = (s, v) =>
                 {
                     var mods = v.GeoscapeModules;
-                    if (!ReseedEquipScreen(s, mods, EvRefreshFlag, EvGetData, EvDisplay, EvRefreshStorage)) return false;
+                    if (!ReseedEquipScreen(s, mods, EvRefreshFlag, EvGetData, PaintVehicleDoll, EvRefreshStorage)) return false;
                     // progression panel: EnterState calls the module directly (UIStateEditVehicle.cs:162);
                     // always the full native reseed — same client-posture law as the edit-soldier entry
                     mods.CharacterProgressionModule.SetCharacterProgression(Viewer(), mods.ActorCycleModule.CurrentCharacter);
@@ -749,6 +783,18 @@ namespace Multiplayer.Network.Sync
                 { "UIModuleVehicleSelection",     new[] { "V#", "U#" } },
                 { "UIModuleGeoRoster",            new[] { "U#" } },
             };
+
+        /// <summary>Surfaces whose repaint MUST be a patch and never a rebuild (§B.9). Declared by NAME
+        /// for the same reason <see cref="DeclaredPrefixes"/> is. Each one carries a live character doll
+        /// with animation state, so the Exit+Enter fallback IS the animation reset for it, and each one
+        /// therefore has a <see cref="Table"/> entry that paints with <c>resetAnimation: false</c>:
+        /// <c>PaintSoldierDoll</c>, <c>PaintVehicleDoll</c> and <c>RepaintAugmentScreen</c>.
+        /// The augmentation screens are TWO real states, <c>UIStateBionics</c> and <c>UIStateMutate</c>
+        /// (decompile PhoenixPoint.Geoscape.View.ViewStates/UIStateBionics.cs:1 and UIStateMutate.cs:1) —
+        /// there is no single "UIStateAugmentationScreen" type.</summary>
+        internal static readonly System.Collections.Generic.HashSet<string> ModelAnimationSurfaces =
+            new System.Collections.Generic.HashSet<string>(StringComparer.Ordinal)
+            { "UIStateEditSoldier", "UIStateEditVehicle", "UIStateBionics", "UIStateMutate" };
 
         /// <summary>The exclusion row above, minus the kinds the screen DOES paint. Named rather than
         /// hand-listed so the exception carries its reason: <c>GeoVehicle</c> is where the squad lives.
@@ -1075,17 +1121,60 @@ namespace Multiplayer.Network.Sync
         }
 
         private static bool ReseedEquipScreen(GeoscapeViewState state, GeoscapeModulesData mods,
-            FieldInfo refreshFlag, MethodInfo getData, MethodInfo display, MethodInfo refreshStorage)
+            FieldInfo refreshFlag, MethodInfo getData, Func<GeoscapeViewState, GeoscapeModulesData, GeoCharacter, bool> paintDoll,
+            MethodInfo refreshStorage)
         {
             var cur = mods.ActorCycleModule == null ? null : mods.ActorCycleModule.CurrentCharacter;
             // resolve-all-first: every MethodInfo checked BEFORE the first invocation, so a renamed
             // member declines cleanly instead of running half the reseed and then falling back.
-            if (cur == null || refreshFlag == null || getData == null || display == null || refreshStorage == null) return false;
+            if (cur == null || refreshFlag == null || getData == null || paintDoll == null || refreshStorage == null) return false;
             refreshFlag.SetValue(state, true); // next RefreshStorage re-reads the model, not the stale UI list
             mods.SoldierEquipModule.OnDataChanged((UIModuleSoldierEquipData)getData.Invoke(state, null));
             // reseeds the CURRENT character = selection preserved by construction
-            return Call(display, state, cur) && Call(refreshStorage, state);
+            return paintDoll(state, mods, cur) && Call(refreshStorage, state);
         }
+
+        /// <summary>§B.9 — <c>UIStateEditSoldier.DisplaySoldier</c>:580-585 with <c>resetAnimation: false</c>.
+        /// Line for line the same work: the equip lists off the model, the state's own refresh flag so
+        /// UpdateState:459-486 re-derives the weight readouts, and the doll. Only the animation argument
+        /// differs, and it is the whole defect — <c>true</c> is the sole path to
+        /// <c>CommonCharacterUtils.ResetCharacterAnimation</c> (<c>UIModuleActorCycle.cs:640</c>).
+        /// NOTHING IS LOST BY NOT RESETTING: the addon rebuild that actually re-dresses the model is
+        /// keyed on the addon SET differing (<c>UIModuleActorCycle.cs:635-654</c>), never on this flag,
+        /// so a mirrored armour/weapon change still takes the rebuild branch. <c>addWeapon</c>/
+        /// <c>showHelmet</c> are left at their defaults exactly as the state passes them, which keeps
+        /// TFTV's helmet-toggle prefix on this same overload in charge of what this peer looks at.</summary>
+        private static bool PaintSoldierDoll(GeoscapeViewState state, GeoscapeModulesData mods, GeoCharacter c)
+        {
+            if (EsUiRefreshNeeded == null || mods.SoldierEquipModule == null || mods.ActorCycleModule == null) return false;
+            mods.SoldierEquipModule.UpdateData(c.InventoryItems, c.EquipmentItems, c.ArmourItems, null,
+                                               c.CharacterStats.GetInventorySlots());
+            EsUiRefreshNeeded.SetValue(state, true);
+            mods.ActorCycleModule.DisplaySoldier(c, resetAnimation: false);
+            return true;
+        }
+
+        /// <summary>§B.9 — <c>UIStateEditVehicle.DisplaySoldier</c>:344-348 with <c>resetAnimation: false</c>.
+        /// Same argument as <see cref="PaintSoldierDoll"/>; the vehicle reaches the reset through
+        /// <c>UIModuleActorCycle.DisplayVehicle</c>:695 instead, and its rebuild branch (:704) is keyed on
+        /// the addon set the same way.</summary>
+        private static bool PaintVehicleDoll(GeoscapeViewState state, GeoscapeModulesData mods, GeoCharacter c)
+        {
+            if (EvUiRefreshNeeded == null || EvVehicleEquipment == null ||
+                mods.SoldierEquipModule == null || mods.ActorCycleModule == null) return false;
+            mods.SoldierEquipModule.UpdateVehicleData(c.InventoryItems, null,
+                VehicleEquipment(state, c, PhoenixPoint.Common.Entities.Equipments.GroundVehicleEquipmentType.Weapon),
+                VehicleEquipment(state, c, PhoenixPoint.Common.Entities.Equipments.GroundVehicleEquipmentType.Hull),
+                VehicleEquipment(state, c, PhoenixPoint.Common.Entities.Equipments.GroundVehicleEquipmentType.Engine),
+                c.CharacterStats.GetInventorySlots());
+            EvUiRefreshNeeded.SetValue(state, true);
+            mods.ActorCycleModule.DisplayVehicle(c, resetAnimation: false);
+            return true;
+        }
+
+        private static IEnumerable<PhoenixPoint.Common.Entities.ICommonItem> VehicleEquipment(GeoscapeViewState state, GeoCharacter c,
+            PhoenixPoint.Common.Entities.Equipments.GroundVehicleEquipmentType type) =>
+            EvVehicleEquipment.Invoke(state, new object[] { c, type }) as IEnumerable<PhoenixPoint.Common.Entities.ICommonItem>;
 
         /// <summary>The context the OPEN state was pushed with — <c>GeoscapeViewState.Context</c>:20, set
         /// once in <c>Push</c>:84 and the very value every EnterState hands its modules. Reflected because

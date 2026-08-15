@@ -138,7 +138,10 @@ namespace RailCheck
             // ReseedEquipScreen is resolve-all-first: any one null MethodInfo makes it `return false` and hand
             // the screen to a fallback the perf design keeps away from it. A silent decline is the failure
             // mode this repo fights, so the resolution itself is the assertion.
-            foreach (var member in new[] { "EsRefreshFlag", "EsGetData", "EsDisplay", "EsRefreshStorage" })
+            // EsDisplay (the state's private DisplaySoldier) was retired by L545/§B.9 — it is the
+            // resetAnimation:true path. EsUiRefreshNeeded is its replacement in the same resolve-all-first
+            // guard: PaintSoldierDoll declines on a null one exactly as ReseedEquipScreen declined before.
+            foreach (var member in new[] { "EsRefreshFlag", "EsGetData", "EsUiRefreshNeeded", "EsRefreshStorage" })
             {
                 var fi = typeof(UiNativeRepaint).GetField(member, All);
                 if (fi == null || fi.GetValue(null) == null)

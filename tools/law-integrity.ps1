@@ -42,7 +42,13 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
 # with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
 # registration multiset (so sparse ids and many registrations per source file remain valid).
-# Updated deliberately 2026-08-15: L540 ADDED (a mark is raised by a value that DIFFERS, never by "a
+# Updated deliberately 2026-08-15: L545 ADDED (a surface with model or animation state is PATCHED, never
+# rebuilt: every name in UiNativeRepaint.ModelAnimationSurfaces has a Table entry, no binding held by
+# UiNativeRepaint resolves to one of those surfaces' own doll methods -- the resetAnimation:true paths --
+# and OpenUiRepaint.Repaint refuses the Exit+Enter fallback for them) -- 344 -> 345 registrations, one new
+# identity string. L156 was RE-POINTED, not weakened: its resolve-all-first arm now names EsUiRefreshNeeded
+# instead of the retired EsDisplay binding, same arm count and same claim. Earlier the same day:
+# L540 ADDED (a mark is raised by a value that DIFFERS, never by "a
 # write happened": GenericApplier.LeafChanged is EXECUTED in both directions on boxed values and on
 # blobs, distinct byte arrays with identical contents compare UNCHANGED, and null-vs-value degrades to
 # CHANGED) -- 339 -> 340 registrations, one new identity string. Nothing retired or amputated:
@@ -93,7 +99,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Earlier the same day: L514 ADDED (the roster list repaints on the same mirrored
 # level-up), 334 -> 335; L513 ADDED (no peer lifts before its boundary releases), 333 -> 334;
 # L512 ADDED (the crew strip repaints on a mirrored level-up), 332 -> 333.
-$expectedRegistrationDigest = 'dc5d7587630e1879ac19900fe78ab889f5622e01b672de88507ef80d195a477a'
+$expectedRegistrationDigest = 'bd44ec38ae0f973d849393801a8f70fb5021107f9daa4735d6c45ac8c91c28a7'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))
