@@ -82,6 +82,17 @@ namespace RailCheck
 
         internal static IEnumerable<string> Check()
         {
+            // Provenance is structural, not an ability-name list: a client engine consequence is never a
+            // command, a client UI gesture is, and every host-native activation is published exactly once.
+            if (TacticalCommandSync.MayPublishActivation(false, false))
+                yield return "L230 client-consequence-became-intent: a non-host activation outside the one UI " +
+                             "order ingress is publishable. Status/turn consequences run on every peer, so this " +
+                             "duplicates the host's native record.";
+            if (!TacticalCommandSync.MayPublishActivation(false, true))
+                yield return "L230 client-gesture-was-swallowed: an explicit client order cannot publish.";
+            if (!TacticalCommandSync.MayPublishActivation(true, false))
+                yield return "L230 host-consequence-was-swallowed: the host no longer publishes native engine " +
+                             "consequences to the peers.";
             var sync = typeof(TacticalCommandSync);
             var tick = sync.GetMethod("TickEchoWaits", AllMembers);
             var publish = sync.GetMethod("PublishClickedOrder", AllMembers);
@@ -93,6 +104,16 @@ namespace RailCheck
             var seamField = patch == null ? null : patch.GetField("Seam", AllMembers);
             var followupSeamField = followupPatch == null ? null : followupPatch.GetField("Seam", AllMembers);
             var followupPrefix = followupPatch == null ? null : followupPatch.GetMethod("Prefix", AllMembers);
+            var clickPrefix = patch == null ? null : patch.GetMethod("Prefix", AllMembers);
+            var clickFinalizer = patch == null ? null : patch.GetMethod("Finalizer", AllMembers);
+            if (capture == null || !Reaches(capture, null, "MayPublishActivation"))
+                yield return "L230 provenance-predicate-bypassed: OnAbilityActivated no longer asks the one " +
+                             "host/explicit-order predicate, so client engine consequences become intents again.";
+            if (clickPrefix == null || !Reaches(clickPrefix, null, "EnterExplicitOrder") ||
+                clickFinalizer == null || !Reaches(clickFinalizer, null, "LeaveExplicitOrder"))
+                yield return "L230 explicit-order-scope-unbound: the UI ingress does not bracket its native " +
+                             "activation with EnterExplicitOrder/LeaveExplicitOrder. Either clicks are swallowed " +
+                             "or the marker leaks and later engine consequences become commands.";
             var viewSeam = typeof(TacticalViewState).GetMethod("ActivateAbility", AllMembers);
             var queue = sync.GetMethod("QueueActivation", AllMembers);
             var pump = sync.GetMethod("TickScheduledActivations", AllMembers);

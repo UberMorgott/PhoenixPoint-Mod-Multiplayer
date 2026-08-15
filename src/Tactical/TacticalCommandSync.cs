@@ -463,12 +463,17 @@ namespace Multiplayer.Tactical
         /// a try/finally around ONE synchronous native call, which is why a plain field is enough — the move
         /// coroutine it starts runs later, on the game loop, with this already cleared.</summary>
         private static ulong _replayOriginPeer;
+        [ThreadStatic] private static int _explicitOrderDepth;
 
         /// <summary>Non-zero exactly while the HOST is replaying a named peer's intent through the native
         /// path. Read by <see cref="TacticalActorDrive"/>: on the host that is the ONLY way an order can be
         /// somebody else's, because a host click and a host replay both reach <c>Activate</c> natively and are
         /// otherwise indistinguishable.</summary>
         internal static ulong ReplayOriginPeer => _replayOriginPeer;
+
+        internal static void EnterExplicitOrder() => _explicitOrderDepth++;
+        internal static void LeaveExplicitOrder() { if (_explicitOrderDepth > 0) _explicitOrderDepth--; }
+        internal static bool MayPublishActivation(bool isHost, bool explicitOrder) => isHost || explicitOrder;
 
         /// <summary>When the 0x82 record now being decoded reached this peer, for the mirror telemetry's
         /// arrival delta. A plain field: the decode and the play are one synchronous call.</summary>
@@ -761,6 +766,11 @@ namespace Multiplayer.Tactical
             if (engine == null) return;                  // solo, or connected but not in a co-op game
             if (SyncApplyScope.Active) return;           // law 8: this activation IS a mirror being applied
             if (ability != null && _scheduledCaptureSuppressed.Remove(ability)) return;
+            // A client may originate only a gesture that crossed the game's one UI order ingress. Native
+            // status/turn consequences run on every peer; treating those as fresh intents races the host's
+            // identical consequence and can execute it twice. The host remains the authority for every
+            // native consequence and publishes its one copy through the ordinary mirror path.
+            if (!MayPublishActivation(engine.IsHost, _explicitOrderDepth > 0)) return;
             // AND NOTHING IS RELAYED FOR A BATTLE THAT IS ALREADY SCORED (law L334). The cheaper half of the
             // same 2026-08-08 defect: the client kept a live ExitMission button through the mission end and
             // pressed it once more (:2338, 154 ms after applying the end), which is what produced the reject

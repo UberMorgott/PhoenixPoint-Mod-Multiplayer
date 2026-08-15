@@ -53,6 +53,11 @@ namespace Multiplayer.Tactical
     /// </summary>
     internal static class TacticalStatusSet
     {
+        internal sealed class BatchEntry
+        {
+            internal TacticalActorBase Actor;
+            internal List<string> Host;
+        }
         /// <summary>Def-name → def, rebuilt on a miss so runtime-minted defs (TFTV) resolve on their first
         /// use instead of being permanently unknown.</summary>
         private static readonly Dictionary<string, StatusDef> _byName =
@@ -269,6 +274,85 @@ namespace Multiplayer.Tactical
                              string.Join(", ", unapply.ToArray()) + "]. Anything in those lists is a status " +
                              "this peer disagreed with the host about; a MountedStatus in them is a passenger " +
                              "roster that had diverged.");
+        }
+
+        /// <summary>Reconciles a whole resnapshot as one status-graph transaction. Status lifecycle methods
+        /// may synchronously add or remove a paired status on another actor (ActorBridgeStatus), therefore a
+        /// per-actor reconcile makes the result depend on snapshot order. All removals happen first; each
+        /// apply plan is then recomputed from the graph left by those removals, so cascaded pair mutations are
+        /// observed rather than overwritten by a stale per-actor plan.</summary>
+        internal static bool ReconcileBatch(TacticalLevelController tlc, IList<BatchEntry> entries, string when)
+        {
+            if (entries == null) return true;
+            // Removal phase. Reconcile against the intersection with host: this removes only extras and
+            // deliberately applies nothing while another actor's OnUnapply may still mutate the graph.
+            foreach (var e in entries)
+            {
+                if (e == null || e.Actor == null || e.Host == null) continue;
+                var local = Collect(e.Actor);
+                var keep = new List<string>();
+                var wanted = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var k in e.Host) { int n; wanted.TryGetValue(k, out n); wanted[k] = n + 1; }
+                foreach (var k in local)
+                {
+                    int n;
+                    if (wanted.TryGetValue(k, out n) && n > 0) { keep.Add(k); wanted[k] = n - 1; }
+                }
+                Reconcile(e.Actor, tlc, keep, when + " removal phase");
+            }
+            // Apply to a bounded fixed point. Applying one bridge half can create its counterpart, while a
+            // failed first half can become applicable only after the counterpart's actor was processed. A
+            // single forward pass is therefore still wire-order dependent. Recompute every plan on every
+            // pass and stop only when the complete graph equals the host graph.
+            const int ceiling = 8;
+            for (int pass = 0; pass < ceiling; pass++)
+            {
+                bool equal = true;
+                foreach (var e in entries)
+                {
+                    if (e == null || e.Actor == null || e.Host == null) continue;
+                    if (!SameMultiset(Collect(e.Actor), e.Host)) equal = false;
+                }
+                if (equal) return true;
+                string before = GraphFingerprint(entries);
+                foreach (var e in entries)
+                    if (e != null && e.Actor != null && e.Host != null)
+                        Reconcile(e.Actor, tlc, e.Host, when + " fixed-point pass " + (pass + 1));
+                if (!BatchMayContinue(pass, ceiling, before, GraphFingerprint(entries))) break;
+            }
+            var mismatches = new List<string>();
+            foreach (var e in entries)
+                if (e != null && e.Actor != null && e.Host != null && !SameMultiset(Collect(e.Actor), e.Host))
+                    mismatches.Add(TacticalActorLifecycle.SafeName(e.Actor));
+            if (mismatches.Count != 0)
+                MpLog.LogError("[Multiplayer][tac] status graph did not converge to the host after " + ceiling +
+                               " batch passes; still different: " + string.Join(", ", mismatches.ToArray()) +
+                               ". No successful resnapshot is claimed for those actors.");
+            return mismatches.Count == 0;
+        }
+
+        internal static bool BatchMayContinue(int pass, int ceiling, string before, string after) =>
+            pass + 1 < ceiling && !string.Equals(before, after, StringComparison.Ordinal);
+
+        private static string GraphFingerprint(IList<BatchEntry> entries)
+        {
+            var rows = new List<string>();
+            foreach (var e in entries)
+            {
+                if (e == null || e.Actor == null) continue;
+                var keys = Collect(e.Actor); keys.Sort(StringComparer.Ordinal);
+                rows.Add(TacticalActorKey.Of(e.Actor).ToString(CultureInfo.InvariantCulture) + ":" +
+                         string.Join("\u001f", keys.ToArray()));
+            }
+            rows.Sort(StringComparer.Ordinal);
+            return string.Join("\u001e", rows.ToArray());
+        }
+
+        internal static bool SameMultiset(IList<string> a, IList<string> b)
+        {
+            var apply = new List<string>(); var remove = new List<string>();
+            Plan(a, b, apply, remove);
+            return apply.Count == 0 && remove.Count == 0;
         }
 
         /// <summary>SAY A REFUSAL ONCE, NOT ONCE PER SWEEP. Every turn edge re-asserts the host's whole status

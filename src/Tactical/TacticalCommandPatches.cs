@@ -155,7 +155,12 @@ namespace Multiplayer.Tactical
         private static MethodBase TargetMethod() => Seam;
 
         private static bool Prefix(TacticalAbility ability, TacticalAbilityTarget target)
-            => !TacticalCommandSync.PublishClickedOrder(ability, target);
+        {
+            TacticalCommandSync.EnterExplicitOrder();
+            return !TacticalCommandSync.PublishClickedOrder(ability, target);
+        }
+
+        private static void Finalizer() => TacticalCommandSync.LeaveExplicitOrder();
     }
 
     /// <summary>

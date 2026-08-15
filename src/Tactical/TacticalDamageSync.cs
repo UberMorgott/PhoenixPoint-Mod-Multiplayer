@@ -991,6 +991,7 @@ namespace Multiplayer.Tactical
             // it stamped at T+2s and rewind that actor's action and will points. RailOrdinal is the ONE key
             // both carry (minted at the single encoder, SyncProtocol:45), so it is the one comparison there is.
             uint ordinal = RailOrdinal.Current;
+            var statusBatch = new List<TacticalStatusSet.BatchEntry>();
             using (SyncApplyScope.Enter())
                 for (int i = 0; i < n; i++)
                 {
@@ -1066,13 +1067,17 @@ namespace Multiplayer.Tactical
                     // LAST, because a forced death runs the game's own status cascade (DieAbility unmounts,
                     // VehicleComponent.OnActorDied empties the roster) and the host's set is what that cascade
                     // must be reconciled AGAINST, not before.
-                    TacticalStatusSet.Reconcile(actor, tlc, statuses, "the host's resnapshot");
+                    statusBatch.Add(new TacticalStatusSet.BatchEntry { Actor = actor, Host = statuses });
                 }
+            bool statusGraphOk;
+            using (SyncApplyScope.Enter())
+                statusGraphOk = TacticalStatusSet.ReconcileBatch(tlc, statusBatch, "the host's resnapshot");
             _resnapRequested = false;
             _resnapWaited = 0;
             MpLog.LogWarning("[Multiplayer][tac] CLIENT applied the host's resnapshot: " + fixedUp + " actor(s) " +
                              "reconciled, " + lost + " unresolvable, " + rewound + " left alone as older than a " +
-                             "settle already applied here.");
+                             "settle already applied here; status graph " +
+                             (statusGraphOk ? "matches the host." : "STILL DIFFERS (reported above)."));
             if (itemsLost > 0)
                 MpLog.LogError("[Multiplayer][tac] the host's resnapshot named " + itemsLost + " damaged item(s) " +
                                "this peer could not resolve (first: " + firstItemWhy + ") — every one of them stays " +

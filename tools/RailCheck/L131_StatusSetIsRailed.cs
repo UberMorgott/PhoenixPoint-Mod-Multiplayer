@@ -62,7 +62,8 @@ namespace RailCheck
             var read = set.GetMethod("Read", All);
             var collect = set.GetMethod("Collect", All);
             var reconcile = set.GetMethod("Reconcile", All);
-            if (plan == null || write == null || read == null || collect == null || reconcile == null)
+            var reconcileBatch = set.GetMethod("ReconcileBatch", All);
+            if (plan == null || write == null || read == null || collect == null || reconcile == null || reconcileBatch == null)
             {
                 yield return "L131 premise-changed: TacticalStatusSet.{Plan,Write,Read,Collect,Reconcile} no " +
                              "longer resolves. The status set is the one field class of an actor that has no " +
@@ -84,6 +85,18 @@ namespace RailCheck
                                         new[] { OverwatchOtherWeapon }, new[] { Overwatch })) yield return v;
             foreach (var v in Converges("this peer is empty", new string[0], new[] { Panic, Mounted })) yield return v;
             foreach (var v in Converges("the host is empty", new[] { Panic, Mounted }, new string[0])) yield return v;
+
+            // A permanently irreparable status must cost one attempted pass, not O(actor-count) complete
+            // graph walks. Progress may continue until the small hard cap; identical fingerprints stop now.
+            if (TacticalStatusSet.BatchMayContinue(0, 8, "same", "same"))
+                yield return "L131 batch-spins-without-progress: an unchanged complete graph schedules another " +
+                             "pass, so one irreparable status can freeze a frame and repeat its exception log.";
+            if (!TacticalStatusSet.BatchMayContinue(0, 8, "before", "after"))
+                yield return "L131 batch-stops-after-progress: a changed graph is not allowed another pass, so " +
+                             "a bridge counterpart created late cannot converge.";
+            if (TacticalStatusSet.BatchMayContinue(7, 8, "before", "after"))
+                yield return "L131 batch-has-no-hard-ceiling: progress can keep the reconciliation loop alive " +
+                             "past its bounded safety cap.";
 
             // The plan must also be MINIMAL: a plan that removes and re-applies what already agrees replays
             // every status's OnApply on every settle — which for MountedStatus means leaving and re-entering
@@ -184,8 +197,11 @@ namespace RailCheck
                      "is also what gives a TORN mirrored ability a defined terminal state — the cancel above it " +
                      "kills the coroutine wherever it stands, and this is what makes the leftovers the host's " +
                      "state rather than half of an entry into a vehicle.")) yield return v;
-            foreach (var v in MustReach(dmg.GetMethod("ApplyResnap", All), "Reconcile", asm,
-                     "L131 resnap-applies-no-statuses: ApplyResnap reads the host's status set and does nothing " +
+            foreach (var v in MustReach(dmg.GetMethod("ApplyResnap", All), "ReconcileBatch", asm,
+                     "L131 resnap-applies-statuses-one-actor-at-a-time: ApplyResnap must land the complete " +
+                     "status graph through ReconcileBatch. ActorBridgeStatus lifecycle mutates its paired " +
+                     "actor synchronously, so per-actor reconcile makes the result depend on wire order. " +
+                     "ApplyResnap otherwise reads the host's status set and does nothing " +
                      "with it. The recovery path then repairs every field of an actor except the one it was " +
                      "extended to repair.")) yield return v;
         }
