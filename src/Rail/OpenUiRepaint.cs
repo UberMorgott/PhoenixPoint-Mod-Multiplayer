@@ -8,6 +8,7 @@ using PhoenixPoint.Geoscape.Entities.Abilities;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.Levels.Factions;
 using PhoenixPoint.Geoscape.View;
+using PhoenixPoint.Geoscape.View.ViewControllers.Roster;
 using PhoenixPoint.Geoscape.View.ViewModules;
 using PhoenixPoint.Geoscape.View.ViewStates;
 using UnityEngine;
@@ -101,6 +102,15 @@ namespace Multiplayer.Network.Sync
         private static readonly FieldInfo VehicleSelectionCurrent =
             AccessTools.Field(typeof(UIModuleVehicleSelection), "_currentVehicle");
 
+        // UIModuleGeoRoster: the SECOND surface that paints the same green cross. GeoRosterItem:345 switches
+        // LevelUpNotification on off `Character.Progression.LevelProgression.HasNewLevel`, inside the slot's
+        // private UpdateLocations():315 — reached from its own PUBLIC no-arg UpdateCharacterData():239, which
+        // is the whole per-slot repaint (name, class icon, corruption fill, level text, bars, notifications)
+        // and creates NO GameObject, so unlike SetCrew it cannot flicker. Bound BY SIGNATURE like the strip
+        // above, so a renamed native member reports itself instead of repainting nothing.
+        private static readonly MethodInfo RosterItemUpdate =
+            AccessTools.Method(typeof(GeoRosterItem), "UpdateCharacterData", Type.EmptyTypes);
+
         /// <summary>The open state's OWN contextual-ability derivation, cached per state type. Deliberately
         /// resolved by NAME on whatever state is open instead of naming screens: the two states that drive
         /// the site menu build DIFFERENT lists — UIStateNothingSelected.GetContextualAbilities:682 is the
@@ -164,6 +174,82 @@ namespace Multiplayer.Network.Sync
             RefreshInfoBar(geo, mods);
             RefreshSiteContextualMenu(geo, mods, view.CurrentViewState);
             RefreshVehicleCrew(mods);
+            RefreshRosterSlots(mods);
+        }
+
+        /// <summary>
+        /// THE ROSTER LIST — the SECOND place the green level-up cross is painted, and the fifth citizen of
+        /// the same gap. <c>GeoRosterItem</c>:345 reads the very flag <see cref="RefreshVehicleCrew"/> chases
+        /// (<c>Character.Progression.LevelProgression.HasNewLevel</c>) and it is a DIFFERENT surface with a
+        /// different owner: <c>UIModuleGeoRoster</c>, held by <c>GeoscapeModulesData</c>:30, so
+        /// <see cref="UiNativeRepaint.Table"/> has no key that reaches it either and it had ZERO repaint
+        /// references in src/. The roster SCREEN's own re-enter re-Inits the slots — but only while that
+        /// screen is the CURRENT state; behind a queued window, or while the module is up as part of another
+        /// state, nothing re-ran them.
+        ///
+        /// NATIVE PAINT, PER SLOT: the game's own public <c>UpdateCharacterData()</c>, which is exactly what
+        /// <c>GeoRosterItem.Init</c>:211 calls. It rewrites text and toggles notification GameObjects — it
+        /// instantiates nothing and re-subscribes nothing — so it is far cheaper than <c>SetCrew</c>. The
+        /// signature gate is kept anyway: same one bound as every other strip, and it keeps this off the
+        /// ~10 Hz flush path entirely when nothing the list draws has moved.
+        /// </summary>
+        private static void RefreshRosterSlots(GeoscapeModulesData mods)
+        {
+            if (RosterItemUpdate == null) return;
+            var roster = mods.GeoRosterModule;
+            if (roster == null)
+            {
+                if (_loggedFailures.Add("GeoRosterMissing"))
+                    MpLog.LogWarning("[Multiplayer][rail] GeoscapeModulesData.GeoRosterModule is null — the " +
+                                     "roster list has no handle to repaint, so a level-up cross or a renamed " +
+                                     "soldier will only appear on a screen re-enter (logged once)");
+                return;
+            }
+            try
+            {
+                // A module whose state is not up is switched off by the game itself
+                // (UIModuleBehavior.SetStateID:34) — nothing open, nothing to repaint.
+                if (!roster.gameObject.activeInHierarchy) return;
+                var slots = roster.Slots;
+                if (slots == null || slots.Count == 0) return;
+                if (!RepaintNeeded("roster", RosterSignature(slots))) return;
+                // law 8: the native paint can fire UI events a capture seam hears.
+                using (SyncApplyScope.Enter())
+                    foreach (var slot in slots)
+                        if (slot != null && slot.Character != null && slot.gameObject.activeInHierarchy)
+                            RosterItemUpdate.Invoke(slot, null);
+            }
+            catch (Exception ex)
+            {
+                if (_loggedFailures.Add("RosterSlots"))
+                    MpLog.LogWarning("[Multiplayer][rail] roster-list repaint threw — the level-up cross and " +
+                                     "soldier data may stay stale until a screen re-enter (logged once): " + ex);
+            }
+        }
+
+        /// <summary>EVERY ROSTER SLOT AS THE LIST DRAWS IT, through the same <see cref="CrewSlotKey"/> the crew
+        /// strip uses — one key shape for both surfaces of the same flag. Null forces the repaint, so an
+        /// unreadable model costs a redundant paint and never a stale cross.</summary>
+        private static string RosterSignature(System.Collections.Generic.IList<GeoRosterItem> slots)
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                foreach (var slot in slots)
+                {
+                    var c = slot == null ? null : slot.Character;
+                    sb.Append(c == null ? "-" : CrewSlotKey(c.DisplayName, c.OccupingSpace, c.LevelProgression,
+                        c.CharacterStats == null ? -1 : c.CharacterStats.Corruption.IntValue)).Append(',');
+                }
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                if (_loggedFailures.Add("RosterSignature"))
+                    MpLog.LogWarning("[Multiplayer][rail] roster-list signature threw — the list falls back to " +
+                                     "repainting on every flush (logged once): " + ex);
+                return null;
+            }
         }
 
         /// <summary>

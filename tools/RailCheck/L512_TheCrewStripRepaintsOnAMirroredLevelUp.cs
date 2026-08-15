@@ -47,15 +47,24 @@ namespace RailCheck
     ///       (<c>OpenUiRepaint.RepaintNeeded</c>) must return FALSE for an unchanged key. <c>SetCrew</c>
     ///       recreates its elements, and a rail flush lands ~10 times a second, so a repaint that always
     ///       fires is the L492 flicker at 10 Hz — strictly worse than the stale cross.
+    ///   (a2) <c>hud-refresh-behind-the-queued-window-skip</c> — the reason arm (a) is worth anything while a
+    ///       modal or an event dialog is up. <c>OpenUiRepaint.RepaintOpenGeoscapeScreen</c> is the caller that
+    ///       runs <c>RefreshPersistentHud</c>; <c>Repaint</c> is the callee that holds the
+    ///       <c>PauseHold.IsCurrentQueuedWindow</c> SKIP and the <c>UiNativeRepaint.TryRepaint</c> early
+    ///       return. The HUD refresh must live in the FORMER and never in the latter, because a queued
+    ///       window takes its own <see cref="UiNativeRepaint.Table"/> arm or the skip, while the crew strip
+    ///       is still VISIBLE behind it. Move the refresh one frame down into <c>Repaint</c> and the strip
+    ///       behind every open window silently stops updating — with the skip line in the log claiming, quite
+    ///       correctly, that it only declined a re-enter.
     ///   (e) <c>indicator-painted-elsewhere</c> — IL: <c>AircraftCrewController.SetCrew</c> still reads
     ///       <c>LevelProgression.HasNewLevel</c>. If the game stops painting the cross there, arms (a)-(d)
     ///       are re-deriving a strip that no longer draws the thing this law is about.
     ///
     /// WHAT IT DOES NOT PROVE: not that the cross is VISIBLE (no live Unity hierarchy here — the
     /// `activeInHierarchy` guard and the Invoke are not executed); not that `HasNewLevel` reaches the peer
-    /// (that is the rail baseline's `covered=3/3`); and nothing about the OTHER surface that draws the same
-    /// flag, <c>GeoRosterItem</c>:345, which belongs to <c>UIStateGeoRoster</c> and is re-derived by that
-    /// state's own re-enter.
+    /// (that is the rail baseline's `covered=3/3`); nothing about the OTHER surface that draws the same flag,
+    /// <c>GeoRosterItem</c>:345 — that is L514's; and arm (a2) proves only that the HUD refresh is
+    /// STRUCTURALLY above the skip, never that any particular window is currently up.
     ///
     /// NOT A QUORUM (P13): a repaint is a peer's own screen redrawing itself; nothing waits on anybody.
     ///
@@ -64,6 +73,8 @@ namespace RailCheck
     ///     [VERIFIED RED 2026-08-15, restored GREEN]
     ///   • drop <c>HasNewLevel</c> from <c>OpenUiRepaint.CrewSlotKey</c> → (c)
     ///     [VERIFIED RED 2026-08-15, restored GREEN]
+    ///   • move the <c>RefreshPersistentHud</c> call out of <c>RepaintOpenGeoscapeScreen</c> and into
+    ///     <c>Repaint</c> → (a2) [VERIFIED RED 2026-08-15, restored GREEN]
     ///   • make <c>RepaintNeeded</c> always return true → (d)
     /// </summary>
     internal static class L512_TheCrewStripRepaintsOnAMirroredLevelUp
@@ -92,6 +103,41 @@ namespace RailCheck
                              "aircraft crew strip. UIModuleVehicleSelection is held by GeoscapeModulesData, not " +
                              "by a view state, so UiNativeRepaint.Table has no key that reaches it — and while a " +
                              "queued window is the current state, the strip behind it is repainted by nothing.";
+
+            // ── (a2) …and it runs ABOVE the queued-window skip, so a visible strip behind a modal or an
+            //         event dialog is still re-derived. Structural, not ordering-by-eye: the refresh is in
+            //         the CALLER, the skip is in the CALLEE, so no arrangement of statements can put the
+            //         refresh behind it. ─────────────────────────────────────────────────────────────────
+            var outer = typeof(OpenUiRepaint).GetMethod("RepaintOpenGeoscapeScreen", All);
+            var inner = typeof(OpenUiRepaint).GetMethod("Repaint", All);
+            var skip = typeof(PauseHold).GetMethod("IsCurrentQueuedWindow", All);
+            if (outer == null || inner == null || skip == null)
+            {
+                yield return "L512 premise-changed: OpenUiRepaint.RepaintOpenGeoscapeScreen / .Repaint / " +
+                             "PauseHold.IsCurrentQueuedWindow did not resolve, so nothing checks that the HUD " +
+                             "refresh stays ABOVE the queued-window skip. Re-point this arm.";
+            }
+            else
+            {
+                bool skipInInner = Program.Callees(inner, mod)
+                    .Any(c => c.MetadataToken == skip.MetadataToken && c.Module == skip.Module);
+                bool hudInOuter = Program.Callees(outer, mod)
+                    .Any(c => c.MetadataToken == hud.MetadataToken && c.Module == hud.Module);
+                bool hudInInner = Program.Callees(inner, mod)
+                    .Any(c => c.MetadataToken == hud.MetadataToken && c.Module == hud.Module);
+                if (!skipInInner)
+                    yield return "L512 premise-changed: OpenUiRepaint.Repaint no longer holds the " +
+                                 "PauseHold.IsCurrentQueuedWindow skip, so this arm is asserting the HUD " +
+                                 "refresh sits above a gate that moved. Find where the skip lives now.";
+                else if (!hudInOuter || hudInInner)
+                    yield return "L512 hud-refresh-behind-the-queued-window-skip: RefreshPersistentHud is no " +
+                                 "longer run by RepaintOpenGeoscapeScreen ABOVE the skip (or has moved down " +
+                                 "into Repaint, which holds it). With a modal or an event dialog current, " +
+                                 "Repaint takes its own UiNativeRepaint.Table arm or returns at the queued- " +
+                                 "window SKIP — and the crew strip is still VISIBLE behind that window. The " +
+                                 "strip would then be repainted by nothing at all, while the log line " +
+                                 "truthfully reports only that a re-enter was declined.";
+            }
 
             // ── (b) the native members it drives are bound by SIGNATURE ─────────────────────────────────
             var setCrew = typeof(UIModuleVehicleSelection).GetMethod("SetCrew", All, null,
