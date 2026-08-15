@@ -20,6 +20,8 @@ namespace Multiplayer.Network.Sync
         public string TrackerType;
         public string Label;
         public int RemainingSeconds;
+        public bool CanFinish;
+        public string ErrorText;
     }
 
     [SerializeType(SerializeMembersByDefault = SerializeMembersType.SerializeAll)]
@@ -75,13 +77,41 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>Stash for the current tick's real canFinish/errorText, written by
+        /// AgendaRowErrorCapturePatch and consumed by AgendaRowCapturePatch immediately after.
+        /// Safe as a bare static pair: UIModuleFactionAgendaTracker.UpdateData calls
+        /// element.UpdateData(timeUnit, flag, errorText) synchronously BEFORE its own disposal
+        /// check and return (UIModuleFactionAgendaTracker.cs:303-308) — so the inner postfix below
+        /// always fires, then clears, before the outer postfix runs for the same element, on the
+        /// single Unity main thread (no reentrancy).</summary>
+        private static bool _pendingCanFinish;
+        private static string _pendingErrorText;
+
+        /// <summary>Host-side capture (inner method): UIFactionDataTrackerElement.UpdateData receives
+        /// canFinish/errorText as its own parameters — the only place they're available, since
+        /// UIFactionDataTrackerElement never stores them as fields (UIFactionDataTrackerElement.cs:83-94,
+        /// only consumed locally to set TrackedTime.text). Stash them for AgendaRowCapturePatch.</summary>
+        [HarmonyPatch(typeof(UIFactionDataTrackerElement), "UpdateData", new[] { typeof(TimeUnit), typeof(bool), typeof(string) })]
+        internal static class AgendaRowErrorCapturePatch
+        {
+            private static void Postfix(bool canFinish, string errorText)
+            {
+                var engine = NetworkEngine.Instance;
+                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+
+                _pendingCanFinish = canFinish;
+                _pendingErrorText = errorText;
+            }
+        }
+
         /// <summary>Host-side capture: mirrors every row the widget's own UpdateData computed into
         /// AgendaTrackerSync.State.Rows. UpdateData(UIFactionDataTrackerElement) runs on every peer
         /// (local UI, not patched out) — guard on IsHost so clients never write. __result true means
-        /// the row finished/disposed this tick (UIModuleFactionAgendaTracker.cs:304-308); stop mirroring
-        /// it. element.CurrentTimeLeft is set by element.UpdateData(...) inside the native method body
-        /// (UIModuleFactionAgendaTracker.cs:303, UIFactionDataTrackerElement.cs:85) before this postfix
-        /// runs, so it already reflects the value just computed.</summary>
+        /// the row finished/disposed this tick, matching the native condition timeUnit &lt;= Zero &amp;&amp; flag
+        /// (UIModuleFactionAgendaTracker.cs:304-308); stop mirroring it. element.CurrentTimeLeft and
+        /// _pendingCanFinish/_pendingErrorText are set by element.UpdateData(...) inside the native
+        /// method body (UIModuleFactionAgendaTracker.cs:303, UIFactionDataTrackerElement.cs:85) before
+        /// this postfix runs, so they already reflect the value just computed this tick.</summary>
         [HarmonyPatch(typeof(UIModuleFactionAgendaTracker), "UpdateData", new[] { typeof(UIFactionDataTrackerElement) })]
         internal static class AgendaRowCapturePatch
         {
@@ -105,14 +135,18 @@ namespace Multiplayer.Network.Sync
                     TrackerType = trackerType,
                     Label = element.TrackedName != null ? element.TrackedName.text : null,
                     RemainingSeconds = (int)element.CurrentTimeLeft.TimeSpan.TotalSeconds,
+                    CanFinish = _pendingCanFinish,
+                    ErrorText = _pendingErrorText,
                 };
             }
         }
 
         /// <summary>Client-side apply: skips native per-row computation and applies the host-synced
         /// row instead, when one exists. Same native method as AgendaRowCapturePatch (Postfix,
-        /// host-only) — no ordering conflict despite patching the same method, since the two are
-        /// mutually exclusive on IsHost: capture only runs when IsHost, apply only when !IsHost.</summary>
+        /// host-only) — safe to patch the same method with both: each side's own IsHost/!IsHost guard
+        /// is the actual invariant (not Harmony's Prefix/Postfix ordering — Postfixes always run even
+        /// when an unrelated Prefix elsewhere returns false and skips the original method), so capture
+        /// only ever writes when IsHost and apply only ever reads/short-circuits when !IsHost.</summary>
         [HarmonyPatch(typeof(UIModuleFactionAgendaTracker), "UpdateData", new[] { typeof(UIFactionDataTrackerElement) })]
         internal static class AgendaRowApplyPatch
         {
@@ -126,8 +160,8 @@ namespace Multiplayer.Network.Sync
                     return true; // no synced row yet (e.g. just joined) — fall back to native computation
 
                 var timeLeft = TimeUnit.FromSeconds(row.RemainingSeconds);
-                bool disposed = row.RemainingSeconds <= 0;
-                element.UpdateData(timeLeft, !disposed);
+                bool disposed = row.RemainingSeconds <= 0 && row.CanFinish;
+                element.UpdateData(timeLeft, row.CanFinish, row.ErrorText);
                 __result = disposed;
                 return false; // skip native computation entirely
             }
