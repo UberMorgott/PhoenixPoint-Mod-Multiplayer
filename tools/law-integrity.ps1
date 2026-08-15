@@ -42,7 +42,15 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # Identity ratchet, deliberately independent of law-count.txt. A count alone can be lowered together
 # with deleted laws and still says nothing about WHICH contracts survived. This digest covers the sorted
 # registration multiset (so sparse ids and many registrations per source file remain valid).
-# Updated deliberately 2026-08-15: L547 ADDED (a LOCAL family's dismissal never travels: the ANSWER RELAY
+# Updated deliberately 2026-08-15: L548 ADDED (a progress-only delta never rebuilds the top-right
+# agenda strip: IL pins that RefreshAgendaTracker keys its TEARDOWN on a row-IDENTITY builder and never on
+# OpenUiRepaint.ScopeKey -- a generation that also moves on a ticking countdown -- and the gate is EXECUTED
+# in both directions with a real BumpScopeGenerations moving underneath an unchanged identity) -- 347 -> 348
+# registrations, one new identity string. Nothing retired or amputated: L492 executes the same gate with
+# hand-written strings and therefore never asked WHICH key the runtime hands it, which is how the 1 Hz
+# client flicker came back with every arm green. L543 was RE-EXPRESSED, not weakened: the four repaint KEYS
+# stay forbidden and the agenda strip's identity builder becomes one of its positive controls.
+# Earlier the same day: L547 ADDED (a LOCAL family's dismissal never travels: the ANSWER RELAY
 # -- WindowQueueSync.SendAdvance -> the 0xB9 advance intent -> the host's modal.FinishDialog -- asks
 # WindowJournal.ScopeOf through the pure MayRelayAnswer, which is EXECUTED in both directions, and the IL
 # arms pin that SendAdvance reaches the predicate and the predicate reaches the table) -- 346 -> 347
@@ -112,7 +120,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # identity string. Earlier the same day: L514 ADDED (the roster list repaints on the same mirrored
 # level-up), 334 -> 335; L513 ADDED (no peer lifts before its boundary releases), 333 -> 334;
 # L512 ADDED (the crew strip repaints on a mirrored level-up), 332 -> 333.
-$expectedRegistrationDigest = '6b6920a6e9bcfa43505a0b5598edb899feba8f2cba1dffe6a02c8d980f546d74'
+$expectedRegistrationDigest = '232041df0222f922bb77f6b3352e7bf4ee44c0c100db4ec57cb763b14933253f'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

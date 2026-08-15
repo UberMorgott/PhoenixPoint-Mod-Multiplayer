@@ -78,6 +78,10 @@ namespace Multiplayer.Network.Sync
         // NATIVE one, so it resolves long before the module is live.
         private static readonly FieldInfo TrackerContext =
             AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_context");
+        // The faction InitialSetup:144 reads — asked of the module rather than assumed to be ViewerFaction,
+        // so the row identity below is computed over exactly the rows the module would rebuild.
+        private static readonly FieldInfo TrackerFaction =
+            AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_faction");
         /// <summary>Last repaint key per strip — see <see cref="RepaintNeeded"/>. A dictionary rather than a
         /// field per strip so the SECOND caller costs a line, not a mechanism.</summary>
         private static readonly System.Collections.Generic.Dictionary<string, string> _repaintKeys =
@@ -335,8 +339,18 @@ namespace Multiplayer.Network.Sync
                 // strip visibly blinked. A rebuild is only owed when the SET OF ROWS changed; the per-element
                 // time text is refreshed by the plain UpdateData below (and by the module's own 1 Hz poll),
                 // which touches no GameObject lifecycle.
+                // AND THE REBUILD IS OWED TO THE ROWS, NOT TO THE SCOPE (L548, client report 2026-08-15).
+                // §B.8 keyed this on ScopeKey — a generation that advances whenever ANY path under the
+                // strip's declared prefixes moved. A manufacture COUNTDOWN lands under "F#" about once a
+                // second on a client, so the generation moved every second and the strip took InitialSetup's
+                // full teardown at 1 Hz: the L492 flicker back, with every arm of L492 green because L492
+                // executes the gate with strings of its own and cannot see which key the runtime hands it.
+                // Scope is the right answer to "is this strip worth looking at"; only a change in the SET OF
+                // ROWS may tear it down, which is what AgendaSignature answers. The countdown text loses
+                // nothing: UpdateData():191-198 repaints every live element on every call, rebuild or not.
                 bool onScreen = tracker.gameObject.activeInHierarchy;
-                bool rebuild = AgendaNeedsRebuild(onScreen, ScopeKey("UIModuleFactionAgendaTracker"));
+                bool rebuild = AgendaNeedsRebuild(onScreen,
+                    AgendaSignature(TrackerFaction?.GetValue(tracker) as GeoFaction));
                 if (!onScreen) return; // switched off: nothing to paint, and nothing was remembered either
                 // law 8: the rebuild re-reads the model and can fire native UI events a capture seam hears.
                 using (SyncApplyScope.Enter())
@@ -354,9 +368,10 @@ namespace Multiplayer.Network.Sync
         }
 
         /// <summary>Does the strip owe a full rebuild? True on the first call of a session and on any change
-        /// to its <see cref="ScopeKey"/>, i.e. whenever a path under one of the prefixes the strip DECLARED
-        /// was touched; a null key rebuilds, the safe direction. Its own memory, so L492 can drive it
-        /// without a live tracker.
+        /// to its <see cref="AgendaSignature"/>, i.e. whenever the SET OF ROWS differs; a null signature
+        /// rebuilds, the safe direction. NOT keyed on <see cref="ScopeKey"/> — L548: that generation moves
+        /// on a ticking countdown too, and a teardown owed to a value is the flicker. Its own memory, so
+        /// L492/L548 can drive it without a live tracker.
         ///
         /// <paramref name="stripOnScreen"/> IS A GATE ON THE QUESTION, NOT ON THE ANSWER (L516, report
         /// 2026-08-15). <see cref="RepaintNeeded"/> REMEMBERS every key it is handed, so a strip that is
@@ -366,6 +381,69 @@ namespace Multiplayer.Network.Sync
         /// whole point is that <see cref="RepaintNeeded"/> is never reached.</summary>
         internal static bool AgendaNeedsRebuild(bool stripOnScreen, string signature) =>
             stripOnScreen && RepaintNeeded("agenda", signature);
+
+        // L543 KEEPS ITS SUBJECT AND THIS IS NOT AN EXCEPTION TO IT. The four builders §B.8 deleted were
+        // REPAINT keys — a hand-rolled read-set standing in for the declared prefixes, i.e. two competing
+        // read-set mechanisms. This one is not a read-set: the strip's scope is still DECLARED ("F#", "S#",
+        // "V#") and still decides whether the strip is looked at. What this answers is the second, stricter
+        // question only this strip asks, because only this strip's repaint DESTROYS what it redraws: may the
+        // rows be torn down? L548 pins it; L543 now names it as a positive control so it cannot vanish again.
+
+        /// <summary>
+        /// EVERYTHING THE STRIP DRAWS, AS ONE STRING — the rebuild key for <see cref="RefreshAgendaTracker"/>.
+        /// Read straight off <c>InitialSetup</c>:144-174, row source by row source, so nothing displayed can
+        /// change without changing this (REACTIVITY is a hard mandate here, not an optimisation):
+        ///   • manufacture head — <c>Manufacture.Current.ManufacturableItem.RelatedItemDef</c> (the row label
+        ///     is that def's display name);
+        ///   • research head — <c>Research.Current.ResearchID</c>;
+        ///   • every vehicle the strip lists — the row exists iff <c>GetCurrentActionTime &gt; 0</c>, which
+        ///     VehicleActionsViewService:177-188 defines as exploring-or-travelling, and its label/icon are
+        ///     the vehicle NAME plus those same two flags;
+        ///   • every facility row — repairing, or building with a non-zero construction time, keyed by def
+        ///     and state.
+        /// NOT included, deliberately: the per-row TIME LEFT. It is the one thing a rebuild does NOT paint —
+        /// <c>UpdateData(element)</c>:271 does, on every call, rebuild or not.
+        /// Returns null when the model cannot be read; null forces the rebuild, so an unreadable model can
+        /// only ever cost a flicker, never a stale strip.
+        /// </summary>
+        private static string AgendaSignature(GeoFaction faction)
+        {
+            if (faction == null) return null;
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                var head = faction.Manufacture?.Current?.ManufacturableItem?.RelatedItemDef;
+                sb.Append(head == null ? "-" : head.name).Append('|')
+                  .Append(faction.Research?.Current?.ResearchID ?? "-").Append('|');
+                foreach (var v in faction.Vehicles)
+                {
+                    if (v == null || (!v.Travelling && !v.IsExploringSite)) continue;
+                    sb.Append(v.Name).Append(v.Travelling ? "@t," : "@x,");
+                }
+                sb.Append('|');
+                if (faction is GeoPhoenixFaction phoenix)
+                    foreach (var b in phoenix.Bases)
+                    {
+                        if (b?.Layout == null) continue;
+                        foreach (var f in b.Layout.Facilities)
+                        {
+                            if (f == null) continue;
+                            if (f.IsRepairing) sb.Append(f.Def == null ? "?" : f.Def.name).Append("@r,");
+                            else if (f.IsBuilding && f.ConstructionTime != TimeUnit.Zero)
+                                sb.Append(f.Def == null ? "?" : f.Def.name).Append("@b,");
+                        }
+                    }
+                return sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                if (_loggedFailures.Add("AgendaSignature"))
+                    MpLog.LogWarning("[Multiplayer][rail] agenda-strip signature threw — the top-right strip " +
+                                     "falls back to rebuilding on every flush (logged once): " + ex);
+                return null;
+            }
+        }
+
 
         /// <summary>THE INFO BAR'S GATE, in L516's shape and for L516's reason: the module's LIVENESS is
         /// asked BEFORE <see cref="RepaintNeeded"/>'s memory is touched, never after. A key recorded against

@@ -449,6 +449,7 @@ namespace RailCheck
             Add(laws, () => L545_PatchDoNotRebuild.Check());
             Add(laws, () => L546_AHostMintedPositionIsPublishedOrStated.Check());
             Add(laws, () => L547_ALocalDismissalNeverTravels.Check());
+            Add(laws, () => L548_TheAgendaStripNeverRebuildsOnAProgressTick.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -496,8 +497,15 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 347;
-        // Updated deliberately 2026-08-15: L547 (a LOCAL family's dismissal never travels — the ANSWER RELAY
+        private const int ExpectedLawRegistrations = 348;
+        // Updated deliberately 2026-08-15: L548 (a progress-only delta never rebuilds the top-right agenda
+        // strip) was ADDED — 347 -> 348. Nothing was retired or amputated: L492 owns "the strip rebuilds when
+        // its rows change" and executes AgendaNeedsRebuild with hand-written strings, so it never asked WHICH
+        // key the runtime hands that gate — which is how §B.8 keying the teardown on ScopeKey (a generation
+        // that moves on a ticking countdown) restored the flicker with every existing arm green. L543 was
+        // RE-EXPRESSED, not weakened: the four repaint KEYS stay forbidden and the agenda strip's identity
+        // builder — the TEARDOWN gate, a different subject — becomes one of its positive controls.
+        // Earlier the same day: L547 (a LOCAL family's dismissal never travels — the ANSWER RELAY
         // asks the same declaration table the host-minted void asks) was ADDED — 346 -> 347. Nothing was
         // retired or amputated: L526 owns the TABLE (undeclared is local, the mission family is global, no
         // scope is decided elsewhere) and never asked whether WindowQueueSync.SendAdvance consults it —
@@ -563,7 +571,7 @@ namespace RailCheck
         // registrations, one new identity string. Earlier the same day: L514 (the roster list repaints on
         // the same mirrored level-up), 334 → 335; L513 (no peer lifts before its boundary releases),
         // 333 → 334; L512 (the crew strip repaints on a mirrored level-up), 332 → 333.
-        private const string ExpectedExecutionIdentityDigest = "d9b424466a55dfbeaf5e1e7c056c3231becc94d2dc2ff5d6731ce96db2444457";
+        private const string ExpectedExecutionIdentityDigest = "afbd3b0fd2e39819318c947d31cc7cccc40d020989acffa80af0619eb4d5230e";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

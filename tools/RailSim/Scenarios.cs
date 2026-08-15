@@ -20,6 +20,45 @@ namespace RailSim
             yield return Pair("a-global-dismissal-removes-it-everywhere", AGlobalDismissalRemovesItEverywhere);
             yield return Pair("no-gap-is-permanent", NoGapIsPermanent);
             yield return Pair("an-untouched-surface-does-not-repaint", AnUntouchedSurfaceDoesNotRepaint);
+            yield return Pair("a-progress-tick-never-tears-down-the-agenda-strip",
+                              AProgressTickNeverTearsDownTheAgendaStrip);
+        }
+
+        /// <summary>L548 as an OBSERVABLE HISTORY. A run of rail batches on a client: a manufacture
+        /// countdown ticks under "F#" once a second while the SET OF ROWS stands still, then a research
+        /// starts and the set really changes. Counted over the real gate and the real generation
+        /// machinery, the strip must be torn down exactly TWICE — the first paint and the real change —
+        /// and never for a countdown, because InitialSetup disposes and re-creates every row and doing
+        /// that at the tick rate is the 1 Hz client flicker reported 2026-08-15.</summary>
+        private static IEnumerable<string> AProgressTickNeverTearsDownTheAgendaStrip(int seed)
+        {
+            OpenUiRepaint.Reset();
+            const string before = "manufacture=Gun|research=-|vehicles=|facilities=";
+            const string after = "manufacture=Gun|research=RES_A|vehicles=|facilities=";
+            var run = new[]
+            {
+                new KeyValuePair<string, string>("F#7a3.SerializationData.Manufacture.Current.Progress", before),
+                new KeyValuePair<string, string>("F#7a3.SerializationData.Manufacture.Current.Progress", before),
+                new KeyValuePair<string, string>("F#7a3.SerializationData.Manufacture.Current.Progress", before),
+                new KeyValuePair<string, string>("F#7a3.SerializationData.Research.Current", after),
+                new KeyValuePair<string, string>("F#7a3.SerializationData.Manufacture.Current.Progress", after),
+            };
+
+            int teardowns = 0;
+            foreach (var batch in run)
+            {
+                OpenUiRepaint.BumpScopeGenerations(new List<string> { batch.Key });
+                if (OpenUiRepaint.AgendaNeedsRebuild(true, batch.Value)) teardowns++;
+            }
+            OpenUiRepaint.Reset();
+
+            if (teardowns != 2)
+                yield return "a-progress-tick-never-tears-down-the-agenda-strip: the strip was rebuilt " +
+                             teardowns + " times across 5 batches, of which exactly ONE changed the set of " +
+                             "rows (plus the first paint). Every extra one is a full row teardown paid for a " +
+                             "countdown that UpdateData() already repaints on every call — the reported 1 Hz " +
+                             "client blink; a missing one is a strip that never follows a real change, which " +
+                             "is the worse defect of the two.";
         }
 
         /// <summary>§C.1 property 3 — the property no existing law can express, and the acceptance

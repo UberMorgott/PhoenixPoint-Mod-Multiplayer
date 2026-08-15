@@ -9,7 +9,18 @@ namespace RailCheck
     /// <summary>
     /// L543 — NO HAND-ROLLED READ-SET SURVIVES BESIDE A DECLARED PREFIX SET.
     ///
-    /// The five signature builders — AgendaSignature, InfoBarKey, CrewSignature, RosterSignature,
+    /// RE-EXPRESSED 2026-08-15 (L548, the 1 Hz client flicker). The law used to forbid FIVE names; it now
+    /// forbids FOUR and REQUIRES the fifth. The subject is unchanged and nothing is weakened: what this law
+    /// bans is a hand-rolled read-set standing in for a DECLARED prefix set — a second REPAINT key, i.e.
+    /// two competing answers to "did anything I read change?". <c>AgendaSignature</c> answers a different
+    /// question, and only the agenda strip has to ask it: its repaint DESTROYS what it redraws
+    /// (<c>InitialSetup</c>:144-177 disposes and re-creates every row), so beside "is this strip worth
+    /// looking at" — still answered by the declared prefixes, unchanged — it needs "may the rows be torn
+    /// down?", and the only honest answer to that is the SET OF ROWS. Keying the teardown on the scope
+    /// generation instead is what made a ticking manufacture countdown blink the strip once a second. So
+    /// the builder moves from arm (a) to arm (b): forbidden as a repaint key, REQUIRED as the teardown gate.
+    ///
+    /// The four remaining signature builders — InfoBarKey, CrewSignature, RosterSignature,
     /// CrewSlotKey — are read-sets written BACKWARDS: a human enumerating, in a string, everything a strip
     /// draws. That is the v1 per-widget sync this project abandoned, and InfoBarKey admitted its own
     /// incompleteness by adding a 1-second Time.realtimeSinceStartup floor. Leaving them beside a declared
@@ -38,7 +49,7 @@ namespace RailCheck
     internal static class L543_NoHandRolledSignatureSurvives
     {
         private static readonly string[] Builders =
-            { "AgendaSignature", "InfoBarKey", "CrewSignature", "RosterSignature", "CrewSlotKey" };
+            { "InfoBarKey", "CrewSignature", "RosterSignature", "CrewSlotKey" };
 
         internal static IEnumerable<string> Check()
         {
@@ -65,11 +76,14 @@ namespace RailCheck
 
             // (b) POSITIVE CONTROL: the primitive and L492/L516's gate must SURVIVE.
             if (repaint.GetMethod("RepaintNeeded", Any) == null ||
-                repaint.GetMethod("AgendaNeedsRebuild", Any) == null)
-                yield return "L543 repaint-needed-gone: RepaintNeeded and/or AgendaNeedsRebuild were " +
-                             "deleted. §B.8 KEEPS RepaintNeeded as the fallback primitive; deleting the " +
-                             "gate satisfies arm (a) while restoring the L492 flicker — a full agenda row " +
-                             "teardown ~10 times a second — and re-breaking L516's ordering.";
+                repaint.GetMethod("AgendaNeedsRebuild", Any) == null ||
+                repaint.GetMethod("AgendaSignature", Any) == null)
+                yield return "L543 repaint-needed-gone: RepaintNeeded, AgendaNeedsRebuild and/or " +
+                             "AgendaSignature were deleted. §B.8 KEEPS RepaintNeeded as the fallback " +
+                             "primitive and AgendaSignature is the agenda strip's TEARDOWN gate (L548), not " +
+                             "a repaint key; deleting either satisfies arm (a) while restoring the L492 " +
+                             "flicker — a full agenda row teardown at the rate a countdown ticks — and " +
+                             "re-breaking L516's ordering.";
 
             // (c) THE REPORTED ORDERING BUG, reproduced end to end.
             OpenUiRepaint.Reset();
