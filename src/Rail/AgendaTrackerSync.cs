@@ -29,5 +29,10 @@ namespace Multiplayer.Network.Sync
         internal static readonly AgendaState State = new AgendaState();
 
         internal static void Register() => IdentityResolver.RegisterModRoot(RootKey, State);
+
+        /// <summary>Same mod-root contract as MistSync/AssignSync: state must be EMPTY at every
+        /// reload boundary (IdentityResolver.cs:205-206) — the transferred save has its own agenda
+        /// rows, so nothing is lost in the gap.</summary>
+        internal static void ResetForReloadBoundary() => State.Rows.Clear();
     }
 }

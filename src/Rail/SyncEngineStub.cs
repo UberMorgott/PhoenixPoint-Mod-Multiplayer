@@ -284,6 +284,7 @@ namespace Multiplayer.Network.Sync
             MistSync.ResetForReloadBoundary(); // BEFORE DiffEngine: the mod root must be empty when the
                                                // post-reload baseline snapshot is taken (see its remark)
             AssignSync.ResetForReloadBoundary(); // same contract, same reason, same side of the line
+            AgendaTrackerSync.ResetForReloadBoundary(); // same contract, same reason, same side of the line
             DiffEngine.ResetForReloadBoundary();
             GenericApplier.ResetForReloadBoundary();
         }
