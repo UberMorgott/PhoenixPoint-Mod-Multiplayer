@@ -196,7 +196,19 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # registrations, one new identity string. Nothing retired: L48/L49 still keep the tables total, L546 still
 # forbids a LocalOnly claim over a host-authoritative raiser, and L106's MirroredData table GAINED the
 # twelve kinds that stopped being holes rather than losing an arm.
-$expectedRegistrationDigest = 'd5f7fced847aab9416656356436e019165c7ca77f6d73451f3ef89328540392d'
+# Updated deliberately 2026-08-15: L556 ADDED (a window whose answer DISPOSES A SHARED ASSET closes on
+# every peer the moment ANY peer answers it; an informational one closes only on the peer who dismissed
+# it). A player accepted a soldier offered at a haven and the offer stayed open -- already taken -- on
+# every other peer, and the asset-distribution prompt did the same. The cause was that dismissal scope was
+# keyed on the FAMILY NAME, and every modal in the game is the one family UIStateGeoModal, so only the
+# deployment-preparation screen ever reached a void. Scope is now DERIVED from the RAISE
+# (GeoModalMirror.DismissalIsGlobal over AnswerDisposesSharedAsset, sharing NamesEntity), the void names
+# the ANSWERED RAISE through its per-raise tag instead of the first unread entry of a name, and it now
+# closes an already-OPEN copy as well as pruning the unread backlog. Nothing retired: L526 still makes an
+# undeclared family LOCAL, L547 still forbids a LOCAL dismissal travelling, L552 still keeps dismissal
+# scope and ANSWER AUTHORITY two derivations. WindowJournal.FamilyScope keeps its single row for the one
+# window that carries no describable payload at all.
+$expectedRegistrationDigest = '08e7dfa599090b75deeba7b3038c9b324f8f639240b3b843653797c7a0dd19a4'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))
