@@ -138,6 +138,12 @@ namespace Multiplayer.Network.Sync
                                 "resnapshot after a turn-epoch hold ceiling");
             }
             ManufactureSync.HostTick(_engine);
+            // host-only inside, ~1 Hz self-throttled: reads the agenda tracker's 4 row sources
+            // (research/manufacture/facility/vehicle) straight off the model, since the native
+            // widget's own capture point only runs while the host is looking at specific geoscape
+            // UI states — see AgendaTrackerSync.HostTick for why that made the old widget-postfix
+            // capture go silent and freeze "M#agenda" stale.
+            AgendaTrackerSync.HostTick(_engine);
             // client-only in effect: release the ONE held appearance edit once the player stopped moving the
             // customization control. A trailing-edge debounce has nothing to ride out to on its own, so the
             // flush lives here rather than on the screen's ExitState — the held value then lands whether or

@@ -6,8 +6,11 @@ using PhoenixPoint.Common.Entities.Items;
 using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.PhoenixBases;
 using PhoenixPoint.Geoscape.Entities.Research;
+using PhoenixPoint.Geoscape.Levels.Factions;
 using PhoenixPoint.Geoscape.View.ViewControllers;
 using PhoenixPoint.Geoscape.View.ViewModules;
+using PhoenixPoint.Geoscape.View.ViewServices;
+using UnityEngine;
 
 namespace Multiplayer.Network.Sync
 {
@@ -77,68 +80,139 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>Stash for the current tick's real canFinish/errorText, written by
-        /// AgendaRowErrorCapturePatch and consumed by AgendaRowCapturePatch immediately after.
-        /// Safe as a bare static pair: UIModuleFactionAgendaTracker.UpdateData calls
-        /// element.UpdateData(timeUnit, flag, errorText) synchronously BEFORE its own disposal
-        /// check and return (UIModuleFactionAgendaTracker.cs:303-308) — so the inner postfix below
-        /// always fires, then clears, before the outer postfix runs for the same element, on the
-        /// single Unity main thread (no reentrancy).</summary>
-        private static bool _pendingCanFinish;
-        private static string _pendingErrorText;
+        private static float _nextHostTickAt;
 
-        /// <summary>Host-side capture (inner method): UIFactionDataTrackerElement.UpdateData receives
-        /// canFinish/errorText as its own parameters — the only place they're available, since
-        /// UIFactionDataTrackerElement never stores them as fields (UIFactionDataTrackerElement.cs:83-94,
-        /// only consumed locally to set TrackedTime.text). Stash them for AgendaRowCapturePatch.</summary>
-        [HarmonyPatch(typeof(UIFactionDataTrackerElement), "UpdateData", new[] { typeof(TimeUnit), typeof(bool), typeof(string) })]
-        internal static class AgendaRowErrorCapturePatch
+        /// <summary>Host-side capture, UI-INDEPENDENT: reads the campaign model directly instead of
+        /// riding UIModuleFactionAgendaTracker's own row list. The widget's 1 Hz coroutine
+        /// (UpdateModuleDataCrt) only runs while it is Init'd, which only happens while the host is
+        /// looking at UIStateNothingSelected/UIStateVehicleSelected (Init/Uninit called from those
+        /// states only) — the moment the host opens Research/Manufacturing/BaseLayout, Uninit() stops
+        /// the coroutine and the old postfix-based capture (AgendaRowCapturePatch /
+        /// AgendaRowErrorCapturePatch, removed 2026-08-16) went silent, freezing "M#agenda" stale on
+        /// every client regardless of task type (field-tested desync). Same per-row shape as
+        /// UIModuleFactionAgendaTracker.UpdateData(element) (UIModuleFactionAgendaTracker.cs:271-309)
+        /// and its InitialSetup row enumeration (:144-177), just sourced from the model.
+        /// Label simplification (deliberate): the native widget formats each label through a
+        /// per-TrackerType ViewElementDef.DisplayName1 (a linked UI asset on the live widget
+        /// instance, e.g. "{0}" wrapping + ToUpper() — UIFactionDataTrackerElement.Init:51-81) that a
+        /// headless host tick has no reachable handle on. Research/Manufacturing/Facility rows use the
+        /// item's own localized name with no format wrapper/uppercasing instead — a plainer label
+        /// beats a garbled or wrong one. Vehicle is the one row type whose label never went through
+        /// that wrapper (UIModuleFactionAgendaTracker.cs:225), so it is replicated exactly.</summary>
+        public static void HostTick(NetworkEngine engine)
         {
-            private static void Postfix(bool canFinish, string errorText)
+            if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
+            if (Time.realtimeSinceStartup < _nextHostTickAt) return;
+            _nextHostTickAt = Time.realtimeSinceStartup + 1f;
+
+            var faction = GenericApplier.GeoLevel()?.PhoenixFaction;
+            if (faction == null) return;
+
+            var freshKeys = new HashSet<string>();
+
+            var research = faction.Research?.Current;
+            if (research != null)
             {
-                var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
-
-                _pendingCanFinish = canFinish;
-                _pendingErrorText = errorText;
-            }
-        }
-
-        /// <summary>Host-side capture: mirrors every row the widget's own UpdateData computed into
-        /// AgendaTrackerSync.State.Rows. UpdateData(UIFactionDataTrackerElement) runs on every peer
-        /// (local UI, not patched out) — guard on IsHost so clients never write. __result true means
-        /// the row finished/disposed this tick, matching the native condition timeUnit &lt;= Zero &amp;&amp; flag
-        /// (UIModuleFactionAgendaTracker.cs:304-308); stop mirroring it. element.CurrentTimeLeft and
-        /// _pendingCanFinish/_pendingErrorText are set by element.UpdateData(...) inside the native
-        /// method body (UIModuleFactionAgendaTracker.cs:303, UIFactionDataTrackerElement.cs:85) before
-        /// this postfix runs, so they already reflect the value just computed this tick.</summary>
-        [HarmonyPatch(typeof(UIModuleFactionAgendaTracker), "UpdateData", new[] { typeof(UIFactionDataTrackerElement) })]
-        internal static class AgendaRowCapturePatch
-        {
-            private static void Postfix(UIFactionDataTrackerElement element, bool __result)
-            {
-                var engine = NetworkEngine.Instance;
-                if (engine == null || !engine.IsActiveSession || !engine.IsHost) return;
-
-                string key = RowKey(element.TrackedObject, out string trackerType);
-                if (key == null) return;
-
-                if (__result)
+                string key = RowKey(research, out string trackerType);
+                if (key != null)
                 {
-                    // Row finished/disposed this tick — stop mirroring it.
-                    State.Rows.Remove(key);
-                    return;
+                    freshKeys.Add(key);
+                    var timeLeft = faction.Research.GetTotalTimeLeft(research);
+                    State.Rows[key] = new AgendaRow
+                    {
+                        TrackerType = trackerType,
+                        Label = research.GetLocalizedName(),
+                        RemainingSeconds = (int)timeLeft.TimeSpan.TotalSeconds,
+                        CanFinish = true,
+                        ErrorText = null,
+                    };
                 }
+            }
 
+            var manufacture = faction.Manufacture;
+            var queueItem = manufacture?.Current;
+            if (queueItem != null)
+            {
+                string key = RowKey(queueItem, out string trackerType);
+                if (key != null)
+                {
+                    freshKeys.Add(key);
+                    var timeLeft = manufacture.GetTotalTimeLeft(queueItem);
+                    var reason = manufacture.CanFinishConstruction(queueItem);
+                    bool canFinish = reason == ItemManufacturing.ManufactureFailureReason.None;
+                    State.Rows[key] = new AgendaRow
+                    {
+                        TrackerType = trackerType,
+                        Label = queueItem.ManufacturableItem?.Name?.Localize(),
+                        RemainingSeconds = (int)timeLeft.TimeSpan.TotalSeconds,
+                        CanFinish = canFinish,
+                        // Simplified same as the label: the native errorText is a localized short
+                        // string looked up via the widget's own linked TooltipSettingsDef
+                        // (UIModuleFactionAgendaTracker.cs:290) — unreachable headlessly. The raw
+                        // enum name is legible enough for a blocked-manufacture row.
+                        ErrorText = canFinish ? null : reason.ToString(),
+                    };
+                }
+            }
+
+            if (faction is GeoPhoenixFaction phoenix)
+            {
+                foreach (var pxBase in phoenix.Bases)
+                {
+                    if (pxBase?.Layout == null) continue;
+                    foreach (var facility in pxBase.Layout.Facilities)
+                    {
+                        if (facility == null) continue;
+                        if (!facility.IsRepairing && !(facility.IsBuilding && facility.ConstructionTime != TimeUnit.Zero))
+                            continue;
+
+                        string key = RowKey(facility, out string trackerType);
+                        if (key == null) continue;
+                        freshKeys.Add(key);
+                        var timeLeft = (1f - facility.ConstructionPercentage) * facility.ConstructionTime;
+                        State.Rows[key] = new AgendaRow
+                        {
+                            TrackerType = trackerType,
+                            Label = facility.ViewElementDef?.DisplayName1.Localize(),
+                            RemainingSeconds = (int)timeLeft.TimeSpan.TotalSeconds,
+                            CanFinish = true,
+                            ErrorText = null,
+                        };
+                    }
+                }
+            }
+
+            foreach (var vehicle in faction.Vehicles)
+            {
+                if (vehicle == null) continue;
+                var timeLeft = VehicleActionsViewService.GetCurrentActionTime(vehicle);
+                if (timeLeft <= TimeUnit.Zero) continue;
+
+                string key = RowKey(vehicle, out string trackerType);
+                if (key == null) continue;
+                freshKeys.Add(key);
                 State.Rows[key] = new AgendaRow
                 {
                     TrackerType = trackerType,
-                    Label = element.TrackedName != null ? element.TrackedName.text : null,
-                    RemainingSeconds = (int)element.CurrentTimeLeft.TimeSpan.TotalSeconds,
-                    CanFinish = _pendingCanFinish,
-                    ErrorText = _pendingErrorText,
+                    Label = (vehicle.Name + " " + VehicleActionsViewService.GetVehicleStateText(vehicle)).ToUpper(),
+                    RemainingSeconds = (int)timeLeft.TimeSpan.TotalSeconds,
+                    // Only ever added while timeLeft > Zero (the InitialSetup condition, above) — the
+                    // native flag (canFinish = timeUnit <= TimeUnit.Zero) is therefore always false for
+                    // a row this sweep writes; the row is removed below the tick it stops qualifying.
+                    CanFinish = false,
+                    ErrorText = null,
                 };
             }
+
+            // Removal sweep: a row not rebuilt this tick belongs to a task that finished, was
+            // cancelled, or lost its source (e.g. a scrapped facility) — stop mirroring it, same as
+            // the removed AgendaRowCapturePatch did on __result == true.
+            List<string> stale = null;
+            foreach (var existingKey in State.Rows.Keys)
+                if (!freshKeys.Contains(existingKey))
+                    (stale ?? (stale = new List<string>())).Add(existingKey);
+            if (stale != null)
+                foreach (var k in stale) State.Rows.Remove(k);
         }
 
         /// <summary>Client-side apply: skips native per-row computation and applies the host-synced
