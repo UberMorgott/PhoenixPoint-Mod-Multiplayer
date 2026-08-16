@@ -882,6 +882,9 @@ namespace RailCheck
                 typeof(Multiplayer.Network.Sync.ScrapCartState), // root "M#cart" (shared scrap cart)
                 typeof(Multiplayer.Network.Sync.MistState),      // root "M#mist" (mist coverage, L59)
                 typeof(Multiplayer.Network.Sync.AssignState),    // root "M#assign" (TFTV ASSIGNMENTS, L441/L442)
+                typeof(Multiplayer.Network.Sync.DeployCountdownState), // root "M#deploy" (deploy countdown)
+                typeof(Multiplayer.Network.Sync.DeployPrepState),      // root "M#prep" (deploy prep)
+                typeof(Multiplayer.Network.Sync.AgendaState),          // root "M#agenda" (agenda tracker)
                 // Ref-addressable SUB-entities (IdentityResolver.IsRefAddressableType). Their state ships as
                 // elements of the collection that OWNS them, but that collection lives in a TWIN table
                 // (GeoHaven <= InstanceData . Zones) and the expansion below only follows a type's own
@@ -979,7 +982,8 @@ namespace RailCheck
             sb.Append("roots (IdentityResolver.RootKinds, walk order): " +
                       string.Join(" | ", IdentityResolver.RootKinds.Select(r => "\"" + r.Key + "\" " + r.Type.Name)) +
                       " + mod-state roots registered at runtime: ScrapCartState (\"M#cart\"), MistState (\"M#mist\")" +
-                      ", AssignState (\"M#assign\")\n");
+                      ", AssignState (\"M#assign\"), DeployCountdownState (\"M#deploy\"), DeployPrepState (\"M#prep\")" +
+                      ", AgendaState (\"M#agenda\")\n");
             sb.Append("seeded (not roots — types the live walk reaches only through a runtime subtype): GeoPhoenixFacility" +
                       " | structural-descend concretions of: " +
                       string.Join(", ", DiffEngine.StructuralDescendKinds.Select(k => k.Name)) + "\n");
