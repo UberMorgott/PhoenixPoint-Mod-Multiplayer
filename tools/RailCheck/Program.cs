@@ -461,6 +461,7 @@ namespace RailCheck
             Add(laws, () => L556_AnAnsweredSharedWindowClosesEverywhere.Check());
             Add(laws, () => L562_TheWholeInfoBarIsPaintedNotOnlyItsMeter.Check());
             Add(laws, () => L563_ADeclaredSurfaceCoversWhatKeepsItsReadsFresh.Check());
+            Add(laws, () => L564_ANarrowedRollupSweepNeverDropsATouchedOwner.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -508,7 +509,16 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 359;
+        private const int ExpectedLawRegistrations = 360;
+        // Updated deliberately 2026-08-18: L564 (a narrowed rollup sweep never drops an owner whose root
+        // the batch touched) was ADDED — 359 -> 360. Nothing was retired and no surviving law lost an arm.
+        // DerivedAggregateRefresh.Targets swept every faction, every site, every base facility and every
+        // character on EVERY armed batch — 3-4 times a second on every client — with no relation to what
+        // had changed. It is now keyed on the batch's own touched roots, and Row.InputPrefixes is the
+        // authority for when that is admissible: a batch moving an input OFF the sweep axis is
+        // owner-independent and must sweep everything. L557 and L561 keep their identities and every arm —
+        // the ladder, the classification and the args escape are untouched; what L564 adds is WHICH owners
+        // a row's rebuild reaches, which neither of them has ever expressed.
         // Updated deliberately 2026-08-18: L563 (a declared repaint surface's prefixes are real rail roots,
         // and one that prints a locally-REBUILT rollup declares the roots that rebuild it) was ADDED —
         // 358 -> 359. Nothing was retired and no surviving law lost an arm. It is the other half of L541:
@@ -753,7 +763,11 @@ namespace RailCheck
         // its own identity and every arm — the new row is an ordinary Recompute it classifies like the rest;
         // what L561 adds is the ORDER of the ladder and the one narrow explicit-args escape, neither of
         // which L557 has ever expressed.
-        private const string ExpectedExecutionIdentityDigest = "b5eff308ab89939991b80fa6ff92fe5e20a3dfa9b39875731b72b65314ccb209";
+        // Updated deliberately 2026-08-18 with L564 (a narrowed rollup sweep never drops an owner whose
+        // root the batch touched): one new identity string, 359 -> 360 executed identities. No identity
+        // retired and no surviving law lost an arm — L557 keeps the classification, L561 keeps the ladder
+        // and the args escape, L563 keeps both its coverage arms and the new arm (d).
+        private const string ExpectedExecutionIdentityDigest = "7bc0f021f2969b54a237c0e3a4b8a88352659740f40c1974b6b2186eb12da22c";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

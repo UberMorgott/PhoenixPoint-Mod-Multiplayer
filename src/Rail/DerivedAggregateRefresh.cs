@@ -329,11 +329,21 @@ namespace Multiplayer.Network.Sync
             var geo = GenericApplier.GeoLevel();
             if (geo == null) return;
             var touched = OpenUiRepaint.TouchedPaths;
+            // THE FIRST PASS AFTER A JOIN OR A RELOAD SWEEPS EVERYTHING, exactly once. A peer whose level
+            // is new to this engine holds rollups nobody rebuilt yet, and the batch that carried the save
+            // is not a description of what CHANGED — it is everything. Keyed on the level instance rather
+            // than on a session flag so a reload, a join and a fresh campaign all heal through one line,
+            // with nothing to wire and nothing to reset. Weak so a dead level is not held alive by it.
+            bool firstPass = !ReferenceEquals(_lastGeo.Target, geo);
+            _lastGeo.Target = geo;
+            var touchedRoots = firstPass ? null : TouchedRoots(touched);
             bool rebuilt = false;
             foreach (var row in Table)
             {
                 if (!Arms(row, touched)) continue;
-                foreach (var target in Targets(geo, row))
+                var sweep = SweepKind(row.Owner);
+                var roots = !firstPass && MayNarrow(row, sweep, touched) ? touchedRoots : null;
+                foreach (var target in Targets(geo, row, roots))
                 {
                     var m = target.GetType().GetMethod(row.Rebuild, Any);
                     // The row's own args when it declares them (see Row.Args), otherwise the game's own
@@ -374,16 +384,107 @@ namespace Multiplayer.Network.Sync
             if (rebuilt) OpenUiRepaint.MarkRecomputeDirty();
         }
 
+        private static readonly WeakReference _lastGeo = new WeakReference(null);
+
+        /// <summary>
+        /// THE ROOT KIND THIS ROW'S TARGET SWEEP ENUMERATES — the one axis <see cref="Targets"/> can be
+        /// indexed by, and therefore the only one a narrowing may key on. Sites, bases and facilities all
+        /// ride the SAME faction→site walk (a base is a site component, a facility hangs off its layout),
+        /// so all three are indexed by the SITE root. Null for the single-instance owners (the level, the
+        /// marketplace): there is nothing to narrow, so <see cref="MayNarrow"/> refuses them.
+        /// </summary>
+        internal static string SweepKind(Type owner)
+        {
+            if (owner == null) return null;
+            if (typeof(GeoFaction).IsAssignableFrom(owner)) return "F#";
+            if (typeof(GeoSite).IsAssignableFrom(owner) ||
+                typeof(GeoPhoenixBase).IsAssignableFrom(owner) ||
+                typeof(GeoPhoenixFacility).IsAssignableFrom(owner)) return "S#";
+            if (typeof(GeoCharacter).IsAssignableFrom(owner)) return "U#";
+            return null;
+        }
+
+        /// <summary>The ROOT SEGMENT a rail path names ("S#12.SerializationData.X" → "S#12"), or null.
+        /// No segment is ever an index (DiffEngine.cs:1231), so the first '.' is the whole grammar.</summary>
+        internal static string RootOf(string path)
+        {
+            if (path == null) return null;
+            int dot = path.IndexOf('.');
+            return dot < 0 ? path : path.Substring(0, dot);
+        }
+
+        /// <summary>Every root this batch touched, as <c>IdentityResolver.RootRef</c> spells them.</summary>
+        internal static HashSet<string> TouchedRoots(ICollection<string> touchedPaths)
+        {
+            var roots = new HashSet<string>(StringComparer.Ordinal);
+            if (touchedPaths == null) return roots;
+            foreach (var path in touchedPaths)
+            {
+                var root = RootOf(path);
+                if (root != null) roots.Add(root);
+            }
+            return roots;
+        }
+
+        /// <summary>
+        /// MAY THIS ROW'S SWEEP BE NARROWED TO THE ROOTS THIS BATCH TOUCHED? The whole safety argument is
+        /// <see cref="Row.InputPrefixes"/>, and nothing else: a rollup is an OWNER-LOCAL function of the
+        /// roots it declares, so the moment the batch touched an input that is NOT under the sweep axis,
+        /// that input is owner-INDEPENDENT and every owner owes a rebuild.
+        ///
+        /// Concretely: <c>GeoPhoenixBase/UpdateStats</c> declares { "S#", "F#" }. A batch touching only
+        /// site paths rebuilds exactly the bases on those sites; a batch that also moved a faction path
+        /// (a FacilityBuffs lookup feeds every base's stats, GeoFacilityComponent.cs:51-58) sweeps them
+        /// all. <c>GeoCharacter/UpdateStats</c> and <c>GeoSite/RefreshVisuals</c> declare their own axis
+        /// alone, so they narrow on every batch — which is where the O(all) → O(changed) actually lands:
+        /// those two rows used to walk every character and every site of every faction, 3-4 times a second.
+        ///
+        /// A row that does not DECLARE the sweep axis (including one with no declared inputs at all, which
+        /// <see cref="Arms"/> arms unconditionally) never narrows.
+        /// </summary>
+        internal static bool MayNarrow(Row row, string sweepKind, ICollection<string> touchedPaths)
+        {
+            if (row == null || sweepKind == null || row.InputPrefixes.Length == 0) return false;
+            if (touchedPaths == null) return false;
+            // AN UNNAMEABLE CHANGE SWEEPS EVERYTHING, asked first and not per prefix. Arms treats a null
+            // path as arming every row precisely because nothing is known about it, and a narrowing keyed
+            // on the touched ROOTS would then key on nothing at all — arming the row and rebuilding no
+            // owner, which is the stale zero wearing a rebuild's clothes.
+            foreach (var path in touchedPaths)
+                if (path == null) return false;
+            bool declaresAxis = false;
+            foreach (var prefix in row.InputPrefixes)
+            {
+                if (prefix == null) return false;                        // an unreadable input: sweep all
+                if (sweepKind.StartsWith(prefix, StringComparison.Ordinal)) { declaresAxis = true; continue; }
+                // An input OFF the sweep axis. It only forbids narrowing when this batch actually moved it.
+                foreach (var path in touchedPaths)
+                    if (path.StartsWith(prefix, StringComparison.Ordinal)) return false;
+            }
+            return declaresAxis;
+        }
+
+        /// <summary>Does this owner rebuild in this batch? Trivially true whenever the sweep was not
+        /// narrowed. Pure and internal so RailCheck L564 executes the real decision with no live level.</summary>
+        internal static bool Included(bool mayNarrow, string ownerRoot, ICollection<string> touchedRoots) =>
+            !mayNarrow || (ownerRoot != null && touchedRoots != null && touchedRoots.Contains(ownerRoot));
+
         /// <summary>Which live objects does this row rebuild? Resolved from the level, by the row's owner
         /// type. A row whose owner nothing here can reach is ANNOUNCED rather than skipped — an
         /// unreachable rollup is the stale number with a table entry in front of it, which is worse than
-        /// no table entry at all because it reads as covered.</summary>
-        private static IEnumerable<object> Targets(GeoLevelController geo, Row row)
+        /// no table entry at all because it reads as covered.
+        ///
+        /// <paramref name="roots"/> NULL = the whole set, which is what every caller did unconditionally
+        /// until 2026-08-18: every faction → every site → <c>GetComponent&lt;GeoPhoenixBase&gt;()</c> →
+        /// <c>Layout.Facilities</c>, plus every character, on EVERY armed batch, with no relation to what
+        /// had changed. Non-null = only the owners whose OWN root this batch touched; <see cref="MayNarrow"/>
+        /// is what decides that the row's declared inputs permit it.</summary>
+        private static IEnumerable<object> Targets(GeoLevelController geo, Row row, HashSet<string> roots)
         {
             if (typeof(GeoFaction).IsAssignableFrom(row.Owner))
             {
                 foreach (var faction in geo.Factions)
-                    if (row.Owner.IsInstanceOfType(faction)) yield return faction;
+                    if (row.Owner.IsInstanceOfType(faction) && Wanted(roots, faction)) yield return faction;
                 yield break;
             }
             // Sites and characters hang off the factions (GeoFaction.cs:135 / :205); the level has no flat
@@ -393,7 +494,7 @@ namespace Multiplayer.Network.Sync
             {
                 foreach (var faction in geo.Factions)
                     foreach (var site in faction.Sites)
-                        if (row.Owner.IsInstanceOfType(site)) yield return site;
+                        if (row.Owner.IsInstanceOfType(site) && Wanted(roots, site)) yield return site;
                 yield break;
             }
             // A base is a COMPONENT of a site (GeoPhoenixBase : GeoSiteComponent), so it rides the same
@@ -403,6 +504,7 @@ namespace Multiplayer.Network.Sync
                 foreach (var faction in geo.Factions)
                     foreach (var site in faction.Sites)
                     {
+                        if (!Wanted(roots, site)) continue;
                         var pxBase = site.GetComponent<GeoPhoenixBase>();
                         if (pxBase != null && row.Owner.IsInstanceOfType(pxBase)) yield return pxBase;
                     }
@@ -415,6 +517,7 @@ namespace Multiplayer.Network.Sync
                 foreach (var faction in geo.Factions)
                     foreach (var site in faction.Sites)
                     {
+                        if (!Wanted(roots, site)) continue;
                         var layout = site.GetComponent<GeoPhoenixBase>()?.Layout;
                         if (layout == null) continue;
                         foreach (var facility in layout.Facilities)
@@ -426,7 +529,8 @@ namespace Multiplayer.Network.Sync
             {
                 foreach (var faction in geo.Factions)
                     foreach (var character in faction.Characters)
-                        if (row.Owner.IsInstanceOfType(character)) yield return character;
+                        if (row.Owner.IsInstanceOfType(character) && Wanted(roots, character))
+                            yield return character;
                 yield break;
             }
             if (row.Owner.IsInstanceOfType(geo)) { yield return geo; yield break; }
@@ -434,6 +538,13 @@ namespace Multiplayer.Network.Sync
             { yield return geo.Marketplace; yield break; }
             Unclassified(row.Owner.Name, row.Rebuild);
         }
+
+        /// <summary>Is this sweep element's own root among the ones the batch touched? The live half of
+        /// <see cref="Included"/> — same decision, with the root read off the object through the rail's own
+        /// <c>IdentityResolver.RootRef</c> rather than handed in. A keyless element (an un-registered site)
+        /// carries no rail path at all, so nothing could have touched it.</summary>
+        private static bool Wanted(HashSet<string> roots, object sweepElement) =>
+            Included(roots != null, IdentityResolver.RootRef(sweepElement), roots);
 
         /// <summary>The argument list for a rebuild, or NULL if this method may not be driven from here.
         /// The bar is NOT "takes no parameters" but the thing that bar was standing in for: THE CALLER

@@ -265,7 +265,15 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # read-direction paints from a named list, and L562 asserts that list, its native signatures, that the
 # scope gate still runs, and that Init (18 unbalanced subscriptions, no Uninit) is never the repaint.
 # Nothing retired, no arm weakened.
-$expectedRegistrationDigest = '27596e34e7d8110e82005fc954716116408daa8e5260287f001dbc964e241d8b'
+# Updated deliberately 2026-08-18: L564 ADDED -- 359 -> 360 registrations, one new identity string.
+# DerivedAggregateRefresh.Targets swept every faction, every site, every base facility and every character
+# on EVERY armed batch -- 3-4 times a second on every client -- with no relation to what had changed. The
+# sweep is now keyed on the batch's own touched roots, and Row.InputPrefixes is the authority for when
+# that is admissible: a batch moving an input OFF the sweep axis is owner-independent and must sweep
+# everything. L564 executes that decision over the real table, for every subset of each row's declared
+# inputs, so a narrowing that would drop an owner whose root DID move is RED instead of a silent stale
+# zero. Nothing retired, no arm weakened.
+$expectedRegistrationDigest = '14e755923f6ca3537213bd5c8c2de2d8dc8ed52dc8c6bfb4ece41357efb8c3b3'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))
