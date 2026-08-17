@@ -456,7 +456,6 @@ namespace RailCheck
             Add(laws, () => L555_ADescribableWindowIsNeverAHole.Check());
             Add(laws, () => L557_NoPeerReadsARollupItsOwnRailStaled.Check());
             Add(laws, () => L556_AnAnsweredSharedWindowClosesEverywhere.Check());
-            Add(laws, () => L558_AgendaTrackerRootIsRegisteredBothSides.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -504,8 +503,18 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 355;
-        // Updated deliberately 2026-08-17: THREE laws RETIRED — 358 -> 355 — because their SUBJECT was
+        private const int ExpectedLawRegistrations = 354;
+        // Updated deliberately 2026-08-17: L558 RETIRED — 355 -> 354 — with its subject, the "M#agenda"
+        // mod root. The whole layer is deleted (src/Rail/AgendaTrackerSync.cs, its three call sites in
+        // SyncEngine, and the root from the contract): it was STRUCTURALLY DEAD, not merely redundant.
+        // AgendaRowApplyPatch prefixed the PER-ROW UpdateData(UIFactionDataTrackerElement), and a row only
+        // ever exists on a peer whose OWN model created it (rows are built in InitialSetup and nowhere
+        // else) — so no local row meant the prefix never fired, and a local row meant the model was already
+        // right. It could not produce a visible change in either direction. Every countdown the strip draws
+        // is DERIVED at display time from the local model plus Level.Timing.Now, so a peer with a correct
+        // mirrored model computes the correct number by itself; that is what the rail already delivers.
+        // Nothing else was retired and no surviving law lost an arm.
+        // Earlier the same day: THREE laws RETIRED — 358 -> 355 — because their SUBJECT was
         // deleted, not because they were inconvenient. L492, L516 and L548 all own ONE mechanism: the
         // agenda strip's hand-written four-source rebuild gate (OpenUiRepaint.AgendaSignature /
         // AgendaNeedsRebuild). The strip now takes the module's own public Init(context) full rebuild
@@ -707,7 +716,7 @@ namespace RailCheck
         // 358 -> 355 executed identities. No identity was added and no surviving law lost an arm; L498
         // lost arm (f) and L543 arm (b) shrank, both because their subject (AgendaNeedsRebuild /
         // AgendaSignature) no longer exists, and L543 GAINED the fifth forbidden builder back.
-        private const string ExpectedExecutionIdentityDigest = "79f42705346905337842b4b401ed640fa51963e00d84dea8a852c60553291dec";
+        private const string ExpectedExecutionIdentityDigest = "4ccbc087956102e099c2ccb5895a7df38f24938b93e9f04dde1cd14ba6bdcecc";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
@@ -896,7 +905,6 @@ namespace RailCheck
                 typeof(Multiplayer.Network.Sync.AssignState),    // root "M#assign" (TFTV ASSIGNMENTS, L441/L442)
                 typeof(Multiplayer.Network.Sync.DeployCountdownState), // root "M#deploy" (deploy countdown)
                 typeof(Multiplayer.Network.Sync.DeployPrepState),      // root "M#prep" (deploy prep)
-                typeof(Multiplayer.Network.Sync.AgendaState),          // root "M#agenda" (agenda tracker)
                 // Ref-addressable SUB-entities (IdentityResolver.IsRefAddressableType). Their state ships as
                 // elements of the collection that OWNS them, but that collection lives in a TWIN table
                 // (GeoHaven <= InstanceData . Zones) and the expansion below only follows a type's own
@@ -994,8 +1002,7 @@ namespace RailCheck
             sb.Append("roots (IdentityResolver.RootKinds, walk order): " +
                       string.Join(" | ", IdentityResolver.RootKinds.Select(r => "\"" + r.Key + "\" " + r.Type.Name)) +
                       " + mod-state roots registered at runtime: ScrapCartState (\"M#cart\"), MistState (\"M#mist\")" +
-                      ", AssignState (\"M#assign\"), DeployCountdownState (\"M#deploy\"), DeployPrepState (\"M#prep\")" +
-                      ", AgendaState (\"M#agenda\")\n");
+                      ", AssignState (\"M#assign\"), DeployCountdownState (\"M#deploy\"), DeployPrepState (\"M#prep\")\n");
             sb.Append("seeded (not roots — types the live walk reaches only through a runtime subtype): GeoPhoenixFacility" +
                       " | structural-descend concretions of: " +
                       string.Join(", ", DiffEngine.StructuralDescendKinds.Select(k => k.Name)) + "\n");

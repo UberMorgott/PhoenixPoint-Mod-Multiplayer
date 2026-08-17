@@ -223,7 +223,17 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # RefreshPersistentHud -> RefreshAgendaTracker), so no gate remains to be right or wrong about. L543 was
 # RESTORED, not weakened: AgendaSignature goes back into its forbidden-builder list (five names again) and
 # its positive control keeps RepaintNeeded; L498's arm (f) retired with its subject.
-$expectedRegistrationDigest = '92d3d7c06ee174c6346c79fb3b705023d2b51477e9d921d95b6b8cd81e9308d1'
+# Updated deliberately 2026-08-17, second change the same day: L558 RETIRED -- 355 -> 354 registrations,
+# one identity string gone -- with its subject, the "M#agenda" mod root. src/Rail/AgendaTrackerSync.cs, its
+# three SyncEngine call sites and the root itself are DELETED. The layer was structurally dead:
+# AgendaRowApplyPatch prefixed the PER-ROW UpdateData(UIFactionDataTrackerElement), and a row only ever
+# exists on a peer whose own model created it (rows are built in InitialSetup and nowhere else), so no
+# local row meant the prefix never fired and a local row meant the model was already right. Every countdown
+# the strip draws is DERIVED at display time from the local model plus Level.Timing.Now, which the rail
+# already mirrors. docs/rail-contract.txt and docs/rail-baseline.txt were regenerated with --update: the
+# ONLY drift is the M#agenda root and its two types leaving (types 104 -> 102, covered 480 -> 479,
+# blobbable 32 -> 31). Nothing else retired; no surviving law lost an arm.
+$expectedRegistrationDigest = '7a3b15356721c4701027da94e2b2f95eb67bc1a15f6872aaa4259f6fa94aa049'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

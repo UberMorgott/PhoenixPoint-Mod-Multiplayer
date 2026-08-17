@@ -65,7 +65,6 @@ namespace Multiplayer.Network.Sync
             // (personnel assignments + recruit-training sessions), which lives in TFTV statics the rail
             // cannot otherwise see and which the ModData exclusion refuses by design (AssignSync).
             AssignSync.Register();
-            AgendaTrackerSync.Register();  // "M#agenda" — 6th mod root, same symmetric registration
             // Geoscape rail surfaces ride the one inbound hook (each returns false for foreign ids):
             // the 0xAD manufacture order channel, the intent engine, and the generic value rail
             // (0xAC DiffEngine deltas → GenericApplier). The peer id feeds the host-side intent dedup.
@@ -138,12 +137,6 @@ namespace Multiplayer.Network.Sync
                                 "resnapshot after a turn-epoch hold ceiling");
             }
             ManufactureSync.HostTick(_engine);
-            // host-only inside, ~1 Hz self-throttled: reads the agenda tracker's 4 row sources
-            // (research/manufacture/facility/vehicle) straight off the model, since the native
-            // widget's own capture point only runs while the host is looking at specific geoscape
-            // UI states — see AgendaTrackerSync.HostTick for why that made the old widget-postfix
-            // capture go silent and freeze "M#agenda" stale.
-            AgendaTrackerSync.HostTick(_engine);
             // client-only in effect: release the ONE held appearance edit once the player stopped moving the
             // customization control. A trailing-edge debounce has nothing to ride out to on its own, so the
             // flush lives here rather than on the screen's ExitState — the held value then lands whether or
@@ -290,7 +283,6 @@ namespace Multiplayer.Network.Sync
             MistSync.ResetForReloadBoundary(); // BEFORE DiffEngine: the mod root must be empty when the
                                                // post-reload baseline snapshot is taken (see its remark)
             AssignSync.ResetForReloadBoundary(); // same contract, same reason, same side of the line
-            AgendaTrackerSync.ResetForReloadBoundary(); // same contract, same reason, same side of the line
             DiffEngine.ResetForReloadBoundary();
             GenericApplier.ResetForReloadBoundary();
         }
