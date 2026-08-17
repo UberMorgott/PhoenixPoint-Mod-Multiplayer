@@ -233,7 +233,13 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # already mirrors. docs/rail-contract.txt and docs/rail-baseline.txt were regenerated with --update: the
 # ONLY drift is the M#agenda root and its two types leaving (types 104 -> 102, covered 480 -> 479,
 # blobbable 32 -> 31). Nothing else retired; no surviving law lost an arm.
-$expectedRegistrationDigest = '7a3b15356721c4701027da94e2b2f95eb67bc1a15f6872aaa4259f6fa94aa049'
+# Updated deliberately 2026-08-17, third change the same day: L559 ADDED -- 354 -> 355 registrations, one
+# new identity string. The native agenda rebuild (UIModuleFactionAgendaTracker.Init -> InitialSetup:148,
+# which EMPTIES the row container) now runs at most once per 250 ms instead of once per flushed rail batch,
+# and a rebuild refused by that floor is recorded as OWED so FlushIfDirty's existing per-frame pass serves
+# it. L559 asserts both halves. It does not resurrect the deleted four-source signature gate: no model
+# source is enumerated, so no change can compare EQUAL and be dropped. Nothing retired, no arm weakened.
+$expectedRegistrationDigest = 'e4ba1f005badd4a989b2797ea46e304e3bebcd0330ca5888bd7dc8c9d837f585'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

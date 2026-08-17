@@ -454,6 +454,7 @@ namespace RailCheck
             Add(laws, () => L553_OneWindowOneIdentityOneResolution.Check());
             Add(laws, () => L554_NoLiftBeforeThisPeersOwnFirstFrame.Check());
             Add(laws, () => L555_ADescribableWindowIsNeverAHole.Check());
+            Add(laws, () => L559_TheAgendaRebuildIsThrottledButNeverLost.Check());
             Add(laws, () => L557_NoPeerReadsARollupItsOwnRailStaled.Check());
             Add(laws, () => L556_AnAnsweredSharedWindowClosesEverywhere.Check());
             laws.Sort(StringComparer.Ordinal);
@@ -503,8 +504,14 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 354;
-        // Updated deliberately 2026-08-17: L558 RETIRED — 355 -> 354 — with its subject, the "M#agenda"
+        private const int ExpectedLawRegistrations = 355;
+        // Updated deliberately 2026-08-17: L559 (the agenda strip's native rebuild is throttled, and a
+        // throttled rebuild is never lost) was ADDED — 354 -> 355. Nothing was retired and nothing was
+        // weakened. It is NOT the hand-written rebuild gate L492/L516/L548 owned coming back: no model
+        // source is enumerated and no change can compare EQUAL, which is the failure that got that gate
+        // deleted. This is a wall-clock FLOOR on how often the native Init(context) teardown may run, with
+        // the refused rebuild recorded as owed so the existing per-frame FlushIfDirty pass serves it.
+        // Earlier the same day: L558 RETIRED — 355 -> 354 — with its subject, the "M#agenda"
         // mod root. The whole layer is deleted (src/Rail/AgendaTrackerSync.cs, its three call sites in
         // SyncEngine, and the root from the contract): it was STRUCTURALLY DEAD, not merely redundant.
         // AgendaRowApplyPatch prefixed the PER-ROW UpdateData(UIFactionDataTrackerElement), and a row only
@@ -716,7 +723,11 @@ namespace RailCheck
         // 358 -> 355 executed identities. No identity was added and no surviving law lost an arm; L498
         // lost arm (f) and L543 arm (b) shrank, both because their subject (AgendaNeedsRebuild /
         // AgendaSignature) no longer exists, and L543 GAINED the fifth forbidden builder back.
-        private const string ExpectedExecutionIdentityDigest = "4ccbc087956102e099c2ccb5895a7df38f24938b93e9f04dde1cd14ba6bdcecc";
+        // Updated deliberately 2026-08-17 with L559 (the agenda rebuild is throttled but never lost): one
+        // new identity string, 354 -> 355 executed identities. No identity retired and no surviving law
+        // lost an arm — L549 keeps HudRepaintOwed and every arm it hangs on it; L559 drives the flag only
+        // through OpenUiRepaint.Reset()-bracketed calls and leaves it cleared.
+        private const string ExpectedExecutionIdentityDigest = "dd739c73ea8aaecda3faa17aefb46647235f31837e15609ccd59150f56a0469e";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

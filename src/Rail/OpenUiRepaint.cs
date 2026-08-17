@@ -64,6 +64,12 @@ namespace Multiplayer.Network.Sync
         /// <summary>Defer ceiling in frames (~5 s at 60 fps). See <see cref="FlushIfDirty"/>.</summary>
         private const int MaxDeferFrames = 300;
 
+        /// <summary>Floor between two native agenda rebuilds, seconds. The module's own
+        /// <c>UpdateModuleDataCrt</c> poll refreshes existing rows once per SECOND, so four rebuilds per
+        /// second is already below anything a player can see.</summary>
+        private const float AgendaRebuildMinInterval = 0.25f;
+        private static float _nextAgendaRebuildAt;
+
         private static readonly FieldInfo StatesStackField =
             AccessTools.Field(typeof(GeoscapeView), "_statesStack");
 
@@ -331,6 +337,23 @@ namespace Multiplayer.Network.Sync
         /// only callers are <c>FlushIfDirty</c> and <c>RepaintOpenGeoscapeScreen</c> (itself reached from
         /// FlushIfDirty). Every mark in between merely sets a flag — <c>MarkDirty</c>/<c>MarkHudDirty</c> —
         /// so N deltas in one batch still cost exactly ONE rebuild.</summary>
+        /// <summary>THROTTLE WITH A TRAILING REBUILD. <c>InitialSetup</c>:148 EMPTIES the row container
+        /// before re-creating every row, so one rebuild per flushed batch is a full teardown at rail rate —
+        /// up to ~10/s on a busy client, which blinks. This is the floor: rebuild when
+        /// <see cref="AgendaRebuildMinInterval"/> has elapsed, otherwise skip.
+        ///
+        /// NEVER LOSSY: a skip re-arms the HUD flag, so the LAST change of a burst is carried by the
+        /// existing per-frame pass (<see cref="FlushIfDirty"/> calls <see cref="RefreshPersistentHud"/> for
+        /// an owed HUD with nothing else dirty) the first frame past the floor. No coroutine, no Update
+        /// hook, no timer object — the same <c>Time.realtimeSinceStartup</c> clock the diagnostics use, read
+        /// by the caller so a law can drive this decision with no live module.</summary>
+        internal static bool AgendaRebuildDue(float now)
+        {
+            if (now < _nextAgendaRebuildAt) { MarkHudDirty(); return false; }
+            _nextAgendaRebuildAt = now + AgendaRebuildMinInterval;
+            return true;
+        }
+
         private static void RefreshAgendaTracker(GeoscapeModulesData mods)
         {
             if (TrackerInit == null || TrackerContext == null) return;
@@ -368,6 +391,9 @@ namespace Multiplayer.Network.Sync
                     { _lastAgendaDiag = diag; MpLog.Log(diag); }
                 }
                 if (!onScreen) return;
+                // Asked LAST, after every handle guard: a throttled skip owes a rebuild, and a strip that is
+                // absent or off-screen owes nothing.
+                if (!AgendaRebuildDue(Time.realtimeSinceStartup)) return;
                 // law 8: the rebuild re-reads the model and can fire native UI events a capture seam hears.
                 using (SyncApplyScope.Enter())
                     TrackerInit.Invoke(tracker, new object[] { context });
@@ -938,6 +964,8 @@ namespace Multiplayer.Network.Sync
             // …and a dead session's strips must not vouch for the next one's: empty = repaint once each.
             _repaintKeys.Clear();
             _lastAgendaDiag = null;
+            // A dead session's rebuild floor must not delay the next session's first strip paint.
+            _nextAgendaRebuildAt = 0f;
             _scopeGeneration.Clear();
             // Next session's first refresh must not read a dead session's site refs as a fresh edge.
             _exploringSites.Clear();
