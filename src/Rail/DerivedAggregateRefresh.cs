@@ -345,12 +345,13 @@ namespace Multiplayer.Network.Sync
                 var roots = !firstPass && MayNarrow(row, sweep, touched) ? touchedRoots : null;
                 foreach (var target in Targets(geo, row, roots))
                 {
-                    var m = target.GetType().GetMethod(row.Rebuild, Any);
+                    var bound = Bind(target.GetType(), row.Rebuild);
                     // The row's own args when it declares them (see Row.Args), otherwise the game's own
                     // defaults. A declared list whose LENGTH no longer matches the method is a signature
                     // that moved under the row: announced, never invoked with a guessed argument.
-                    var args = row.Args != null && m != null && m.GetParameters().Length == row.Args.Length
-                                   ? row.Args : DefaultArgs(m);
+                    var m = bound.Method;
+                    var args = row.Args != null && m != null && bound.ParameterCount == row.Args.Length
+                                   ? row.Args : bound.Defaults;
                     if (args == null || (row.Args != null && !ReferenceEquals(args, row.Args)))
                     {
                         Unclassified(row.Owner.Name, row.Rebuild);
@@ -552,6 +553,45 @@ namespace Multiplayer.Network.Sync
         /// <c>GeoCharacter.UpdateStats(bool recalculateBodparts = false)</c> qualifies while any method
         /// with a required argument does not — a required argument is a value this peer would have to
         /// invent, and an invented input is exactly the divergence the whole engine avoids.</summary>
+        /// <summary>One rebuild, resolved once. Every field here was recomputed PER TARGET PER BATCH:
+        /// <c>GetMethod</c> (a name lookup over the whole type, <c>FlattenHierarchy</c> included),
+        /// <c>GetParameters()</c> (a fresh array every call) and <see cref="DefaultArgs"/> (another one).
+        /// At 3-4 batches a second over every owner a row sweeps, that is steady Gen0 garbage on the main
+        /// thread — which on Mono is itself a periodic-hitch source, on top of the lookup cost.</summary>
+        private sealed class Bound
+        {
+            internal MethodInfo Method;
+            internal int ParameterCount;
+            /// <summary>The GAME'S OWN defaults, or null when this method may not be driven from here.
+            /// Shared across invocations deliberately: <c>Invoke</c> does not write back into the array for
+            /// a signature with no <c>ref</c>/<c>out</c> parameter, and a required or by-reference parameter
+            /// is exactly what <see cref="DefaultArgs"/> refuses by returning null.</summary>
+            internal object[] Defaults;
+        }
+
+        private static readonly Dictionary<string, Bound> _bound =
+            new Dictionary<string, Bound>(StringComparer.Ordinal);
+
+        /// <summary>Resolve-once, keyed by (target type, rebuild name) — the pair that decides the answer.
+        /// Never invalidated: a <see cref="MethodInfo"/> for a loaded type stays valid for the process, and
+        /// a MISS is cached too (Method null), so a row whose signature moved costs one lookup, not one per
+        /// target per batch forever.</summary>
+        private static Bound Bind(Type targetType, string rebuild)
+        {
+            var key = targetType.FullName + "|" + rebuild;
+            Bound bound;
+            if (_bound.TryGetValue(key, out bound)) return bound;
+            var m = targetType.GetMethod(rebuild, Any);
+            bound = new Bound
+            {
+                Method = m,
+                ParameterCount = m == null ? -1 : m.GetParameters().Length,
+                Defaults = DefaultArgs(m),
+            };
+            _bound[key] = bound;
+            return bound;
+        }
+
         private static object[] DefaultArgs(MethodInfo m)
         {
             if (m == null) return null;
