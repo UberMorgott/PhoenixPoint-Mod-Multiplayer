@@ -78,6 +78,18 @@ namespace Multiplayer.Network.Sync
         // the list, a queued one leaves it), so law 11 requires the list to repaint too, not just the queue.
         private static readonly System.Reflection.MethodInfo ShowAvailableMethod =
             AccessTools.Method(typeof(UIModuleResearch), "ShowAvailable");
+        // THE THIRD PANEL, and the one only the fallback used to paint. UIModuleResearch.Init:184 calls
+        // SetupAlliedResearches():368 — the "what our allies are researching" strip — and NOTHING else on
+        // this screen ever does except the module's own queue/cancel handlers (:416/:423/:430/:438/:483),
+        // which no mirror walks. This Table entry returns true and therefore SUPPRESSES the Exit+Enter
+        // fallback, so on every peer that did not act the allied strip froze at whatever it showed when the
+        // screen opened. Init is deliberately NOT re-driven instead: :185 SelectFirstTab() and
+        // SetupResearches:213-234 -> HoverElement(first, instant:true):537 would reset the player's tab and
+        // hover once per rail batch, which is the L492/tab-reset class this file already fought once.
+        // Read-direction only: :370-377 filters allies to those with a current research and re-Inits one
+        // list item each (UIUtil.EnsureActiveComponentsInContainer), writing nothing into the model.
+        private static readonly System.Reflection.MethodInfo SetupAlliedMethod =
+            AccessTools.Method(typeof(UIModuleResearch), "SetupAlliedResearches");
         // NO MOD-SERVED RAISE (§A.9, L520). The reflective handles onto GeoscapeView.OnFactionResearchCompleted
         // and GeoscapeLog.Faction_ResearchCompleted are DELETED: a client presents a research completion by
         // draining its window-journal cursor like every other family, never by replaying a private native
@@ -401,6 +413,7 @@ namespace Multiplayer.Network.Sync
                     // queue panel stays visible under any list tab. ONLY when that list is the one on
                     // screen: see ShowingAvailableList.
                     if (ShowingAvailableList(module)) ShowAvailableMethod?.Invoke(module, null);
+                    SetupAlliedMethod?.Invoke(module, null);   // allied-research strip — see the binding
                 }
                 return true;
             }

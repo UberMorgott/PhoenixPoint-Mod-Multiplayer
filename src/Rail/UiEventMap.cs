@@ -482,6 +482,51 @@ namespace Multiplayer.Network.Sync
         // diplomacy count. Site markers live on GeoscapeView, outside any view state — nothing else on
         // this screen reads the model.
         private static readonly MethodInfo NsObjectives = AccessTools.Method(typeof(UIStateNothingSelected), "OnFactionObjectivesChanged");
+        /// <summary>
+        /// THE TWO MODULES BOTH GEOSCAPE STATES OWN, AND NEITHER ARM PAINTED. UIStateNothingSelected
+        /// (:103 SetDiplomacyDisplay, :131 _pxBaseManagementModule.Init) and UIStateVehicleSelected
+        /// (:200, :231) drive them from their own EnterState — and both Table arms below return true,
+        /// which SUPPRESSES the Exit+Enter fallback that was their only repaint. So on every peer that
+        /// did not perform the gesture the diplomacy pip strip and the base-list personnel/aircraft
+        /// counters froze until the player left the screen and came back. This is the same gap
+        /// <see cref="OpenUiRepaint.RefreshPersistentHud"/> closes for modules that span states; these two
+        /// belong to these two states, so they are closed HERE, once, for both arms.
+        ///
+        /// DELETING THE ARMS WAS THE OTHER OPTION AND IT IS UNSAFE. Neither EnterState is a repaint:
+        /// UIStateNothingSelected:76-82 SWITCHES to UIStateVehicleSelected whenever the viewer owns an
+        /// aircraft (and :134-139 switches the other way), and both call
+        /// <c>GameUtl.GetFreeCursorController().ForceCursorToCenterScreen()</c> (:87 / :144) — i.e. a
+        /// fallback re-enter would yank the player's cursor to the middle of the screen at rail rate.
+        /// UIStateVehicleSelected.ExitState:244-248 also writes back into the model
+        /// (<c>SelectedVehicle.Range.RangeIndicatorVisible = false</c>, <c>Animator.SetBool</c>).
+        ///
+        /// NEITHER PAINT IS A REBUILD. The base list is refreshed row by row through the row's OWN public
+        /// <c>RefreshVisuals()</c> (SiteManagementRow.cs:56-64 → ShowSiteStats: two text assignments), which
+        /// is exactly the branch <c>UIModuleSiteManagement.FillList</c>:182-188 takes when nothing structural
+        /// moved — FillList itself is NOT driven, because its first statement is <c>SelectRow(null)</c>
+        /// (:158), i.e. it would drop the row the player has selected once per rail batch, and Init is worse
+        /// still (:98-102 HideModule()s the panel). ponytail: a base APPEARING therefore still needs the
+        /// native <c>_changed</c> path; upgrade only if that is ever reported, it is a structural create.
+        /// The diplomacy strip has no per-pip refresh — <c>SetDiplomacyDisplay</c> destroys and re-instantiates
+        /// the pips (:28, :74) — so it is gated on its own declared scope through the SAME
+        /// <see cref="OpenUiRepaint.ScopeKey"/>/<see cref="OpenUiRepaint.RepaintNeeded"/> pair the
+        /// persistent-HUD strips use, and costs nothing on a batch that touched no faction.
+        /// </summary>
+        private static void RepaintSharedGeoscapeModules(GeoscapeViewState s, GeoscapeView v)
+        {
+            var mods = v == null ? null : v.GeoscapeModules;
+            if (mods == null) return;
+            var context = StateContext(s);
+            var diplomacy = mods.DiplomacyDisplayModule;
+            if (context != null && diplomacy != null && diplomacy.gameObject.activeInHierarchy &&
+                OpenUiRepaint.RepaintNeeded("diplomacy", OpenUiRepaint.ScopeKey("UIModuleDiplomacyDisplay")))
+                diplomacy.SetDiplomacyDisplay(context);
+            var bases = mods.BaseManagementModule;
+            if (bases == null || bases.BasesContainer == null || !bases.IsModuleExtended) return;
+            foreach (var row in bases.BasesContainer.GetComponentsInChildren<SiteManagementRow>())
+                if (row != null && row.Site != null) row.RefreshVisuals();
+        }
+
         // UIModuleBaseLayout.SetLeftSideInfo (:605, also its own PxBase.Stats.OnStatsUpdated handler)
         // + SetupBaseLayout (:561, re-inits every slot from PxBase.Layout). Deliberately NOT
         // UIModuleBaseLayout.Init — Init closes an open build menu / facility info (:291-292).
@@ -614,6 +659,7 @@ namespace Multiplayer.Network.Sync
                     // then decline → the fallback re-enter stacked on a partial repaint. Decline up front.
                     if (VsSelected == null || VsTabs == null || VsActions == null || VsReachable == null || VsObjectives == null) return false;
                     if (VsSelected.GetValue(s, null) == null) return false;
+                    RepaintSharedGeoscapeModules(s, v);
                     return Call(VsTabs, s) && Call(VsActions, s) && Call(VsReachable, s) && Call(VsObjectives, s, Viewer());
                 },
                 [typeof(UIStateVehicleRoster)] = (s, v) =>
@@ -639,7 +685,11 @@ namespace Multiplayer.Network.Sync
                     v.GeoscapeModules.VehicleRoster?.UpdateSelectedVehicleEquipments();  // roster slot (:112)
                     return true;
                 },
-                [typeof(UIStateNothingSelected)] = (s, v) => Call(NsObjectives, s, Viewer()),
+                [typeof(UIStateNothingSelected)] = (s, v) =>
+                {
+                    RepaintSharedGeoscapeModules(s, v);
+                    return Call(NsObjectives, s, Viewer());
+                },
                 // NO ENTRY FOR THE CUSTOMIZATION SCREENS, ON PURPOSE (reverted 2026-08-08, was d51f24d).
                 // `UIStateUnitCustomization<T>` writes nothing back in `ExitState` (:67-79 is pure unbind),
                 // so the fallback Exit+Enter is safe here — and it is also the only one of the two paths that
@@ -801,6 +851,14 @@ namespace Multiplayer.Network.Sync
                 { "UIModuleInfoBar",              new[] { "F#", "S#" } },
                 { "UIModuleVehicleSelection",     new[] { "V#", "U#" } },
                 { "UIModuleGeoRoster",            new[] { "U#" } },
+                // The diplomacy pip strip: SetDiplomacyDisplay reads <Faction>.Diplomacy through
+                // MainDiplomacyRelationDisplayRowElement.DiplomacyRelation, the same stored FactionDiplomacy
+                // the info bar's percentages come off (docs/rail-baseline.txt:527/561/594) -> "F#". Declared
+                // here rather than left undeclared BECAUSE the paint destroys and re-instantiates every pip
+                // (UIModuleDiplomacyDisplay.cs:28 + :74): undeclared would mean that teardown on every rail
+                // batch, which is the L492 flicker class. It is driven from the two geoscape Table arms
+                // (RepaintSharedGeoscapeModules), not from RefreshPersistentHud.
+                { "UIModuleDiplomacyDisplay",     new[] { "F#" } },
             };
 
         /// <summary>Surfaces whose repaint MUST be a patch and never a rebuild (§B.9). Declared by NAME
