@@ -4,6 +4,7 @@ using System.Reflection;
 using Assets.Code.PhoenixPoint.Geoscape.Entities.Sites.TheMarketplace;
 using Base.Core;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Entities.Sites;
 using PhoenixPoint.Geoscape.Events;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.Levels.Factions;
@@ -134,6 +135,18 @@ namespace Multiplayer.Network.Sync
             // THE REPORTED DEFECT. GeoFaction.cs:1774-1777 → :694-701 is `from s in Sites select
             // s.SiteProduction` → ResourceIncome.SetOutput. Nothing else. Sites are rail roots ("S#"),
             // so every input is already here and the rebuild is exact.
+            // LEVEL 1 OF THE SAME ROLLUP, AND IT HAS TO RUN FIRST. GeoFaction.UpdateProduction below sums
+            // Site.SiteProduction, and the only thing that writes SiteProduction is GeoPhoenixBase.UpdateStats
+            // (GeoPhoenixBase.cs:393-424 -> PhoenixBaseStats.Update, PhoenixBaseStats.cs:88-197), driven on the
+            // host by facility events the rail's field writes never fire here. Recomputing level 2 over an
+            // empty level 1 rebuilds zero, which is the income the client actually saw. NOT UpdateOutput
+            // (:548-556): it ends in RoutePower() -> SetPowered, an authoritative write, and this engine runs
+            // inside SyncApplyScope where it would punch straight through FacilityPowerGate.
+            Recompute(typeof(GeoPhoenixBase), "Facility_PowerStateChanged", "UpdateStats", new[] { "S#", "F#" },
+                      "GeoPhoenixBase.cs:860-863 — body is UpdateStats(); :393-424 writes only " +
+                      "Site.StorageProvided, the repeller/scanner ranges and Site.SiteProduction from " +
+                      "PhoenixBaseStats.Update (PhoenixBaseStats.cs:88-197 — a pure sum over Layout facilities: " +
+                      "no entity, no id, no RNG, no clock, no wallet)"),
             Recompute(typeof(GeoFaction), "OnSiteProductionChanged", "UpdateProduction", new[] { "S#", "F#" },
                       "GeoFaction.cs:694-701 — pure Sites->SiteProduction rollup into ResourceIncome; the " +
                       "aggregate ItemManufacturing.GetTotalTime:405-417 turns into TimeUnit.Invalid without"),
@@ -327,6 +340,18 @@ namespace Multiplayer.Network.Sync
                 foreach (var faction in geo.Factions)
                     foreach (var site in faction.Sites)
                         if (row.Owner.IsInstanceOfType(site)) yield return site;
+                yield break;
+            }
+            // A base is a COMPONENT of a site (GeoPhoenixBase : GeoSiteComponent), so it rides the same
+            // faction->site sweep, one hop further in.
+            if (typeof(GeoPhoenixBase).IsAssignableFrom(row.Owner))
+            {
+                foreach (var faction in geo.Factions)
+                    foreach (var site in faction.Sites)
+                    {
+                        var pxBase = site.GetComponent<GeoPhoenixBase>();
+                        if (pxBase != null && row.Owner.IsInstanceOfType(pxBase)) yield return pxBase;
+                    }
                 yield break;
             }
             if (typeof(GeoCharacter).IsAssignableFrom(row.Owner))

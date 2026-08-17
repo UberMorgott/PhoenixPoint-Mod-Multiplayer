@@ -949,6 +949,11 @@ namespace Multiplayer.Network.Sync
                 typeof(GeoPhoenixFacility.FacilityStateEventHandler), layout, FacStateHandler);
             FacUpdateCache.Invoke(layout, null);
             FacInit.Invoke(pxBase, new object[] { fac });
+            // The base's cached rollup (power, capacities, ResourceOutput -> Site.SiteProduction) is driven by
+            // facility EVENTS, which the rail's field writes never fire here — same call the facility-delta arm
+            // makes (UiEventMap.cs:171-172). Without it the arrived facility contributes nothing until an
+            // unrelated delta happens to hit that arm.
+            using (SyncApplyScope.Enter()) pxBase.UpdateStats();
             OpenUiRepaint.MarkDirty(); // open base screen rebuilds via the UIStatePhoenixBaseLayout table entry
             MpLog.Log("[Multiplayer][rail] structural create '" + rootKey + "' applied (facility " + fac.Def?.name + ", " + blob.Length + "B)");
             return true;
