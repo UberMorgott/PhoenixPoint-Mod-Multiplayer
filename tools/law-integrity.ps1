@@ -251,7 +251,14 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # GeoFaction rows, invoked through the one narrow explicit-args escape with suppressEvents:true so the
 # rebuild cannot reach RoutePower -> SetPowered inside SyncApplyScope. L561 asserts the ladder ORDER, the
 # override, the narrowness of the escape and both wirings. Nothing retired, no arm weakened.
-$expectedRegistrationDigest = 'cdacc5b4d442e0d681f6e0ab85fe933259707f5780c414c8d23848481dfc0dd2'
+# Updated deliberately 2026-08-18: L562 ADDED -- 357 -> 358 registrations, one new identity string.
+# OpenUiRepaint.RefreshInfoBar drove exactly one of UIModuleInfoBar's paint methods (UpdatePopulation),
+# so resources, income, scanners, soldiers, vehicles, storage and containment froze on every mirroring
+# peer while the population meter beside them kept updating. The refresh now drives the module's other
+# read-direction paints from a named list, and L562 asserts that list, its native signatures, that the
+# scope gate still runs, and that Init (18 unbalanced subscriptions, no Uninit) is never the repaint.
+# Nothing retired, no arm weakened.
+$expectedRegistrationDigest = '60526a408849eb9bdc46d77eb964f38a86c893ad48637c549b0f7e33daa96b79'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

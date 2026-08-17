@@ -459,6 +459,7 @@ namespace RailCheck
             Add(laws, () => L559_TheAgendaRebuildIsThrottledButNeverLost.Check());
             Add(laws, () => L557_NoPeerReadsARollupItsOwnRailStaled.Check());
             Add(laws, () => L556_AnAnsweredSharedWindowClosesEverywhere.Check());
+            Add(laws, () => L562_TheWholeInfoBarIsPaintedNotOnlyItsMeter.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -506,8 +507,14 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 357;
-        // Updated deliberately 2026-08-17: L559 (the agenda strip's native rebuild is throttled, and a
+        private const int ExpectedLawRegistrations = 358;
+        // Updated deliberately 2026-08-18: L562 (the whole top-right info bar is painted, not only its
+        // population meter) was ADDED — 357 -> 358. Nothing was retired and no surviving law lost an arm.
+        // L543 is untouched: L562 forbids no signature and builds no read-set — the bar keeps the SAME
+        // ScopeKey/RepaintNeeded gate it already had, and what L562 adds is which native paint methods run
+        // once that gate says yes. L516's liveness-before-memory ordering is likewise untouched and is the
+        // arm the new positive control re-executes.
+        // Earlier: L559 (the agenda strip's native rebuild is throttled, and a
         // throttled rebuild is never lost) was ADDED — 354 -> 355. Nothing was retired and nothing was
         // weakened. It is NOT the hand-written rebuild gate L492/L516/L548 owned coming back: no model
         // source is enumerated and no change can compare EQUAL, which is the failure that got that gate
@@ -738,7 +745,7 @@ namespace RailCheck
         // its own identity and every arm — the new row is an ordinary Recompute it classifies like the rest;
         // what L561 adds is the ORDER of the ladder and the one narrow explicit-args escape, neither of
         // which L557 has ever expressed.
-        private const string ExpectedExecutionIdentityDigest = "dbe4edfe1d698c830c7d131ff0591baaaeaf151cca5c66ad645c0dcd9dded1f0";
+        private const string ExpectedExecutionIdentityDigest = "15f96a66bd1400093c5ee33f23b99c6e75bd5882699650cc9fbf17544c822dd0";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

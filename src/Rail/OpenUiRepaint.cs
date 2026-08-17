@@ -110,6 +110,59 @@ namespace Multiplayer.Network.Sync
             AccessTools.Method(typeof(UIModuleInfoBar), "UpdatePopulation", Type.EmptyTypes);
         private static readonly FieldInfo InfoBarContext =
             AccessTools.Field(typeof(UIModuleInfoBar), "_context");
+        // THE REST OF THE SAME BAR (L562). UpdatePopulation alone is the population meter and TFTV's
+        // reputation postfix; every other number on the strip has its own paint method, each reached
+        // NATIVELY only from an event the rail never fires on a mirroring peer (Init:150-160 subscribes
+        // ScannerCapacityChanged/CharacterAdded/StorageChanged/ResourcesChanged/OnIncomeChanged, and
+        // Update():216-247 only drains flags those handlers set). Signatures READ, not assumed:
+        //   UpdateResourceInfo(GeoFaction, bool):388 — wallet + income for all seven resources
+        //   SetScannersInfo():371            — scanner count/capacity
+        //   UpdatePhoenixSpecificDataData():265 — soldiers, vehicles, storage, containment in one call
+        // UpdateStorage():338 is a REAL member and is deliberately NOT listed: :271 already reaches it,
+        // and a second invoke would paint the same label twice per batch.
+        private static readonly MethodInfo InfoBarUpdateResourceInfo =
+            AccessTools.Method(typeof(UIModuleInfoBar), "UpdateResourceInfo",
+                               new[] { typeof(GeoFaction), typeof(bool) });
+        private static readonly MethodInfo InfoBarSetScannersInfo =
+            AccessTools.Method(typeof(UIModuleInfoBar), "SetScannersInfo", Type.EmptyTypes);
+        private static readonly MethodInfo InfoBarPhoenixData =
+            AccessTools.Method(typeof(UIModuleInfoBar), "UpdatePhoenixSpecificDataData", Type.EmptyTypes);
+
+        /// <summary>
+        /// THE ONE DELIBERATE MODULE-TIER EXCEPTION, and it is MECHANISM-FORCED — do not "clean this up"
+        /// into something generic. There is no rebuild contract at the module tier to be generic OVER:
+        /// <c>UIModuleBehavior</c> (Base.UI/UIModuleBehavior.cs:10-88) declares only SetStateID/OnShow/OnHide,
+        /// exactly 1 of 73 modules overrides OnShow, <c>Init</c> exists on 26 of 73 with differing signatures
+        /// and <c>Uninit</c> on 8 — so a reflection sweep over "the module's refresh method" would be a guess
+        /// per module. This bar in particular belongs to NO view state (that is why
+        /// <see cref="RefreshPersistentHud"/> exists at all) and its <c>Init</c>:142-175 performs 18
+        /// unbalanced <c>+=</c> on long-lived objects with NO Uninit to match — so re-driving Init leaks one
+        /// subscription set per rail batch. The read-direction paints below are the only honest repaint it
+        /// has, and naming them is the price of that.
+        ///
+        /// Internal so L562 can execute the list rather than re-listing it: a native rename then turns the
+        /// law RED instead of silently blanking half the strip.
+        /// </summary>
+        internal static readonly MethodInfo[] InfoBarPaints =
+        {
+            InfoBarUpdatePopulation, InfoBarUpdateResourceInfo, InfoBarSetScannersInfo, InfoBarPhoenixData,
+        };
+
+        /// <summary>Drive every bound paint on the ONE live bar. The argument shape is derived from the
+        /// member itself (the only two-parameter one is UpdateResourceInfo(faction, useAnimation)) so the
+        /// list above stays a list and never becomes a switch. <c>useAnimation: false</c> deliberately: the
+        /// animated form is what the native wallet handler uses for a change THIS peer made, and a mirrored
+        /// batch is not a spend the local player just performed.</summary>
+        private static void PaintInfoBar(UIModuleInfoBar bar, GeoFaction faction)
+        {
+            foreach (var paint in InfoBarPaints)
+            {
+                if (paint == null) continue;
+                var parameters = paint.GetParameters();
+                if (parameters.Length == 0) paint.Invoke(bar, null);
+                else if (faction != null) paint.Invoke(bar, new object[] { faction, false });
+            }
+        }
 
         // UIModuleVehicleSelection: private SetCrew(IEnumerable<GeoCharacter>, int):401, which forwards to
         // AircraftCrewController.SetCrew:56 — the ONE place that ever switches
@@ -576,11 +629,15 @@ namespace Multiplayer.Network.Sync
             // LIVENESS BEFORE MEMORY (L516's ordering, L543's arm c). `_context` is null until
             // UIModuleInfoBar.Init:144, and UpdatePopulation:276-288 dereferences `_context.View` unguarded
             // (decompiled/AssemblyCSharp/.../UIModuleInfoBar.cs:110 field, :144 assignment, :278 first read).
-            if (!InfoBarNeedsRefresh(InfoBarContext.GetValue(bar) != null, ScopeKey("UIModuleInfoBar"))) return;
+            var context = InfoBarContext.GetValue(bar) as GeoscapeViewContext;
+            if (!InfoBarNeedsRefresh(context != null, ScopeKey("UIModuleInfoBar"))) return;
             try
             {
                 // law 8: the repaint re-reads the model and can fire native UI events a capture seam hears.
-                using (SyncApplyScope.Enter()) InfoBarUpdatePopulation.Invoke(bar, null);
+                // The faction comes from the bar's OWN binding, never from the viewer: every paint below
+                // dereferences `_context.ViewerFaction` itself, so asking anything else would repaint one
+                // faction's numbers into another faction's strip.
+                using (SyncApplyScope.Enter()) PaintInfoBar(bar, context.ViewerFaction);
             }
             catch (Exception ex)
             {
