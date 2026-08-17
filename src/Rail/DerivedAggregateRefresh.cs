@@ -337,12 +337,27 @@ namespace Multiplayer.Network.Sync
             bool firstPass = !ReferenceEquals(_lastGeo.Target, geo);
             _lastGeo.Target = geo;
             var touchedRoots = firstPass ? null : TouchedRoots(touched);
+            _ranThisBatch.Clear();
             bool rebuilt = false;
             foreach (var row in Table)
             {
                 if (!Arms(row, touched)) continue;
                 var sweep = SweepKind(row.Owner);
                 var roots = !firstPass && MayNarrow(row, sweep, touched) ? touchedRoots : null;
+                // ONE REBUILD PER OWNER, however many HANDLERS name it. The table is keyed by the native
+                // EVENT HANDLER — L557 derives that set from the shipped assembly and every member must be
+                // classified here — while what actually runs is the parameterless REBUILD the handler calls,
+                // and several handlers routinely call the same one: GeoCharacter.OnAbilityAdded (:711-717)
+                // and OnHungerDaysChanged (:725-728) are BOTH exactly `UpdateStats()`, on the same owner,
+                // armed by the same "U#". So every character of every faction was rebuilt TWICE per batch.
+                // Deduped HERE and not by deleting a row: the rows differ in the one field that matters to
+                // L557 (Handler), and dropping either would leave a real native handler unclassified.
+                // Args in the key because a row that overrides the game's default is a DIFFERENT invocation
+                // of the same method; the narrowing likewise, so a whole sweep is never eaten by a narrowed
+                // one that ran first.
+                if (row.Args == null &&
+                    !_ranThisBatch.Add(row.Owner.FullName + "|" + row.Rebuild + (roots == null ? "|all" : "|narrow")))
+                    continue;
                 foreach (var target in Targets(geo, row, roots))
                 {
                     var bound = Bind(target.GetType(), row.Rebuild);
@@ -386,6 +401,11 @@ namespace Multiplayer.Network.Sync
         }
 
         private static readonly WeakReference _lastGeo = new WeakReference(null);
+
+        /// <summary>(owner, rebuild, narrowing) pairs already driven in THIS batch — see the dedupe in
+        /// <see cref="ClientTick"/>. Reused across batches rather than allocated per tick: this runs 3-4
+        /// times a second for the life of a session.</summary>
+        private static readonly HashSet<string> _ranThisBatch = new HashSet<string>(StringComparer.Ordinal);
 
         /// <summary>
         /// THE ROOT KIND THIS ROW'S TARGET SWEEP ENUMERATES — the one axis <see cref="Targets"/> can be
