@@ -418,7 +418,6 @@ namespace RailCheck
             Add(laws, () => L481_ADroppedReferenceAsksForItselfBack.Check());
             Add(laws, () => L483_TheMistRepellerRadiusIsDerived.Check());
             Add(laws, () => L485_ARefusalTheClientCouldNotHaveGreyedReachesTheScreen.Check());
-            Add(laws, () => L492_TheAgendaStripRebuildsOnlyWhenItsRowsChange.Check());
             Add(laws, () => L472_EveryDoorIntoAiEvaluationIsKnownAndGatedOnce.Check(game));
             Add(laws, () => L491_AGetterMintedTwinResolvesOntoItsLiveOwner.Check());
             Add(laws, () => L497_TheCrewBarsRepaintOnAMirroredStat.Check());
@@ -437,7 +436,6 @@ namespace RailCheck
             Add(laws, () => L512_TheCrewStripRepaintsOnAMirroredLevelUp.Check());
             Add(laws, () => L513_NoPeerLiftsBeforeItsBoundaryReleases.Check());
             Add(laws, () => L514_TheRosterListRepaintsOnTheSameMirroredLevelUp.Check());
-            Add(laws, () => L516_AnOffScreenStripNeverVouchesForItsRows.Check());
             Add(laws, () => L520_TheOnlyPublicationIsTheQueryPostfix.Check());
             Add(laws, () => L521_TheAppendIsScreenIndependent.Check());
             Add(laws, () => L522_AClientNeverSortsAWindowQueue.Check());
@@ -449,7 +447,6 @@ namespace RailCheck
             Add(laws, () => L545_PatchDoNotRebuild.Check());
             Add(laws, () => L546_AHostMintedPositionIsPublishedOrStated.Check());
             Add(laws, () => L547_ALocalDismissalNeverTravels.Check());
-            Add(laws, () => L548_TheAgendaStripNeverRebuildsOnAProgressTick.Check());
             Add(laws, () => L549_TheActingPeersOwnGestureRepaintsItsOwnHud.Check());
             Add(laws, () => L550_EveryHostOnlyPresentationChannelIsServed.Check());
             Add(laws, () => L551_TheRevealIsOneInstantForEveryPeer.Check());
@@ -507,8 +504,18 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 358;
-        // Updated deliberately 2026-08-16: L558 (the agenda tracker root is registered, both sides, and
+        private const int ExpectedLawRegistrations = 355;
+        // Updated deliberately 2026-08-17: THREE laws RETIRED — 358 -> 355 — because their SUBJECT was
+        // deleted, not because they were inconvenient. L492, L516 and L548 all own ONE mechanism: the
+        // agenda strip's hand-written four-source rebuild gate (OpenUiRepaint.AgendaSignature /
+        // AgendaNeedsRebuild). The strip now takes the module's own public Init(context) full rebuild
+        // every batch it is on screen,
+        // so there is no gate left to be right or wrong about. That gate is deleted BECAUSE it enumerated
+        // exactly vanilla's four row sources: a row appended by another mod (TFTV postfixes InitialSetup)
+        // could never move the signature, so its rebuild was skipped for the life of the session. The
+        // flicker those three laws were written for is now bounded by the batch flush instead — stated
+        // plainly rather than hidden: one rebuild per flushed batch, not one per delta.
+        // Earlier: L558 (the agenda tracker root is registered, both sides, and
         // the client apply patch actually reads it) was ADDED — 357 -> 358. Nothing was retired and
         // nothing was weakened. Tasks 1-5 landed the "M#agenda" mod-root sync feature (src/Rail/
         // AgendaTrackerSync.cs) so every peer paints the HOST'S computed remaining-time instead of
@@ -695,7 +702,12 @@ namespace RailCheck
         // one new identity string. No identity retired. L506 keeps its own identity and every arm — the
         // hourly tick stays refused on a client; what L557 adds runs BESIDE that refusal and invokes only
         // methods the caller supplies no information to, so it advances no simulation.
-        private const string ExpectedExecutionIdentityDigest = "d8aa89ec0acca081f5c4d078dcd6ef416679bac283ef897bdb9785c23d395111";
+        // Updated deliberately 2026-08-17 with the retirement of L492/L516/L548 (the agenda strip's
+        // hand-written rebuild gate — see ExpectedLawRegistrations): three identity strings RETIRED,
+        // 358 -> 355 executed identities. No identity was added and no surviving law lost an arm; L498
+        // lost arm (f) and L543 arm (b) shrank, both because their subject (AgendaNeedsRebuild /
+        // AgendaSignature) no longer exists, and L543 GAINED the fifth forbidden builder back.
+        private const string ExpectedExecutionIdentityDigest = "79f42705346905337842b4b401ed640fa51963e00d84dea8a852c60553291dec";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
@@ -6384,15 +6396,17 @@ namespace RailCheck
                 // Read the PRODUCTION handle, not a fresh lookup: the overload trap is real —
                 // UpdateData(UIFactionDataTrackerElement) exists next to UpdateData(), and grabbing it would
                 // tick ONE row instead of rebuilding the module.
-                var prodUpdate = repaint.GetField("TrackerUpdateData", AllMembers)?.GetValue(null) as MethodBase;
-                if (prodUpdate != null && prodUpdate.GetParameters().Length != 0)
-                    yield return "L54 overload-grabbed: OpenUiRepaint.TrackerUpdateData is not the no-argument " +
-                                 "UpdateData — UpdateData(UIFactionDataTrackerElement) is a per-ROW tick, not the " +
-                                 "module rebuild, so the refresh would repaint one element and drop the rest";
-                if (!Callees(updateData, game).Any(c => c.MetadataToken == initialSetup.MetadataToken))
-                    yield return "L54 flag-does-nothing: UpdateData() no longer calls InitialSetup — setting " +
-                                 "_needsRefresh stopped meaning 'rebuild the rows', so the refresh runs and the stale " +
-                                 "research/manufacturing/aircraft rows stay exactly as they were";
+                var prodInit = repaint.GetField("TrackerInit", AllMembers)?.GetValue(null) as MethodBase;
+                if (prodInit != null && (prodInit.GetParameters().Length != 1 ||
+                                         prodInit.GetParameters()[0].ParameterType.Name != "GeoscapeViewContext"))
+                    yield return "L54 overload-grabbed: OpenUiRepaint.TrackerInit is not Init(GeoscapeViewContext) — " +
+                                 "that is the module's ONE public full-rebuild entry point, and anything else either " +
+                                 "ticks a single row or does not resolve at all";
+                if (!Callees(init, game).Any(c => c.MetadataToken == initialSetup.MetadataToken))
+                    yield return "L54 rebuild-does-nothing: Init no longer calls InitialSetup — InitialSetup is where " +
+                                 "the rows are CREATED (and the seam other mods postfix to add their own), so driving " +
+                                 "Init would refresh existing rows only and a task that STARTED elsewhere never " +
+                                 "appears at all";
                 if (timingStart == null || !Callees(init, game).Any(c => c.Name == "Start" &&
                                                                         c.DeclaringType == typeof(Base.Core.Timing)))
                     yield return "L54 hud-self-refreshes: UIModuleFactionAgendaTracker.Init no longer starts its poll " +
@@ -6404,7 +6418,7 @@ namespace RailCheck
             }
 
             // The production handles RefreshPersistentHud actually caches.
-            foreach (var n in new[] { "TrackerUpdateData", "TrackerNeedsRefresh" })
+            foreach (var n in new[] { "TrackerInit", "TrackerContext" })
             {
                 var slot = repaint.GetField(n, AllMembers);
                 object bound = null;
@@ -6850,13 +6864,13 @@ namespace RailCheck
 
             // The HUD's read set comes from the MethodInfo the mod itself invokes: if the game renames
             // UpdateData, RefreshPersistentHud's own null-guard turns the whole HUD refresh into a silent
-            // no-op at runtime (OpenUiRepaint.cs, "if (TrackerUpdateData == null ...) return"), and a
+            // no-op at runtime (OpenUiRepaint.cs, "if (TrackerInit == null ...) return"), and a
             // static red here is the only warning anyone gets.
-            var target = typeof(OpenUiRepaint).GetField("TrackerUpdateData", AllMembers)?.GetValue(null) as MethodBase;
-            var flag = typeof(OpenUiRepaint).GetField("TrackerNeedsRefresh", AllMembers)?.GetValue(null);
+            var target = typeof(OpenUiRepaint).GetField("TrackerInit", AllMembers)?.GetValue(null) as MethodBase;
+            var flag = typeof(OpenUiRepaint).GetField("TrackerContext", AllMembers)?.GetValue(null);
             if (target == null || flag == null)
             {
-                yield return "L60 hud-target-unresolved: UIModuleFactionAgendaTracker.UpdateData()/_needsRefresh no " +
+                yield return "L60 hud-target-unresolved: UIModuleFactionAgendaTracker.Init(context)/_context no " +
                              "longer resolve — RefreshPersistentHud returns on its own null-guard, so the persistent " +
                              "HUD silently stops repainting on EVERY peer and no log line says so";
                 yield break;

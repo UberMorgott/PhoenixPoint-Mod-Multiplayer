@@ -27,8 +27,6 @@ namespace RailSim
             yield return Pair("a-hole-is-earned-not-declared", AHoleIsEarnedNotDeclared);
             yield return Pair("the-hole-predicate-classifies-anything", TheHolePredicateClassifiesAnything);
             yield return Pair("an-untouched-surface-does-not-repaint", AnUntouchedSurfaceDoesNotRepaint);
-            yield return Pair("a-progress-tick-never-tears-down-the-agenda-strip",
-                              AProgressTickNeverTearsDownTheAgendaStrip);
             yield return Pair("my-own-gesture-repaints-my-own-strip", MyOwnGestureRepaintsMyOwnStrip);
             yield return Pair("a-joining-peer-never-replays-the-status-bar",
                               AJoiningPeerNeverReplaysTheStatusBar);
@@ -560,29 +558,24 @@ namespace RailSim
             return new GeoscapeLogEntry { EventDate = TimeUnit.FromTimeSpan(TimeSpan.FromTicks(ticks)) };
         }
 
-        /// <summary>L549 as an OBSERVABLE HISTORY, and the direction L548's history does not cover: there
-        /// the changes ARRIVE, here the peer makes them ITSELF. A host queues a research, then a
-        /// manufacture, then nothing. Each self-initiated gesture must leave the persistent HUD owing a
-        /// refresh — the flag every apply path raises and no local gesture used to — and the strip's own
-        /// teardown gate must still fire exactly twice, once per real change of the SET OF ROWS. A peer
-        /// whose own action repaints nothing until it walks out of the screen and back is the postulate-1
-        /// defect reported on the host 2026-08-15.</summary>
+        /// <summary>L549 as an OBSERVABLE HISTORY: the peer makes the changes ITSELF instead of receiving
+        /// them. A host queues a research, then a manufacture, then a gesture the strip does not draw. Each
+        /// self-initiated gesture must leave the persistent HUD owing a refresh — the flag every apply path
+        /// raises and no local gesture used to. A peer whose own action repaints nothing until it walks out
+        /// of the screen and back is the postulate-1 defect reported on the host 2026-08-15.
+        ///
+        /// The teardown-count half went with the agenda strip's rebuild gate (2026-08-17): the strip now
+        /// takes the module's own native Init(context) rebuild once per flushed batch, so there is no
+        /// per-gesture teardown decision left to observe.</summary>
         private static IEnumerable<string> MyOwnGestureRepaintsMyOwnStrip(int seed)
         {
             OpenUiRepaint.Reset();
-            var gestures = new[]
-            {
-                "manufacture=-|research=RES_A|vehicles=|facilities=",   // the host starts a research
-                "manufacture=Gun|research=RES_A|vehicles=|facilities=", // …then queues a manufacture
-                "manufacture=Gun|research=RES_A|vehicles=|facilities=", // …then a gesture the strip does not draw
-            };
 
-            int unmarked = 0, teardowns = 0;
-            foreach (var rows in gestures)
+            int unmarked = 0;
+            for (int gesture = 0; gesture < 3; gesture++)
             {
                 OpenUiRepaint.MarkLocalGesture();          // the acting peer's own capture seam
                 if (!OpenUiRepaint.HudRepaintOwed) unmarked++;
-                if (OpenUiRepaint.AgendaNeedsRebuild(true, rows)) teardowns++;
             }
             OpenUiRepaint.Reset();
 
@@ -592,50 +585,6 @@ namespace RailSim
                              "APPLY path, so the peer that pressed the button is the one peer whose " +
                              "already-open strip is never refreshed — the host starting a research and seeing " +
                              "no research row.";
-            if (teardowns != 2)
-                yield return "my-own-gesture-repaints-my-own-strip: the strip was torn down " + teardowns +
-                             " times across 3 self-initiated gestures, of which exactly TWO changed the SET OF " +
-                             "ROWS (the first paint and the manufacture). A third teardown means the mark now " +
-                             "rebuilds the strip for any gesture at all — the L492/L548 flicker on the acting " +
-                             "peer this time; a missing one means the mark reaches the HUD and the strip " +
-                             "ignores it.";
-        }
-
-        /// <summary>L548 as an OBSERVABLE HISTORY. A run of rail batches on a client: a manufacture
-        /// countdown ticks under "F#" once a second while the SET OF ROWS stands still, then a research
-        /// starts and the set really changes. Counted over the real gate and the real generation
-        /// machinery, the strip must be torn down exactly TWICE — the first paint and the real change —
-        /// and never for a countdown, because InitialSetup disposes and re-creates every row and doing
-        /// that at the tick rate is the 1 Hz client flicker reported 2026-08-15.</summary>
-        private static IEnumerable<string> AProgressTickNeverTearsDownTheAgendaStrip(int seed)
-        {
-            OpenUiRepaint.Reset();
-            const string before = "manufacture=Gun|research=-|vehicles=|facilities=";
-            const string after = "manufacture=Gun|research=RES_A|vehicles=|facilities=";
-            var run = new[]
-            {
-                new KeyValuePair<string, string>("F#7a3.SerializationData.Manufacture.Current.Progress", before),
-                new KeyValuePair<string, string>("F#7a3.SerializationData.Manufacture.Current.Progress", before),
-                new KeyValuePair<string, string>("F#7a3.SerializationData.Manufacture.Current.Progress", before),
-                new KeyValuePair<string, string>("F#7a3.SerializationData.Research.Current", after),
-                new KeyValuePair<string, string>("F#7a3.SerializationData.Manufacture.Current.Progress", after),
-            };
-
-            int teardowns = 0;
-            foreach (var batch in run)
-            {
-                OpenUiRepaint.BumpScopeGenerations(new List<string> { batch.Key });
-                if (OpenUiRepaint.AgendaNeedsRebuild(true, batch.Value)) teardowns++;
-            }
-            OpenUiRepaint.Reset();
-
-            if (teardowns != 2)
-                yield return "a-progress-tick-never-tears-down-the-agenda-strip: the strip was rebuilt " +
-                             teardowns + " times across 5 batches, of which exactly ONE changed the set of " +
-                             "rows (plus the first paint). Every extra one is a full row teardown paid for a " +
-                             "countdown that UpdateData() already repaints on every call — the reported 1 Hz " +
-                             "client blink; a missing one is a strip that never follows a real change, which " +
-                             "is the worse defect of the two.";
         }
 
         /// <summary>§C.1 property 3 — the property no existing law can express, and the acceptance

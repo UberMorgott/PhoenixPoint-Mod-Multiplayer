@@ -53,8 +53,11 @@ namespace RailCheck
     ///       docs/rail-baseline.txt:527/561/594) and the alien base list behind its meter ("S#"). A
     ///       declaration missing one of them would go green on every other arm while that half of the
     ///       strip froze.
-    ///   (f) <c>agenda-off-the-shared-gate</c> — `AgendaNeedsRebuild` still routes through `RepaintNeeded`,
-    ///       so the two strips cannot drift back into two mechanisms.
+    ///
+    /// Arm (f) (<c>agenda-off-the-shared-gate</c>) was RETIRED 2026-08-17 with its subject: the agenda strip
+    /// no longer has a gate at all — it takes the module's own native <c>Init(context)</c> rebuild once per
+    /// flushed batch — so there is no second mechanism left for it to drift into. This law's own subject,
+    /// the info bar, is untouched.
     ///
     /// Falsify (verified RED, then restored):
     ///   • drop the `RepaintNeeded` call from `RefreshInfoBar` → (a)
@@ -74,11 +77,10 @@ namespace RailCheck
             var gate = typeof(OpenUiRepaint).GetMethod("RepaintNeeded", Any);
             var refresh = typeof(OpenUiRepaint).GetMethod("RefreshInfoBar", Any);
             var live = typeof(OpenUiRepaint).GetMethod("InfoBarNeedsRefresh", Any);
-            var agenda = typeof(OpenUiRepaint).GetMethod("AgendaNeedsRebuild", Any);
-            if (gate == null || refresh == null || live == null || agenda == null)
+            if (gate == null || refresh == null || live == null)
             {
                 yield return "L498 premise-changed: OpenUiRepaint.RepaintNeeded / .RefreshInfoBar / " +
-                             ".InfoBarNeedsRefresh / .AgendaNeedsRebuild did not resolve. The one repaint-if-changed " +
+                             ".InfoBarNeedsRefresh did not resolve. The one repaint-if-changed " +
                              "gate has been renamed, removed, or split back into a mechanism per strip, so " +
                              "every arm below would pass vacuously — and both failure directions are silent: " +
                              "a strip that repaints ten times a second says nothing in the log, and neither " +
@@ -151,13 +153,6 @@ namespace RailCheck
                                  "keeps drawing the old number until something else moves. Every other arm " +
                                  "stays green while that half of the bar is frozen.";
                 }
-
-            // ── (f) the agenda strip still rides the same gate ─────────────────────────────────────────
-            if (!Program.Callees(agenda, mod).Any(c => Same(c, gate)))
-                yield return "L498 agenda-off-the-shared-gate: AgendaNeedsRebuild no longer routes through " +
-                             "RepaintNeeded. Two strips answering the same question with two mechanisms is " +
-                             "exactly the per-panel sprawl this consolidation removed, and the second copy " +
-                             "is always the one that silently stops matching the first.";
         }
 
         private const string QUOTE = "\"";

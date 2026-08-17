@@ -213,7 +213,17 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # the client apply patch AgendaTrackerSync.AgendaRowApplyPatch.Prefix actually reads AgendaState.Rows
 # instead of short-circuiting the native computation as a silent no-op). Tasks 1-5 landed the feature
 # (src/Rail/AgendaTrackerSync.cs); nothing retired.
-$expectedRegistrationDigest = 'd01f37ca15fa1252eac6891fc6a78eed151d45aad19e9f90c2a86aa7e90502d0'
+# Updated deliberately 2026-08-17: L492, L516 and L548 RETIRED -- 358 -> 355 registrations, three identity
+# strings gone. All three own ONE mechanism, OpenUiRepaint.AgendaSignature/AgendaNeedsRebuild: the agenda
+# strip's hand-written rebuild gate. It is deleted, not weakened, because the "set of rows" it compared was
+# an enumeration of exactly vanilla's four row sources -- a row another mod appends from its own
+# InitialSetup postfix (TFTV AgendaPatches.cs:363-448) could never move the signature, so the rebuild that
+# row was owed was skipped for the whole session. The strip now takes the module's own PUBLIC
+# Init(GeoscapeViewContext) full rebuild, once per FLUSHED BATCH (OpenUiRepaint.FlushIfDirty ->
+# RefreshPersistentHud -> RefreshAgendaTracker), so no gate remains to be right or wrong about. L543 was
+# RESTORED, not weakened: AgendaSignature goes back into its forbidden-builder list (five names again) and
+# its positive control keeps RepaintNeeded; L498's arm (f) retired with its subject.
+$expectedRegistrationDigest = '92d3d7c06ee174c6346c79fb3b705023d2b51477e9d921d95b6b8cd81e9308d1'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

@@ -67,12 +67,11 @@ namespace Multiplayer.Network.Sync
         private static readonly FieldInfo StatesStackField =
             AccessTools.Field(typeof(GeoscapeView), "_statesStack");
 
-        // UIModuleFactionAgendaTracker: private no-arg UpdateData() (:179 — the body UpdateModuleDataCrt:125
-        // calls) and the flag that makes it do a FULL rebuild (:186-190 -> InitialSetup:144).
-        private static readonly MethodInfo TrackerUpdateData =
-            AccessTools.Method(typeof(UIModuleFactionAgendaTracker), "UpdateData", Type.EmptyTypes);
-        private static readonly FieldInfo TrackerNeedsRefresh =
-            AccessTools.Field(typeof(UIModuleFactionAgendaTracker), "_needsRefresh");
+        // UIModuleFactionAgendaTracker: the module's own PUBLIC full rebuild, Init(GeoscapeViewContext):93 —
+        // UpdateData() + InitialSetup():144. Bound by signature so a native change reports itself.
+        private static readonly MethodInfo TrackerInit =
+            AccessTools.Method(typeof(UIModuleFactionAgendaTracker), "Init",
+                               new[] { typeof(GeoscapeViewContext) });
         // Init(context):93 is what fills it; before the first geoscape state has entered, InitialSetup:144
         // would NRE on `_faction.Manufacture`. Asked rather than caught: the module handle below is the
         // NATIVE one, so it resolves long before the module is live.
@@ -163,11 +162,10 @@ namespace Multiplayer.Network.Sync
         /// in <see cref="UiNativeRepaint.Table"/> can ever reach it and <see cref="Repaint"/> alone left it
         /// stale on every peer that did not perform the gesture.
         ///
-        /// Its native refresh cannot be borrowed as-is: <c>Init</c>:100 starts <c>UpdateModuleDataCrt</c> on
-        /// the GAME clock (<c>_context.Level.Timing.Start</c>), so setting <c>_needsRefresh</c> and waiting
-        /// — what this used to do, from ResearchSync — only repaints once the geoscape is UNPAUSED, and on
-        /// the host nothing set the flag at all. So drive the module's own <c>UpdateData()</c> directly,
-        /// with the flag on: that is precisely what the native poll does, one tick early.
+        /// Its native poll cannot be waited on: <c>Init</c>:100 starts <c>UpdateModuleDataCrt</c> on the GAME
+        /// clock (<c>_context.Level.Timing.Start</c>), so it only repaints once the geoscape is UNPAUSED, and
+        /// it refreshes EXISTING rows only. So the module's own public <c>Init(context)</c>:93 is re-driven
+        /// here — the full native rebuild, one tick early.
         ///
         /// Called from the ONE universal repaint, so every mark — a client's rail batch, the host applying a
         /// remote intent (IntentRail.HandleInbound), a reject reconverge — refreshes it, for every kind,
@@ -310,13 +308,32 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        /// <summary>Top-right activity strip. The flag makes UpdateData() take its InitialSetup branch
-        /// (UIModuleFactionAgendaTracker.cs:186-190 → :144), i.e. the module's own full rebuild from
-        /// Research.Current / Manufacture.Current / every vehicle action / every facility under
-        /// construction — exactly what its game-clock poll does, one tick early.</summary>
+        /// <summary>Top-right activity strip — NATIVE FULL REBUILD, once per flushed batch it is on screen.
+        /// <c>UIModuleFactionAgendaTracker.Init(context)</c>:93-104 is the module's own PUBLIC rebuild:
+        /// <c>UpdateData()</c> then <c>InitialSetup()</c>:144, which is where every row is CREATED. The 1 s
+        /// <c>UpdateModuleDataCrt</c> poll refreshes only rows that ALREADY exist, so a peer whose model
+        /// gained a task has no row for it until something runs InitialSetup again — and nothing does: the
+        /// module spans view states, so no state re-Init's it when the player comes back.
+        ///
+        /// INIT, NOT A HAND-PICKED REBUILD. <c>InitialSetup</c> is the seam other mods extend — TFTV appends
+        /// its own agenda rows from a Postfix on it (refs/TFTV-src/TFTV/TFTVAAAgenda/AgendaPatches.cs:363-448)
+        /// — so driving the native entry point picks up every row type this assembly has never heard of, with
+        /// zero enumeration here. The four-source signature gate this replaces (AgendaSignature /
+        /// AgendaNeedsRebuild, and L492/L516/L548 with them) is exactly what excluded them: it could only see
+        /// vanilla's manufacture head, research head, vehicle actions and facility builds, so a change to any
+        /// other row source compared EQUAL and the rebuild it owed was skipped for good.
+        ///
+        /// Re-driving Init is safe: :98 starts <c>UpdateModuleDataCrt</c> only when the old
+        /// <c>_updateable</c> is null or stopped, and it is <c>Awake</c>:89-90 — not Init — that owns the
+        /// button and hotkey subscriptions, so nothing double-subscribes and no coroutine accumulates.
+        ///
+        /// ONCE PER FLUSHED BATCH, never per delta: the only caller is <c>RefreshPersistentHud</c>, whose
+        /// only callers are <c>FlushIfDirty</c> and <c>RepaintOpenGeoscapeScreen</c> (itself reached from
+        /// FlushIfDirty). Every mark in between merely sets a flag — <c>MarkDirty</c>/<c>MarkHudDirty</c> —
+        /// so N deltas in one batch still cost exactly ONE rebuild.</summary>
         private static void RefreshAgendaTracker(GeoscapeModulesData mods)
         {
-            if (TrackerUpdateData == null || TrackerNeedsRefresh == null || TrackerContext == null) return;
+            if (TrackerInit == null || TrackerContext == null) return;
             var tracker = mods.FactionDataTracker;
             if (tracker == null)
             {
@@ -326,47 +343,17 @@ namespace Multiplayer.Network.Sync
                                      "on its own game-clock poll (logged once)");
                 return;
             }
-            if (TrackerContext.GetValue(tracker) == null) return; // not Init'd yet — InitialSetup would NRE
+            // Not Init'd yet: InitialSetup would NRE on _faction, and there is no context to hand back.
+            var context = TrackerContext.GetValue(tracker) as GeoscapeViewContext;
+            if (context == null) return;
             try
             {
-                // THE STRIP MUST BE ON SCREEN BEFORE IT IS ASKED ANYTHING (report 2026-08-15: the top-right
-                // label stopped following RESEARCH on clients). A module whose state is not up is switched
-                // off by the game itself (UIModuleBehavior.SetStateID:34) — and unlike UIStateNothingSelected
-                // this module SPANS states, so nothing re-Inits it when the state comes back; that is the
-                // whole reason this method exists. RepaintNeeded REMEMBERS every key it is handed, so asking
-                // an OFF strip made it vouch for a signature nobody ever drew: the research head changed
-                // while the player was inside UIStateResearch or behind the research-complete modal, the key
-                // was recorded, and the next flush — the first one with the strip back on screen — compared
-                // EQUAL and skipped the rebuild. The row then sat stale until something ELSE in the signature
-                // moved, which is exactly "manufacturing updates, research does not".
-                // The two strips added the same day guard this way already (RefreshVehicleCrew:304,
-                // RefreshRosterSlots:212); the agenda strip was the one that did not. The info bar is now
-                // guarded the same way by InfoBarNeedsRefresh — its old one-second Time.realtimeSinceStartup
-                // floor, which used to paper over the same ordering, went with InfoBarKey (§B.8).
-                // THE FLICKER (client, reported 2026-08-14). InitialSetup DESTROYS and re-creates every row,
-                // and this ran on EVERY flush — measured at `marks=10`, i.e. ~10 rail batches a second, so the
-                // strip visibly blinked. A rebuild is only owed when the SET OF ROWS changed; the per-element
-                // time text is refreshed by the plain UpdateData below (and by the module's own 1 Hz poll),
-                // which touches no GameObject lifecycle.
-                // AND THE REBUILD IS OWED TO THE ROWS, NOT TO THE SCOPE (L548, client report 2026-08-15).
-                // §B.8 keyed this on ScopeKey — a generation that advances whenever ANY path under the
-                // strip's declared prefixes moved. A manufacture COUNTDOWN lands under "F#" about once a
-                // second on a client, so the generation moved every second and the strip took InitialSetup's
-                // full teardown at 1 Hz: the L492 flicker back, with every arm of L492 green because L492
-                // executes the gate with strings of its own and cannot see which key the runtime hands it.
-                // Scope is the right answer to "is this strip worth looking at"; only a change in the SET OF
-                // ROWS may tear it down, which is what AgendaSignature answers. The countdown text loses
-                // nothing: UpdateData():191-198 repaints every live element on every call, rebuild or not.
+                // A module whose state is not up is switched off by the game itself
+                // (UIModuleBehavior.SetStateID:34) — nothing on screen, nothing to rebuild.
                 bool onScreen = tracker.gameObject.activeInHierarchy;
-                var trackedFaction = TrackerFaction?.GetValue(tracker) as GeoFaction;
-                string agendaSignature = AgendaSignature(trackedFaction);
-                bool rebuild = AgendaNeedsRebuild(onScreen, agendaSignature);
-                // TEMPORARY (report 2026-08-15: the RESEARCH row appears/disappears on clients and was
-                // absent on the host). Prints only when the answer CHANGES, so an alternating research head
-                // is visible line by line while a steady strip stays silent — and a role that never reaches
-                // this method prints nothing at all, which is itself the answer for the host.
                 if (MpDiag.On)
                 {
+                    var trackedFaction = TrackerFaction?.GetValue(tracker) as GeoFaction;
                     string diag = "[MP][uirepaint] agenda " +
                         (NetworkEngine.Instance != null && NetworkEngine.Instance.IsHost ? "HOST" : "CLIENT") +
                         " onScreen=" + onScreen +
@@ -374,103 +361,22 @@ namespace Multiplayer.Network.Sync
                         " research=" + (trackedFaction == null || trackedFaction.Research == null ||
                                         trackedFaction.Research.Current == null
                                             ? "-" : trackedFaction.Research.Current.ResearchID) +
-                        " rebuild=" + rebuild + " rows=" + AgendaRowCount(tracker) +
+                        " rows=" + AgendaRowCount(tracker) +
                         " rTL=" + AgendaResearchTimeLeft(trackedFaction) +
-                        " mTL=" + AgendaManufactureTimeLeft(trackedFaction) +
-                        " sig=" + (agendaSignature ?? "NULL");
+                        " mTL=" + AgendaManufactureTimeLeft(trackedFaction);
                     if (!string.Equals(diag, _lastAgendaDiag, StringComparison.Ordinal))
                     { _lastAgendaDiag = diag; MpLog.Log(diag); }
                 }
-                if (!onScreen) return; // switched off: nothing to paint, and nothing was remembered either
+                if (!onScreen) return;
                 // law 8: the rebuild re-reads the model and can fire native UI events a capture seam hears.
                 using (SyncApplyScope.Enter())
-                {
-                    if (rebuild) TrackerNeedsRefresh.SetValue(tracker, true);
-                    TrackerUpdateData.Invoke(tracker, null);
-                }
+                    TrackerInit.Invoke(tracker, new object[] { context });
             }
             catch (Exception ex)
             {
                 if (_loggedFailures.Add("PersistentHud"))
                     MpLog.LogWarning("[Multiplayer][rail] persistent-HUD refresh threw — the top-right tracker may " +
                                      "stay stale until the next screen change (logged once): " + ex);
-            }
-        }
-
-        /// <summary>Does the strip owe a full rebuild? True on the first call of a session and on any change
-        /// to its <see cref="AgendaSignature"/>, i.e. whenever the SET OF ROWS differs; a null signature
-        /// rebuilds, the safe direction. NOT keyed on <see cref="ScopeKey"/> — L548: that generation moves
-        /// on a ticking countdown too, and a teardown owed to a value is the flicker. Its own memory, so
-        /// L492/L548 can drive it without a live tracker.
-        ///
-        /// <paramref name="stripOnScreen"/> IS A GATE ON THE QUESTION, NOT ON THE ANSWER (L516, report
-        /// 2026-08-15). <see cref="RepaintNeeded"/> REMEMBERS every key it is handed, so a strip that is
-        /// switched off must not be asked at all — answering "no rebuild" for it would be harmless, but
-        /// RECORDING its signature makes the off strip vouch for rows nobody drew, and the first flush after
-        /// it comes back compares EQUAL and skips the rebuild it owes. Short-circuit, deliberately: the
-        /// whole point is that <see cref="RepaintNeeded"/> is never reached.</summary>
-        internal static bool AgendaNeedsRebuild(bool stripOnScreen, string signature) =>
-            stripOnScreen && RepaintNeeded("agenda", signature);
-
-        // L543 KEEPS ITS SUBJECT AND THIS IS NOT AN EXCEPTION TO IT. The four builders §B.8 deleted were
-        // REPAINT keys — a hand-rolled read-set standing in for the declared prefixes, i.e. two competing
-        // read-set mechanisms. This one is not a read-set: the strip's scope is still DECLARED ("F#", "S#",
-        // "V#") and still decides whether the strip is looked at. What this answers is the second, stricter
-        // question only this strip asks, because only this strip's repaint DESTROYS what it redraws: may the
-        // rows be torn down? L548 pins it; L543 now names it as a positive control so it cannot vanish again.
-
-        /// <summary>
-        /// EVERYTHING THE STRIP DRAWS, AS ONE STRING — the rebuild key for <see cref="RefreshAgendaTracker"/>.
-        /// Read straight off <c>InitialSetup</c>:144-174, row source by row source, so nothing displayed can
-        /// change without changing this (REACTIVITY is a hard mandate here, not an optimisation):
-        ///   • manufacture head — <c>Manufacture.Current.ManufacturableItem.RelatedItemDef</c> (the row label
-        ///     is that def's display name);
-        ///   • research head — <c>Research.Current.ResearchID</c>;
-        ///   • every vehicle the strip lists — the row exists iff <c>GetCurrentActionTime &gt; 0</c>, which
-        ///     VehicleActionsViewService:177-188 defines as exploring-or-travelling, and its label/icon are
-        ///     the vehicle NAME plus those same two flags;
-        ///   • every facility row — repairing, or building with a non-zero construction time, keyed by def
-        ///     and state.
-        /// NOT included, deliberately: the per-row TIME LEFT. It is the one thing a rebuild does NOT paint —
-        /// <c>UpdateData(element)</c>:271 does, on every call, rebuild or not.
-        /// Returns null when the model cannot be read; null forces the rebuild, so an unreadable model can
-        /// only ever cost a flicker, never a stale strip.
-        /// </summary>
-        private static string AgendaSignature(GeoFaction faction)
-        {
-            if (faction == null) return null;
-            try
-            {
-                var sb = new System.Text.StringBuilder();
-                var head = faction.Manufacture?.Current?.ManufacturableItem?.RelatedItemDef;
-                sb.Append(head == null ? "-" : head.name).Append('|')
-                  .Append(faction.Research?.Current?.ResearchID ?? "-").Append('|');
-                foreach (var v in faction.Vehicles)
-                {
-                    if (v == null || (!v.Travelling && !v.IsExploringSite)) continue;
-                    sb.Append(v.Name).Append(v.Travelling ? "@t," : "@x,");
-                }
-                sb.Append('|');
-                if (faction is GeoPhoenixFaction phoenix)
-                    foreach (var b in phoenix.Bases)
-                    {
-                        if (b?.Layout == null) continue;
-                        foreach (var f in b.Layout.Facilities)
-                        {
-                            if (f == null) continue;
-                            if (f.IsRepairing) sb.Append(f.Def == null ? "?" : f.Def.name).Append("@r,");
-                            else if (f.IsBuilding && f.ConstructionTime != TimeUnit.Zero)
-                                sb.Append(f.Def == null ? "?" : f.Def.name).Append("@b,");
-                        }
-                    }
-                return sb.ToString();
-            }
-            catch (Exception ex)
-            {
-                if (_loggedFailures.Add("AgendaSignature"))
-                    MpLog.LogWarning("[Multiplayer][rail] agenda-strip signature threw — the top-right strip " +
-                                     "falls back to rebuilding on every flush (logged once): " + ex);
-                return null;
             }
         }
 
