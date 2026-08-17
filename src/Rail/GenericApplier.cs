@@ -1590,11 +1590,33 @@ namespace Multiplayer.Network.Sync
         /// (:106) — taken about the geoscape centre, since the routine slerps in globe-local space.
         /// The 5 s pre-roll (:89) needs no correction: the host paid it too, so at the instant this peer's
         /// re-seeded routine starts moving the host has advanced by exactly those 5 s onto this same point.</summary>
+        /// <summary>THE REFUSAL, SAID OUT LOUD. The catch-up above is the only thing that puts a re-seeded
+        /// leg where the host already is, and every one of its three refusals used to be a silent `return` —
+        /// the dominant bug class here. It matters: in the 2026-08-18 session BOTH clients logged 20+
+        /// `nav re-seed` lines and ZERO `nav anchor` lines, i.e. the catch-up never fired all session and
+        /// nothing said so. A peer that skips it departs from where it stands, flies the whole leg a round
+        /// trip behind the host, and is corrected only by the arrival snap (ReseedNavigation's parked arm).
+        /// The numbers are the diagnosis: <c>elapsed</c> ≤ 0 means this peer's level clock reads BEHIND the
+        /// host's departure stamp (TimeAnchor skew, not a route problem), <c>elapsed</c> > route means the
+        /// stamp belongs to a journey already finished. Unconditional: a re-seed is a per-journey event
+        /// (20 in four minutes of live play), not a per-frame one.</summary>
+        private static void AnchorSkipped(string root, bool haveAnchor, double elapsed, double routeSeconds)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            MpLog.Log("[Multiplayer][rail] nav anchor SKIPPED " + (root ?? "V#?") +
+                      (!haveAnchor
+                          ? " — the host shipped no departure stamp for it"
+                          : " — elapsed=" + elapsed.ToString("F0", inv) + "s route=" +
+                            routeSeconds.ToString("F0", inv) + "s (needs 0 < elapsed <= route)") +
+                      "; this peer flies the leg from where it stands and stays a round trip behind " +
+                      "until the arrival snap");
+        }
+
         private static void AnchorToHostDeparture(GeoVehicle v, string root, List<Vector3> path)
         {
             DepartureAnchorRail.Anchor anchor = default(DepartureAnchorRail.Anchor);
             bool haveAnchor = root != null && _departureAnchors.TryGetValue(root, out anchor);
-            if (!haveAnchor) return;
+            if (!haveAnchor) { AnchorSkipped(root, false, 0.0, 0.0); return; }
             var geo = StartedGeoLevel();
             if (geo == null || geo.Timing == null || geo.SceneReferences == null ||
                 geo.SceneReferences.Geoscape == null || path.Count == 0) return;
@@ -1609,9 +1631,10 @@ namespace Multiplayer.Network.Sync
                 legs[i] = GeoMap.Distance(i == 0 ? from : path[i - 1], path[i]);
                 routeSeconds += legs[i].InMeters / speed;
             }
-            double covered = CoveredSeconds(haveAnchor, anchor.LevelSeconds,
-                                            geo.Timing.Now.TimeSpan.TotalSeconds, routeSeconds);
-            if (covered < 0.0) return;
+            double now = geo.Timing.Now.TimeSpan.TotalSeconds;
+            double covered = CoveredSeconds(haveAnchor, anchor.LevelSeconds, now, routeSeconds);
+            if (covered < 0.0)
+            { AnchorSkipped(root, true, now - anchor.LevelSeconds, routeSeconds); return; }
 
             var range = new EarthUnits(anchor.RangeValue);
             var centre = geo.SceneReferences.Geoscape.position;
