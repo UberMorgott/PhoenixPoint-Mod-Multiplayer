@@ -799,6 +799,31 @@ namespace Multiplayer.Network.Sync
         public static void MarkDirty() { _dirty = true; _bumpAllScopes = true; _marksSinceFlush++; }
 
         /// <summary>
+        /// THE RECOMPUTE'S OWN MARK — dirty, but NOT pathless (L563 arm (d)).
+        ///
+        /// <see cref="DerivedAggregateRefresh.ClientTick"/> used to end on the pathless
+        /// <see cref="MarkDirty()"/> above, and the <c>_bumpAllScopes</c> half of it made
+        /// <see cref="BumpScopeGenerations"/> advance EVERY declared scope unconditionally. Since a
+        /// recompute row arms on "S#"/"F#"/"U#" — i.e. on essentially every rail batch a live geoscape
+        /// produces — that turned every scope gate in the file OFF: the agenda strip's full row teardown,
+        /// the info bar's TFTV postfix, the crew strip's <c>SetCrew</c> re-instantiation, the roster walk
+        /// and the diplomacy pips all ran 3-4 times a second on every client, whatever had actually moved.
+        /// Measured 2026-08-18 on a live client: <c>worst=repaint 35..43ms</c>, <c>frameMax=67..75ms</c> —
+        /// and a stalled frame is a missing segment of aircraft flight, because the pose is closed-form per
+        /// FRAME (GeoNavComponent.cs:104-116).
+        ///
+        /// THE MARK IS STILL UNCONDITIONAL, and only the SCOPE half is dropped. That is not a rounding of
+        /// the reactivity mandate, it is where the mandate actually bites: the batch that armed the rows
+        /// recorded its OWN touched paths a moment earlier, and every strip that prints a rebuilt rollup
+        /// declares a prefix set that COVERS that row's inputs — asserted row by row and strip by strip in
+        /// RailCheck L563 arm (b), so the two halves cannot drift apart silently. <c>_dirty</c> is kept
+        /// because the open SCREEN's declaration is NOT covering in the same way: UIStateEditSoldier prints
+        /// <c>_faction.GetTotalAvailableStorage()</c> (EnterState:596), a value the GeoPhoenixBase/UpdateStats
+        /// row rebuilds from "S#", while the screen declares only { "U#", "V#", "F#" }.
+        /// </summary>
+        internal static void MarkRecomputeDirty() { _dirty = true; _marksSinceFlush++; }
+
+        /// <summary>
         /// The same mark, carrying WHICH KIND changed — so the OPEN screen can decline a change that
         /// cannot affect it. A screen must not be marked dirty by a kind it provably never paints: a
         /// soldier's inventory/perk sheet has no business rebuilding because a GeoSite timer ticked, and

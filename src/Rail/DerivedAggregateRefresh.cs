@@ -362,10 +362,16 @@ namespace Multiplayer.Network.Sync
                     }
                 }
             }
-            // The correction is only half a fix until it is on screen (P11). One pathless mark: a rebuilt
-            // rollup feeds durations and capacities across every strip, and the row's own input prefixes
-            // describe what it READ, not what it wrote — so there is no narrower honest claim to make.
-            if (rebuilt) OpenUiRepaint.MarkDirty();
+            // The correction is only half a fix until it is on screen (P11) — but NOT with the pathless
+            // mark this line used to raise. A pathless MarkDirty also sets _bumpAllScopes, which advances
+            // EVERY declared scope generation and so switches off every strip gate in OpenUiRepaint; since
+            // the rows arm on "S#"/"F#"/"U#", that fired on essentially every batch and made the agenda
+            // teardown, the info bar's TFTV postfix, SetCrew, the roster walk and the diplomacy pips all
+            // run 3-4 times a second on every client (measured `worst=repaint 35..43ms`, 2026-08-18).
+            // The batch's OWN touched paths are already recorded and every strip that prints a rebuilt
+            // rollup declares prefixes covering that row's inputs — L563 arm (b) asserts exactly that
+            // pairing, strip by strip, so the narrower mark cannot silently freeze one.
+            if (rebuilt) OpenUiRepaint.MarkRecomputeDirty();
         }
 
         /// <summary>Which live objects does this row rebuild? Resolved from the level, by the row's owner
