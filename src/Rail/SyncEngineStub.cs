@@ -224,6 +224,11 @@ namespace Multiplayer.Network.Sync
             // A research-complete window this peer latched while it was off the map (P13: never yank a
             // player out of an unrelated screen) opens here, the moment it is back — no rail traffic.
             ResearchSync.ClientTick(_engine);
+            // The client-only geo block above is charged as ONE step. It was the only stretch of this tick
+            // outside every RailCost window, so its cost landed in tickMax under NO step name — the
+            // 2026-08-18 client lines read `tickMax=54..62ms worst=repaint 35..43ms` and the ~15-25 ms
+            // difference had nowhere to be attributed. Named, the next session says whether it is ours.
+            t = RailCost.Charge("geo", t);
             // client-only inside, and it must stay IMMEDIATELY ahead of the flush (L557): the rail writes
             // model state as FIELDS, so the game's own change events never fire here and every stored
             // rollup that only an event refreshes is frozen at zero — which is why the manufacture row's
@@ -231,6 +236,7 @@ namespace Multiplayer.Network.Sync
             // the armed rollups from the batch's own touched paths, so the flush below paints the
             // CORRECTED value in the same frame rather than a stale one.
             DerivedAggregateRefresh.ClientTick(_engine);
+            t = RailCost.Charge("derived", t); // client-only recompute chain — its own name, see above
             t = RailCost.Now();
             OpenUiRepaint.FlushIfDirty();
             RailCost.Charge("repaint", t);

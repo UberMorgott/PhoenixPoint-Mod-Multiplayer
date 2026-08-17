@@ -249,11 +249,23 @@ namespace Multiplayer.Network.Sync
             var view = geo?.View;
             var mods = view?.GeoscapeModules;
             if (mods == null) return; // no geoscape view at all (tactical / main menu) — nothing to repaint
+            // ONE NAME PER STRIP (RailCost). "repaint" was a single step covering all five strips, the scroll
+            // walk and the screen rebuild, so the 2026-08-18 client line `worst=repaint 35..43ms` named the
+            // pass and not the work — and a strip whose rebuild costs a frame is exactly what makes a
+            // travelling aircraft render in steps on a peer (its pose is closed-form per FRAME,
+            // GeoNavComponent.cs:104-116, so a stalled frame is a missing frame of motion). Charging is two
+            // Stopwatch reads per strip, the same price every other step here already pays.
+            long t = RailCost.Now();
             RefreshAgendaTracker(mods);
+            t = RailCost.Charge("repaint:agenda", t);
             RefreshInfoBar(mods);
+            t = RailCost.Charge("repaint:infobar", t);
             RefreshSiteContextualMenu(geo, mods, view.CurrentViewState);
+            t = RailCost.Charge("repaint:sitemenu", t);
             RefreshVehicleCrew(mods);
+            t = RailCost.Charge("repaint:crew", t);
             RefreshRosterSlots(mods);
+            RailCost.Charge("repaint:roster", t);
         }
 
         /// <summary>
@@ -1150,10 +1162,12 @@ namespace Multiplayer.Network.Sync
             // "revert what I just staged" gesture. The set of baseline fields is DECLARED per screen
             // in UiNativeRepaint.StageBaselines; this checkpoint is the only place that saves and
             // restores them, and it names no screen.
+            long t = RailCost.Now();
             var baseline = UiNativeRepaint.StageSnapshot.Capture(current, view);
             CaptureScrolls(view);
+            t = RailCost.Charge("repaint:scrolls", t);   // the whole-canvas ScrollRect walk + stage snapshot
             try { Repaint(current, view, marks); }
-            finally { baseline.Restore(); RestoreScrolls(); }
+            finally { baseline.Restore(); RestoreScrolls(); RailCost.Charge("repaint:screen", t); }
         }
 
         /// <summary>WHERE THE PLAYER HAD SCROLLED TO, ACROSS THE WHOLE REPAINT. Both halves of
@@ -1176,12 +1190,15 @@ namespace Multiplayer.Network.Sync
             if (mods == null) return;
             try
             {
-                foreach (var scroll in mods.transform.root.GetComponentsInChildren<UnityEngine.UI.ScrollRect>(true))
-                {
-                    if (scroll == null || scroll.content == null) continue;
-                    _scrolls.Add(scroll);
-                    _scrollAt.Add(scroll.normalizedPosition);
-                }
+                // NON-ALLOCATING OVERLOAD, and the list is reused across flushes: the array-returning form
+                // allocates one array per flushed batch over the WHOLE canvas, i.e. rail-rate garbage on the
+                // one path that already costs frame time. Same traversal, same includeInactive:true, no new
+                // API — GetComponentsInChildren<T>(bool, List<T>) is Unity's own overload of the same call.
+                // Every hit is recorded, dead ones included, so the two lists stay INDEX-ALIGNED;
+                // RestoreScrolls already skips a null or content-less entry.
+                mods.transform.root.GetComponentsInChildren(true, _scrolls);
+                foreach (var scroll in _scrolls)
+                    _scrollAt.Add(scroll == null || scroll.content == null ? Vector2.zero : scroll.normalizedPosition);
             }
             catch (Exception ex)
             {
