@@ -519,12 +519,52 @@ namespace Multiplayer.Network.Sync
             var context = StateContext(s);
             var diplomacy = mods.DiplomacyDisplayModule;
             if (context != null && diplomacy != null && diplomacy.gameObject.activeInHierarchy &&
-                OpenUiRepaint.RepaintNeeded("diplomacy", OpenUiRepaint.ScopeKey("UIModuleDiplomacyDisplay")))
+                OpenUiRepaint.RepaintNeeded("diplomacy", DiplomacyKey(diplomacy, context)))
                 diplomacy.SetDiplomacyDisplay(context);
             var bases = mods.BaseManagementModule;
             if (bases == null || bases.BasesContainer == null || !bases.IsModuleExtended) return;
             foreach (var row in bases.BasesContainer.GetComponentsInChildren<SiteManagementRow>())
                 if (row != null && row.Site != null) row.RefreshVisuals();
+        }
+
+        /// <summary>
+        /// THE PIP STRIP'S READ SET, AS A VALUE — the three relation ints and nothing else.
+        ///
+        /// It was gated on <c>ScopeKey("UIModuleDiplomacyDisplay")</c> against a declaration of the WHOLE
+        /// faction root, <c>{ "F#" }</c>. That root also carries <c>Research.AllResearchesArray#…</c> and
+        /// <c>Wallet._resources#…</c>, which move on nearly every batch, so the generation advanced 3-4
+        /// times a second and <c>SetDiplomacyDisplay</c> ran that often — and it is not a repaint:
+        /// <c>ClearDiplomacyDisplay</c>:51-59 <c>Destroy</c>s every pip and <c>FillDiplomacyRow</c>:69-81
+        /// <c>Instantiate</c>s up to twenty new ones, on the HOST as well as on every client. No static
+        /// prefix can be narrower either: a faction key is <c>"F#" + Def.Guid</c>
+        /// (IdentityResolver.cs:157), so a deeper declaration matches nothing at all (L563 arm (a)).
+        ///
+        /// So the key is the VALUE, through the same <see cref="OpenUiRepaint.RepaintNeeded"/> memory every
+        /// other strip already uses — no new mechanism. Read exactly as <c>Init</c>:19-27 reads it,
+        /// <c>context.Level.GetFaction(row.Relation).Diplomacy.GetRelation(context.ViewerFaction)</c>, and
+        /// deliberately NOT off <c>row.DiplomacyRelation</c>: <c>Uninit</c>:29-37 nulls that on every
+        /// clear, so the cached handle is null exactly when this is asked.
+        ///
+        /// NULL = REPAINT, which is <see cref="OpenUiRepaint.RepaintNeeded"/>'s own safe direction: an
+        /// unreadable model may cost a repaint and may never cost a stale strip.
+        /// </summary>
+        private static string DiplomacyKey(UIModuleDiplomacyDisplay module, GeoscapeViewContext context)
+        {
+            try
+            {
+                var rows = module.ViewerRelations;
+                if (rows == null || context.Level == null || context.ViewerFaction == null) return null;
+                var key = new System.Text.StringBuilder();
+                foreach (var row in rows)
+                {
+                    var faction = row == null || row.Relation == null ? null : context.Level.GetFaction(row.Relation);
+                    var relation = faction?.Diplomacy?.GetRelation(context.ViewerFaction);
+                    if (relation == null) return null;
+                    key.Append(relation.Diplomacy).Append('/');
+                }
+                return key.ToString();
+            }
+            catch (Exception) { return null; }
         }
 
         // UIModuleBaseLayout.SetLeftSideInfo (:605, also its own PxBase.Stats.OnStatsUpdated handler)
@@ -896,14 +936,17 @@ namespace Multiplayer.Network.Sync
                 { "UIModuleInfoBar",              new[] { "F#", "S#" } },
                 { "UIModuleVehicleSelection",     new[] { "V#", "U#" } },
                 { "UIModuleGeoRoster",            new[] { "U#" } },
-                // The diplomacy pip strip: SetDiplomacyDisplay reads <Faction>.Diplomacy through
-                // MainDiplomacyRelationDisplayRowElement.DiplomacyRelation, the same stored FactionDiplomacy
-                // the info bar's percentages come off (docs/rail-baseline.txt:527/561/594) -> "F#". Declared
-                // here rather than left undeclared BECAUSE the paint destroys and re-instantiates every pip
-                // (UIModuleDiplomacyDisplay.cs:28 + :74): undeclared would mean that teardown on every rail
-                // batch, which is the L492 flicker class. It is driven from the two geoscape Table arms
-                // (RepaintSharedGeoscapeModules), not from RefreshPersistentHud.
-                { "UIModuleDiplomacyDisplay",     new[] { "F#" } },
+                // UIModuleDiplomacyDisplay is deliberately NOT declared here, and that is a NARROWING
+                // rather than a gap (2026-08-18). It used to declare the whole faction root, { "F#" } —
+                // which also carries Research.AllResearchesArray#… and Wallet._resources#…, so the strip's
+                // generation advanced 3-4 times a second and its paint, which Destroys and re-Instantiates
+                // every pip (UIModuleDiplomacyDisplay.cs:28 + :74), ran that often on every peer INCLUDING
+                // the host. No static prefix can be narrower: a faction key is "F#" + Def.Guid
+                // (IdentityResolver.cs:157), so a deeper declaration matches nothing (arm (a) of L563).
+                // The strip is now gated on its READ SET AS A VALUE instead — the three relation ints, see
+                // UiEventMap.DiplomacyKey — through the same OpenUiRepaint.RepaintNeeded memory, so an
+                // unchanged relation costs one key build. A declaration here would now be dead: nothing
+                // asks ScopeKey("UIModuleDiplomacyDisplay") any more.
             };
 
         /// <summary>Surfaces whose repaint MUST be a patch and never a rebuild (§B.9). Declared by NAME
