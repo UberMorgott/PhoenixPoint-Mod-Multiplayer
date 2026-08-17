@@ -969,6 +969,9 @@ namespace Multiplayer.Network.Sync
             _scopeGeneration.Clear();
             // Next session's first refresh must not read a dead session's site refs as a fresh edge.
             _exploringSites.Clear();
+            // …and never hold a dead scene's ScrollRects alive across a session boundary.
+            _scrolls.Clear();
+            _scrollAt.Clear();
         }
 
         /// <summary>
@@ -1091,8 +1094,73 @@ namespace Multiplayer.Network.Sync
             // in UiNativeRepaint.StageBaselines; this checkpoint is the only place that saves and
             // restores them, and it names no screen.
             var baseline = UiNativeRepaint.StageSnapshot.Capture(current, view);
+            CaptureScrolls(view);
             try { Repaint(current, view, marks); }
-            finally { baseline.Restore(); }
+            finally { baseline.Restore(); RestoreScrolls(); }
+        }
+
+        /// <summary>WHERE THE PLAYER HAD SCROLLED TO, ACROSS THE WHOLE REPAINT. Both halves of
+        /// <see cref="Repaint"/> can move it: a native rebuild re-fills a list, and the Exit+Enter fallback
+        /// destroys every widget on the screen. Nothing is NAMED here — no screen, no module, no list — which
+        /// is the entire point: the alternative is one "it lost my scroll" patch per panel, forever, and the
+        /// next panel is always the one nobody wrote a patch for. The whole UI canvas is walked once per
+        /// flushed batch (the same boundary the repaint itself runs on), inactive included, so a list that is
+        /// switched off and back on by the repaint keeps its position too.</summary>
+        private static readonly System.Collections.Generic.List<UnityEngine.UI.ScrollRect> _scrolls =
+            new System.Collections.Generic.List<UnityEngine.UI.ScrollRect>();
+        private static readonly System.Collections.Generic.List<Vector2> _scrollAt =
+            new System.Collections.Generic.List<Vector2>();
+
+        private static void CaptureScrolls(GeoscapeView view)
+        {
+            _scrolls.Clear();
+            _scrollAt.Clear();
+            var mods = view == null ? null : view.GeoscapeModules;
+            if (mods == null) return;
+            try
+            {
+                foreach (var scroll in mods.transform.root.GetComponentsInChildren<UnityEngine.UI.ScrollRect>(true))
+                {
+                    if (scroll == null || scroll.content == null) continue;
+                    _scrolls.Add(scroll);
+                    _scrollAt.Add(scroll.normalizedPosition);
+                }
+            }
+            catch (Exception ex)
+            {
+                _scrolls.Clear();
+                _scrollAt.Clear();
+                if (_loggedFailures.Add("ScrollCapture"))
+                    MpLog.LogWarning("[Multiplayer][rail] scroll capture threw — a repaint may jump the " +
+                                     "player's list back to the top (logged once): " + ex);
+            }
+        }
+
+        /// <summary>BEST EFFORT, NEVER A THROW: a repaint that already happened must not be undone by a
+        /// scroll rect that did not survive it. A destroyed rect compares null (Unity's overloaded ==) and is
+        /// skipped; a rebuilt one may also have a DIFFERENT content height, and a virtualised list
+        /// (<c>VirtualScrollRect</c>) repools its content entirely, so the restored normalized position is an
+        /// approximation there rather than a guarantee — approximately where the player was still beats the
+        /// top of the list.</summary>
+        private static void RestoreScrolls()
+        {
+            for (int i = 0; i < _scrolls.Count; i++)
+            {
+                var scroll = _scrolls[i];
+                try
+                {
+                    if (scroll == null || scroll.content == null) continue;
+                    scroll.normalizedPosition = _scrollAt[i];
+                }
+                catch (Exception ex)
+                {
+                    if (_loggedFailures.Add("ScrollRestore"))
+                        MpLog.LogWarning("[Multiplayer][rail] scroll restore threw — the list under the " +
+                                         "player may have jumped to the top (logged once): " + ex);
+                }
+            }
+            _scrolls.Clear();
+            _scrollAt.Clear();
         }
 
         private static void Repaint(GeoscapeViewState current, GeoscapeView view, int marks)
