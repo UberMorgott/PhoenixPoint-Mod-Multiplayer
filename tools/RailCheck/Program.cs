@@ -462,6 +462,7 @@ namespace RailCheck
             Add(laws, () => L562_TheWholeInfoBarIsPaintedNotOnlyItsMeter.Check());
             Add(laws, () => L563_ADeclaredSurfaceCoversWhatKeepsItsReadsFresh.Check());
             Add(laws, () => L564_ANarrowedRollupSweepNeverDropsATouchedOwner.Check());
+            Add(laws, () => L565_TheDepartureCatchUpIsAHostMeasuredDuration.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -509,7 +510,16 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 360;
+        private const int ExpectedLawRegistrations = 361;
+        // Updated deliberately 2026-08-18: L565 (the departure catch-up is a duration the host measured, never
+        // two clocks subtracted across peers) was ADDED — 360 -> 361. Nothing was retired. L460 keeps its own
+        // identity and every arm it can still express: its clock arm MOVED rather than being dropped — asserting
+        // that AnchorToHostDeparture reads GeoLevelController.Timing became the assertion of the DEFECT once the
+        // subtraction moved to the host, so L565 arm (a) now asserts the negative of it and L460 keeps a live
+        // arm on the same call set (anchor-inert). L460's executed decision arm follows CoveredSeconds' new
+        // three-argument shape and lost nothing: no-stamp, backwards and past-the-route are all still refused
+        // case by case. Measured cause, not a theory: [MP][clockphase] host=64566046717.200
+        // client=64566046274.894 dGame=-442.306 dReal=-0.123 scale=3600.00, alongside 16 refusals in 21 re-seeds.
         // Updated deliberately 2026-08-18: L564 (a narrowed rollup sweep never drops an owner whose root
         // the batch touched) was ADDED — 359 -> 360. Nothing was retired and no surviving law lost an arm.
         // DerivedAggregateRefresh.Targets swept every faction, every site, every base facility and every
@@ -767,7 +777,14 @@ namespace RailCheck
         // root the batch touched): one new identity string, 359 -> 360 executed identities. No identity
         // retired and no surviving law lost an arm — L557 keeps the classification, L561 keeps the ladder
         // and the args escape, L563 keeps both its coverage arms and the new arm (d).
-        private const string ExpectedExecutionIdentityDigest = "7bc0f021f2969b54a237c0e3a4b8a88352659740f40c1974b6b2186eb12da22c";
+        // Updated deliberately 2026-08-18 with L565 (the departure catch-up is a host-measured duration): one
+        // new identity string, 360 -> 361 executed identities. No identity retired. L460 keeps its own identity
+        // and its arm count is unchanged — its clock arm was RE-EXPRESSED, not removed: the assertion that the
+        // client reads the level clock became the assertion of the bug, so it is now made in the negative by
+        // L565 arm (a) while L460 keeps a live arm over the same call set. L43 is untouched and still owns the
+        // re-seed suppression rule (arm 3 executes IsSuffixOf case by case, including the three shapes that MUST
+        // re-seed), which is why the 21 re-seeds per client needed no change: each one is a real host departure.
+        private const string ExpectedExecutionIdentityDigest = "fe65df27e0c531fbefce7ffc769baca5aa82fd442e0092606b89a4389cd68946";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including

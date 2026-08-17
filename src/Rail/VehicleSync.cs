@@ -686,10 +686,13 @@ namespace Multiplayer.Network.Sync
     /// ends in the host's arrival snap (<c>GenericApplier.ReseedNavigation</c>'s parked arm); a foreign craft
     /// flies leg after leg with no snap and never reconverges.
     ///
-    /// So the host stamps WHEN it left and WITH WHAT RANGE, and the client fast-forwards the leg by
-    /// <c>sharedNow - departure</c> before navigating (<c>GenericApplier.AnchorToHostDeparture</c>). The clock
-    /// is the LEVEL clock, which is exactly the one <see cref="TimeAnchor"/> already holds equal across peers —
-    /// per-ACTOR clocks are unshared epochs (see <c>ReseedExploration</c>) and must never be compared.
+    /// So the host stamps WHEN it left and WITH WHAT RANGE, converts that to <c>hostNow - departure</c> AT
+    /// EMIT — one clock, one frame of reference — and the client fast-forwards the leg by the duration it
+    /// receives (<c>GenericApplier.AnchorToHostDeparture</c>). It deliberately does NOT subtract the stamp
+    /// from its own clock, even though both are the LEVEL clock <see cref="TimeAnchor"/> holds equal: that
+    /// equality is a periodic re-latch, and its residual is larger than the leg time being recovered. See
+    /// <see cref="Covered"/> for the live measurement. (Per-ACTOR clocks are unshared epochs — see
+    /// <c>ReseedExploration</c> — and were never comparable at all.)
     ///
     /// <c>RangeRemaining</c> rides along for the same reason it shows up in the CRC backstop as permanently
     /// DIVERGED: <c>NavigateRoutine</c>:116 writes it locally off <c>startRangeRemaining</c>, so a client that
@@ -703,7 +706,33 @@ namespace Multiplayer.Network.Sync
     internal static class DepartureAnchorRail
     {
         internal const byte TailMarker = 0xD8;
+
+        /// <summary>HOST-SIDE ONLY: the departure instant on the HOST's level clock. Never shipped, because
+        /// an absolute clock reading is meaningless on the peer that receives it — see <see cref="Covered"/>.</summary>
         internal struct Anchor { internal double LevelSeconds; internal float RangeValue; }
+
+        /// <summary>THE WIRE SHAPE, and the whole of the 2026-08-18 fix: a DURATION measured entirely inside
+        /// the host's own frame of reference, never two absolute clock readings subtracted across peers.
+        ///
+        /// The catch-up used to ship <see cref="Anchor.LevelSeconds"/> raw and let the client compute
+        /// <c>ownNow - hostStamp</c>. Both clocks are the LEVEL clock <see cref="TimeAnchor"/> holds equal —
+        /// but "equal" is a re-latch on pause/scale/drift, not an identity, and the residual is a real-time
+        /// phase error. Measured live (client-2 Player.log, [MP][clockphase]):
+        /// <c>host=64566046717.200 client=64566046274.894 dGame=-442.306 dReal=-0.123 scale=3600.00</c>.
+        /// 0.123 REAL seconds of lag is 442 GAME seconds at geoscape scale — and the quantity the catch-up
+        /// wants to measure (one rail round trip x Scale) is that same fraction of a real second. The signal
+        /// was the size of the instrument's noise, so its SIGN was random: of 21 re-seeds that session, 9
+        /// went negative, 5 positive, and 7 landed on exactly 0 (ordered from a PAUSED geoscape, where
+        /// dReal=paused and scale=0.00 make the two readings bit-identical). Sixteen of twenty-one
+        /// departures were refused for arithmetic that never described the route at all.
+        ///
+        /// So the subtraction moves to the host, where both terms are the SAME clock: <c>hostNow - departure</c>
+        /// at emit time. What crosses the wire is "how much of this leg the host had already flown when this
+        /// batch left", which needs no shared epoch to be true. It also cannot place a client AHEAD of the
+        /// host by construction: the value is measured before the packet is sent, so it always understates
+        /// the host's real progress by exactly the flight time — the direction the arrival snap already
+        /// corrects, and never the direction that would make a client arrive early.</summary>
+        internal struct Covered { internal double Seconds; internal float RangeValue; }
 
         private static readonly object Gate = new object();
         private static readonly Dictionary<string, Anchor> Anchors =
@@ -729,8 +758,19 @@ namespace Multiplayer.Network.Sync
             }
         }
 
-        internal static KeyValuePair<string, Anchor>[] Snapshot()
-        { lock (Gate) return Anchors.OrderBy(x => x.Key, StringComparer.Ordinal).ToArray(); }
+        /// <summary>The wire view, taken against the HOST's own clock reading at emit. <paramref name="hostNowSeconds"/>
+        /// is NaN when there is no started geoscape to read — the arithmetic then yields NaN, which
+        /// <c>GenericApplier.CoveredSeconds</c> rejects along with every other value that is not a real
+        /// duration inside the route. Never silently zero: zero is a LEGAL covered value ("the host has not
+        /// moved yet"), so it must not double as "unknown".</summary>
+        internal static KeyValuePair<string, Covered>[] Snapshot(double hostNowSeconds)
+        {
+            lock (Gate)
+                return Anchors.OrderBy(x => x.Key, StringComparer.Ordinal)
+                              .Select(x => new KeyValuePair<string, Covered>(x.Key, new Covered
+                              { Seconds = hostNowSeconds - x.Value.LevelSeconds, RangeValue = x.Value.RangeValue }))
+                              .ToArray();
+        }
         internal static void Remove(string vehicleIdentity)
         { if (vehicleIdentity == null) return; lock (Gate) Anchors.Remove(vehicleIdentity); }
         internal static void Clear() { lock (Gate) Anchors.Clear(); }

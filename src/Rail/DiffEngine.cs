@@ -1823,11 +1823,20 @@ namespace Multiplayer.Network.Sync
                         { w.Write(departure.Key); w.Write(departure.Value); }
                         // Second optional section, its OWN key set: the generation map only advances behind a
                         // site-parked capture, the anchor map behind every StartTravel (see DepartureAnchorRail).
-                        var anchors = DepartureAnchorRail.Snapshot();
+                        // THE SUBTRACTION HAPPENS HERE, on the host, where both terms are the SAME clock.
+                        // Shipping the raw departure epoch and letting the client subtract its own Timing.Now
+                        // measured the host↔client level-clock phase error instead of the leg — 0.123 real
+                        // seconds of it is 442 game seconds at scale=3600, which swamps the round trip the
+                        // catch-up exists to recover. See DepartureAnchorRail.Covered.
+                        var hostGeo = GenericApplier.GeoLevel();
+                        double hostNow = hostGeo != null && hostGeo.Timing != null
+                            ? hostGeo.Timing.Now.TimeSpan.TotalSeconds
+                            : double.NaN;
+                        var anchors = DepartureAnchorRail.Snapshot(hostNow);
                         w.Write(DepartureAnchorRail.TailMarker);
                         w.Write((ushort)anchors.Length);
                         foreach (var anchor in anchors)
-                        { w.Write(anchor.Key); w.Write(anchor.Value.LevelSeconds); w.Write(anchor.Value.RangeValue); }
+                        { w.Write(anchor.Key); w.Write(anchor.Value.Seconds); w.Write(anchor.Value.RangeValue); }
                     }
 
                     try

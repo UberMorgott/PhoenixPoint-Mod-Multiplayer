@@ -102,11 +102,13 @@ namespace RailCheck
                              "GenericApplier._departureAnchors — whatever it places the aircraft at, it is not where the " +
                              "HOST is, and the two peers' legs stay independent derivations";
             var levelTiming = levelClock.GetGetMethod(true);
-            if (levelTiming != null && !anchorReads.Any(c => c.MetadataToken == levelTiming.MetadataToken &&
-                                                             c.Module == levelTiming.Module))
-                yield return "L460 anchor-clockless: AnchorToHostDeparture never reads GeoLevelController.Timing — the " +
-                             "host's stamp can only be turned into elapsed time against the LEVEL clock, the one " +
-                             "TimeAnchor holds equal across peers (a per-actor clock is an unshared epoch, L77)";
+            // The clock arm MOVED to the host on 2026-08-18 and now lives in L565: turning the stamp into a
+            // duration against THIS peer's level clock is precisely the defect, so what used to be asserted
+            // here is asserted there in the negative. `anchorReads` stays live for the arm below it.
+            if (anchorReads.Count == 0)
+                yield return "L460 anchor-inert: AnchorToHostDeparture calls nothing in the game assembly at all — it " +
+                             "cannot be placing an aircraft anywhere, so the re-seeded leg is unanchored in fact " +
+                             "however the call site reads";
 
             // (c) THE PURE DECISION, executed. `elapsed`, never zero-by-default, and never a stamp that cannot
             // describe THIS route.
@@ -116,20 +118,21 @@ namespace RailCheck
                              "rules are no longer executable, so nothing can tell a shared-time anchor from a guess";
             else
             {
-                Func<bool, double, double, double, double> f = (have, dep, now, route) =>
-                    (double)covered.Invoke(null, new object[] { have, dep, now, route });
-                if (Math.Abs(f(true, 100.0, 340.0, 600.0) - 240.0) > 1e-9)
-                    yield return "L460 anchor-ignores-host-epoch: CoveredSeconds does not return sharedNow - departure " +
-                                 "for a live stamp — the client starts the leg at zero elapsed, i.e. at local now, and " +
-                                 "the whole fix is a no-op";
-                if (f(false, 100.0, 340.0, 600.0) >= 0.0)
+                Func<bool, double, double, double> f = (have, hostCovered, route) =>
+                    (double)covered.Invoke(null, new object[] { have, hostCovered, route });
+                if (Math.Abs(f(true, 240.0, 600.0) - 240.0) > 1e-9)
+                    yield return "L460 anchor-ignores-host-epoch: CoveredSeconds does not pass the host's measured leg " +
+                                 "time through for a live stamp — the client starts the leg at zero elapsed, i.e. at " +
+                                 "local now, and the whole fix is a no-op";
+                if (f(false, 240.0, 600.0) >= 0.0)
                     yield return "L460 anchor-invents-an-epoch: CoveredSeconds fast-forwards a leg it has NO host stamp " +
                                  "for (a save-transfer join, or a host too old to ship the tail section) — it would place " +
                                  "the aircraft by arithmetic on an unset field";
-                if (f(true, 900.0, 340.0, 600.0) >= 0.0)
-                    yield return "L460 anchor-accepts-a-future-stamp: CoveredSeconds accepts a departure LATER than " +
-                                 "shared now — a client whose TimeAnchor has not applied yet would fly the leg backwards";
-                if (f(true, 100.0, 900.0, 600.0) >= 0.0)
+                if (f(true, -1.0, 600.0) >= 0.0)
+                    yield return "L460 anchor-accepts-a-future-stamp: CoveredSeconds accepts a NEGATIVE covered time — " +
+                                 "no host clock can measure one, so the tail is unreadable and the leg would be flown " +
+                                 "backwards";
+                if (f(true, 900.0, 600.0) >= 0.0)
                     yield return "L460 anchor-reuses-a-finished-journey: CoveredSeconds accepts a stamp older than the " +
                                  "whole route — that stamp belongs to a journey already over, and honouring it parks the " +
                                  "aircraft on its destination the instant a new order lands";

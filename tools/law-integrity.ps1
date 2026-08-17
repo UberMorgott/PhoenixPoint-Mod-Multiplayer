@@ -273,7 +273,20 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # everything. L564 executes that decision over the real table, for every subset of each row's declared
 # inputs, so a narrowing that would drop an owner whose root DID move is RED instead of a silent stale
 # zero. Nothing retired, no arm weakened.
-$expectedRegistrationDigest = '14e755923f6ca3537213bd5c8c2de2d8dc8ed52dc8c6bfb4ece41357efb8c3b3'
+# Updated deliberately 2026-08-18: L565 ADDED -- 360 -> 361 registrations, one new identity string.
+# The departure catch-up shipped the host's ABSOLUTE level-clock stamp and let the client subtract its own
+# Timing.Now. Both peers hold that clock "equal", but equality is a re-latch on pause/scale/drift and the
+# residual is a real-time phase error times Timing.Scale: measured live, dReal=-0.123 s at scale=3600 is 442
+# GAME seconds of error against a leg time of the same order, so the sign of the answer was noise. 16 of 21
+# re-seeds were refused (9 negative, 7 exactly zero -- those ordered from a paused geoscape, where the two
+# readings are bit-identical). The subtraction moved to the host, where both terms are the same clock, and
+# only the difference crosses the wire. L565 holds it there: the client may not read the level clock, the
+# host must, the wire type is its own struct, and the guard is executed over six nonsense rows and three
+# legitimate ones -- so widening it to admit a negative or a NaN is RED, and narrowing it to refuse a
+# standing start is RED too. Nothing retired. L460 keeps its identity and its arm count: its clock arm was
+# RE-EXPRESSED (the client reading the level clock is now the defect, asserted in the negative by L565) and
+# its executed decision arm follows CoveredSeconds' new three-argument shape without losing a case.
+$expectedRegistrationDigest = 'd1ed2d4b1ff67556319999d80e485726ff872485f7ba30e7c18ab0f974faa828'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

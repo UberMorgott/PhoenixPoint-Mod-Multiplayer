@@ -1549,33 +1549,40 @@ namespace Multiplayer.Network.Sync
                 for (int i = 0; i < anchors; i++)
                 {
                     string key = MessageSerializer.ReadBoundedString(reader);
-                    _departureAnchors[key] = new DepartureAnchorRail.Anchor
-                    { LevelSeconds = reader.ReadDouble(), RangeValue = reader.ReadSingle() };
+                    _departureAnchors[key] = new DepartureAnchorRail.Covered
+                    { Seconds = reader.ReadDouble(), RangeValue = reader.ReadSingle() };
                 }
             }
             if (reader.BaseStream.Position != reader.BaseStream.Length) throw new InvalidDataException("trailing GeoRail bytes");
         }
 
-        private static readonly Dictionary<string, DepartureAnchorRail.Anchor> _departureAnchors =
-            new Dictionary<string, DepartureAnchorRail.Anchor>(StringComparer.Ordinal);
+        private static readonly Dictionary<string, DepartureAnchorRail.Covered> _departureAnchors =
+            new Dictionary<string, DepartureAnchorRail.Covered>(StringComparer.Ordinal);
 
         /// <summary>Is a mirrored order's derivation allowed to start from the LOCAL clock? Never, once the
         /// host has stamped the departure — that is the whole of the foreign-aircraft fix, kept pure so
-        /// RailCheck L460 can execute it case by case. Returns the leg time already covered on the host,
+        /// RailCheck L460/L565 can execute it case by case. Returns the leg time already covered on the host,
         /// or -1 for "no usable anchor, fall back to local now".
         ///
-        /// The three refusals are all cases where the anchor cannot describe THIS route:
+        /// <paramref name="hostCoveredSeconds"/> is a DURATION the host measured against its own clock and
+        /// shipped (<see cref="DepartureAnchorRail.Covered"/>) — NOT this peer's now minus a foreign stamp,
+        /// which is what made 16 of 21 departures unplaceable in the 2026-08-18 session. So the refusals are
+        /// no longer "the clocks disagree"; every one of them now means the value cannot describe THIS route:
         ///   • no stamp at all (a save-transfer join, or a host too old to send the section);
-        ///   • a stamp in the future — an un-applied <see cref="TimeAnchor"/> on a fresh client;
-        ///   • a stamp older than the whole route, which means it belongs to a journey already finished, not
-        ///     to the order that just landed. Fast-forwarding by it would park the aircraft on its
-        ///     destination.</summary>
-        internal static double CoveredSeconds(bool haveAnchor, double departureSeconds, double sharedNow,
-                                              double routeSeconds)
+        ///   • a NEGATIVE duration, which no host clock can produce — a corrupt or unreadable tail;
+        ///   • NaN, which is what the host writes when it has no started geoscape to measure against;
+        ///   • longer than the whole route, which means it belongs to a journey already finished, not to the
+        ///     order that just landed. Fast-forwarding by it would park the aircraft on its destination.
+        ///
+        /// ZERO IS ACCEPTED, and deliberately: it is the exact answer for an order the host issued in this
+        /// same batch, which on a paused geoscape is every order the player gives. Honouring it costs one
+        /// placement at t=0 — the aircraft's own position, a no-op — and seeds the host's RangeRemaining,
+        /// which is the correction the CRC backstop kept reporting DIVERGED. Written as an accept-test, not
+        /// a reject-test, so NaN falls out on the correct side instead of passing every comparison.</summary>
+        internal static double CoveredSeconds(bool haveAnchor, double hostCoveredSeconds, double routeSeconds)
         {
             if (!haveAnchor || routeSeconds <= 0.0) return -1.0;
-            double elapsed = sharedNow - departureSeconds;
-            return elapsed <= 0.0 || elapsed > routeSeconds ? -1.0 : elapsed;
+            return hostCoveredSeconds >= 0.0 && hostCoveredSeconds <= routeSeconds ? hostCoveredSeconds : -1.0;
         }
 
         /// <summary>Fast-forward a re-seeded leg to where the HOST already is, so the remaining leg re-derives
@@ -1596,29 +1603,34 @@ namespace Multiplayer.Network.Sync
         /// `nav re-seed` lines and ZERO `nav anchor` lines, i.e. the catch-up never fired all session and
         /// nothing said so. A peer that skips it departs from where it stands, flies the whole leg a round
         /// trip behind the host, and is corrected only by the arrival snap (ReseedNavigation's parked arm).
-        /// The numbers are the diagnosis: <c>elapsed</c> ≤ 0 means this peer's level clock reads BEHIND the
-        /// host's departure stamp (TimeAnchor skew, not a route problem), <c>elapsed</c> > route means the
-        /// stamp belongs to a journey already finished. Unconditional: a re-seed is a per-journey event
-        /// (20 in four minutes of live play), not a per-frame one.</summary>
-        private static void AnchorSkipped(string root, bool haveAnchor, double elapsed, double routeSeconds)
+        /// It did its job: the 2026-08-18 lines are what identified the frame-of-reference bug behind
+        /// <see cref="DepartureAnchorRail.Covered"/> — 16 refusals in 21 re-seeds, split 9 negative / 7
+        /// exactly zero, the zeros all on orders given from a paused geoscape. Since that fix the printed
+        /// number is the HOST's own measured duration, so a negative one is no longer clock skew; it means
+        /// the tail is unreadable, and <c>hostCovered</c> > route means the value belongs to a journey
+        /// already finished. Unconditional: a re-seed is a per-journey event (21 in four minutes of live
+        /// play, one per real host-side departure), not a per-frame one.</summary>
+        private static void AnchorSkipped(string root, bool haveAnchor, double covered, double routeSeconds)
         {
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             MpLog.Log("[Multiplayer][rail] nav anchor SKIPPED " + (root ?? "V#?") +
                       (!haveAnchor
                           ? " — the host shipped no departure stamp for it"
-                          : " — elapsed=" + elapsed.ToString("F0", inv) + "s route=" +
-                            routeSeconds.ToString("F0", inv) + "s (needs 0 < elapsed <= route)") +
+                          : " — hostCovered=" + covered.ToString("F0", inv) + "s route=" +
+                            routeSeconds.ToString("F0", inv) + "s (needs 0 <= hostCovered <= route)") +
                       "; this peer flies the leg from where it stands and stays a round trip behind " +
                       "until the arrival snap");
         }
 
         private static void AnchorToHostDeparture(GeoVehicle v, string root, List<Vector3> path)
         {
-            DepartureAnchorRail.Anchor anchor = default(DepartureAnchorRail.Anchor);
+            DepartureAnchorRail.Covered anchor = default(DepartureAnchorRail.Covered);
             bool haveAnchor = root != null && _departureAnchors.TryGetValue(root, out anchor);
             if (!haveAnchor) { AnchorSkipped(root, false, 0.0, 0.0); return; }
             var geo = StartedGeoLevel();
-            if (geo == null || geo.Timing == null || geo.SceneReferences == null ||
+            // NO LOCAL CLOCK READ, and L565 keeps it that way: the level clock is needed for nothing here any
+            // more, only the geoscape centre the Slerp is taken about.
+            if (geo == null || geo.SceneReferences == null ||
                 geo.SceneReferences.Geoscape == null || path.Count == 0) return;
             float speed = v.Speed.InMeters / 3600f;                   // GeoNavComponent.cs:95
             if (speed <= 0f) return;
@@ -1631,10 +1643,9 @@ namespace Multiplayer.Network.Sync
                 legs[i] = GeoMap.Distance(i == 0 ? from : path[i - 1], path[i]);
                 routeSeconds += legs[i].InMeters / speed;
             }
-            double now = geo.Timing.Now.TimeSpan.TotalSeconds;
-            double covered = CoveredSeconds(haveAnchor, anchor.LevelSeconds, now, routeSeconds);
+            double covered = CoveredSeconds(haveAnchor, anchor.Seconds, routeSeconds);
             if (covered < 0.0)
-            { AnchorSkipped(root, true, now - anchor.LevelSeconds, routeSeconds); return; }
+            { AnchorSkipped(root, true, anchor.Seconds, routeSeconds); return; }
 
             var range = new EarthUnits(anchor.RangeValue);
             var centre = geo.SceneReferences.Geoscape.position;
