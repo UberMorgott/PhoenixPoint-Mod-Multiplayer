@@ -830,6 +830,51 @@ namespace Multiplayer.Network.Sync
                 // "F#*.ItemStorage". Not built speculatively — the roots above are already the safe answer.
                 { "UIStateEditSoldier", new[] { "U#", "V#", "F#" } },
 
+                // THE RESEARCH SCREEN. Its Table arm is ResearchSync.RepaintResearchUi ->
+                // RebuildOpenResearchScreen, which is a CLOSED read set: the arm answers true for every
+                // open UIStateResearch (ResearchSync.cs:403-424, the catch arm included), so the Exit+Enter
+                // fallback never runs for this screen and the three module calls below are ALL of it.
+                //   "F#" GeoFaction — every row the three calls paint:
+                //     SetupQueue      -> _faction.Research.Current / .Last / .InQueueCount / .ResearchQueue
+                //                        (UIModuleResearch.cs:336-366) and each row's Progress01/ResearchCost,
+                //                        which are ResearchElement instance data under GeoFaction.Research.
+                //     ShowAvailable   -> _faction.Research.Visible (:306), each row's requirement COUNTER
+                //                        (ResearchListItem.cs:110-121 -> ResearchRequirement._progress, stored
+                //                        under the same Research subtree) and CanResearch()'s wallet gate.
+                //     SetupAllied     -> _faction.Allies[].Research.Current (:368-378) — other factions are
+                //                        F# roots too, so one prefix carries the allied strip as well.
+                //     RefreshFilters  -> _faction.Research.Visible/.Completed and _alienFaction.Research
+                //                        .Completed (:280-285).
+                //     The "new research" dots read GeoPhoenixFaction.NewEntityKnowledge (:240-243).
+                //   "S#" GeoSite — THE ETA TEXT, and it is the half a faction-only declaration would lose.
+                //     Every queue row prints Research.GetTotalTimeLeft (ResearchQueueItem.cs:121-124), whose
+                //     rate is Faction.ResourceIncome.GetTotalResouce(Research) (Research.cs:649-651). A peer
+                //     never receives ResourceIncome as rail state: it is REBUILT locally by the
+                //     DerivedAggregateRefresh row GeoFaction/UpdateProduction, whose declared inputs are
+                //     { "S#", "F#" } — i.e. a lab finished on another peer moves a SITE path and nothing
+                //     under "F#" at all. L563 asserts exactly this pairing so the two cannot drift apart.
+                // Scoped away, and the point of the row: "U#" (a soldier's gear, statuses and progression
+                // are nowhere on this screen), "V#", "T"/"TA", "ES", "MG", "MK", "ST", "GL", "M#*".
+                // TFTV touches this screen and does NOT widen the set: its only patches on UIModuleResearch
+                // are Awake/Init/AddToQueue/SetupQueue postfixes that hang DRAG HANDLERS on the existing
+                // queue items (TFTVDragandDropFunctionality.cs:43-137) — no new model readout, no new root.
+                { "UIStateResearch", new[] { "F#", "S#" } },
+
+                // UIStateNothingSelected and UIStateVehicleSelected are deliberately NOT declared, and this
+                // is a REFUSAL rather than a pending audit (2026-08-18). Their arms end in
+                // OnFactionObjectivesChanged -> UIModuleGeoObjectives.RefreshObjectives, and the objective
+                // ROWS are the readout that cannot be attributed to a root set: GeoFaction.Objectives is
+                // EXCLUDED from the rail entirely (docs/rail-baseline.txt:550/584, "blob husk on
+                // GeoFactionObjective"), so the list is local simulation whose content comes from whatever
+                // each subclass reads — vanilla alone spans sites, vehicles, faction diplomacy, research,
+                // the event system AND GeoLevel.Tutorial (TutorialFactionObjective.cs:34-37, a "GL" read),
+                // and TFTV adds its own objective rows in ten files plus paints into these two states
+                // directly (TFTVAAAgenda/AgendaPatches.cs, TFTVUI/Geoscape/AircraftOrder.cs,
+                // TFTVUI/Geoscape/TFTVHavenRecruitsUI/*, TFTVBaseRework/BaseActivation.cs). A prefix set
+                // that misses one of those rows is a SILENTLY FROZEN screen, which is worse than the wasted
+                // rebuild it would remove — so these two keep the undeclared default (L541: repaint on
+                // everything) until somebody can enumerate the objective family end to end.
+
                 // The persistent-HUD strips. They belong to no view state (that is the premise of
                 // RefreshPersistentHud), so they are declared by MODULE name and keyed through
                 // OpenUiRepaint.ScopeKey. Each set is the strip's OWN reads, converted from the signature

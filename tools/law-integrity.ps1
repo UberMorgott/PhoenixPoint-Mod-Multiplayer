@@ -39,6 +39,13 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
     if ($n -match '^L(\d+)') { $regIds[$Matches[1]] = $true } else { $inlineRegs.Add($n) }
 }
 
+# Updated deliberately 2026-08-18: L563 ADDED (a declared repaint surface's prefixes are real rail roots,
+# and a surface that PRINTS a locally-rebuilt rollup declares the roots that rebuild it) -- 358 -> 359
+# registrations, one new identity string. Nothing retired. L541 owns the SAFE direction of the same
+# declaration table (no row = repaint on everything) and never asked whether a row that IS present covers
+# what its own arm reads -- which is how UIStateResearch could have been declared "F#" alone and frozen
+# every ETA on the screen: the rate is Faction.ResourceIncome, a value no peer receives on the rail and
+# only the DerivedAggregateRefresh GeoFaction/UpdateProduction row rebuilds, from { "S#", "F#" }.
 # Updated deliberately 2026-08-15: L554 ADDED (no peer lifts before its own first post-load frame has
 # RENDERED, and the host is not exempt. The deadline shipped the day before was re-measured at 21:54 and
 # failed: RTT sampled ~0 so the lead was the 400 ms floor, so both clients read the common instant as
@@ -258,7 +265,7 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # read-direction paints from a named list, and L562 asserts that list, its native signatures, that the
 # scope gate still runs, and that Init (18 unbalanced subscriptions, no Uninit) is never the repaint.
 # Nothing retired, no arm weakened.
-$expectedRegistrationDigest = '60526a408849eb9bdc46d77eb964f38a86c893ad48637c549b0f7e33daa96b79'
+$expectedRegistrationDigest = '27596e34e7d8110e82005fc954716116408daa8e5260287f001dbc964e241d8b'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

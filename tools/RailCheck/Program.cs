@@ -460,6 +460,7 @@ namespace RailCheck
             Add(laws, () => L557_NoPeerReadsARollupItsOwnRailStaled.Check());
             Add(laws, () => L556_AnAnsweredSharedWindowClosesEverywhere.Check());
             Add(laws, () => L562_TheWholeInfoBarIsPaintedNotOnlyItsMeter.Check());
+            Add(laws, () => L563_ADeclaredSurfaceCoversWhatKeepsItsReadsFresh.Check());
             laws.Sort(StringComparer.Ordinal);
 
             // Violations live INSIDE the snapshot on purpose: the gate is then a single comparison, and a
@@ -507,8 +508,15 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 358;
-        // Updated deliberately 2026-08-18: L562 (the whole top-right info bar is painted, not only its
+        private const int ExpectedLawRegistrations = 359;
+        // Updated deliberately 2026-08-18: L563 (a declared repaint surface's prefixes are real rail roots,
+        // and one that prints a locally-REBUILT rollup declares the roots that rebuild it) was ADDED —
+        // 358 -> 359. Nothing was retired and no surviving law lost an arm. It is the other half of L541:
+        // L541 owns the SAFE direction (no declaration = repaint on everything) and never asks whether a
+        // row that IS present covers what its screen reads. The live case is UIStateResearch's ETA text,
+        // whose rate is Faction.ResourceIncome — a value no peer receives on the rail and only the
+        // DerivedAggregateRefresh GeoFaction/UpdateProduction row rebuilds, from { "S#", "F#" }.
+        // Earlier the same day: L562 (the whole top-right info bar is painted, not only its
         // population meter) was ADDED — 357 -> 358. Nothing was retired and no surviving law lost an arm.
         // L543 is untouched: L562 forbids no signature and builds no read-set — the bar keeps the SAME
         // ScopeKey/RepaintNeeded gate it already had, and what L562 adds is which native paint methods run
@@ -745,7 +753,7 @@ namespace RailCheck
         // its own identity and every arm — the new row is an ordinary Recompute it classifies like the rest;
         // what L561 adds is the ORDER of the ladder and the one narrow explicit-args escape, neither of
         // which L557 has ever expressed.
-        private const string ExpectedExecutionIdentityDigest = "15f96a66bd1400093c5ee33f23b99c6e75bd5882699650cc9fbf17544c822dd0";
+        private const string ExpectedExecutionIdentityDigest = "b5eff308ab89939991b80fa6ff92fe5e20a3dfa9b39875731b72b65314ccb209";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
