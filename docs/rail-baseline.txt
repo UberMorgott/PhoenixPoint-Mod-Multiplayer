@@ -437,10 +437,10 @@ PhoenixPoint.Geoscape.Entities.Missions.GeoStealResourcesFromHavenMission  [dire
   + Leaf _attackedZoneDef (GeoHavenZoneDef)
   + Descend _squad (GeoSquad)
   + Leaf _threatLevel (DifficultyThreatLevel)
-PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility  [direct]  covered=10/11
+PhoenixPoint.Geoscape.Entities.PhoenixBases.GeoPhoenixFacility  [direct]  covered=11/11
   + Leaf FacilityId (UInt32)
   + Leaf IsCorridor (Boolean)
-  - EXCLUDED _components (GeoFacilityComponent[]): blob husk on GeoFacilityComponent (Context:GeoFacilityComponentContext)
+  + EntityCollection _components (GeoFacilityComponent[]) unordered=no apply=array-assign
   + Leaf _def (PhoenixFacilityDef)
   + Leaf _health (Int32)
   + Leaf _isPowered (Boolean)
@@ -675,6 +675,7 @@ blob-reconstructed element types (Activator.CreateInstance + table fields):
   PhoenixPoint.Geoscape.Entities.GeoItem keyable=no customCreate=yes husk=none roundtrip=unconstructible:MissingMethodException
   PhoenixPoint.Geoscape.Entities.GeoUnitDescriptor keyable=no customCreate=no husk=none roundtrip=ok(0)
   PhoenixPoint.Geoscape.Entities.Interception.Equipments.GeoVehicleEquipment keyable=no customCreate=no husk=none roundtrip=ok(2)
+  PhoenixPoint.Geoscape.Entities.PhoenixBases.FacilityComponents.GeoFacilityComponent ABSTRACT — every element aborts at encode
   PhoenixPoint.Geoscape.Entities.Research.Requirement.ResearchRequirement+InstanceData keyable=no customCreate=no husk=none roundtrip=ok(2)
   PhoenixPoint.Geoscape.Entities.Research.ResearchElement keyable=yes customCreate=no husk=Costs:ResearchCost[],Faction:GeoFaction,ResearchDef:ResearchDef,Rewards:ResearchReward[],_revealRequirements:ReseachRequirementContainer,_sb:StringBuilder,_unlockRequirements:ReseachRequirementContainer roundtrip=ok(4)
   PhoenixPoint.Geoscape.Events.GeoEventTimer keyable=no customCreate=no husk=none roundtrip=ok(3)
@@ -840,6 +841,6 @@ twin summary: resolved=79 gaps=36 dispatch=7
 
 null-on-construct containers (L20 — the decoder MUST materialize these, never assume a ctor did): ManufacturableItem.ManufacturePrice (LeafList), ManufacturableItem.ScrapReward (LeafList), GeoHavenDefenseMissionInstanceData.AttackingSites (LeafList), ProgressionDescriptor.PersonalAbilities (LeafDict), ResearchElement._serializableRevealRequirementsData (EntityList), ResearchElement._serializableUnlockRequirementsData (EntityList)
 
-summary: covered=479 excluded=78 blobbable=31 geoItemDicts=1
+summary: covered=480 excluded=77 blobbable=32 geoItemDicts=1
 
 law violations (must be zero): 0

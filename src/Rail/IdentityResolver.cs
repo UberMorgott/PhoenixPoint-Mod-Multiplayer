@@ -35,7 +35,18 @@ namespace Multiplayer.Network.Sync
     public static class IdentityResolver
     {
         // ─── ID-member probe table (the one pattern table, checked in order) ───
-        private static readonly string[] IdProbes = { "SiteId", "VehicleID", "ResearchID", "FacilityId", "Id", "Def" };
+        // "ComponentDef" is LAST and is the base-class spelling of "Def": GeoFacilityComponent declares its
+        // def as `ComponentDef` (GeoFacilityComponent.cs:14) while every concrete subclass ALSO exposes the
+        // same object as `Def` (UseSoldiersFacilityComponent.cs:50 -> GetDef<T>() -> the very
+        // GeoFacilityComponentDef the base stores), so both probes yield the SAME guid and adding it changes
+        // no existing key. What it changes is TypeKeyable of the DECLARED element type: GeoPhoenixFacility
+        // ._components is a GeoFacilityComponent[] (GeoPhoenixFacility.cs:47), the base has no "Def", so the
+        // array classified EntityList and died on the husk gate ("blob husk on GeoFacilityComponent") —
+        // every slot assignment, every per-component cached output was invisible after the create blob.
+        // Keyable ⇒ EntityCollection ⇒ element-ADDRESSED (RailTypes.cs:518), which never rebuilds the
+        // readonly array and is deliberately not husk-gated (:551-553).
+        private static readonly string[] IdProbes =
+            { "SiteId", "VehicleID", "ResearchID", "FacilityId", "Id", "Def", "ComponentDef" };
         private static readonly Dictionary<Type, Func<object, string>> _keyOfCache = new Dictionary<Type, Func<object, string>>();
 
         /// <summary>Stable key of an object (for collection-element addressing), or null when none derivable.</summary>
