@@ -237,9 +237,16 @@ namespace Multiplayer.Network.Sync
             // CORRECTED value in the same frame rather than a stale one.
             DerivedAggregateRefresh.ClientTick(_engine);
             t = RailCost.Charge("derived", t); // client-only recompute chain — its own name, see above
-            t = RailCost.Now();
+            // NO PARENT CHARGE HERE, and that is the point. RailCost.Charge keeps ONE global maximum
+            // (RailCost.cs:43-46), so a step that WRAPS other steps is by construction >= every one of them
+            // and always wins `worst=`. Charging the whole flush as "repaint" therefore made the per-strip
+            // names added for exactly this question — repaint:agenda|infobar|sitemenu|crew|roster
+            // (OpenUiRepaint.cs:260-268) and repaint:scrolls|screen (:1193,:1195) — unprintable: not one
+            // appeared in 35 client cost lines, because their own parent outscored every one of them. The
+            // children now compete on their own and `worst=` finally names the strip. Nothing is lost:
+            // EndFrame's tickMax still spans the flush, so a repaint cost that no child claims still shows
+            // up as the gap between tickMax and the worst named step.
             OpenUiRepaint.FlushIfDirty();
-            RailCost.Charge("repaint", t);
             RailCost.EndFrame(t0);
         }
 
