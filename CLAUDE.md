@@ -16,6 +16,14 @@
 - Enable commit hooks once per clone: `git config core.hooksPath .githooks`.
 - Never claim verification without reporting the command and result.
 
+## Field verification
+
+- GREEN laws prove the harness path, not the running game. A behaviour change is not done until one field artifact is reported: a log line the change produces, a screenshot, or a live state dump before/after.
+- Every Harmony patch must appear in `Harmony.GetAllPatchedMethods()` at startup under our owner id, and must increment an execution counter on first run. A declared patch that never applies or never executes means the feature is dead — report that instead of claiming success.
+- Never claim a rail change repaints open UI without naming the repaint seam by `file:line` and the field artifact showing it repainted.
+- When the field artifact needs a human at two clients, say exactly that. Reporting "laws are green" as verification is a correctness failure.
+- Prefer a native full-rebuild entry point over replicating rendered rows; a rebuild re-enumerates the game's own sources and picks up rows other mods add.
+
 ## Laws
 
 - Register every law through `Add(laws, () => ...)`; never use `laws.AddRange(...)`.
