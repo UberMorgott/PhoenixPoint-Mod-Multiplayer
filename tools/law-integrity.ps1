@@ -245,7 +245,13 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # husk-gated blob), and UseSoldiersFacilityComponent.AssignSoldierSlot -- the ONE writer of both slot
 # arrays -- gained a block-first capture plus a host arm on the 0xB1 base family. L560 asserts both
 # halves plus the game-side funnel sweep. Nothing retired, no arm weakened.
-$expectedRegistrationDigest = 'f36b4f8b38ecd13844190bfd543e09db5ecce50aecf179c2efcec0179c480f48'
+# Updated deliberately 2026-08-17, fifth change the same day: L561 ADDED -- 356 -> 357 registrations, one
+# new identity string. DerivedAggregateRefresh gained LEVEL 0 of the income ladder (GeoPhoenixFacility
+# .UpdateOutput, which rebuilds each component's cached output) ahead of the existing GeoPhoenixBase and
+# GeoFaction rows, invoked through the one narrow explicit-args escape with suppressEvents:true so the
+# rebuild cannot reach RoutePower -> SetPowered inside SyncApplyScope. L561 asserts the ladder ORDER, the
+# override, the narrowness of the escape and both wirings. Nothing retired, no arm weakened.
+$expectedRegistrationDigest = 'cdacc5b4d442e0d681f6e0ab85fe933259707f5780c414c8d23848481dfc0dd2'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

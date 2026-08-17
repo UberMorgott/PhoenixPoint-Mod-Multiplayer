@@ -4,6 +4,7 @@ using System.Reflection;
 using Assets.Code.PhoenixPoint.Geoscape.Entities.Sites.TheMarketplace;
 using Base.Core;
 using PhoenixPoint.Geoscape.Entities;
+using PhoenixPoint.Geoscape.Entities.PhoenixBases;
 using PhoenixPoint.Geoscape.Entities.Sites;
 using PhoenixPoint.Geoscape.Events;
 using PhoenixPoint.Geoscape.Levels;
@@ -101,16 +102,33 @@ namespace Multiplayer.Network.Sync
             /// <summary>Why, in one line. The prose is not the claim — L557 re-derives the claim — but a
             /// row nobody can review is a row that rots.</summary>
             internal readonly string Reason;
+            /// <summary>NULL for every ordinary row — <see cref="DefaultArgs"/> supplies the GAME'S OWN
+            /// answer and this engine invents nothing, which is the whole safety argument. Non-null is the
+            /// NARROW escape for the one shape that argument does not cover: a rebuild whose default
+            /// argument is itself unsafe on a peer. It is not "the caller may pass what it likes" — the
+            /// only admissible value is one that makes the rebuild do LESS than the default would, and
+            /// <see cref="ArgsReason"/> must carry the file:line that says which native tail it cuts.</summary>
+            internal readonly object[] Args;
+            internal readonly string ArgsReason;
 
-            internal Row(Type owner, string handler, Kind kind, string rebuild, string[] inputs, string reason)
+            internal Row(Type owner, string handler, Kind kind, string rebuild, string[] inputs, string reason,
+                         object[] args = null, string argsReason = null)
             {
                 Owner = owner; Handler = handler; Class = kind; Rebuild = rebuild;
                 InputPrefixes = inputs ?? new string[0]; Reason = reason;
+                Args = args; ArgsReason = argsReason;
             }
         }
 
         private static Row Recompute(Type owner, string handler, string rebuild, string[] inputs, string why) =>
             new Row(owner, handler, Kind.Recompute, rebuild, inputs, why);
+
+        /// <summary><see cref="Recompute"/> with the explicit-args escape. Separate factory, not an optional
+        /// parameter: every call site of it is a row that deliberately overrides the game's own default, and
+        /// that has to be visible in the table rather than hidden in a trailing argument.</summary>
+        private static Row RecomputeWithArgs(Type owner, string handler, string rebuild, string[] inputs,
+                                             object[] args, string argsWhy, string why) =>
+            new Row(owner, handler, Kind.Recompute, rebuild, inputs, why, args, argsWhy);
 
         private static Row Carried(Type owner, string handler, string why) =>
             new Row(owner, handler, Kind.Carried, null, new string[0], why);
@@ -135,6 +153,32 @@ namespace Multiplayer.Network.Sync
             // THE REPORTED DEFECT. GeoFaction.cs:1774-1777 → :694-701 is `from s in Sites select
             // s.SiteProduction` → ResourceIncome.SetOutput. Nothing else. Sites are rail roots ("S#"),
             // so every input is already here and the rebuild is exact.
+            // LEVEL 0 — THE PER-COMPONENT OUTPUTS, AND IT HAS TO RUN FIRST OF ALL. Every facility component
+            // caches its own output in a `{get; private set;}` written ONLY by its own UpdateOutput(), and
+            // the game drives those from SLOT events (UseSoldiersFacilityComponent.OnSoldierSlotChanged,
+            // AICoreFacilityComponent.OnSlotChanged) that a rail FIELD WRITE never fires. So the level-1 row
+            // below re-summed cached zeros: PhoenixBaseStats.Update reads ResourceGeneratorFacilityComponent
+            // .ResourceOutput (:16), PowerFacilityComponent.PowerOuput, SatelliteUplinkFacilityComponent
+            // .ScannerCapacity, PrisonFacilityComponent.ContaimentCapaclity and MistRepellerFacilityComponent
+            // ._expansionRate — all of them caches, none of them recomputed on a peer.
+            // suppressEvents:TRUE is not a preference and not a tidiness knob. The default (false) lets
+            // OnFacilityOutputUpdated reach GeoPhoenixBase.Facility_OnFacilityOutputUpdated
+            // (GeoPhoenixBase.cs:702), whose body is RoutePower() -> SetPowered — an AUTHORITATIVE write,
+            // and this engine runs inside SyncApplyScope, where FacilityPowerGate's apply arm
+            // (ClientSimGate.cs:190-196) is deliberately OPEN. So the default argument would make a client
+            // re-route its own base's power, which is precisely the simulation the gate exists to refuse.
+            // True cuts BOTH subscriptions at once: GeoPhoenixFacility nulls the event around the loop
+            // (:404-406/:414-415) and it is the only route out — the components' own OnOutputChanged has
+            // exactly one subscriber, the facility's OnComponentOutputUpdated (:260 -> :421).
+            RecomputeWithArgs(typeof(GeoPhoenixFacility), "OnComponentOutputUpdated", "UpdateOutput",
+                      new[] { "S#" }, new object[] { true },
+                      "GeoPhoenixBase.cs:702 — the default suppressEvents:false lets OnFacilityOutputUpdated " +
+                      "reach Facility_OnFacilityOutputUpdated -> RoutePower() -> SetPowered, which " +
+                      "FacilityPowerGate (ClientSimGate.cs:190-196) admits inside SyncApplyScope",
+                      "GeoPhoenixFacility.cs:400-417 — the body is `for i: components[i].UpdateOutput()` and " +
+                      "nothing else; every override is arithmetic over its own def, its AI-core slots, its " +
+                      "worker slots and GetValueAfterAppliedModifiers (GeoFacilityComponent.cs:51-58, a " +
+                      "faction FacilityBuffs lookup) — no entity, no id, no RNG, no clock, no wallet"),
             // LEVEL 1 OF THE SAME ROLLUP, AND IT HAS TO RUN FIRST. GeoFaction.UpdateProduction below sums
             // Site.SiteProduction, and the only thing that writes SiteProduction is GeoPhoenixBase.UpdateStats
             // (GeoPhoenixBase.cs:393-424 -> PhoenixBaseStats.Update, PhoenixBaseStats.cs:88-197), driven on the
@@ -292,8 +336,12 @@ namespace Multiplayer.Network.Sync
                 foreach (var target in Targets(geo, row))
                 {
                     var m = target.GetType().GetMethod(row.Rebuild, Any);
-                    var args = DefaultArgs(m);
-                    if (args == null)
+                    // The row's own args when it declares them (see Row.Args), otherwise the game's own
+                    // defaults. A declared list whose LENGTH no longer matches the method is a signature
+                    // that moved under the row: announced, never invoked with a guessed argument.
+                    var args = row.Args != null && m != null && m.GetParameters().Length == row.Args.Length
+                                   ? row.Args : DefaultArgs(m);
+                    if (args == null || (row.Args != null && !ReferenceEquals(args, row.Args)))
                     {
                         Unclassified(row.Owner.Name, row.Rebuild);
                         continue;
@@ -351,6 +399,20 @@ namespace Multiplayer.Network.Sync
                     {
                         var pxBase = site.GetComponent<GeoPhoenixBase>();
                         if (pxBase != null && row.Owner.IsInstanceOfType(pxBase)) yield return pxBase;
+                    }
+                yield break;
+            }
+            // A facility hangs off the base's layout, i.e. one hop further in than the base arm above —
+            // same faction->site->GetComponent<GeoPhoenixBase>() sweep, then Layout.Facilities.
+            if (typeof(GeoPhoenixFacility).IsAssignableFrom(row.Owner))
+            {
+                foreach (var faction in geo.Factions)
+                    foreach (var site in faction.Sites)
+                    {
+                        var layout = site.GetComponent<GeoPhoenixBase>()?.Layout;
+                        if (layout == null) continue;
+                        foreach (var facility in layout.Facilities)
+                            if (facility != null && row.Owner.IsInstanceOfType(facility)) yield return facility;
                     }
                 yield break;
             }

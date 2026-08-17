@@ -454,6 +454,7 @@ namespace RailCheck
             Add(laws, () => L553_OneWindowOneIdentityOneResolution.Check());
             Add(laws, () => L554_NoLiftBeforeThisPeersOwnFirstFrame.Check());
             Add(laws, () => L555_ADescribableWindowIsNeverAHole.Check());
+            Add(laws, () => L561_TheRecomputeChainRunsBottomUpAndNeverRoutesPower.Check());
             Add(laws, () => L560_AFacilitySlotIsHostAuthoritativeAndOnTheRail.Check());
             Add(laws, () => L559_TheAgendaRebuildIsThrottledButNeverLost.Check());
             Add(laws, () => L557_NoPeerReadsARollupItsOwnRailStaled.Check());
@@ -505,7 +506,7 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 356;
+        private const int ExpectedLawRegistrations = 357;
         // Updated deliberately 2026-08-17: L559 (the agenda strip's native rebuild is throttled, and a
         // throttled rebuild is never lost) was ADDED — 354 -> 355. Nothing was retired and nothing was
         // weakened. It is NOT the hand-written rebuild gate L492/L516/L548 owned coming back: no model
@@ -732,7 +733,12 @@ namespace RailCheck
         // one new identity string, 355 -> 356 executed identities. No identity retired and no surviving law
         // lost an arm — L138 keeps its client-writable-leaf sweep, and the slot arrays it now sees are a
         // leaf list it was never shown before (they were inside an EXCLUDED husk).
-        private const string ExpectedExecutionIdentityDigest = "7bba760f94fd3fa73f9c8be0d70f897fb2321d8f4059eb5f004862169480a48b";
+        // Updated deliberately 2026-08-17 with L561 (the recompute chain runs bottom-up and never routes
+        // power): one new identity string, 356 -> 357 executed identities. No identity retired. L557 keeps
+        // its own identity and every arm — the new row is an ordinary Recompute it classifies like the rest;
+        // what L561 adds is the ORDER of the ladder and the one narrow explicit-args escape, neither of
+        // which L557 has ever expressed.
+        private const string ExpectedExecutionIdentityDigest = "dbe4edfe1d698c830c7d131ff0591baaaeaf151cca5c66ad645c0dcd9dded1f0";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
