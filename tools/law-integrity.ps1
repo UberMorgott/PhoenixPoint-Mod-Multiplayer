@@ -239,7 +239,13 @@ foreach ($m in [regex]::Matches($progText, '(?:laws\.AddRange\(|Add\(laws,\s*\(\
 # and a rebuild refused by that floor is recorded as OWED so FlushIfDirty's existing per-frame pass serves
 # it. L559 asserts both halves. It does not resurrect the deleted four-source signature gate: no model
 # source is enumerated, so no change can compare EQUAL and be dropped. Nothing retired, no arm weakened.
-$expectedRegistrationDigest = 'e4ba1f005badd4a989b2797ea46e304e3bebcd0330ca5888bd7dc8c9d837f585'
+# Updated deliberately 2026-08-17, fourth change the same day: L560 ADDED -- 355 -> 356 registrations, one
+# new identity string. GeoPhoenixFacility._components left the rail's exclusion list (the "ComponentDef"
+# id probe makes GeoFacilityComponent keyable, so the array is element-ADDRESSED instead of an
+# husk-gated blob), and UseSoldiersFacilityComponent.AssignSoldierSlot -- the ONE writer of both slot
+# arrays -- gained a block-first capture plus a host arm on the 0xB1 base family. L560 asserts both
+# halves plus the game-side funnel sweep. Nothing retired, no arm weakened.
+$expectedRegistrationDigest = 'f36b4f8b38ecd13844190bfd543e09db5ecce50aecf179c2efcec0179c480f48'
 $registrationText = (($registrationNames | Sort-Object) -join "`n")
 $registrationDigest = [Convert]::ToHexString(
     [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($registrationText))

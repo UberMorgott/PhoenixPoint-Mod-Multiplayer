@@ -8,7 +8,9 @@ using Base.Defs;
 using HarmonyLib;
 using Multiplayer.Network.MessageLayer;
 using PhoenixPoint.Common.Entities;
+using PhoenixPoint.Geoscape.Entities;
 using PhoenixPoint.Geoscape.Entities.PhoenixBases;
+using PhoenixPoint.Geoscape.Entities.PhoenixBases.FacilityComponents;
 using PhoenixPoint.Geoscape.Entities.Sites;
 using PhoenixPoint.Geoscape.Levels;
 using PhoenixPoint.Geoscape.View.ViewControllers.PhoenixBase;
@@ -50,6 +52,7 @@ namespace Multiplayer.Network.Sync
         private const byte OpRepair = 3;
         private const byte OpTogglePower = 4;
         private const byte OpRename = 5;      // the base's NAME — a site value, not a facility one
+        private const byte OpAssignSlot = 6;  // a facility's worker/user SLOT — see AssignSlotCapturePatch
 
         // Blocked native body's own position derivation (UIModuleBaseLayout.ConstructFacility:459).
         private static readonly MethodInfo CoordByIdx =
@@ -64,6 +67,7 @@ namespace Multiplayer.Network.Sync
                 [OpRepair] = HandleIntent,
                 [OpTogglePower] = HandleIntent,
                 [OpRename] = HandleIntent,
+                [OpAssignSlot] = HandleIntent,
             };
             IntentRail.Register(SurfaceIds.GeoBaseIntent, "base", ops);
         }
@@ -199,6 +203,70 @@ namespace Multiplayer.Network.Sync
             }
         }
 
+        /// <summary>
+        /// SOLDIER-SLOT gesture — the assign/unassign half of a base, which had NO seam at all: nothing in
+        /// src/ named <c>UseSoldiersFacilityComponent</c>, so a client dragging a worker into a lab mutated
+        /// its own model silently and every peer (the host included) kept the old crew. That is economy
+        /// divergence, not a stale panel: the slot arrays feed <c>ResourceGeneratorFacilityComponent</c>
+        /// .UpdateOutput, the heal/XP rates and the base's whole production rollup.
+        ///
+        /// ONE PREFIX, THE MODEL FUNNEL. <c>AssignSoldierSlot</c> (UseSoldiersFacilityComponent.cs:207) is
+        /// the SINGLE writer of both slot arrays — every other route is a wrapper over it:
+        /// <c>AssignSoldierToFreeSlot</c> :185, <c>UnassignSoldierFromUsedSlot</c> :200,
+        /// <c>UnassignSoldierSlot</c> :243, <c>UnassignAllSoldiers</c> :354/:361 and
+        /// <c>UnassignSoldier</c> :372/:380 (itself the <c>OnSoldierRemoved</c> handler :235). So the UI
+        /// gesture (UIModulePXBaseFacilityRoster.cs:138/142, UIStatePhoenixFacilityRosterAssignment.cs:134/
+        /// 137/143), the facility-driven release (HealFacilityComponent.cs:81,
+        /// ExperienceFacilityComponent.cs:66) and the base-driven one (GeoPhoenixBase.cs:812/869/907) all
+        /// arrive here already reduced to (slot, character, type) — no per-caller guard, no re-derivation.
+        /// The <c>source</c> rides along so the host replays the gesture the client actually made.
+        ///
+        /// Void method, so blocking strands no dereference. The one caller that reads a RESULT is
+        /// <c>AssignSoldierToFreeSlot</c>, which returns true for "a free slot existed" — its UI caller
+        /// (:137/:143) only stages <c>slot.Selected</c>, a widget flag the repaint re-seeds. Block-first
+        /// posture: the model stays as the rail left it until the host's own AssignSoldierSlot lands.
+        ///
+        /// Repaint: the slot arrays now ride the rail as a LeafList of "U#" refs under
+        /// <c>_components#&lt;componentDefGuid&gt;</c> (the ComponentDef probe, 64e9ef0), and
+        /// <c>UseSoldiersFacilityComponent</c> has no per-kind arm in <c>UiEventMap</c>, so it takes the
+        /// universal open-screen repaint (UiEventMap.cs:205-213) — the open roster screen is Exit+Enter'd
+        /// and re-reads the slots. The HOST's own screen is repainted by the intent dispatch
+        /// (IntentRail.cs:236).
+        /// </summary>
+        [HarmonyPatch(typeof(UseSoldiersFacilityComponent), nameof(UseSoldiersFacilityComponent.AssignSoldierSlot))]
+        internal static class AssignSlotCapturePatch
+        {
+            private static bool Prefix(UseSoldiersFacilityComponent __instance, int slot, GeoCharacter character,
+                                       UseSoldiersFacilityComponent.SlotType type,
+                                       UseSoldiersFacilityComponent.SlotChangeSource source)
+            {
+                if (IntentRail.ShouldRunNative()) return true;
+                try
+                {
+                    var fac = __instance.Facility;
+                    var site = fac?.PxBase == null ? null : fac.PxBase.Site;
+                    var guid = __instance.ComponentDef == null ? null : __instance.ComponentDef.Guid;
+                    if (site == null || guid == null)
+                        return false; // law 3: never write locally — and nothing addressable to send
+                    int charId = character == null ? -1 : (int)character.Id;
+                    IntentRail.Send(SurfaceIds.GeoBaseIntent, OpAssignSlot,
+                        "slot " + type + "[" + slot + "] fid=" + fac.FacilityId + " -> " +
+                        (charId < 0 ? "(empty)" : "U#" + charId), w =>
+                        {
+                            w.Write(site.SiteId);
+                            w.Write(fac.FacilityId);
+                            w.Write(guid);
+                            w.Write(slot);
+                            w.Write((byte)type);
+                            w.Write((byte)source);
+                            w.Write(charId);
+                        });
+                }
+                catch (Exception ex) { MpLog.LogError("[MP][base] slot capture failed: " + ex); }
+                return false;
+            }
+        }
+
         // ─── HOST: apply through the SAME native funnels (dedup/decode/reject = IntentRail) ─────
 
         private static void HandleIntent(NetworkEngine engine, ulong senderPeerId, uint nonce, byte op, BinaryReader r)
@@ -264,6 +332,41 @@ namespace Multiplayer.Network.Sync
                 else if (fac.Def.PowerCost <= px.Stats.RemainingPower) fac.SetPowered(powered: true);
                 else
                 { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "not enough power for " + fac.Def.name, "S#" + siteId); return; }
+            }
+            else if (op == OpAssignSlot)
+            {
+                // Client input is UNTRUSTED: every field is re-validated against HOST state before the
+                // native funnel runs, and nothing derived is taken from the wire (no output, no rate, no
+                // capacity — those are recomputed by the game from the slots it ends up with).
+                string compGuid = WireString.ReadKey(r);
+                int slot = r.ReadInt32();
+                byte typeByte = r.ReadByte(), sourceByte = r.ReadByte();
+                int charId = r.ReadInt32();
+                var comp = fac.Components?.OfType<UseSoldiersFacilityComponent>()
+                              .FirstOrDefault(c => c.ComponentDef != null && c.ComponentDef.Guid == compGuid);
+                if (comp == null)
+                { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "no soldier component " + compGuid + " on fid=" + facilityId, "S#" + siteId); return; }
+                // SlotType.None makes GetSoldierSlots throw (UseSoldiersFacilityComponent.cs:263), and an
+                // undefined enum byte would too — refuse both here rather than through the throw funnel.
+                var type = (UseSoldiersFacilityComponent.SlotType)typeByte;
+                if (type != UseSoldiersFacilityComponent.SlotType.User &&
+                    type != UseSoldiersFacilityComponent.SlotType.Worker)
+                { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "bad slot type " + typeByte, "S#" + siteId); return; }
+                if (slot < 0 || slot >= comp.GetSoldierSlotsCount(type))
+                { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "slot " + slot + " out of range for " + type, "S#" + siteId); return; }
+                GeoCharacter who = null;
+                if (charId >= 0)
+                {
+                    who = geo.Factions.SelectMany(f => f.Characters).FirstOrDefault(c => c != null && (int)c.Id == charId);
+                    // The soldier must be one of the BASE OWNER's — the wire carries a bare id, so without
+                    // this a client could staff its own labs with another faction's roster.
+                    if (who == null || who.Faction != site.Owner)
+                    { IntentRail.Reject(SurfaceIds.GeoBaseIntent, senderPeerId, "no own soldier U#" + charId + " for site " + siteId, "S#" + siteId); return; }
+                }
+                var source = Enum.IsDefined(typeof(UseSoldiersFacilityComponent.SlotChangeSource), sourceByte)
+                    ? (UseSoldiersFacilityComponent.SlotChangeSource)sourceByte
+                    : UseSoldiersFacilityComponent.SlotChangeSource.External;
+                comp.AssignSoldierSlot(slot, who, type, source);
             }
             else // OpRepair (op set is table-gated upstream)
             {

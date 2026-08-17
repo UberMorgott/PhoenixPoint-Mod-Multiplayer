@@ -454,6 +454,7 @@ namespace RailCheck
             Add(laws, () => L553_OneWindowOneIdentityOneResolution.Check());
             Add(laws, () => L554_NoLiftBeforeThisPeersOwnFirstFrame.Check());
             Add(laws, () => L555_ADescribableWindowIsNeverAHole.Check());
+            Add(laws, () => L560_AFacilitySlotIsHostAuthoritativeAndOnTheRail.Check());
             Add(laws, () => L559_TheAgendaRebuildIsThrottledButNeverLost.Check());
             Add(laws, () => L557_NoPeerReadsARollupItsOwnRailStaled.Check());
             Add(laws, () => L556_AnAnsweredSharedWindowClosesEverywhere.Check());
@@ -504,7 +505,7 @@ namespace RailCheck
 
         private static int _lawsRegistered, _lawsCrashed;
         private static readonly HashSet<string> _executedLawIdentities = new HashSet<string>(StringComparer.Ordinal);
-        private const int ExpectedLawRegistrations = 355;
+        private const int ExpectedLawRegistrations = 356;
         // Updated deliberately 2026-08-17: L559 (the agenda strip's native rebuild is throttled, and a
         // throttled rebuild is never lost) was ADDED — 354 -> 355. Nothing was retired and nothing was
         // weakened. It is NOT the hand-written rebuild gate L492/L516/L548 owned coming back: no model
@@ -727,7 +728,11 @@ namespace RailCheck
         // new identity string, 354 -> 355 executed identities. No identity retired and no surviving law
         // lost an arm — L549 keeps HudRepaintOwed and every arm it hangs on it; L559 drives the flag only
         // through OpenUiRepaint.Reset()-bracketed calls and leaves it cleared.
-        private const string ExpectedExecutionIdentityDigest = "dd739c73ea8aaecda3faa17aefb46647235f31837e15609ccd59150f56a0469e";
+        // Updated deliberately 2026-08-17 with L560 (a facility slot is host-authoritative and on the rail):
+        // one new identity string, 355 -> 356 executed identities. No identity retired and no surviving law
+        // lost an arm — L138 keeps its client-writable-leaf sweep, and the slot arrays it now sees are a
+        // leaf list it was never shown before (they were inside an EXCLUDED husk).
+        private const string ExpectedExecutionIdentityDigest = "7bba760f94fd3fa73f9c8be0d70f897fb2321d8f4059eb5f004862169480a48b";
 
         /// <summary>Source registration is not execution: an attacker can wrap every Add in if(false),
         /// leaving text-level integrity green while running zero laws. Refuse every verdict, including
