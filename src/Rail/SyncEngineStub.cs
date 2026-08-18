@@ -247,6 +247,9 @@ namespace Multiplayer.Network.Sync
             // EndFrame's tickMax still spans the flush, so a repaint cost that no child claims still shows
             // up as the gap between tickMax and the worst named step.
             OpenUiRepaint.FlushIfDirty();
+            // Step detector (diag-gated, see VehicleStepDiag): AFTER every apply/repaint of this frame,
+            // so the pose it reads is the one the player will see rendered.
+            VehicleStepDiag.Tick();
             RailCost.EndFrame(t0);
         }
 
@@ -281,6 +284,7 @@ namespace Multiplayer.Network.Sync
             // list, and TearDown (which SessionEnd drives) is what calls it.
             OpenUiRepaint.Reset();
             SyncApplyScope.Reset();
+            VehicleStepDiag.Reset();  // per-session pose memory + frame stamps
         }
 
         public void ResetForReloadBoundary()

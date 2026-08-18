@@ -310,6 +310,7 @@ namespace Multiplayer.Network.Sync
             });
             for (var p = t; p != null; p = p.ParentTime)
                 if (p.Scheduler != null) { p.Scheduler.RescheduleForTiming(t); break; }
+            VehicleStepDiag.LastRebaseFrame = Time.frameCount;  // step-detector alibi stamp
         }
 
         /// <summary>Client: stamp the moment a delta batch reached the network drain. The ONLY measurable

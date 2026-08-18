@@ -219,6 +219,7 @@ namespace Multiplayer.Network.Sync
                 // Charged by RailCost: this runs on the NETWORK DRAIN, not inside SyncEngine.Tick, so the
                 // tick total cannot see it — and "the client hitches, the host does not" points here first.
                 long t = RailCost.Now();
+                VehicleStepDiag.LastApplyFrame = UnityEngine.Time.frameCount;  // step-detector alibi stamp
                 if (payload[0] == DiffEngine.MsgDelta) { ApplyDelta(engine, payload); RailCost.Charge("apply", t); }
                 else if (payload[0] == DiffEngine.MsgStructural) { ApplyStructural(engine, payload); RailCost.Charge("structural", t); }
                 // A 0xB7 modal raise is broadcast SYNCHRONOUSLY from the host's OpenModal postfix while the
@@ -1657,6 +1658,8 @@ namespace Multiplayer.Network.Sync
                     float t = (float)(covered / legSeconds);
                     v.SetOrientedGlobeWorldPosition(centre + Vector3.Slerp(from - centre, path[i] - centre, t));
                     v.RangeRemaining = range - legs[i] * t;
+                    VehicleStepDiag.LastAnchorFrame = UnityEngine.Time.frameCount;  // step-detector alibi stamp
+                    VehicleStepDiag.LastAnchorRoot = root;
                     MpLog.Log("[Multiplayer][rail] nav anchor " + root + " → leg " + (i + 1) + "/" + path.Count +
                               " t=" + t.ToString("F3") + " covered=" + covered.ToString("F0") + "s");
                     return;
@@ -2082,6 +2085,8 @@ namespace Multiplayer.Network.Sync
                 foreach (var d in route) path.Add(d.WorldPosition);
                 AnchorToHostDeparture(v, root, path); // BEFORE Navigate: CalculatePath:69-72 reads WorldPosition
                 v.Navigation.Navigate(path);     // GeoVehicle.OnLevelStart:388
+                VehicleStepDiag.LastReseedFrame = UnityEngine.Time.frameCount;  // step-detector alibi stamp
+                VehicleStepDiag.LastReseedRoot = root;
                 if (root != null) _seededRoute[root] = route;
                 MpLog.Log("[Multiplayer][rail] nav re-seed " + (root ?? "?") + " → " + route.Length + " leg(s)");
                 return;
