@@ -10,18 +10,23 @@ namespace Multiplayer.Network.Sync
     /// answer stops being argued from source reading. TFTV builds the AnuIcon/NJIcon/SynIcon and
     /// *Percentage objects hidden in a <c>UIModuleInfoBar.Init</c> prefix and reveals each row in its
     /// <c>UpdatePopulation</c> POSTFIX (refs/TFTV-src/TFTV/TFTVUI/Geoscape/TopInforBar.cs:127, reveal at
-    /// :202/:212/:220) — gated on <c>PhoenixFaction.GameTags</c> holding that faction's
-    /// <c>*_Discovered_DiplomacyStateTagDef</c>, which the game grants ONLY on inspecting a haven of the
-    /// faction (GeoPhoenixFaction.cs:1185-1192). The reveal therefore re-runs on every UpdatePopulation
-    /// — native or driven by our repaint (OpenUiRepaint.RefreshInfoBar) — so a discovered faction can
-    /// never stay hidden by ordering; the ONLY open question is whether the tag is present on this
-    /// peer's PhoenixFaction. This postfix prints exactly that, plus each TFTV object's live state:
+    /// :202/:212/:220; creation = AdjustInfoBarGeoscape:361 from the Init prefix,
+    /// TFTVHarmonyGeoscapeUI.cs:98-105) — gated on <c>PhoenixFaction.GameTags</c> holding that faction's
+    /// <c>*_Discovered_DiplomacyStateTagDef</c>, which the game grants ONLY in
+    /// <c>GeoPhoenixFaction.OnSiteInspectedChanged</c> on inspecting a haven of the faction
+    /// (GeoPhoenixFaction.cs:1172-1186). Native UpdatePopulation callers: SetPopulationVisibility:185
+    /// (Init path) and Update():246 via <c>_populationChaged</c> ← Level.OnWorldPopulationChanged
+    /// (Init:165); on a client those events never fire off rail writes, so our repaint
+    /// (OpenUiRepaint.RefreshInfoBar) is the driver that matters — and it drives this very method, so a
+    /// discovered faction can never stay hidden by ordering; the ONLY open question is whether the tag
+    /// is present on this peer's PhoenixFaction. This postfix prints exactly that, plus each TFTV
+    /// object's live state:
     ///   • <c>tag=False</c> on BOTH peers → game-correct: the faction is genuinely undiscovered, go
     ///     inspect one of its havens;
     ///   • <c>tag=True</c> on the host but <c>False</c> on a client → the faction GameTags rail row
     ///     (RailMeta.cs:591) failed to carry it — OUR bug;
     ///   • <c>tag=True</c> with <c>icon=off</c> → TFTV's reveal is not running — a patch-ordering bug.
-    /// Asked through the game's own <c>IsFactionDiscovered</c> (GeoPhoenixFaction.cs:1206-1215), the
+    /// Asked through the game's own <c>IsFactionDiscovered</c> (GeoPhoenixFaction.cs:1200-1213), the
     /// same FactionsDiplomacySettings mapping the grant uses, so no def name is duplicated here.
     ///
     /// Runs on BOTH peers (it patches the module, not the rail), logs only when the composite state
