@@ -1066,6 +1066,7 @@ namespace Multiplayer.Network.Sync
             // …and never hold a dead scene's ScrollRects alive across a session boundary.
             _scrolls.Clear();
             _scrollAt.Clear();
+            _scrollsForState = null;
         }
 
         /// <summary>
@@ -1189,8 +1190,8 @@ namespace Multiplayer.Network.Sync
             // restores them, and it names no screen.
             long t = RailCost.Now();
             var baseline = UiNativeRepaint.StageSnapshot.Capture(current, view);
-            CaptureScrolls(view);
-            t = RailCost.Charge("repaint:scrolls", t);   // the whole-canvas ScrollRect walk + stage snapshot
+            CaptureScrolls(view, current);
+            t = RailCost.Charge("repaint:scrolls", t);   // cached ScrollRect snapshot (walk only on state change)
             try { Repaint(current, view, marks); }
             finally { baseline.Restore(); RestoreScrolls(); RailCost.Charge("repaint:screen", t); }
         }
@@ -1199,29 +1200,41 @@ namespace Multiplayer.Network.Sync
         /// <see cref="Repaint"/> can move it: a native rebuild re-fills a list, and the Exit+Enter fallback
         /// destroys every widget on the screen. Nothing is NAMED here — no screen, no module, no list — which
         /// is the entire point: the alternative is one "it lost my scroll" patch per panel, forever, and the
-        /// next panel is always the one nobody wrote a patch for. The whole UI canvas is walked once per
-        /// flushed batch (the same boundary the repaint itself runs on), inactive included, so a list that is
-        /// switched off and back on by the repaint keeps its position too.</summary>
+        /// next panel is always the one nobody wrote a patch for. The whole-canvas walk was measured at
+        /// 29-35ms per flushed batch (worst charged step on every peer, 2026-08-17 logs), so it is CACHED:
+        /// the walk runs only when the open view state changes (or after the widget-destroying Exit+Enter
+        /// fallback invalidates it); every other batch just reads normalizedPosition off the cached list.
+        /// A destroyed rect compares null and is skipped on both ends, so a stale entry is inert.</summary>
         private static readonly System.Collections.Generic.List<UnityEngine.UI.ScrollRect> _scrolls =
             new System.Collections.Generic.List<UnityEngine.UI.ScrollRect>();
         private static readonly System.Collections.Generic.List<Vector2> _scrollAt =
             new System.Collections.Generic.List<Vector2>();
+        /// <summary>View-state TYPE NAME the cached <see cref="_scrolls"/> walk was taken under; null =
+        /// re-walk. A string, not a Type: this is a cache key, not a reflection handle, and a Type field
+        /// would (rightly) trip L23's null-handle sweep.</summary>
+        private static string _scrollsForState;
 
-        private static void CaptureScrolls(GeoscapeView view)
+        private static void CaptureScrolls(GeoscapeView view, GeoscapeViewState current)
         {
-            _scrolls.Clear();
             _scrollAt.Clear();
             var mods = view == null ? null : view.GeoscapeModules;
-            if (mods == null) return;
+            if (mods == null) { _scrolls.Clear(); _scrollsForState = null; return; }
             try
             {
                 // NON-ALLOCATING OVERLOAD, and the list is reused across flushes: the array-returning form
-                // allocates one array per flushed batch over the WHOLE canvas, i.e. rail-rate garbage on the
-                // one path that already costs frame time. Same traversal, same includeInactive:true, no new
-                // API — GetComponentsInChildren<T>(bool, List<T>) is Unity's own overload of the same call.
-                // Every hit is recorded, dead ones included, so the two lists stay INDEX-ALIGNED;
-                // RestoreScrolls already skips a null or content-less entry.
-                mods.transform.root.GetComponentsInChildren(true, _scrolls);
+                // allocates one array per walk over the WHOLE canvas. Same traversal, same
+                // includeInactive:true, no new API — GetComponentsInChildren<T>(bool, List<T>) is Unity's
+                // own overload of the same call. Every hit is recorded, dead ones included, so the two
+                // lists stay INDEX-ALIGNED; RestoreScrolls already skips a null or content-less entry.
+                // ponytail: rects INSTANTIATED mid-state (not merely toggled active) are invisible to the
+                // cache until the next state change — their scroll may jump on a repaint. Upgrade path if
+                // a real screen hits it: invalidate from that screen's rebuild seam, not per-batch walks.
+                if (_scrollsForState != current.GetType().FullName)
+                {
+                    _scrolls.Clear();
+                    mods.transform.root.GetComponentsInChildren(true, _scrolls);
+                    _scrollsForState = current.GetType().FullName;
+                }
                 foreach (var scroll in _scrolls)
                     _scrollAt.Add(scroll == null || scroll.content == null ? Vector2.zero : scroll.normalizedPosition);
             }
@@ -1229,6 +1242,7 @@ namespace Multiplayer.Network.Sync
             {
                 _scrolls.Clear();
                 _scrollAt.Clear();
+                _scrollsForState = null;
                 if (_loggedFailures.Add("ScrollCapture"))
                     MpLog.LogWarning("[Multiplayer][rail] scroll capture threw — a repaint may jump the " +
                                      "player's list back to the top (logged once): " + ex);
@@ -1243,7 +1257,8 @@ namespace Multiplayer.Network.Sync
         /// top of the list.</summary>
         private static void RestoreScrolls()
         {
-            for (int i = 0; i < _scrolls.Count; i++)
+            // _scrolls is the CACHE and survives the flush; only the per-flush positions are dropped.
+            for (int i = 0; i < _scrolls.Count && i < _scrollAt.Count; i++)
             {
                 var scroll = _scrolls[i];
                 try
@@ -1258,7 +1273,6 @@ namespace Multiplayer.Network.Sync
                                          "player may have jumped to the top (logged once): " + ex);
                 }
             }
-            _scrolls.Clear();
             _scrollAt.Clear();
         }
 
@@ -1330,6 +1344,9 @@ namespace Multiplayer.Network.Sync
             if (_loggedFallback.Add(current.GetType().Name))
                 MpLog.Log("[MP][uirepaint] fallback re-enter: " + current.GetType().Name);
             if (!(StatesStackField?.GetValue(view) is StateStack<GeoscapeViewContext> stack)) return;
+            // Exit+Enter destroys and rebuilds every widget on the screen — the cached ScrollRect list is
+            // stale after it (destroyed entries are inert nulls, rebuilt ones absent), so re-walk next batch.
+            _scrollsForState = null;
             try
             {
                 // law 8: a re-enter that fires native events must not echo an intent back to the host.
